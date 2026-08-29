@@ -1,0 +1,19 @@
+[package]
+name = "hypertabular"
+version = "0.1.0"
+edition = "2024"
+description = "The contract every Hyper* tabular provider speaks: a format-neutral cell, a caller-declared plan of HyperCast doors, the cast engine that turns cells into HyperCast verdicts, and the column-major batch that crosses the FFI boundary once per chunk."
+license = "MIT"
+readme = "../README.md"
+repository = "https://github.com/SkunkWerkx/HyperTabular"
+keywords = ["csv", "xlsx", "parser", "ffi", "allocation-free"]
+categories = ["parsing"]
+
+[lib]
+# The contract crate is linked into each provider's cdylib; it has no exports of its own.
+crate-type = ["rlib"]
+
+[dependencies]
+# The one upstream: every cell verdict is a HyperCast verdict. None of the Hyper* crates
+# are on crates.io; Cargo finds the package inside the repository's rust/ directory.
+hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master" }
