@@ -14,6 +14,7 @@ categories = ["parsing"]
 crate-type = ["rlib"]
 
 [dependencies]
-# The one upstream: every cell verdict is a HyperCast verdict. None of the Hyper* crates
-# are on crates.io; Cargo finds the package inside the repository's rust/ directory.
+# The one upstream: every cell verdict is a HyperCast verdict. `hypercast` is published on
+# crates.io (0.2.0 as of 2026-09-02); it is still consumed from git here so the contract
+# tracks the core's master. Cargo finds the package inside the repository's rust/ directory.
 hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master" }

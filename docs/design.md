@@ -24,15 +24,15 @@ verdict").
 
 - `hypercast` is consumed as a **git dependency** on `SkunkWerkx/HyperCast` (`branch =
   "master"`); Cargo finds the package inside the repo's `rust/` directory on its own.
-  None of the Hyper* crates are on crates.io (verified 2026-08-28: `hypercast`,
-  `hyperuuid`, `hypertabular` all "does not exist").
+  `hypercast` is on crates.io (0.2.0 as of 2026-09-02); `hypertabular` is not. The git
+  source is kept so the contract tracks the core's master rather than its last tag.
 - `hypertabular` is consumed by the two providers as a **path dependency**
-  (`../../HyperTabular/rust`) for now. A git dependency cannot work yet: Cargo insists on
-  resolving the *original* git source even when it is `[patch]`ed to a local path
-  (verified empirically in this session — `could not find Cargo.toml` against the empty
-  HyperTabular remote). The flip to a git dependency is one line in each provider's
-  `Cargo.toml`, noted there, once HyperTabular's crate is pushed. Until then a standalone
-  clone of a provider needs its sibling checked out beside it.
+  (`../../HyperTabular/rust`). The remote has carried the crate since 2026-08-28, so a git
+  source resolves now (it could not while the remote was empty: Cargo resolves the
+  original git source even when it is `[patch]`ed to a local path). The path source is
+  kept so the providers build against the sibling checkout while all three crates move
+  together; the flip is one line in each provider's `Cargo.toml`, noted there. A
+  standalone clone of a provider needs its sibling checked out beside it.
 
 ## The contract
 
@@ -56,7 +56,9 @@ the cast engine is written once:
 
 A `Door` is one HyperCast door (`Bool`, `I8…I64`, `U8…U64`, `F32`, `F64`, `Uuid`,
 `Timestamp`, `Unix(precision)`, `Date`, `Time`, `Duration`) plus `Text`, which asks for the
-bytes themselves. A `Column` is a door, the `NumFormat` its numeric doors use, and the
+bytes themselves. HyperCast has since added three doors with no `Door` here yet:
+`cast_date_ordered` and `cast_datetime` (a caller-declared `DateOrder`, 2026-08-30) and
+`cast_excel_serial` (2026-08-31; see "Parked"). A `Column` is a door, the `NumFormat` its numeric doors use, and the
 source ordinal it reads. A `Plan` is the ordered list of columns to produce — a projection,
 so a 40-column file can be read into 5 typed columns. Nothing is sniffed: no type
 inference, no separator detection, no header heuristics. Culture stays out of the core
@@ -230,18 +232,21 @@ The core is crossed once per batch. Each provider exports, over a plain C ABI:
 `hypertabular::ffi` owns the `#[repr(C)]` types (`CellVerdict`, `Span`, `FaultRaw`,
 `RawColumnSpec`, `RawColumnView`, `RawBatchView`) so both providers — and all seven
 bindings — share one layout. Because `hypercast` is linked statically, each provider's
-library also carries HyperCast's 17 `cast_*` exports.
+library also carries HyperCast's 20 `cast_*` exports.
 
 ## Parked, deliberately
 
 - **XLS (BIFF8).** The read-only record set is small and well documented (see prior-art
-  §12); the CONTINUE-aware string cursor is the one tricky piece. It waits on the decision
-  the HyperWorkbook README already marks TBD.
+  §12); the CONTINUE-aware string cursor is the one tricky piece. It waits on a decision
+  that has not been taken.
 - **Parallel chunked scanning.** The scanner is sequential by construction (quote parity
   is a global carry). Polars' two-state chunk analysis is the cheapest known way to
   parallelise on top of the same mask code; it is a later round, not a design constraint.
 - **Writing.** Out of scope for this version, as stated up front.
-- **An Excel-serial door in HyperCast itself.** The HyperCast roadmap suggested one; the
-  conversion lives in `hypertabular::serial` instead because it needs the workbook's date
-  system and produces a `Wall`/`Clock`, which are tabular concepts, not scalar text. Easy to
-  move if HyperCast wants it.
+- **Collapsing `hypertabular::serial` onto HyperCast's Excel-serial door.** HyperCast
+  shipped `cast_excel_serial` on 2026-08-31: serial *text* in, a caller-declared
+  `ExcelEpoch`, a `Timestamp` out — the door for a CSV column of serials. The conversion
+  here stays separate because it starts from the `f64` the workbook stores and produces a
+  `Wall`/`Clock`/`Span`, which are tabular concepts. The two carry the same rules (epoch,
+  the phantom serial 60, the fraction as time of day) independently, and nothing yet pins
+  them to agree.
