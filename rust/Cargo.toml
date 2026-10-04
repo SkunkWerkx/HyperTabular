@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Forward-only tabular parsing — delimited text and spreadsheets — with a HyperCast verdict for every cell: an allocation-free, panic-free, no_std core that fills caller-owned column buffers, wrapped as a native library (libhypertabular) for direct FFI from every host language."
 license = "MIT"
-readme = "../README.md"
+# A copy of the root README inside the crate's own directory, not a path up to it: maturin
+# reads this file whenever it builds the Python wheel from this manifest, and the forge's
+# Alpine suite builds that wheel from a copy of rust/ and python/ alone (musl-suite), where
+# `../README.md` is not there to read. HyperCast's crate carries its own for the same reason.
+readme = "README.md"
 repository = "https://github.com/SkunkWerkx/HyperTabular"
 keywords = ["csv", "xlsx", "parser", "ffi", "allocation-free"]
 categories = ["parsing"]
@@ -31,6 +35,10 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], op
 ext-php-rs = { version = "0.16", optional = true }
 # Build-time check only, never shipped: see the `no-panic` feature.
 no-panic = { version = "0.1", optional = true }
+# The Python binding (src/python_ext.rs), linked into a CPython extension module.
+# abi3-py311, as HyperCast's is: one build per platform serves every CPython from the
+# package's floor up.
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"], optional = true }
 
 [features]
 # On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
@@ -61,6 +69,13 @@ php = ["dep:ext-php-rs", "std"]
 # Built with std, because the proof needs the unwind edge a panic leaves and a no_std
 # build has to abort; the exports' code is the same either way.
 no-panic = ["dep:no-panic", "exports"]
+# The Python binding: a binding like any other — it allocates every buffer and the core
+# fills them — but written in Rust and linked with the core into one extension module
+# (`hypertabular._native`), so it calls the core's Rust functions instead of loading the
+# shared library. maturin builds it into the wheels (python/pyproject.toml); the forge's
+# suites build it with `cargo rustc --release --crate-type cdylib --features python`.
+# Nothing under src/kernel knows it exists.
+python = ["dep:pyo3", "std"]
 
 [dev-dependencies]
 # The comparison baseline for the delimited conformance suite and bench — never linked.
