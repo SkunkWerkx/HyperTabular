@@ -12,3 +12,11 @@ csharp/HyperTabular/runtimes/
 # The same for the static libraries a Native AOT publish links in: staged by the forge's
 # static-libs/build-static-libs.sh at test and pack time, never committed.
 csharp/HyperTabular/staticlibs/
+
+# Ruby
+# CI places each leg's native lib here for `bundle exec rspec` at build-native time, and the
+# gem build stages every RID's into the gem; regenerable locally via `cargo cdylib`.
+ruby/lib/hypertabular/native/*/
+ruby/Gemfile.lock
+ruby/pkg/
+ruby/.yardoc/

@@ -40,7 +40,6 @@ jobs:
       java: false
       swift: false
       php: false
-      ruby: false
       magnus: false
       go: false
       pyo3: false
