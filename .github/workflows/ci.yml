@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   build-native:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@master
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@binding-toggles
     permissions:            # attestation signs with OIDC; a reusable workflow
       contents: read        # can never escalate beyond its caller's grant
       id-token: write
