@@ -15,9 +15,15 @@
 /.github          export-ignore
 /.gitattributes   export-ignore
 /.gitignore       export-ignore
+/Package.swift    export-ignore
 /global.json      export-ignore
 /csharp           export-ignore
+/go               export-ignore
+/java             export-ignore
+/python           export-ignore
+/ruby             export-ignore
 /rust             export-ignore
+/swift            export-ignore
 /corpus           export-ignore
 /docs             export-ignore
 /php/tests        export-ignore
