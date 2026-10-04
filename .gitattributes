@@ -1,0 +1,6 @@
+# One line ending everywhere. The corpus is compared byte for byte against what the example
+# that writes it produces, and a Windows checkout that turned its line feeds into CRLF
+# would make that comparison fail on that platform alone.
+* text=auto eol=lf
+*.xlsx binary
+*.ods binary
