@@ -2,6 +2,21 @@
 **/target/
 corpus/generate/out/
 
+# Python
+**/__pycache__/
+**/*.egg-info/
+**/.venv/
+**/dist/
+**/.pytest_cache/
+**/.mypy_cache/
+# The staged PyO3 extension for local dev/test — nested at hypertabular._native (the maturin
+# module-name), built from the core crate's python feature. abi3 wheels carry one build per
+# platform regardless of Python version (hence the plain and .abi3 spellings, not a
+# per-version-tagged glob); .pyd covers Windows.
+python/src/hypertabular/_native.so
+python/src/hypertabular/_native.abi3.so
+python/src/hypertabular/_native.pyd
+
 # .NET
 **/bin/
 **/obj/

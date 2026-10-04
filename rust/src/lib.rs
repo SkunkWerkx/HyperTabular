@@ -92,6 +92,11 @@ mod source;
 #[cfg(feature = "std")]
 pub mod workbook;
 
+// The Python binding over the core. A binding, not part of the core: it allocates, it
+// uses std, and it is compiled only into the extension module.
+#[cfg(feature = "python")]
+mod python_ext;
+
 #[cfg(feature = "std")]
 pub use hypercast::{
     Date, Duration, ExcelEpoch, Fault, NumFormat, Reason, Timestamp, UnixPrecision,
