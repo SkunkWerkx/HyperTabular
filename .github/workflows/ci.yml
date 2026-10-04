@@ -43,7 +43,6 @@ jobs:
       java_resources_dir: java/src/main/resources/native
       # Not written yet. Each comes on with its binding.
       magnus: false
-      go: false
       pyo3: false
 
   check-core:
