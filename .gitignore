@@ -12,3 +12,22 @@ csharp/HyperTabular/runtimes/
 # The same for the static libraries a Native AOT publish links in: staged by the forge's
 # static-libs/build-static-libs.sh at test and pack time, never committed.
 csharp/HyperTabular/staticlibs/
+
+# Gradle / Java
+**/.gradle/
+**/build/
+# CI places each leg's native library here before `gradlew test`, and the Maven publish
+# bundles every platform's at publish time; the local dev loop stages into
+# build/generated-resources instead (already covered by **/build/ above), so anything here
+# is regenerable via `cargo cdylib`.
+java/src/main/resources/native/
+# csharp/HyperTabular/build/ is NuGet's real, tracked build/{PackageId}.targets packaging
+# convention, not a build output. It collides with **/build/ above, which would otherwise
+# silently swallow anything new in it: the file would sit on disk, pack correctly in a
+# local `dotnet pack`, and simply never exist in CI. Each directory level needs its own
+# negation — git won't descend into an excluded directory to find a deeper !file
+# re-inclusion — and gitignore rules apply in file order, so this must come after the rule
+# it un-ignores. HyperCast carries the same block for the same reason.
+!csharp/HyperTabular/build/
+!csharp/HyperTabular/build/net11.0/
+!csharp/HyperTabular/build/net11.0/HyperTabular.targets

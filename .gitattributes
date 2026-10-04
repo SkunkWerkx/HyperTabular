@@ -4,3 +4,6 @@
 * text=auto eol=lf
 *.xlsx binary
 *.ods binary
+# The one exception: cmd.exe reads a batch file's labels reliably only with CRLF, so the
+# Gradle wrapper's gradlew.bat keeps the line endings Gradle wrote it with.
+*.bat text eol=crlf
