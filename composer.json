@@ -1,0 +1,36 @@
+{
+    "name": "skunkwerkx/hypertabular",
+    "description": "Delimited text (CSV, TSV) read a batch at a time into typed columns, every cell a HyperCast Success/Fault verdict — direct native FFI into a Rust core that owns no memory.",
+    "type": "library",
+    "keywords": ["csv", "tsv", "parser", "tabular", "validation", "ffi", "rust"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Brian Buvinghausen"
+        }
+    ],
+    "homepage": "https://github.com/SkunkWerkx/HyperTabular",
+    "support": {
+        "issues": "https://github.com/SkunkWerkx/HyperTabular/issues",
+        "source": "https://github.com/SkunkWerkx/HyperTabular"
+    },
+    "require": {
+        "php": ">=8.2",
+        "ext-ffi": "*",
+        "skunkwerkx/hypercast": "^0.6.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0",
+        "squizlabs/php_codesniffer": "^3.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "HyperTabular\\": "php/src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "HyperTabular\\Tests\\": "php/tests/"
+        }
+    }
+}

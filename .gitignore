@@ -12,3 +12,16 @@ csharp/HyperTabular/runtimes/
 # The same for the static libraries a Native AOT publish links in: staged by the forge's
 # static-libs/build-static-libs.sh at test and pack time, never committed.
 csharp/HyperTabular/staticlibs/
+
+# PHP
+# Native libs under php/src/native/{rid}/ are not ignored: as in HyperCast, Packagist has no
+# packing step — the git tree at the tag IS the package — so the libraries a release ships
+# are committed there. Without one for the platform, the binding falls back to
+# rust/target/release/ (`cargo cdylib`).
+php/vendor/
+php/composer.lock
+php/.phpunit.result.cache
+# The root composer.json exists only for Packagist, which reads the repository root; nothing
+# here runs `composer install` from the root, and a stray local one should not be committed.
+/vendor/
+/composer.lock
