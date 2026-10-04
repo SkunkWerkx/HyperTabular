@@ -22,3 +22,4 @@ pub mod delimited;
 pub mod door;
 pub mod exports;
 pub mod inflate;
+pub mod workbook;

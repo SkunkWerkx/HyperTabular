@@ -1,23 +1,41 @@
-//! Writes `corpus/delimited.json`, the contract every binding replays.
-//!
-//! A case says two things, by hand: the input, and the text that must reach each cell —
-//! which rows there are, where each cell begins and ends, what quoting leaves behind.
-//! That grid is the tabular layer's whole job and is never computed. What each plan
-//! column then makes of its cell's text is not this layer's to decide: HyperCast is the
-//! judge, so the verdict written for a cell is whatever HyperCast's own door says of that
-//! text, asked directly, with no reader in between.
+//! Writes the two corpora every binding replays: `corpus/delimited.json` and
+//! `corpus/workbook.json`.
 //!
 //!   cargo run --example corpus
 //!
-//! `tests/corpus_delimited.rs` replays the file through the reader, and fails if this
-//! example would write anything other than what is committed.
+//! **Delimited.** A case says two things, by hand: the input, and the text that must
+//! reach each cell — which rows there are, where each cell begins and ends, what quoting
+//! leaves behind. That grid is the tabular layer's whole job and is never computed. What
+//! each plan column then makes of its cell's text is not this layer's to decide: HyperCast
+//! is the judge, so the verdict written for a cell is whatever HyperCast's own door says
+//! of that text, asked directly, with no reader in between.
+//!
+//! **Workbook.** A case is one sheet of one of the packages in `corpus/workbook/`, read
+//! with one set of options through one plan. Nothing here is by hand: the file was first
+//! written by the std workbook reader this crate had before its core could read a
+//! workbook — a reader that owed the core nothing — with the core required to agree
+//! before it was written; that reader is gone, and the file is what is left of it. This
+//! example now writes the file from the core, through the Rust binding, so running it
+//! says whether the core still reads what that reader read: a diff in `workbook.json` is
+//! a change in behaviour, to be explained before it is committed.
+//!
+//!   cargo run --example corpus -- --packages
+//!
+//! also rewrites the generated packages themselves (the fixtures beside them are
+//! `make_fixtures.py`'s). Their deflated bytes come from whatever deflate the build
+//! links, so they are committed rather than rebuilt, and rewritten only on purpose.
+//!
+//! `tests/corpus_delimited.rs` and `tests/corpus_workbook.rs` replay the files through the
+//! readers, and fail if this example would write anything other than what is committed.
 
 #[path = "../tests/support/corpus.rs"]
 pub mod corpus;
+#[path = "../tests/support/packages.rs"]
+pub mod packages;
 
 use corpus::*;
 use hypercast::{DateOrder, ExcelEpoch, Fault, UnixPrecision};
-use hypertabular::{Door, NumFormat};
+use hypertabular::{Column, Door, Format, NumFormat, SheetOptions, Workbook};
 use serde_json::{Value, json};
 
 struct Failure {
@@ -525,9 +543,154 @@ pub fn corpus_json() -> String {
     text
 }
 
+/// Where the workbook packages are.
+pub const WORKBOOK_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook");
+
+/// Every door over each of `width` source columns, what a door declares varied by column.
+fn every_door_over(width: usize) -> Vec<Column> {
+    let mut plan = Vec::new();
+    for ordinal in 0..width {
+        for code in 1..=22u32 {
+            let by = ordinal as u32;
+            let param = match code {
+                14 => 1 + by % 4,
+                20 | 21 => 1 + by % 3,
+                22 => 1 + by % 2,
+                _ => 0,
+            };
+            let door = Door::from_code(code, param).expect("a door");
+            plan.push(Column::new(ordinal, door));
+        }
+    }
+    plan
+}
+
+/// The workbook cases: every sheet of every package in `corpus/workbook/`, each way of
+/// reading it.
+pub fn workbook_cases() -> Vec<Value> {
+    let mut files: Vec<String> = std::fs::read_dir(WORKBOOK_DIR)
+        .expect("corpus/workbook")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .into_string()
+                .expect("a name")
+        })
+        .filter(|name| name.ends_with(".xlsx") || name.ends_with(".ods"))
+        .collect();
+    files.sort();
+    let mut cases = Vec::new();
+    for file in &files {
+        let book = Workbook::open(format!("{WORKBOOK_DIR}/{file}")).expect("a workbook");
+        let width = if file.starts_with("generated") { 4 } else { 10 };
+        let sheets: Vec<Value> = book
+            .sheets()
+            .iter()
+            .map(|sheet| json!({"name": sheet.name, "hidden": sheet.hidden}))
+            .collect();
+        let base = SheetOptions::default();
+        for (index, info) in book.sheets().iter().enumerate() {
+            for (at, options) in [
+                base,
+                base.with_header(false),
+                base.with_empty_rows_skipped(false),
+                base.with_header(false).with_empty_rows_skipped(false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // A real ODS sheet ends in a million empty rows; delivered, they would be
+                // most of the file.
+                if file == "basic.ods" && !options.skip_empty_rows {
+                    continue;
+                }
+                // Every door over every column once; the other options change which rows
+                // there are, which the text door shows.
+                let plan: Vec<Column> = if at == 0 {
+                    every_door_over(width)
+                } else {
+                    (0..width).map(Column::text).collect()
+                };
+                let mut sheet = book.sheet(index, options, &plan).expect("a sheet");
+                let header = header_json(sheet.header());
+                let (mut numbers, mut rows) = (Vec::new(), Vec::new());
+                let failure = loop {
+                    match sheet.read() {
+                        Ok(Some(batch)) => {
+                            numbers.extend((0..batch.rows()).map(|row| batch.line(row)));
+                            rows_json(&batch, &mut rows);
+                        }
+                        Ok(None) => break None,
+                        Err(error) => break Some(error),
+                    }
+                };
+                let plan: Vec<Value> = plan
+                    .iter()
+                    .map(|column| {
+                        let mut entry = door_json(column.door);
+                        entry["ordinal"] = json!(column.ordinal);
+                        entry
+                    })
+                    .collect();
+                let mut case = json!({
+                    "name": format!(
+                        "{file}, sheet {index} ({:?}), {}, {}",
+                        info.name,
+                        if options.has_header { "a header" } else { "no header" },
+                        if options.skip_empty_rows {
+                            "empty rows skipped"
+                        } else {
+                            "empty rows delivered"
+                        },
+                    ),
+                    "file": format!("workbook/{file}"),
+                    "format": match book.format() {
+                        Format::Xlsx => "xlsx",
+                        Format::Ods => "ods",
+                    },
+                    "epoch": book.date_system() as u32,
+                    "sheets": sheets,
+                    "sheet": index,
+                    "options": {
+                        "has_header": options.has_header,
+                        "skip_empty_rows": options.skip_empty_rows,
+                    },
+                    "plan": plan,
+                    "header": header,
+                    "numbers": numbers,
+                    "rows": rows,
+                });
+                if let Some(error) = failure {
+                    case["failure"] = failure_json(&error);
+                    case["note"] =
+                        json!("the rows are the oracle's; the failure's fields are the core's own");
+                }
+                cases.push(case);
+            }
+        }
+    }
+    cases
+}
+
+/// `corpus/workbook.json`, as it should be.
+pub fn workbook_json() -> String {
+    workbook_text(&workbook_cases())
+}
+
 #[allow(dead_code)]
 fn main() {
+    if std::env::args().any(|argument| argument == "--packages") {
+        for (name, bytes) in packages::corpus_packages() {
+            let path = format!("{WORKBOOK_DIR}/{name}");
+            std::fs::write(&path, bytes).expect("writing a package");
+            println!("wrote {path}");
+        }
+    }
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/delimited.json");
     std::fs::write(path, corpus_json()).expect("writing the corpus");
+    println!("wrote {path}");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook.json");
+    std::fs::write(path, workbook_json()).expect("writing the corpus");
     println!("wrote {path}");
 }

@@ -27,9 +27,6 @@ bench = false
 # the package inside its rust/ directory — and from crates.io at that release. `exports`
 # stays off, so no library built from this crate carries HyperCast's `cast_*` symbols.
 hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master", default-features = false }
-# Streaming inflate for the workbook reader in the std layer, until the core has its own
-# (docs/workbook.md, "Container and streaming"). Never part of the core.
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 # The Zend extension the forge builds beside the shared library (the `php` feature). Never
 # part of the core, and never of the library the shipped PHP package loads.
 ext-php-rs = { version = "0.16", optional = true }
@@ -42,11 +39,11 @@ pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"], option
 
 [features]
 # On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
-# API over the core — owned batches, a row-at-a-time reader, files, the workbook reader.
+# API over the core — the Rust binding: readers that own their buffers, and files.
 # Nothing the crate ships as a library is built with it. The core (src/kernel) is the same
 # code with or without it, and compiles with it off, where `std` cannot be named.
 default = ["std", "exports"]
-std = ["hypercast/std", "dep:flate2"]
+std = ["hypercast/std"]
 # The C ABI symbols. On by default and implied by every feature that builds a library of
 # this crate's own; off for a crate that links this one as an rlib and exports a C ABI of
 # its own, so that its library does not carry these (HyperCast's `exports`, same reason).
@@ -83,21 +80,18 @@ csv = "1.4"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 # The corpus is JSON: the example that writes it and the test that replays it.
 serde_json = "1"
+# Deflate for the tests, which build their workbook packages in memory and hold the core's
+# own inflate to another's. The crate itself inflates with the core and links neither.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [[bench]]
 name = "delimited_benchmarks"
 harness = false
 
-[[bench]]
-name = "workbook_benchmarks"
-harness = false
-
-# Two cfgs only `check-core.sh` sets. `hypertabular_canary` compiles in an export that can
-# panic, so the no-panic proof can be watched refusing it; `hypertabular_internals`
-# compiles in exports over the parts of the core no real export reaches yet, so the proof
-# covers them too.
+# A cfg only `check-core.sh` sets: `hypertabular_canary` compiles in an export that can
+# panic, so the no-panic proof can be watched refusing it.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)', 'cfg(hypertabular_internals)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)'] }
 
 # The same profile HyperCast ships with, for the same measured reasons.
 [profile.release]

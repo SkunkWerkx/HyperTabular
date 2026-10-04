@@ -165,3 +165,133 @@ pub fn uuid_json(value: [u8; 16]) -> Value {
 pub fn text_json(value: &[u8]) -> Value {
     json!({"expect": "ok", "text": String::from_utf8_lossy(value)})
 }
+
+/// The keys of a workbook case, in the order `corpus/workbook.json` writes them.
+pub const WORKBOOK_KEYS: [&str; 13] = [
+    "name", "file", "format", "epoch", "sheets", "sheet", "options", "plan", "header", "numbers",
+    "rows", "failure", "note",
+];
+
+/// `corpus/workbook.json` as text: one case an object, one key a line, and one row of
+/// `rows` a line — the file is thousands of cells, and a line a row is what keeps a
+/// change to it readable.
+pub fn workbook_text(cases: &[Value]) -> String {
+    let mut text = String::from("[\n");
+    for (index, case) in cases.iter().enumerate() {
+        text.push_str("  {\n");
+        let keys: Vec<&str> = WORKBOOK_KEYS
+            .into_iter()
+            .filter(|key| case.get(key).is_some())
+            .collect();
+        assert_eq!(
+            keys.len(),
+            case.as_object().expect("a case is an object").len(),
+            "a case has a key the writer does not know"
+        );
+        for (at, key) in keys.iter().enumerate() {
+            let last = if at + 1 == keys.len() { "" } else { "," };
+            match case[key].as_array().filter(|_| *key == "rows") {
+                Some(rows) if !rows.is_empty() => {
+                    text.push_str("    \"rows\": [\n");
+                    for (row, cells) in rows.iter().enumerate() {
+                        let comma = if row + 1 == rows.len() { "" } else { "," };
+                        text.push_str(&format!("      {cells}{comma}\n"));
+                    }
+                    text.push_str(&format!("    ]{last}\n"));
+                }
+                _ => text.push_str(&format!("    \"{key}\": {}{last}\n", case[key])),
+            }
+        }
+        text.push_str(if index + 1 == cases.len() {
+            "  }\n"
+        } else {
+            "  },\n"
+        });
+    }
+    text.push_str("]\n");
+    text
+}
+
+/// A cell of a batch in the corpus's shape: its value through its column's door, or its
+/// fault with the text the fault is a span of.
+pub fn cell_json(batch: &hypertabular::Batch<'_>, column: usize, row: usize) -> Value {
+    use hypertabular::{CivilDateTime, Date, Decimal, Duration, Timestamp};
+    if let Some(fault) = batch.verdicts(column)[row].fault() {
+        let raw = batch.raw(column, row);
+        return fault_json(fault.reason, fault.offset, fault.len, &raw);
+    }
+    let number = |value: Value| json!({"expect": "ok", "value": value});
+    let read = "a cell whose verdict is ok has a value";
+    match batch.columns()[column].door {
+        Door::Bool => number(json!(batch.bool(column)[row])),
+        Door::I8 => number(json!(batch.i8(column)[row])),
+        Door::I16 => number(json!(batch.i16(column)[row])),
+        Door::I32 => number(json!(batch.i32(column)[row])),
+        Door::I64 => number(json!(batch.i64(column)[row])),
+        Door::U8 => number(json!(batch.u8(column)[row])),
+        Door::U16 => number(json!(batch.u16(column)[row])),
+        Door::U32 => number(json!(batch.u32(column)[row])),
+        Door::U64 => number(json!(batch.u64(column)[row])),
+        Door::F32 => number(json!(f64::from(batch.f32(column)[row]))),
+        Door::F64 => number(json!(batch.f64(column)[row])),
+        Door::Decimal => decimal_json(batch.get::<Decimal>(column, row).expect(read)),
+        Door::Uuid => uuid_json(batch.get::<[u8; 16]>(column, row).expect(read)),
+        Door::Timestamp | Door::Unix(_) | Door::ExcelSerial(_) => {
+            timestamp_json(batch.get::<Timestamp>(column, row).expect(read))
+        }
+        Door::Date | Door::DateOrdered(_) => date_json(batch.get::<Date>(column, row).expect(read)),
+        Door::DateTime(_) => datetime_json(batch.get::<CivilDateTime>(column, row).expect(read)),
+        Door::Time => json!({"expect": "ok", "nanos": batch.get::<u64>(column, row).expect(read)}),
+        Door::Duration => duration_json(batch.get::<Duration>(column, row).expect(read)),
+        Door::Text => text_json(batch.text(column, row).expect(read)),
+    }
+}
+
+/// Every row of a batch, in the corpus's shape.
+pub fn rows_json(batch: &hypertabular::Batch<'_>, rows: &mut Vec<Value>) {
+    for row in 0..batch.rows() {
+        let cells: Vec<Value> = (0..batch.columns().len())
+            .map(|column| cell_json(batch, column, row))
+            .collect();
+        rows.push(json!(cells));
+    }
+}
+
+/// A header in the corpus's shape: its names, or `null` for none declared.
+pub fn header_json(header: Option<&hypertabular::Header>) -> Value {
+    match header {
+        Some(header) => json!(
+            header
+                .names()
+                .map(|name| String::from_utf8_lossy(name))
+                .collect::<Vec<_>>()
+        ),
+        None => Value::Null,
+    }
+}
+
+/// A plan entry as a column.
+pub fn column_of(entry: &Value) -> hypertabular::Column {
+    let ordinal = entry["ordinal"].as_u64().expect("ordinal") as usize;
+    hypertabular::Column::new(ordinal, door_of(entry)).format(format_of(entry))
+}
+
+/// A structural failure in the corpus's shape. Only a column-count failure of delimited
+/// text and the failures of a workbook say what was expected and found.
+pub fn failure_json(error: &hypertabular::Error) -> Value {
+    use hypertabular::{Error, FailureKind};
+    let Error::Structure(failure) = error else {
+        panic!("not a failure the corpus describes: {error:?}");
+    };
+    let mut entry = json!({
+        "kind": failure.kind.name(),
+        "record": failure.record,
+        "line": failure.line,
+        "byte": failure.byte,
+    });
+    if failure.kind != FailureKind::UnclosedQuote {
+        entry["expected"] = json!(failure.expected);
+        entry["found"] = json!(failure.found);
+    }
+    entry
+}

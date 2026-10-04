@@ -1,21 +1,21 @@
 //! Throughput receipts. Three scopes on one generated file, HyperCast-style honest
 //! comparison against the `csv` crate (the Rust reference; Sep is C#-side, measured from
-//! the C# binding when it exists):
+//! the C# binding):
 //!
-//! - `rows`: structure only — every row delivered, no cell touched (Sep's "Row" scope).
-//! - `cells`: every cell's bytes touched (Sep's "Cols" scope).
-//! - `batch`: every cell cast through a HyperCast door into a typed batch — the payoff.
+//! - `structure`: the core alone, an empty plan — every row found, no cell cast — on
+//!   every engine this CPU offers, so the SIMD tiers are visible next to each other.
+//! - `cells`: every cell's bytes touched (Sep's "Cols" scope), through the text door.
+//! - `batch`: every cell cast through a HyperCast door into typed columns — the payoff.
 //!
 //! The file: 200 000 rows × 10 columns, ~24 MB, one quoted column with embedded
 //! separators, one with `""` escapes on every tenth row, integers, reals, an RFC 3339
-//! timestamp, a UUID, a boolean, and a date. Also, the scanner alone on every engine
-//! this CPU offers, so the SIMD tiers are visible next to each other.
+//! timestamp, a UUID, a boolean, and a date.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use hypertabular::delimited::engine;
-use hypertabular::delimited::scan::{Output, Scanner};
-use hypertabular::delimited::{Dialect, Reader};
-use hypertabular::{Batch, Column, Door, Plan, fill_batch};
+use hypertabular::kernel::abi::{Filled, OK, Span};
+use hypertabular::kernel::delimited::engine::{self, Kind};
+use hypertabular::kernel::delimited::fill::{self, RawDialect, State};
+use hypertabular::{Column, DelimitedReader, Dialect};
 
 fn generate(rows: usize) -> Vec<u8> {
     let mut text = b"id,name,city,amount,ratio,when,uuid,active,born,note\n".to_vec();
@@ -46,74 +46,85 @@ fn generate(rows: usize) -> Vec<u8> {
     text
 }
 
+/// The engines this build can run, best first.
+fn engines() -> Vec<Kind> {
+    #[cfg(target_arch = "x86_64")]
+    let kinds = [Kind::Avx2Clmul, Kind::Sse2Clmul, Kind::Sse2, Kind::Swar];
+    #[cfg(target_arch = "aarch64")]
+    let kinds = [Kind::NeonPmull, Kind::Neon, Kind::Swar];
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let kinds = [Kind::Swar];
+    kinds
+        .into_iter()
+        .filter(|&kind| engine::usable(kind))
+        .collect()
+}
+
 fn benchmarks(c: &mut Criterion) {
     let text = generate(200_000);
     let bytes = text.len() as u64;
 
-    let mut group = c.benchmark_group("scan");
+    let mut group = c.benchmark_group("structure");
     group.throughput(Throughput::Bytes(bytes));
-    for kind in engine::available() {
-        group.bench_with_input(
-            BenchmarkId::new("structure", kind.name()),
-            &kind,
-            |b, &kind| {
-                let scanner = Scanner::with_engine(b',', true, kind);
-                let mut out = Output::default();
-                b.iter(|| {
-                    let mut pos = 0;
-                    let mut line = 1;
-                    loop {
-                        out.clear();
-                        let stop = scanner.scan(&text, pos, line, true, 1024, &mut out);
-                        pos = stop.next;
-                        line = stop.line;
-                        if out.rows.is_empty() {
-                            break;
-                        }
+    for kind in engines() {
+        group.bench_with_input(BenchmarkId::new("core", kind.name()), &kind, |b, &kind| {
+            let dialect = RawDialect {
+                separator: b',',
+                quoting: 1,
+                skip_blank_lines: 1,
+                engine: kind.code(),
+            };
+            // No columns: a row takes one entry of the cell table, and nothing is cast.
+            let mut cells = vec![Span::default(); 1024];
+            b.iter(|| {
+                let mut state = State::init(dialect).unwrap();
+                let (mut at, mut rows) = (0usize, 0u64);
+                loop {
+                    let mut out = Filled::default();
+                    // SAFETY: there are no column buffers to have room in.
+                    let code = unsafe {
+                        fill::fill(
+                            &mut state,
+                            &text[at..],
+                            true,
+                            &[],
+                            &[],
+                            1024,
+                            &mut cells,
+                            &mut [],
+                            &mut out,
+                        )
+                    };
+                    assert_eq!(code, OK);
+                    if out.rows == 0 {
+                        return rows;
                     }
-                    pos
-                });
-            },
-        );
+                    rows += out.rows;
+                    at += out.consumed as usize;
+                }
+            });
+        });
     }
     group.finish();
 
-    let mut group = c.benchmark_group("reader");
+    let mut group = c.benchmark_group("cells");
     group.throughput(Throughput::Bytes(bytes));
-    group.bench_function("rows/hyperdelimited", |b| {
+    let every: Vec<Column> = (0..10).map(Column::text).collect();
+    group.bench_function("hypertabular", |b| {
         b.iter(|| {
-            let mut reader = Reader::from_slice(&text, Dialect::CSV).unwrap();
-            let mut rows = 0u64;
-            while reader.next_row().unwrap().is_some() {
-                rows += 1;
-            }
-            rows
-        });
-    });
-    group.bench_function("rows/csv", |b| {
-        b.iter(|| {
-            let mut reader = csv::ReaderBuilder::new().from_reader(&text[..]);
-            let mut record = csv::ByteRecord::new();
-            let mut rows = 0u64;
-            while reader.read_byte_record(&mut record).unwrap() {
-                rows += 1;
-            }
-            rows
-        });
-    });
-    group.bench_function("cells/hyperdelimited", |b| {
-        b.iter(|| {
-            let mut reader = Reader::from_slice(&text, Dialect::CSV).unwrap();
+            let mut reader = DelimitedReader::from_slice(&text, Dialect::CSV, &every).unwrap();
             let mut total = 0usize;
-            while let Some(row) = reader.next_row().unwrap() {
-                for cell in row.iter() {
-                    total += cell.len();
+            while let Some(batch) = reader.read().unwrap() {
+                for column in 0..10 {
+                    for row in 0..batch.rows() {
+                        total += batch.text(column, row).map_or(0, <[u8]>::len);
+                    }
                 }
             }
             total
         });
     });
-    group.bench_function("cells/csv", |b| {
+    group.bench_function("csv", |b| {
         b.iter(|| {
             let mut reader = csv::ReaderBuilder::new().from_reader(&text[..]);
             let mut record = csv::ByteRecord::new();
@@ -128,26 +139,25 @@ fn benchmarks(c: &mut Criterion) {
     });
     group.finish();
 
-    let plan = Plan::new(vec![
-        Column::new(0, Door::I64),
-        Column::new(1, Door::Text),
-        Column::new(2, Door::Text),
-        Column::new(3, Door::F64),
-        Column::new(4, Door::F32),
-        Column::new(5, Door::Timestamp),
-        Column::new(6, Door::Uuid),
-        Column::new(7, Door::Bool),
-        Column::new(8, Door::Date),
-        Column::new(9, Door::Text),
-    ]);
+    let plan = [
+        Column::i64(0),
+        Column::text(1),
+        Column::text(2),
+        Column::f64(3),
+        Column::f32(4),
+        Column::timestamp(5),
+        Column::uuid(6),
+        Column::bool(7),
+        Column::date(8),
+        Column::text(9),
+    ];
     let mut group = c.benchmark_group("batch");
     group.throughput(Throughput::Bytes(bytes));
-    group.bench_function("typed/hyperdelimited", |b| {
-        let mut batch = Batch::new();
+    group.bench_function("typed/hypertabular", |b| {
         b.iter(|| {
-            let mut reader = Reader::from_slice(&text, Dialect::CSV).unwrap();
+            let mut reader = DelimitedReader::from_slice(&text, Dialect::CSV, &plan).unwrap();
             let mut rows = 0usize;
-            while fill_batch(&mut reader, &plan, &mut batch, 1024).unwrap() > 0 {
+            while let Some(batch) = reader.read().unwrap() {
                 rows += batch.rows();
             }
             rows
