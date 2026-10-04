@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj" />
+  <Project Path="HyperTabular.Tests/HyperTabular.Tests.csproj" />
+  <Project Path="HyperTabular/HyperTabular.csproj" />
+</Solution>

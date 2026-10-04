@@ -1,0 +1,15 @@
+<Project>
+
+	<PropertyGroup>
+		<!-- .NET 11 is the floor, as it is for HyperCast, and for HyperCast's reason: every
+		     cell comes back as HyperCast's Verdict, a native discriminated union, and CS8509
+		     (non-exhaustive switch expression) is elevated to an error so an unhandled
+		     disposition is a build failure rather than a review nit. -->
+		<TargetFramework>net11.0</TargetFramework>
+		<LangVersion>preview</LangVersion>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<WarningsAsErrors>$(WarningsAsErrors);CS8509</WarningsAsErrors>
+	</PropertyGroup>
+
+</Project>

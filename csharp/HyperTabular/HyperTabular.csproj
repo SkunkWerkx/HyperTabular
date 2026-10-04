@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- TargetFramework (net11.0 floor), LangVersion preview, and CS8509-as-error come from
+       csharp/Directory.Build.props, as in HyperCast. -->
+  <PropertyGroup>
+    <PackageId>HyperTabular</PackageId>
+    <!-- The committed version prepare-release.yml bumps, in lockstep with rust/Cargo.toml. -->
+    <Version>0.1.0</Version>
+    <!-- HyperTabular.dll and hypertabular.dll differ only by case, and on Windows one would
+         overwrite the other in the output directory: HyperCast's rename, for its reason. -->
+    <AssemblyName>HyperTabular.Managed</AssemblyName>
+    <RootNamespace>HyperTabular</RootNamespace>
+    <Description>Forward-only delimited text (CSV, TSV, any ASCII separator) read into typed column batches with a HyperCast Verdict for every cell — AOT/trim-friendly P/Invoke bindings into a native Rust core (libhypertabular) that owns no memory: this assembly allocates the buffers, the core fills them, once per batch.</Description>
+    <Authors>Brian Buvinghausen</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/SkunkWerkx/HyperTabular</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/SkunkWerkx/HyperTabular</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>csv;tsv;parsing;verdict;pinvoke;native-aot</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Source-generated LibraryImport only, no reflection: opts into, and fails the build
+         on, the trim and Native AOT analyzers. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <!-- An undocumented public member fails the build instead of shipping undocumented. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
+         its types, not copies of them. -->
+    <PackageReference Include="HyperCast" Version="0.6.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="\" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="\" />
+    <!-- Standard NuGet RID-specific native asset layout, populated by CI before packing. -->
+    <None Include="runtimes/**" Pack="true" PackagePath="runtimes" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The same files flattened into the output root, where an in-repo ProjectReference
+         probes; only this SDK's own RID when it is among the staged ones (HyperCast's project
+         file has the whole account of why). -->
+    <None Include="runtimes/$(NETCoreSdkRuntimeIdentifier)/native/*"
+          Condition="Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native')"
+          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="runtimes/**/native/*"
+          Condition="!Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native')"
+          Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Auto-imported into every consuming project: the Native AOT static link. -->
+    <None Include="build/**" Pack="true" PackagePath="build" />
+    <None Include="buildTransitive/**" Pack="true" PackagePath="buildTransitive" />
+    <!-- The core as a static library, one per RID, for a Native AOT publish to link in.
+         Staged here before packing, like runtimes/, and not committed. -->
+    <None Include="staticlibs/**" Pack="true" PackagePath="staticlibs" />
+    <!-- Local dev loop: when the core has been built in-repo (`cargo cdylib` in rust/), copy
+         that library to the output so tests run against it with no packaging step — unless
+         this SDK's RID was staged under runtimes/ explicitly, which wins. -->
+    <None Include="../../rust/target/release/libhypertabular.so"
+          Condition="Exists('../../rust/target/release/libhypertabular.so') And !Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native/libhypertabular.so')"
+          Link="libhypertabular.so" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="../../rust/target/release/libhypertabular.dylib"
+          Condition="Exists('../../rust/target/release/libhypertabular.dylib') And !Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native/libhypertabular.dylib')"
+          Link="libhypertabular.dylib" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <None Include="../../rust/target/release/hypertabular.dll"
+          Condition="Exists('../../rust/target/release/hypertabular.dll') And !Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native/hypertabular.dll')"
+          Link="hypertabular.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+</Project>

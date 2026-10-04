@@ -1,0 +1,40 @@
+<Project>
+  <!-- Auto-imported into every consuming project via NuGet's build/{tfm}/{PackageId}.targets
+       convention (and, through buildTransitive/, into projects that reach the package through
+       another project).
+
+       Native AOT: link the core in. DirectPInvoke binds every import from "hypertabular" as
+       a direct call the linker must resolve, and NativeLibrary hands the linker the archive
+       that defines them: one executable, nothing opened at start. The archives are in
+       staticlibs/{rid}/, built without Rust's standard library, so this package, HyperCast's
+       and HyperUuid's can all be linked into one executable.
+
+       Presence decides: where the package has no archive for the RID being published,
+       nothing here applies and the publish loads the shared library as it always did.
+       Setting HyperTabularStaticLink to false asks for that on purpose. HyperCast's copy of
+       this file has the full account; the tabular layer has no browser-wasm half. -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(HyperTabularStaticLink)' != 'false'">
+    <_HyperTabularStaticLibrary Condition="$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/hypertabular.lib</_HyperTabularStaticLibrary>
+    <_HyperTabularStaticLibrary Condition="!$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/libhypertabular.a</_HyperTabularStaticLibrary>
+    <_HyperTabularStaticLibrary Condition="!Exists('$(_HyperTabularStaticLibrary)')"></_HyperTabularStaticLibrary>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_HyperTabularStaticLibrary)' != ''">
+    <DirectPInvoke Include="hypertabular" />
+    <NativeLibrary Include="$(_HyperTabularStaticLibrary)" />
+  </ItemGroup>
+
+  <!-- With the core linked in, the shared library is dead weight in the publish directory.
+       It gets there two ways (NuGet's native asset, a project reference's copy-to-output
+       item) and both end up in @(ResolvedFileToPublish), which is where it is taken back
+       out, by file name. -->
+  <Target Name="_HyperTabularDropSharedLibraryFromAotPublish"
+          AfterTargets="ComputeResolvedFilesToPublishList"
+          Condition="'$(_HyperTabularStaticLibrary)' != ''">
+    <ItemGroup>
+      <_HyperTabularSharedLibrary Include="@(ResolvedFileToPublish)"
+                         Condition="'%(Filename)%(Extension)' == 'libhypertabular.so' Or '%(Filename)%(Extension)' == 'libhypertabular.dylib' Or '%(Filename)%(Extension)' == 'hypertabular.dll'" />
+      <ResolvedFileToPublish Remove="@(_HyperTabularSharedLibrary)" />
+    </ItemGroup>
+  </Target>
+</Project>

@@ -57,6 +57,8 @@ no-panic = ["dep:no-panic", "exports"]
 # The comparison baseline for the delimited conformance suite and bench — never linked.
 csv = "1.4"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+# The corpus is JSON: the example that writes it and the test that replays it.
+serde_json = "1"
 
 [[bench]]
 name = "delimited_benchmarks"
