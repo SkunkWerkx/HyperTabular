@@ -1,0 +1,225 @@
+name: Stage native binaries after merge
+
+# PHP, Swift and Go have no packing step of their own: whatever is in the git tree at a
+# tagged commit is what a consumer gets (HyperCast's php/src/native/README.md has the full
+# story). So the binaries under php/src/native/, swift/HyperTabularCore.artifactbundle/ and
+# go/staticlib/ are committed, and they go stale the moment rust/ changes unless something
+# re-stages them. This does, as HyperCast's and HyperUuid's workflow of the same name does:
+# when a PR touching rust/ merges to master, pull the exact binaries that PR's own ci.yml run
+# built and tested, verify their provenance, and commit them straight back — so master's
+# HEAD is always tag-ready, with no second CI cycle (ci.yml has no push trigger, so this bot
+# commit does not start another matrix run).
+#
+# Deliberately a direct push, not a bot-opened PR: a PR here would be a diff of binary files
+# nobody can read, and it would put back the manual step this workflow exists to remove. The
+# one assumption it leans on: the merged PR's head SHA's own ci.yml run is still the right
+# one to trust — true unless another already-merged PR touched rust/ between "this PR went
+# green" and "this PR got merged".
+#
+# workflow_dispatch stages from any already-green commit without a PR merge: pass the SHA
+# whose ci.yml run to pull from. It is also how the first staging happens, since the PR that
+# brought the bindings in merged before this workflow existed.
+#
+# A third trigger covers the one rust/ change that never arrives as a PR: a release's
+# version bump. The libraries embed the crate version; when a ci.yml run dispatched by hand
+# against master completes, this stages its output, so the commit that is then tagged
+# carries libraries that report the version being released. PR runs are not picked up here:
+# an unmerged PR's libraries have no business on master, and the merged case is the
+# pull_request trigger's job.
+
+on:
+  pull_request:
+    types: [closed]
+    paths:
+      - "rust/**"
+  workflow_run:
+    workflows: ["CI — build native, test every binding"]
+    types: [completed]
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: "Commit SHA to pull native-* artifacts from (must have a successful ci.yml run) and to stage/commit onto master"
+        required: true
+        type: string
+
+jobs:
+  stage-native-binaries:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.merged == true ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      # gh attestation verify reads this repo's attestations before any binary is committed.
+      attestations: read
+    steps:
+      - name: Resolve the source commit
+        id: source
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch) echo "sha=${{ inputs.head_sha }}" >> "$GITHUB_OUTPUT" ;;
+            workflow_run)      echo "sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT" ;;
+            *)                 echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Find that commit's own ci.yml run
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "${{ steps.source.outputs.sha }}" --status success --json databaseId --jq '.[0].databaseId')
+          if [ -z "$run_id" ]; then
+            echo "::error::No successful ci.yml run found for ${{ steps.source.outputs.sha }} — nothing to stage from." >&2
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: artifacts/native
+          merge-multiple: false
+          run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # The static libraries, for the two bindings that link the core in and have no packing
+      # step of their own: Swift (swift/HyperTabularCore.artifactbundle) and Go (go/staticlib).
+      # The artifact is laid out by repository path; it also carries the C# package's
+      # archives, which are packed at release and never committed.
+      - uses: actions/download-artifact@v8
+        with:
+          name: static-libs
+          path: artifacts/static-libs
+          run-id: ${{ steps.find.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # Provenance is checked BEFORE anything is committed, not after. These binaries are
+      # the least inspectable artifacts this repo ships — compiled files in the git tree
+      # that a PHP, Swift or Go consumer gets verbatim — so the one moment they can still be
+      # rejected is here. ci.yml attested each one at build time (hyper-build-native.yml's
+      # attest step, which runs on same-repo PRs too, so that this workflow has something to
+      # check).
+      #
+      # --signer-repo is not optional. `--repo X` alone asserts both that the artifact's
+      # source repo is X and that the workflow which signed it lives in X. The first is
+      # true; the second is not — the signing step lives in hyper-build-native.yml in the
+      # shared SkunkWerkx/.github forge, which is what Fulcio records as the build signer.
+      # Omit it and every verification fails with a bare `verifying with issuer
+      # "sigstore.dev"`, which reads like a bad signature but is only an identity mismatch.
+      - name: Verify build provenance, then stage into php/src/native, swift/, go/staticlib
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          declare -A LIB_NAMES=(
+            [linux-x64]=libhypertabular.so
+            [linux-arm64]=libhypertabular.so
+            [linux-musl-x64]=libhypertabular.so
+            [linux-musl-arm64]=libhypertabular.so
+            [osx-x64]=libhypertabular.dylib
+            [osx-arm64]=libhypertabular.dylib
+            [win-x64]=hypertabular.dll
+            [win-arm64]=hypertabular.dll
+          )
+          : > digests.txt
+          for rid in "${!LIB_NAMES[@]}"; do
+            src="artifacts/native/native-$rid/${LIB_NAMES[$rid]}"
+            echo "::group::verify $rid"
+            if ! gh attestation verify "$src" \
+                 --repo "$GITHUB_REPOSITORY" --signer-repo SkunkWerkx/.github; then
+              echo "::error::No valid build provenance for $rid — refusing to commit it."
+              exit 1
+            fi
+            echo "::endgroup::"
+            echo "$(sha256sum "$src" | cut -d' ' -f1)  $rid/${LIB_NAMES[$rid]}" >> digests.txt
+          done
+
+          # PHP is the one tree that takes shared libraries. PHP on Windows is an x64 process
+          # even on ARM hardware, so an ARM64 DLL under php/ could never be loaded and is not
+          # staged; it is verified above all the same, as every library the run built is.
+          #
+          # install -m 755 rather than cp: download-artifact does not preserve modes.
+          for rid in "${!LIB_NAMES[@]}"; do
+            [ "$rid" = win-arm64 ] && continue
+            mkdir -p "php/src/native/$rid"
+            install -m 755 "artifacts/native/native-$rid/${LIB_NAMES[$rid]}" "php/src/native/$rid/${LIB_NAMES[$rid]}"
+          done
+
+          # The static libraries: nine for Swift's bundle (glibc and musl Linux, macOS and
+          # Windows on two architectures each, and wasm32-wasip1 — the two Windows ones named
+          # hypertabular.lib, as MSVC's linker convention has it), six for Go (Linux, macOS
+          # and Windows on two architectures each; the Windows ones are the MSVC archives,
+          # which MinGW's linker reads). The artifact also holds go/staticlib/wasm, which the
+          # forge builds for any Go tree; this binding has no TinyGo backend to link it, so
+          # it is left out. All of a tree's or none: a Swift bundle whose info.json names an
+          # archive that is not there fails every consumer's build, and a Go build with no
+          # archive for its platform does not link. info.json is generated text naming those
+          # nine paths and the crate version; it rides along unattested, readable in the diff.
+          declare -A STATIC_TREES=(
+            [swift/HyperTabularCore.artifactbundle]=9
+            [go/staticlib]=6
+          )
+          for tree in "${!STATIC_TREES[@]}"; do
+            archives=()
+            for archive in artifacts/static-libs/"$tree"/*/libhypertabular.a artifacts/static-libs/"$tree"/*/hypertabular.lib; do
+              [ -e "$archive" ] || continue
+              [ "$archive" = "artifacts/static-libs/go/staticlib/wasm/libhypertabular.a" ] && continue
+              archives+=("$archive")
+            done
+            if [ "${#archives[@]}" != "${STATIC_TREES[$tree]}" ]; then
+              echo "::error::Expected ${STATIC_TREES[$tree]} static libraries under $tree in the static-libs artifact, found ${#archives[@]}."
+              exit 1
+            fi
+            for archive in "${archives[@]}"; do
+              dest="${archive#artifacts/static-libs/}"
+              echo "::group::verify $dest"
+              if ! gh attestation verify "$archive" \
+                   --repo "$GITHUB_REPOSITORY" --signer-repo SkunkWerkx/.github; then
+                echo "::error::No valid build provenance for $dest — refusing to commit it."
+                exit 1
+              fi
+              echo "::endgroup::"
+              echo "$(sha256sum "$archive" | cut -d' ' -f1)  $dest" >> digests.txt
+              mkdir -p "$(dirname "$dest")"
+              install -m 644 "$archive" "$dest"
+            done
+          done
+          install -m 644 "artifacts/static-libs/swift/HyperTabularCore.artifactbundle/info.json" \
+            "swift/HyperTabularCore.artifactbundle/info.json"
+
+          echo "### Staged native binaries (attestations verified)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sort -k2 digests.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and push if anything actually changed
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          RUN_ID: ${{ steps.find.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add php/src/native swift/HyperTabularCore.artifactbundle
+          # -f: go/staticlib's archives are in .gitignore, so that this workflow is the only
+          # thing that ever adds one — a developer's own build of them stays out of a commit.
+          git add -f go/staticlib
+          if git diff --cached --quiet; then
+            echo "::notice::Staged binaries are byte-identical to what's already committed — nothing to push."
+            exit 0
+          fi
+          git commit \
+            -m "chore: stage native binaries from ci.yml run $RUN_ID ($SOURCE_SHA)" \
+            -m "Build provenance verified with \`gh attestation verify\` before staging." \
+            -m "sha256:" -m "$(cat digests.txt)"
+          git push origin HEAD:${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref_name }}
