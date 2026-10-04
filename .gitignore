@@ -1,2 +1,14 @@
-target/
+# Rust
+**/target/
 corpus/generate/out/
+
+# .NET
+**/bin/
+**/obj/
+**/TestResults/
+# CI (hyper-pack-nuget.yml) arranges and packs these per-RID at pack time; regenerable
+# locally via `cargo cdylib` (the csproj's runtimes/**/native/* wildcard item).
+csharp/HyperTabular/runtimes/
+# The same for the static libraries a Native AOT publish links in: staged by the forge's
+# static-libs/build-static-libs.sh at test and pack time, never committed.
+csharp/HyperTabular/staticlibs/

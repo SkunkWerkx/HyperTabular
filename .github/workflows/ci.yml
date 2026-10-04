@@ -46,3 +46,58 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy --no-default-features --features cdylib -- -D warnings
+
+  # The C# binding against this commit's core: its suite over the shared library (the
+  # corpus replay among it), then the Native AOT smoke program with the core linked in from
+  # the static archive the forge's own action builds. Until the other bindings exist this
+  # stands in for the C# leg of the forge's build-native matrix, on Linux only.
+  csharp:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            rid: linux-x64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-26.04-arm
+            rid: linux-arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "11.0.x"
+          dotnet-quality: "preview"
+
+      - name: Build the native core
+        working-directory: rust
+        run: cargo cdylib
+
+      - name: Test the C# binding against it
+        run: dotnet test --project csharp/HyperTabular.Tests/HyperTabular.Tests.csproj -c Release
+
+      - name: Build this leg's static library
+        uses: SkunkWerkx/.github/.github/actions/static-libs@master
+        with:
+          crate: hypertabular
+          project: HyperTabular
+          targets: ${{ matrix.target }}
+
+      - name: Native AOT publish, the core linked in
+        run: |
+          dotnet publish csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj \
+            -c Release -r ${{ matrix.rid }} -o "$RUNNER_TEMP/aot" -warnaserror
+          # Linked in means nothing to load: no shared library beside the executable.
+          if ls "$RUNNER_TEMP/aot" | grep -q 'libhypertabular'; then
+            echo "::error::the AOT publish still carries the shared library"; exit 1
+          fi
+
+      - name: Run the AOT-published binary (must exit 0)
+        run: '"$RUNNER_TEMP/aot/HyperTabular.AotSmokeTest"'
+
