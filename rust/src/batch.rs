@@ -5,79 +5,17 @@
 //! cleared, never reallocated once warm — and crossed once per fill by the FFI layer.
 
 use crate::cast::{
-    cast_bool, cast_date, cast_duration, cast_f32, cast_f64, cast_i8, cast_i16, cast_i32, cast_i64,
-    cast_text, cast_time, cast_timestamp, cast_u8, cast_u16, cast_u32, cast_u64, cast_unix,
-    cast_uuid,
+    cast_bool, cast_date, cast_date_ordered, cast_datetime, cast_decimal, cast_duration,
+    cast_excel_serial, cast_f32, cast_f64, cast_i8, cast_i16, cast_i32, cast_i64, cast_text,
+    cast_time, cast_timestamp, cast_u8, cast_u16, cast_u32, cast_u64, cast_unix, cast_uuid,
 };
 use crate::cell::Cell;
+use crate::kernel::abi::{CellVerdict, Span};
 use crate::plan::{Column, Door, Plan};
 use crate::render::render;
-use crate::serial::DateSystem;
 use crate::source::{Row, TabularSource};
 use core::ffi::c_void;
-use hypercast::{Date, Duration, Fault, Reason, Timestamp};
-
-/// HyperCast's fault made `#[repr(C)]`, with `reason == 0` meaning success. The span
-/// indexes the cell's own text (see [`Batch::raw`] for how to see that text after a
-/// fault).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CellVerdict {
-    /// Byte offset of the offending span within the cell's raw text.
-    pub offset: u32,
-    /// Byte length of the offending span.
-    pub len: u32,
-    /// `0` ok, `1` empty, `2` malformed, `3` out of range — HyperCast's ABI codes.
-    pub reason: u32,
-}
-
-impl CellVerdict {
-    /// The success verdict.
-    pub const OK: CellVerdict = CellVerdict {
-        offset: 0,
-        len: 0,
-        reason: 0,
-    };
-
-    /// True when the cell cast successfully.
-    pub const fn is_ok(&self) -> bool {
-        self.reason == 0
-    }
-
-    /// The fault, when there is one.
-    pub const fn fault(&self) -> Option<Fault> {
-        let reason = match self.reason {
-            1 => Reason::Empty,
-            2 => Reason::Malformed,
-            3 => Reason::OutOfRange,
-            _ => return None,
-        };
-        Some(Fault {
-            reason,
-            offset: self.offset,
-            len: self.len,
-        })
-    }
-
-    /// A verdict from a fault.
-    pub const fn from_fault(fault: Fault) -> CellVerdict {
-        CellVerdict {
-            offset: fault.offset,
-            len: fault.len,
-            reason: fault.reason as u32,
-        }
-    }
-}
-
-/// A byte range in the batch's arena.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Span {
-    /// Byte offset into [`Batch::arena`].
-    pub offset: u32,
-    /// Byte length.
-    pub len: u32,
-}
+use hypercast::{CivilDateTime, Date, Decimal, Duration, ExcelEpoch, Fault, Reason, Timestamp};
 
 /// One entry of the fault table: which cell faulted and where its raw text sits in the
 /// arena. Only `Malformed` and `OutOfRange` verdicts are recorded — `Empty` has no text.
@@ -115,6 +53,8 @@ pub enum Values {
     Time(Vec<u64>),
     Duration(Vec<Duration>),
     Text(Vec<Span>),
+    Decimal(Vec<Decimal>),
+    DateTime(Vec<CivilDateTime>),
 }
 
 impl Values {
@@ -132,8 +72,10 @@ impl Values {
             Door::F32 => Values::F32(Vec::new()),
             Door::F64 => Values::F64(Vec::new()),
             Door::Uuid => Values::Uuid(Vec::new()),
-            Door::Timestamp | Door::Unix(_) => Values::Timestamp(Vec::new()),
-            Door::Date => Values::Date(Vec::new()),
+            Door::Timestamp | Door::Unix(_) | Door::ExcelSerial(_) => Values::Timestamp(Vec::new()),
+            Door::Date | Door::DateOrdered(_) => Values::Date(Vec::new()),
+            Door::Decimal => Values::Decimal(Vec::new()),
+            Door::DateTime(_) => Values::DateTime(Vec::new()),
             Door::Time => Values::Time(Vec::new()),
             Door::Duration => Values::Duration(Vec::new()),
             Door::Text => Values::Text(Vec::new()),
@@ -159,6 +101,8 @@ impl Values {
             Values::Time(v) => v.clear(),
             Values::Duration(v) => v.clear(),
             Values::Text(v) => v.clear(),
+            Values::Decimal(v) => v.clear(),
+            Values::DateTime(v) => v.clear(),
         }
     }
 
@@ -182,6 +126,8 @@ impl Values {
             Values::Time(v) => v.len(),
             Values::Duration(v) => v.len(),
             Values::Text(v) => v.len(),
+            Values::Decimal(v) => v.len(),
+            Values::DateTime(v) => v.len(),
         }
     }
 
@@ -212,6 +158,8 @@ impl Values {
             Values::Time(v) => v.as_ptr().cast(),
             Values::Duration(v) => v.as_ptr().cast(),
             Values::Text(v) => v.as_ptr().cast(),
+            Values::Decimal(v) => v.as_ptr().cast(),
+            Values::DateTime(v) => v.as_ptr().cast(),
         }
     }
 }
@@ -270,6 +218,8 @@ impl ColumnData {
         times => Time u64,
         durations => Duration Duration,
         spans => Text Span,
+        decimals => Decimal Decimal,
+        datetimes => DateTime CivilDateTime,
     }
 }
 
@@ -375,7 +325,7 @@ impl Batch {
 
     /// Casts one row under `plan` (which must be the plan [`Batch::prepare`] saw) and
     /// appends it.
-    pub fn push_row<R: Row + ?Sized>(&mut self, row: &R, plan: &Plan, system: DateSystem) {
+    pub fn push_row<R: Row + ?Sized>(&mut self, row: &R, plan: &Plan, system: ExcelEpoch) {
         let row_index = self.rows as u32;
         for (index, column) in plan.columns().iter().enumerate() {
             let cell = row.cell(column.ordinal);
@@ -393,6 +343,51 @@ impl Batch {
                 (Values::F32(v), _) => push_or(v, cast_f32(&cell, format), 0.0),
                 (Values::F64(v), _) => push_or(v, cast_f64(&cell, format), 0.0),
                 (Values::Uuid(v), _) => push_or(v, cast_uuid(&cell), [0; 16]),
+                (Values::Timestamp(v), Door::ExcelSerial(epoch)) => push_or(
+                    v,
+                    cast_excel_serial(&cell, epoch),
+                    Timestamp {
+                        seconds: 0,
+                        nanos: 0,
+                    },
+                ),
+                (Values::Date(v), Door::DateOrdered(order)) => push_or(
+                    v,
+                    cast_date_ordered(&cell, order, system),
+                    Date {
+                        year: 1,
+                        month: 1,
+                        day: 1,
+                    },
+                ),
+                (Values::DateTime(v), door) => {
+                    let order = match door {
+                        Door::DateTime(order) => order,
+                        _ => hypercast::DateOrder::YearMonthDay,
+                    };
+                    push_or(
+                        v,
+                        cast_datetime(&cell, order, system),
+                        CivilDateTime {
+                            date: Date {
+                                year: 1,
+                                month: 1,
+                                day: 1,
+                            },
+                            nanos_of_day: 0,
+                        },
+                    )
+                }
+                (Values::Decimal(v), _) => push_or(
+                    v,
+                    cast_decimal(&cell, format),
+                    Decimal {
+                        lo: 0,
+                        hi: 0,
+                        scale: 0,
+                        negative: false,
+                    },
+                ),
                 (Values::Timestamp(v), Door::Unix(precision)) => push_or(
                     v,
                     cast_unix(&cell, precision),

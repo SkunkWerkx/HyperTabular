@@ -2,19 +2,86 @@
 name = "hypertabular"
 version = "0.1.0"
 edition = "2024"
-description = "The contract every Hyper* tabular provider speaks: a format-neutral cell, a caller-declared plan of HyperCast doors, the cast engine that turns cells into HyperCast verdicts, and the column-major batch that crosses the FFI boundary once per chunk."
+description = "Forward-only tabular parsing — delimited text and spreadsheets — with a HyperCast verdict for every cell: an allocation-free, panic-free, no_std core that fills caller-owned column buffers, wrapped as a native library (libhypertabular) for direct FFI from every host language."
 license = "MIT"
 readme = "../README.md"
 repository = "https://github.com/SkunkWerkx/HyperTabular"
 keywords = ["csv", "xlsx", "parser", "ffi", "allocation-free"]
 categories = ["parsing"]
 
+# Only the rlib is declared. The shared library every binding loads is built by naming its
+# crate type on the command line (`cargo cdylib`, an alias in .cargo/config.toml), as
+# HyperCast's is and for the same reasons (SkunkWerkx/.github, "The Rust core").
 [lib]
-# The contract crate is linked into each provider's cdylib; it has no exports of its own.
 crate-type = ["rlib"]
+# The unit tests are not benches: keeps `cargo bench` on the criterion targets only.
+bench = false
 
 [dependencies]
-# The one upstream: every cell verdict is a HyperCast verdict. `hypercast` is published on
-# crates.io (0.2.0 as of 2026-09-02); it is still consumed from git here so the contract
-# tracks the core's master. Cargo finds the package inside the repository's rust/ directory.
-hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master" }
+# The one upstream, and the core's only dependency: every cell verdict is a HyperCast
+# verdict. From the repository's master while HyperCast 0.6.2 is unreleased — Cargo finds
+# the package inside its rust/ directory — and from crates.io at that release. `exports`
+# stays off, so no library built from this crate carries HyperCast's `cast_*` symbols.
+hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master", default-features = false }
+# Streaming inflate for the workbook reader in the std layer, until the core has its own
+# (docs/workbook.md, "Container and streaming"). Never part of the core.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+# Build-time check only, never shipped: see the `no-panic` feature.
+no-panic = { version = "0.1", optional = true }
+
+[features]
+# On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
+# API over the core — owned batches, a row-at-a-time reader, files, the workbook reader.
+# Nothing the crate ships as a library is built with it. The core (src/kernel) is the same
+# code with or without it, and compiles with it off, where `std` cannot be named.
+default = ["std", "exports"]
+std = ["hypercast/std", "dep:flate2"]
+# The C ABI symbols. On by default and implied by every feature that builds a library of
+# this crate's own; off for a crate that links this one as an rlib and exports a C ABI of
+# its own, so that its library does not carry these (HyperCast's `exports`, same reason).
+exports = []
+# The panic handler a no_std static library needs (lib.rs); see HyperCast's manifest for
+# why the static libraries carry no copy of Rust's standard library.
+staticlib = ["exports"]
+# The shared library every binding loads (`cargo cdylib`), without Rust's standard
+# library: the `staticlib` panic handler plus what a no_std shared library needs that a
+# static one does not (lib.rs).
+cdylib = ["staticlib"]
+# Proves at link time that no C ABI export can panic: `cargo no-panic` fails with an
+# undefined symbol naming any export the optimizer could not clear of every panic path.
+# Built with std, because the proof needs the unwind edge a panic leaves and a no_std
+# build has to abort; the exports' code is the same either way.
+no-panic = ["dep:no-panic", "exports"]
+
+[dev-dependencies]
+# The comparison baseline for the delimited conformance suite and bench — never linked.
+csv = "1.4"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "delimited_benchmarks"
+harness = false
+
+[[bench]]
+name = "workbook_benchmarks"
+harness = false
+
+# `hypertabular_canary` compiles in an export that can panic, so that `check-core.sh` can
+# watch the no-panic proof refuse it. Never set by anything else.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)'] }
+
+# The same profile HyperCast ships with, for the same measured reasons.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+# A profiler needs the symbols the release profile strips.
+[profile.bench]
+strip = false
+
+# The profile the static libraries are built with: release, plus panics that abort.
+[profile.staticlib]
+inherits = "release"
+panic = "abort"

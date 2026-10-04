@@ -1,0 +1,48 @@
+name: CI — prove the core, test the crate
+
+# The core's three properties — no standard library, no allocation, no panic — proven on
+# the library itself by rust/check-core.sh, and the whole crate's suite, on both
+# architectures the engines are written for. This is the floor, not the pipeline: the
+# forge's build-native matrix (SkunkWerkx/.github) joins it with the first binding.
+#
+# No `push` trigger, as in every Hyper* repo: a PR run and a manual one are enough.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+
+      # The other architecture's library is only type-checked, which needs its target
+      # and nothing else: nothing is linked for it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools
+          targets: thumbv7em-none-eabi, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+
+      - name: The core is no_std, allocation-free and panic-free
+        run: ./check-core.sh
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --no-default-features --features cdylib -- -D warnings

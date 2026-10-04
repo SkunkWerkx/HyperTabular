@@ -16,30 +16,108 @@
 //! Nothing here sniffs, infers, or guesses: the caller declares the doors, the number
 //! formats, the header, and the dialect. The design record is `docs/design.md`.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+// The panic handler for the no_std libraries this crate links itself (`cargo staticlib`,
+// `cargo cdylib`), built with `panic = "abort"`. No export can reach it — that is what the
+// no-panic proof says — but a no_std artifact has to name one. HyperCast's lib.rs has the
+// whole account of this and of the two blocks after it; the mechanics are identical.
+#[cfg(all(feature = "staticlib", not(feature = "std")))]
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
+    #[cfg(target_arch = "wasm32")]
+    core::arch::wasm32::unreachable();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        unsafe extern "C" {
+            safe fn abort() -> !;
+        }
+        abort()
+    }
+}
+
+// A no_std shared library is its own final link, so it has to define the personality
+// routine the precompiled `core` names — hidden, so that it is not one more export.
+#[cfg(all(feature = "cdylib", not(feature = "std"), target_vendor = "apple"))]
+core::arch::global_asm!(
+    ".globl _rust_eh_personality",
+    ".private_extern _rust_eh_personality",
+    "_rust_eh_personality:",
+    "ret",
+);
+#[cfg(all(
+    feature = "cdylib",
+    not(feature = "std"),
+    not(target_vendor = "apple"),
+    not(target_os = "windows"),
+    not(target_arch = "wasm32"),
+))]
+core::arch::global_asm!(
+    ".globl rust_eh_personality",
+    ".hidden rust_eh_personality",
+    ".type rust_eh_personality, %function",
+    "rust_eh_personality:",
+    "ret",
+);
+
+// And it has to name the C runtime std would have named for it.
+#[cfg(all(feature = "cdylib", not(feature = "std"), unix))]
+#[link(name = "c")]
+unsafe extern "C" {}
+#[cfg(all(feature = "cdylib", not(feature = "std"), target_env = "msvc"))]
+#[cfg_attr(target_feature = "crt-static", link(name = "libcmt"))]
+#[cfg_attr(not(target_feature = "crt-static"), link(name = "msvcrt"))]
+unsafe extern "C" {}
+
+pub mod kernel;
+
+#[cfg(feature = "std")]
 mod batch;
+#[cfg(feature = "std")]
 mod cast;
+#[cfg(feature = "std")]
 mod cell;
+#[cfg(feature = "std")]
+pub mod delimited;
+#[cfg(feature = "std")]
 pub mod ffi;
+#[cfg(feature = "std")]
 mod plan;
+#[cfg(feature = "std")]
 mod render;
+#[cfg(feature = "std")]
 pub mod serial;
+#[cfg(feature = "std")]
 mod source;
+#[cfg(feature = "std")]
+pub mod workbook;
 
-pub use hypercast::{Date, Duration, Fault, NumFormat, Reason, Timestamp, UnixPrecision};
-
-pub use batch::{Batch, CellVerdict, ColumnData, FaultRaw, Span, Values, fill_batch};
-pub use cast::{
-    Value, cast_bool, cast_date, cast_duration, cast_f32, cast_f64, cast_i8, cast_i16, cast_i32,
-    cast_i64, cast_text, cast_time, cast_timestamp, cast_u8, cast_u16, cast_u32, cast_u64,
-    cast_unix, cast_uuid,
+#[cfg(feature = "std")]
+pub use hypercast::{
+    Date, Duration, ExcelEpoch, Fault, NumFormat, Reason, Timestamp, UnixPrecision,
 };
+
+pub use kernel::abi::{CellVerdict, Span};
+pub use kernel::door::Door;
+
+#[cfg(feature = "std")]
+pub use batch::{Batch, ColumnData, FaultRaw, Values, fill_batch};
+#[cfg(feature = "std")]
+pub use cast::{
+    Value, cast_bool, cast_date, cast_date_ordered, cast_datetime, cast_decimal, cast_duration,
+    cast_excel_serial, cast_f32, cast_f64, cast_i8, cast_i16, cast_i32, cast_i64, cast_text,
+    cast_time, cast_timestamp, cast_u8, cast_u16, cast_u32, cast_u64, cast_unix, cast_uuid,
+};
+#[cfg(feature = "std")]
 pub use cell::{Cell, CellError};
-pub use plan::{Column, Door, Plan};
+#[cfg(feature = "std")]
+pub use plan::{Column, Plan};
+#[cfg(feature = "std")]
 pub use render::render;
-pub use serial::DateSystem;
+#[cfg(feature = "std")]
 pub use source::{Header, Row, TabularSource};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use std::convert::Infallible;
@@ -60,17 +138,14 @@ mod tests {
         assert_eq!(reason(cast_f64(&cell, &INVARIANT)), Reason::Empty);
         assert_eq!(reason(cast_uuid(&cell)), Reason::Empty);
         assert_eq!(
-            reason(cast_timestamp(&cell, DateSystem::Excel1900)),
+            reason(cast_timestamp(&cell, ExcelEpoch::Y1900)),
             Reason::Empty
         );
         assert_eq!(
             reason(cast_unix(&cell, UnixPrecision::Seconds)),
             Reason::Empty
         );
-        assert_eq!(
-            reason(cast_date(&cell, DateSystem::Excel1900)),
-            Reason::Empty
-        );
+        assert_eq!(reason(cast_date(&cell, ExcelEpoch::Y1900)), Reason::Empty);
         assert_eq!(reason(cast_time(&cell)), Reason::Empty);
         assert_eq!(reason(cast_duration(&cell)), Reason::Empty);
         assert_eq!(reason(cast_text(&cell)), Reason::Empty);
@@ -82,7 +157,7 @@ mod tests {
         assert_eq!(cast_bool(&Cell::Text(b" enabled ")), Ok(true));
         assert_eq!(cast_f64(&Cell::Text(b"50%"), &INVARIANT), Ok(0.5));
         assert_eq!(
-            cast_timestamp(&Cell::Text(b"2022-02-22T19:22:22Z"), DateSystem::Excel1900),
+            cast_timestamp(&Cell::Text(b"2022-02-22T19:22:22Z"), ExcelEpoch::Y1900),
             Ok(Timestamp {
                 seconds: 1_645_557_742,
                 nanos: 0
@@ -177,11 +252,11 @@ mod tests {
             day: 15,
         };
         assert_eq!(
-            cast_date(&Cell::Number(45_000.0), DateSystem::Excel1900),
+            cast_date(&Cell::Number(45_000.0), ExcelEpoch::Y1900),
             Ok(date)
         );
         assert_eq!(
-            cast_timestamp(&Cell::Number(45_000.5), DateSystem::Excel1900),
+            cast_timestamp(&Cell::Number(45_000.5), ExcelEpoch::Y1900),
             Ok(Timestamp {
                 seconds: 1_678_881_600,
                 nanos: 0
@@ -189,23 +264,28 @@ mod tests {
         );
         // The same serial is 1462 days later in the 1904 system.
         assert_eq!(
-            cast_date(&Cell::Number(45_000.0), DateSystem::Excel1904),
+            cast_date(&Cell::Number(45_000.0), ExcelEpoch::Y1904),
             Ok(Date {
                 year: 2027,
                 month: 3,
                 day: 16
             })
         );
-        // Time is the fraction; a serial under 1 has no date.
+        // Time is the fraction; in the 1900 system a serial under 1 has no date.
         assert_eq!(cast_time(&Cell::Number(0.5)), Ok(43_200_000_000_000));
         assert_eq!(cast_time(&Cell::Number(45_000.25)), Ok(21_600_000_000_000));
         assert_eq!(
-            reason(cast_date(&Cell::Number(0.5), DateSystem::Excel1900)),
-            Reason::Malformed
+            reason(cast_date(&Cell::Number(0.5), ExcelEpoch::Y1900)),
+            Reason::OutOfRange
         );
         assert_eq!(
-            reason(cast_timestamp(&Cell::Number(0.5), DateSystem::Excel1900)),
-            Reason::Malformed
+            reason(cast_timestamp(&Cell::Number(0.5), ExcelEpoch::Y1900)),
+            Reason::OutOfRange
+        );
+        // The phantom 1900-02-29 is out of range, as it is for HyperCast's text door.
+        assert_eq!(
+            reason(cast_date(&Cell::Number(60.0), ExcelEpoch::Y1900)),
+            Reason::OutOfRange
         );
         // Duration is days.
         assert_eq!(
@@ -261,7 +341,7 @@ mod tests {
             nanos: 54_245_123_000_000,
         };
         assert_eq!(
-            cast_timestamp(&wall, DateSystem::Excel1900),
+            cast_timestamp(&wall, ExcelEpoch::Y1900),
             Ok(Timestamp {
                 seconds: 1_767_366_245,
                 nanos: 123_000_000
@@ -272,7 +352,7 @@ mod tests {
             1_767_366_245
         );
         assert_eq!(
-            cast_date(&wall, DateSystem::Excel1900),
+            cast_date(&wall, ExcelEpoch::Y1900),
             Ok(Date {
                 year: 2026,
                 month: 1,
@@ -297,7 +377,7 @@ mod tests {
             })
         );
         assert_eq!(
-            reason(cast_date(&clock, DateSystem::Excel1900)),
+            reason(cast_date(&clock, ExcelEpoch::Y1900)),
             Reason::Malformed
         );
         assert_eq!(cast_text(&clock).unwrap().as_ref(), b"15:04:05");
@@ -373,12 +453,12 @@ mod tests {
     fn column_cast_dispatches_dynamically() {
         let column = Column::new(0, Door::I16);
         assert_eq!(
-            column.cast(&Cell::Text(b"7"), DateSystem::Excel1900),
+            column.cast(&Cell::Text(b"7"), ExcelEpoch::Y1900),
             Ok(Value::I16(7))
         );
         let column = Column::new(0, Door::Unix(UnixPrecision::Seconds));
         assert_eq!(
-            column.cast(&Cell::Text(b"0"), DateSystem::Excel1900),
+            column.cast(&Cell::Text(b"0"), ExcelEpoch::Y1900),
             Ok(Value::Timestamp(Timestamp {
                 seconds: 0,
                 nanos: 0
@@ -386,7 +466,7 @@ mod tests {
         );
         let column = Column::new(0, Door::Text);
         assert!(
-            matches!(column.cast(&Cell::Number(1.0), DateSystem::Excel1900), Ok(Value::Text(text)) if text.as_ref() == b"1")
+            matches!(column.cast(&Cell::Number(1.0), ExcelEpoch::Y1900), Ok(Value::Text(text)) if text.as_ref() == b"1")
         );
     }
 

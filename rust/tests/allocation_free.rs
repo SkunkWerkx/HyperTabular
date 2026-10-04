@@ -8,7 +8,7 @@
 //! spawns a thread per test function.
 
 use hypertabular::{
-    Batch, Cell, CellError, Column, Date, DateSystem, Door, Duration, Header, NumFormat, Plan, Row,
+    Batch, Cell, CellError, Column, Date, Door, Duration, ExcelEpoch, Header, NumFormat, Plan, Row,
     TabularSource, UnixPrecision, cast_bool, cast_date, cast_duration, cast_f64, cast_i32,
     cast_text, cast_time, cast_timestamp, cast_u64, cast_unix, cast_uuid, fill_batch,
 };
@@ -102,7 +102,7 @@ fn allocation_free() {
     assert_allocation_free("text timestamp", || {
         cast_timestamp(
             &Cell::Text(b"2026-01-02T15:04:05.123456789+05:00"),
-            DateSystem::Excel1900,
+            ExcelEpoch::Y1900,
         )
         .unwrap()
     });
@@ -122,10 +122,10 @@ fn allocation_free() {
         cast_u64(&Cell::Number(1e15), &format).unwrap()
     });
     assert_allocation_free("number date", || {
-        cast_date(&Cell::Number(45_000.0), DateSystem::Excel1900).unwrap()
+        cast_date(&Cell::Number(45_000.0), ExcelEpoch::Y1900).unwrap()
     });
     assert_allocation_free("number timestamp", || {
-        cast_timestamp(&Cell::Number(45_000.5), DateSystem::Excel1904).unwrap()
+        cast_timestamp(&Cell::Number(45_000.5), ExcelEpoch::Y1904).unwrap()
     });
     assert_allocation_free("number unix", || {
         cast_unix(&Cell::Number(1_700_000_000.0), UnixPrecision::Seconds).unwrap()
@@ -136,7 +136,7 @@ fn allocation_free() {
     });
     assert_allocation_free("bool", || cast_bool(&Cell::Bool(true)).unwrap());
     assert_allocation_free("wall timestamp", || {
-        cast_timestamp(&wall, DateSystem::Excel1900).unwrap()
+        cast_timestamp(&wall, ExcelEpoch::Y1900).unwrap()
     });
     assert_allocation_free("span time", || cast_time(&span).unwrap());
     assert_allocation_free("number failure", || {

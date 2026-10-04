@@ -9,10 +9,10 @@
 use crate::cell::Cell;
 use crate::plan::{Column, Door};
 use crate::render::render;
-use crate::serial::{self, DateSystem, NANOS_PER_DAY, SerialKind};
+use crate::serial::{self, NANOS_PER_DAY};
 use hypercast::{
-    Date, Duration, Fault, MAX_TIMESTAMP_SECONDS, MIN_TIMESTAMP_SECONDS, NumFormat, Reason,
-    Timestamp, UnixPrecision,
+    CivilDateTime, Date, DateOrder, Decimal, Duration, ExcelEpoch, Fault, MAX_TIMESTAMP_SECONDS,
+    MIN_TIMESTAMP_SECONDS, NumFormat, Reason, Timestamp, UnixPrecision, excel_serial,
 };
 use std::borrow::Cow;
 
@@ -143,28 +143,23 @@ pub fn cast_uuid(cell: &Cell<'_>) -> Result<[u8; 16], Fault> {
 /// A wall-clock reading taken as UTC — the one interpretive act in the matrix, stated in
 /// `docs/design.md`: neither Excel serials nor ODS date-values carry a zone.
 pub(crate) fn wall_to_timestamp(date: Date, nanos: u64) -> Timestamp {
-    let days = serial::days_from_civil(
-        i64::from(date.year),
-        u32::from(date.month),
-        u32::from(date.day),
-    );
-    Timestamp {
-        seconds: days * 86_400 + (nanos / 1_000_000_000) as i64,
-        nanos: (nanos % 1_000_000_000) as i32,
+    CivilDateTime {
+        date,
+        nanos_of_day: nanos,
     }
+    .assume_utc()
 }
 
-fn serial_to_wall(value: f64, system: DateSystem) -> Result<(Date, u64), Fault> {
-    match serial::to_cell(value, system, SerialKind::DateTime).map_err(spanless)? {
-        Cell::Wall { date, nanos } => Ok((date, nanos)),
-        // A serial under 1 has no date component.
-        _ => Err(MALFORMED),
-    }
+/// A workbook number read as a date serial: HyperCast's typed door, verbatim.
+fn serial_to_wall(value: f64, system: ExcelEpoch) -> Result<(Date, u64), Fault> {
+    excel_serial(value, system)
+        .map(|wall| (wall.date, wall.nanos_of_day))
+        .map_err(spanless)
 }
 
 /// Casts a cell through HyperCast's RFC 3339 timestamp door; a workbook number is read
 /// as an Excel serial under `system`, and a wall-clock cell is read as UTC.
-pub fn cast_timestamp(cell: &Cell<'_>, system: DateSystem) -> Result<Timestamp, Fault> {
+pub fn cast_timestamp(cell: &Cell<'_>, system: ExcelEpoch) -> Result<Timestamp, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => hypercast::cast_timestamp(text),
@@ -211,13 +206,72 @@ pub fn cast_unix(cell: &Cell<'_>, precision: UnixPrecision) -> Result<Timestamp,
 }
 
 /// Casts a cell through HyperCast's `yyyy-MM-dd` door; a workbook number is read as an
-/// Excel serial under `system` (a serial under 1 has no date and is `Malformed`).
-pub fn cast_date(cell: &Cell<'_>, system: DateSystem) -> Result<Date, Fault> {
+/// Excel serial under `system`, by HyperCast's rules.
+pub fn cast_date(cell: &Cell<'_>, system: ExcelEpoch) -> Result<Date, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => hypercast::cast_date(text),
         Cell::Number(value) => serial_to_wall(value, system).map(|(date, _)| date),
         Cell::Wall { date, .. } => Ok(date),
+        _ => Err(MALFORMED),
+    }
+}
+
+/// Casts a cell through HyperCast's ordered-date door: text under the declared field
+/// order; every typed cell exactly as [`cast_date`] reads it, since a stored date has no
+/// field order to declare.
+pub fn cast_date_ordered(
+    cell: &Cell<'_>,
+    order: DateOrder,
+    system: ExcelEpoch,
+) -> Result<Date, Fault> {
+    match *cell {
+        Cell::Text(text) => hypercast::cast_date_ordered(text, order),
+        _ => cast_date(cell, system),
+    }
+}
+
+/// Casts a cell through HyperCast's civil date-time door: text under the declared field
+/// order, a workbook number as an Excel serial under `system`, and a wall-clock cell as
+/// itself — the one door that takes it without assuming a zone.
+pub fn cast_datetime(
+    cell: &Cell<'_>,
+    order: DateOrder,
+    system: ExcelEpoch,
+) -> Result<CivilDateTime, Fault> {
+    match *cell {
+        Cell::Empty => Err(EMPTY),
+        Cell::Text(text) => hypercast::cast_datetime(text, order),
+        Cell::Number(value) => excel_serial(value, system).map_err(spanless),
+        Cell::Wall { date, nanos } => Ok(CivilDateTime {
+            date,
+            nanos_of_day: nanos,
+        }),
+        _ => Err(MALFORMED),
+    }
+}
+
+/// Casts a cell through HyperCast's Excel-serial door under the *declared* date system —
+/// for a column of serials the file did not format as dates: text and workbook numbers
+/// alike, read as UTC. A wall-clock cell is already past its serial and is read as UTC.
+pub fn cast_excel_serial(cell: &Cell<'_>, epoch: ExcelEpoch) -> Result<Timestamp, Fault> {
+    match *cell {
+        Cell::Empty => Err(EMPTY),
+        Cell::Text(text) => hypercast::cast_excel_serial(text, epoch),
+        Cell::Number(value) => excel_serial(value, epoch)
+            .map(CivilDateTime::assume_utc)
+            .map_err(spanless),
+        Cell::Wall { date, nanos } => Ok(wall_to_timestamp(date, nanos)),
+        _ => Err(MALFORMED),
+    }
+}
+
+/// Casts a cell through HyperCast's exact decimal door. Only text can be one: a workbook
+/// number is a binary double, and which decimal it "meant" is not something the file says.
+pub fn cast_decimal(cell: &Cell<'_>, format: &NumFormat) -> Result<Decimal, Fault> {
+    match *cell {
+        Cell::Empty => Err(EMPTY),
+        Cell::Text(text) => hypercast::cast_decimal(text, format),
         _ => Err(MALFORMED),
     }
 }
@@ -300,12 +354,14 @@ pub enum Value<'a> {
     Time(u64),
     Duration(Duration),
     Text(Cow<'a, [u8]>),
+    Decimal(Decimal),
+    DateTime(CivilDateTime),
 }
 
 impl Column {
     /// Casts `cell` through this column's door, with its declared numeric notation and
     /// the source's date system.
-    pub fn cast<'a>(&self, cell: &Cell<'a>, system: DateSystem) -> Result<Value<'a>, Fault> {
+    pub fn cast<'a>(&self, cell: &Cell<'a>, system: ExcelEpoch) -> Result<Value<'a>, Fault> {
         Ok(match self.door {
             Door::Bool => Value::Bool(cast_bool(cell)?),
             Door::I8 => Value::I8(cast_i8(cell, &self.format)?),
@@ -325,6 +381,10 @@ impl Column {
             Door::Time => Value::Time(cast_time(cell)?),
             Door::Duration => Value::Duration(cast_duration(cell)?),
             Door::Text => Value::Text(cast_text(cell)?),
+            Door::Decimal => Value::Decimal(cast_decimal(cell, &self.format)?),
+            Door::DateOrdered(order) => Value::Date(cast_date_ordered(cell, order, system)?),
+            Door::DateTime(order) => Value::DateTime(cast_datetime(cell, order, system)?),
+            Door::ExcelSerial(epoch) => Value::Timestamp(cast_excel_serial(cell, epoch)?),
         })
     }
 }

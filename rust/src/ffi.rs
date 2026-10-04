@@ -8,7 +8,8 @@
 //! handle); `-2` a structural error in the data, retrievable through the provider's
 //! `last_error`; `-3` an I/O error.
 
-use crate::batch::{Batch, CellVerdict, FaultRaw};
+use crate::batch::{Batch, FaultRaw};
+use crate::kernel::abi::CellVerdict;
 use crate::plan::{Column, Door, Plan};
 use core::ffi::c_void;
 use hypercast::NumFormat;
@@ -77,6 +78,7 @@ pub fn num_format_from_raw(spec: &RawColumnSpec) -> Option<NumFormat> {
         decimal_sep,
         group_sep,
         flags: spec.flags,
+        currency: hypercast::CurrencySymbol::NONE,
     })
 }
 
@@ -158,11 +160,7 @@ mod tests {
         );
         assert_eq!(
             plan.columns()[2],
-            Column::new(1, Door::F64).with_format(NumFormat {
-                decimal_sep: ',',
-                group_sep: '.',
-                flags: 1
-            })
+            Column::new(1, Door::F64).with_format(NumFormat::new(',', '.', 1))
         );
         assert!(
             plan_from_raw(&[RawColumnSpec {
@@ -196,11 +194,16 @@ mod tests {
 
     #[test]
     fn every_door_code_round_trips() {
-        for code in 1..=18 {
+        for code in 1..=22 {
             let door = Door::from_code(code, 1).unwrap();
             assert_eq!(door.code(), code);
         }
         assert!(Door::from_code(0, 1).is_none());
-        assert!(Door::from_code(19, 1).is_none());
+        assert!(Door::from_code(23, 1).is_none());
+        // A door that declares something refuses a declaration it does not have.
+        assert!(Door::from_code(14, 5).is_none());
+        assert!(Door::from_code(20, 4).is_none());
+        assert!(Door::from_code(21, 0).is_none());
+        assert!(Door::from_code(22, 3).is_none());
     }
 }
