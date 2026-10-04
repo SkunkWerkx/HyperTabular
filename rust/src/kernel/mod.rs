@@ -21,3 +21,4 @@ pub mod abi;
 pub mod delimited;
 pub mod door;
 pub mod exports;
+pub mod inflate;

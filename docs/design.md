@@ -105,8 +105,20 @@ The workbook reader (`docs/workbook.md`) is still the first design: generic over
 `std::io::Read`, inflating through `flate2`, with handle-based exports that own their
 batches. It lives in the Rust layer and is built only with `std`. Bringing it into the
 core means the same treatment — the container read from the caller's bytes, shared strings
-and styles in caller buffers sized by a first call, and an inflate of the core's own, since
-no third-party one passes the no-panic proof. Until then the cast matrix below describes
+and styles in caller buffers sized by a first call.
+
+The piece that had to exist first does: `kernel::inflate`, the core's own. No inflate
+that exists can be put under the proof — the ones in safe Rust index their tables, and the
+ones behind a C ABI turn a panic into an abort the proof cannot see — so this one is
+written for it: a 27 KiB state block of plain integers, the output buffer doubling as the
+dictionary, and every step either completing or leaving the state as it found it, which is
+what makes it resumable at any byte of input or output. It is held to zlib's deflate at
+every level, fed a byte at a time into a window barely larger than the dictionary, and to
+thousands of damaged streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs
+with its run-time SIMD and 599 for miniz_oxide. One thing it taught about the proof: the
+table builder took the symbol mapping as a function pointer, and a call through a pointer
+is one the compiler must assume can unwind, so the proof refused the whole inflate until
+the pointer became a value to match on. Until then the cast matrix below describes
 that layer: the format-neutral `Cell` exists for the workbook's typed cells, and the
 core's delimited path, where every cell is text, calls HyperCast's doors directly.
 

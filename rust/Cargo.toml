@@ -66,10 +66,12 @@ harness = false
 name = "workbook_benchmarks"
 harness = false
 
-# `hypertabular_canary` compiles in an export that can panic, so that `check-core.sh` can
-# watch the no-panic proof refuse it. Never set by anything else.
+# Two cfgs only `check-core.sh` sets. `hypertabular_canary` compiles in an export that can
+# panic, so the no-panic proof can be watched refusing it; `hypertabular_internals`
+# compiles in exports over the parts of the core no real export reaches yet, so the proof
+# covers them too.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)', 'cfg(hypertabular_internals)'] }
 
 # The same profile HyperCast ships with, for the same measured reasons.
 [profile.release]

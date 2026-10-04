@@ -208,6 +208,50 @@ export! {
     }
 }
 
+// Parts of the core that no export reaches yet, put under the proof anyway: compiled only
+// when `check-core.sh` asks, and expected to pass. Each goes when a real export calls it.
+#[cfg(hypertabular_internals)]
+export! {
+    /// The core's inflate: one call of [`crate::kernel::inflate::Inflate::run`], on a
+    /// state the call starts fresh when `reset` is nonzero.
+    ///
+    /// # Safety
+    /// `state` is a live, aligned `Inflate` (or writable room for one when `reset` is
+    /// nonzero); `input` is `input_len` bytes; `out` has room for `out_len`; `consumed`
+    /// and `written` are writable.
+    fn hypertabular_internal_inflate(
+        state: *mut crate::kernel::inflate::Inflate,
+        reset: u32,
+        input: *const u8,
+        input_len: usize,
+        out: *mut u8,
+        out_len: usize,
+        at: usize,
+        consumed: *mut usize,
+        written: *mut usize,
+    ) -> i32 {
+        use crate::kernel::inflate::{Inflate, Status};
+        if state.is_null() || consumed.is_null() || written.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            if reset != 0 {
+                state.write(Inflate::new());
+            }
+            let progress = (*state).run(bytes(input, input_len), buffer(out, out_len), at);
+            consumed.write(progress.consumed);
+            written.write(progress.written);
+            match progress.status {
+                Status::NeedsInput => 1,
+                Status::OutputFull => 2,
+                Status::Done => 0,
+                Status::Invalid => -2,
+            }
+        }
+    }
+}
+
 // What the proof must refuse. Compiled only when `check-core.sh` asks, to watch it fail: a
 // proof that has never rejected anything has not been shown to check anything.
 #[cfg(hypertabular_canary)]
