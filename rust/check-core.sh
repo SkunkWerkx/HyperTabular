@@ -31,10 +31,15 @@ if grep -rnE '(^|[^_])feature[[:space:]]*=' "$kernel" | grep -v "^$kernel/export
 fi
 [ "$(grep -c 'cfg_attr(feature = ' "$kernel/exports.rs")" -eq 2 ] \
   || fail "exports.rs should hold exactly the macro's two feature attributes"
-# One way to make a symbol.
-[ "$(grep -rnE 'unsafe\(no_mangle\)' "$kernel" | wc -l)" -eq 1 ] \
+# One way to make a symbol, in the whole crate and not only in the kernel: the layers above
+# the core are Rust API, and a build with every feature on exports what the core-only build
+# does. (The two extension modules, php_ext and python_ext, register with their host through
+# their framework's macro; neither declares a C symbol of its own.)
+[ "$(grep -rnE 'unsafe\(no_mangle\)' src | wc -l)" -eq 1 ] \
   || fail "no_mangle belongs in the export! macro and nowhere else"
-if grep -rnE '#\[no_mangle\]|export_name|#\[unsafe\(export_name' "$kernel"; then
+grep -qE 'unsafe\(no_mangle\)' "$kernel/exports.rs" \
+  || fail "the one no_mangle is not the export! macro's"
+if grep -rnE '#\[no_mangle\]|export_name|#\[unsafe\(export_name' src; then
   fail "the lines above make a symbol outside the export! macro"
 fi
 echo "ok"

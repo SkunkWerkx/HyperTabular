@@ -26,7 +26,6 @@
 //! ```
 
 mod error;
-pub mod ffi;
 mod iso;
 mod ods;
 mod sheet;
