@@ -42,7 +42,6 @@ jobs:
       php: false
       ruby: false
       magnus: false
-      go: false
       pyo3: false
 
   check-core:
