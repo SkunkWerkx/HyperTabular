@@ -81,6 +81,8 @@ mod cell;
 pub mod delimited;
 #[cfg(feature = "std")]
 pub mod ffi;
+#[cfg(feature = "php")]
+mod php_ext;
 #[cfg(feature = "std")]
 mod plan;
 #[cfg(feature = "std")]

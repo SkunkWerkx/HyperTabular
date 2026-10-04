@@ -39,7 +39,6 @@ jobs:
       # Not written yet. Each comes on with its binding.
       java: false
       swift: false
-      php: false
       ruby: false
       magnus: false
       go: false

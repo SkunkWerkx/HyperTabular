@@ -26,6 +26,9 @@ hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master"
 # Streaming inflate for the workbook reader in the std layer, until the core has its own
 # (docs/workbook.md, "Container and streaming"). Never part of the core.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+# The Zend extension the forge builds beside the shared library (the `php` feature). Never
+# part of the core, and never of the library the shipped PHP package loads.
+ext-php-rs = { version = "0.16", optional = true }
 # Build-time check only, never shipped: see the `no-panic` feature.
 no-panic = { version = "0.1", optional = true }
 
@@ -47,6 +50,12 @@ staticlib = ["exports"]
 # library: the `staticlib` panic handler plus what a no_std shared library needs that a
 # static one does not (lib.rs).
 cdylib = ["staticlib"]
+# This crate as a Zend extension (ext-php-rs), as HyperCast carries one and for the same
+# reason: the forge builds `--features php` on every darwin and linux leg, load-checks the
+# result and attests it. The shipped PHP package is ext-ffi over the plain shared library
+# (php/src); this is the module entry point and a version probe, nothing more
+# (src/php_ext.rs). Off by default, and outside src/kernel, which no feature reaches.
+php = ["dep:ext-php-rs", "std"]
 # Proves at link time that no C ABI export can panic: `cargo no-panic` fails with an
 # undefined symbol naming any export the optimizer could not clear of every panic path.
 # Built with std, because the proof needs the unwind edge a panic leaves and a no_std

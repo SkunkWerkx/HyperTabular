@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<ruleset name="HyperTabular-docs">
+    <description>Doc-comment enforcement for HyperTabular's real public API surface — not a
+        general style linter. NativePlatform.php and Native.php are internal FFI plumbing
+        (PHP has no package-private visibility, so they are excluded by path here instead),
+        the same public/internal boundary HyperCast's PHP binding draws.</description>
+
+    <file>src/DelimitedReader.php</file>
+    <file>src/Column.php</file>
+    <file>src/Dialect.php</file>
+    <file>src/Door.php</file>
+    <file>src/Tabular.php</file>
+    <file>src/TabularException.php</file>
+    <file>src/TabularFailure.php</file>
+
+    <rule ref="Squiz.Commenting.ClassComment"/>
+    <rule ref="Squiz.Commenting.FunctionComment">
+        <!-- Doc-comment presence and @param/@return/@throws accuracy only — not full Squiz
+             formatting (alignment, blank-line placement, etc.), which isn't this project's
+             comment style and isn't what "force documentation" is asking for. -->
+        <exclude name="Squiz.Commenting.FunctionComment.SpacingAfter"/>
+        <exclude name="Squiz.Commenting.FunctionComment.SpacingAfterParamType"/>
+        <exclude name="Squiz.Commenting.FunctionComment.SpacingAfterParamName"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ParamCommentAlignment"/>
+        <!-- "integer"/"boolean" instead of "int"/"bool" is Squiz's pre-PHP7-scalar-type-hint
+             convention — this codebase's real type hints already say int/bool, so its
+             docblocks should match them. -->
+        <exclude name="Squiz.Commenting.FunctionComment.IncorrectParamVarName"/>
+        <exclude name="Squiz.Commenting.FunctionComment.InvalidReturn"/>
+        <!-- Requiring every @param description to start capitalized and end with a full stop
+             is pedantry beyond "must be documented" — the Hyper* doc style uses short
+             lowercase phrases throughout every binding. -->
+        <exclude name="Squiz.Commenting.FunctionComment.ParamCommentFullStop"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ParamCommentNotCapital"/>
+        <!-- The same for @throws, which HyperCast's doors (that never throw for data) have
+             no use for and this binding's reader does. -->
+        <exclude name="Squiz.Commenting.FunctionComment.ThrowsNoFullStop"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ThrowsNotCapital"/>
+        <!-- A plan is documented as list<Column>, which PHP's own type hints cannot say:
+             the declaration reads `array`, and the docblock is the more precise of the two. -->
+        <exclude name="Squiz.Commenting.FunctionComment.IncorrectTypeHint"/>
+    </rule>
+</ruleset>
