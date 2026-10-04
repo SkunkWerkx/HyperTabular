@@ -1,0 +1,11 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec
+
+# The test gems; rake and yard are the gemspec's own development dependencies, since
+# `rake build` and `rake docs:check` are part of packaging the gem.
+group :development do
+  gem "rspec", "~> 3.13"
+end

@@ -1,0 +1,32 @@
+require "bundler/gem_tasks"
+require "yard"
+
+# The public API surface: the module, the dialect, the plan's columns, the reader and its
+# error. native_platform.rb and runtime*.rb are internal FFI plumbing, the same
+# public/internal boundary hypercast's Rakefile draws.
+PUBLIC_API = %w[
+  lib/hypertabular.rb
+  lib/hypertabular/dialect.rb
+  lib/hypertabular/column.rb
+  lib/hypertabular/tabular_error.rb
+  lib/hypertabular/delimited_reader.rb
+].freeze
+
+# Doc-comment enforcement for that surface. `yard stats`/`YARD::CLI::Stats` always
+# rediscovers files from lib/**/*.rb on its own regardless of what's parsed into the
+# registry beforehand, so this walks the registry directly instead of going through that
+# CLI, and exits non-zero on any undocumented object.
+task :"docs:check" do
+  YARD::Registry.clear
+  YARD.parse(PUBLIC_API)
+
+  undocumented = YARD::Registry.all.select { |obj| obj.docstring.nil? || obj.docstring.empty? }
+  total = YARD::Registry.all.size
+  puts "#{total - undocumented.size}/#{total} documented"
+
+  unless undocumented.empty?
+    warn "\nUndocumented objects:"
+    undocumented.each { |obj| warn "  #{obj.path}" }
+    exit 1
+  end
+end
