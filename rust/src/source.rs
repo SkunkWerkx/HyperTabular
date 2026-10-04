@@ -4,7 +4,7 @@
 //! and dies at the next `next_row`.
 
 use crate::cell::Cell;
-use crate::serial::DateSystem;
+use hypercast::ExcelEpoch;
 
 /// The header row as the provider read it (declared by the caller, never sniffed), with
 /// ordinal lookup by exact bytes.
@@ -123,8 +123,8 @@ pub trait TabularSource {
     fn header(&self) -> Option<&Header>;
 
     /// The date system serials are read under; workbooks override this from the file.
-    fn date_system(&self) -> DateSystem {
-        DateSystem::Excel1900
+    fn date_system(&self) -> ExcelEpoch {
+        ExcelEpoch::Y1900
     }
 
     /// The next row, or `None` at the end.
@@ -142,7 +142,7 @@ impl<S: TabularSource + ?Sized> TabularSource for &mut S {
         (**self).header()
     }
 
-    fn date_system(&self) -> DateSystem {
+    fn date_system(&self) -> ExcelEpoch {
         (**self).date_system()
     }
 

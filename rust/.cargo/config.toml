@@ -1,0 +1,21 @@
+# The build aliases the forge and every dev loop run (SkunkWerkx/.github, "The recipe").
+
+# A Ruby or Python extension must not link the host runtime on Darwin.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-undefined,dynamic_lookup"]
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-undefined,dynamic_lookup"]
+
+# Every musl target defaults to a static C runtime, under which rustc cannot emit a cdylib.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[alias]
+# The shared library every binding loads: the core alone, without Rust's standard library.
+cdylib = ["rustc", "--release", "--lib", "--crate-type", "cdylib", "--no-default-features", "--features", "cdylib", "--config", 'profile.release.panic="abort"']
+# The static library the bindings that link the core take.
+staticlib = "rustc --profile staticlib --lib --crate-type staticlib --no-default-features --features staticlib"
+# The proof that no export can panic. With std and unwinding, or it would prove nothing.
+no-panic = "rustc --release --lib --crate-type cdylib --features no-panic --target-dir target/no-panic -- -C link-arg=-Wl,--no-undefined"

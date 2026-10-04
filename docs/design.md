@@ -1,38 +1,126 @@
 # HyperTabular — design record
 
-The decisions behind the three tabular repositories, written down so nothing lives only in
-a conversation. Companion to [prior-art.md](prior-art.md), which records what was studied
-and where each borrowed idea came from.
+The decisions behind the tabular layer, written down so nothing lives only in a
+conversation. Companion to [prior-art.md](prior-art.md), which records what was studied
+and where each borrowed idea came from, and to [delimited.md](delimited.md) and
+[workbook.md](workbook.md), the format-specific records.
 
-## The three repositories
+## One repository, one library
 
-| Repository | Crate | Role |
-| --- | --- | --- |
-| **HyperTabular** | `hypertabular` (rlib) | The contract every format provider speaks: the format-neutral `Cell`, the caller-declared `Plan` of doors, the cast engine that turns cells into HyperCast verdicts, the column-major `Batch`, and the `#[repr(C)]` shapes the bindings share. No I/O, no format knowledge. |
-| **HyperDelimited** | `hyperdelimited` (cdylib + rlib) | CSV/TSV/PSV — any single-byte ASCII separator — as a `hypertabular` provider. The SIMD structural scanner lives here. No spreadsheet dependencies. |
-| **HyperWorkbook** | `hyperworkbook` (cdylib + rlib) | XLSX and ODS as `hypertabular` providers. Zip container, inflate, a sheet-XML tokenizer, styles/shared-strings, Excel serial dates. XLS is deliberately parked (see "Parked"). |
+Delimited text and spreadsheets are one crate, `hypertabular`, and one native library,
+`libhypertabular`. They began as three repositories — a contract crate and two providers,
+each provider a library of its own that linked HyperCast statically — and that shape did
+not survive what HyperCast and HyperUuid settled about shipping a Rust core to eight
+languages:
 
-HyperUuid is not in this graph; it is the pattern precedent (one Rust core, seven bindings)
-and nothing more. HyperCast is the one real upstream dependency: every cell verdict *is* a
-HyperCast `Result<T, Fault>` with HyperCast's closed `Reason` set — `Empty`, `Malformed`,
-`OutOfRange`. HyperTabular adds no fourth reason; structural failures (a torn CSV row, a
-corrupt zip) are a separate error type, never a cell verdict, exactly as Svartalfheim's
-`ITabularReader` drew the line ("structural failures throw, bad values are the caller's
-verdict").
+- Two provider archives each carried Rust's standard library, and two such archives cannot
+  be linked into one program (`duplicate symbol: rust_eh_personality`). Each also carried
+  HyperCast's 22 C symbols, so neither linked beside `libhypercast.a` either
+  (`multiple definition of cast_bool`). That is every binding that links the core rather
+  than loads it: Go, Swift, C# Native AOT.
+- The code a binding needs to read a batch — the plan, the verdicts, the column buffers —
+  is the same for both formats, and had no package to live in.
 
-### Dependency mechanics
+HyperCast is the one dependency: every cell verdict *is* a HyperCast verdict with its
+closed `Reason` set — `Empty`, `Malformed`, `OutOfRange`. HyperTabular adds no fourth
+reason; structural failures (a torn CSV row, a corrupt zip) are a separate thing, never a
+cell verdict, exactly as Svartalfheim's `ITabularReader` drew the line ("structural
+failures throw, bad values are the caller's verdict"). It is taken with its `exports`
+feature off, so the library built here carries none of HyperCast's symbols.
 
-- `hypercast` is consumed as a **git dependency** on `SkunkWerkx/HyperCast` (`branch =
-  "master"`); Cargo finds the package inside the repo's `rust/` directory on its own.
-  `hypercast` is on crates.io (0.2.0 as of 2026-09-02); `hypertabular` is not. The git
-  source is kept so the contract tracks the core's master rather than its last tag.
-- `hypertabular` is consumed by the two providers as a **path dependency**
-  (`../../HyperTabular/rust`). The remote has carried the crate since 2026-08-28, so a git
-  source resolves now (it could not while the remote was empty: Cargo resolves the
-  original git source even when it is `[patch]`ed to a local path). The path source is
-  kept so the providers build against the sibling checkout while all three crates move
-  together; the flip is one line in each provider's `Cargo.toml`, noted there. A
-  standalone clone of a provider needs its sibling checked out beside it.
+## The core, and what holds it
+
+The crate is two layers, and the line between them is the point of the design.
+
+**The core** (`rust/src/kernel`) is what the native library is made of and what every
+binding calls. It reads bytes the caller hands it and writes into buffers the caller hands
+it. It has no standard library, allocates nothing, and cannot panic.
+
+**The Rust API** (everything else, behind the default `std` feature) is one binding among
+eight: owned batches, a row-at-a-time reader, files. It allocates, in Rust's own idiom,
+exactly as the C# binding allocates in C#'s. Nothing in it is in the library.
+
+The three properties of the core are not a discipline. Each is something a build refuses
+to get wrong, and `rust/check-core.sh` runs every one of them, on the code and on the
+library it becomes:
+
+| Property | What makes it impossible to break quietly |
+| --- | --- |
+| No standard library | The library is the kernel built with `std` off, where the name `std` does not compile. Checked again for a target that has no standard library to link (`thumbv7em-none-eabi`). |
+| No allocation | The crate never declares the `alloc` crate, so `Vec`, `Box` and `String` do not exist to be named, and there is no allocator for anything to call. The proof is on the artifact: the shared library's import list is compared against an allow-list (`memcpy`, `memset`, `memcmp`/`bcmp`, `memmove`, `abort`) and a `malloc` on it fails the check. The static library's one object is held to the same list. And a counting allocator watches a whole input go through the core in the test suite: the count is zero, not "zero once warm". |
+| No panic | Every export is declared through one macro (`export!`, `kernel/exports.rs`), which is the only place a symbol can be made and which puts the function under dtolnay's `no-panic`: the link fails, naming the export, if the optimizer leaves any panic path in it. The library's export list is compared whole against the macro's uses, so an export outside the proof is not an export. And the proof is shown a function it has to reject — a canary export that can panic, compiled only for that check — because a proof that has never refused anything has not been shown to check anything. |
+| The same code everywhere | No `cfg(feature)` under `kernel` except the macro's two. What the checks say of the shipped library they say of the core in every build that links it. |
+| Nothing else linked in | The core's dependency closure is `hypercast` and nothing else, asserted. HyperCast holds itself to the same three properties, float parsing included. |
+
+What follows from "no allocation" is the shape of every call: memory is an argument. The
+caller brings the input, a 64-byte state block, the column buffers, and any scratch the
+core needs, sized by rules the core states; where a size cannot be known up front the core
+says how much it needs and takes nothing until it has it. The binding allocates all of it
+once, in whatever its language does best, and the core is crossed once per chunk.
+
+### Delimited text in the core
+
+`kernel::delimited::fill` — one call, a chunk in, columns out:
+
+- **Input.** Any chunk that starts on a row boundary. The call reports the bytes it is
+  finished with; streaming is the caller putting the rest at the front of the next chunk.
+  An unfinished row at the end of a chunk is left alone, so a row longer than the caller's
+  buffer is the caller's to make room for.
+- **Two passes over the chunk.** The scanner (`docs/delimited.md`) walks whole rows and
+  records where each cell the plan reads begins and ends, in a table the caller supplied.
+  Then each plan column is cast in one loop — one door, straight down the table — into that
+  column's value and verdict arrays. Column-major casting is what lets the numeric
+  notation be resolved once per column and each door's loop stay monomorphic.
+- **The cell table is the caller's map.** It locates every cell the plan reads in the
+  caller's own input, so the raw text of a cell that failed to cast is a slice the caller
+  already holds. There is no fault table and no copy.
+- **Text is zero-copy.** A `Text` value is a span into the input. Only a cell with `""`
+  inside has to be unescaped, into an arena the caller supplied, and its span is flagged
+  as pointing there. A file without escaped quotes never touches the arena.
+- **Failures.** A record of the wrong width, or input that ends inside a quoted cell, is
+  reported after every intact row before it has been delivered, and is final for that
+  state block. A table or an arena too small for one row is not a failure: the call says
+  how much one row takes.
+
+Measured on linux-x64 (a 66 MB, million-row file; six columns cast to `i64`, `f64`, text,
+a timestamp, a boolean and `i32`): about 575 MB/s through the core into the caller's
+buffers, 530 MB/s through the Rust binding (`delimited::BatchReader`, which also copies
+each batch's text into the batch), against 430 MB/s for the row-at-a-time reader filling
+the same batch a cell at a time, and 900 MB/s for the `csv` crate splitting records
+without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB).
+
+### The Rust API is a binding
+
+`delimited::BatchReader` is the Rust binding over that call, and is the model for the
+other seven: it owns the input buffer and the reads that fill it, a `Batch`'s column
+vectors, the cell table and the arena — allocated once, reused — and the loop that puts
+what the core did not consume back in front of it. It copies a batch's text into the batch
+so the batch outlives its chunk, and builds the batch's fault table from the cell table.
+Those are its choices; none of it is in the core. `delimited::Reader`, the row-at-a-time
+cursor, shares the core's scanner and collects what it reports into vectors.
+
+### What is not in the core yet
+
+The workbook reader (`docs/workbook.md`) is still the first design: generic over
+`std::io::Read`, inflating through `flate2`, with handle-based exports that own their
+batches. It lives in the Rust layer and is built only with `std`. Bringing it into the
+core means the same treatment — the container read from the caller's bytes, shared strings
+and styles in caller buffers sized by a first call.
+
+The piece that had to exist first does: `kernel::inflate`, the core's own. No inflate
+that exists can be put under the proof — the ones in safe Rust index their tables, and the
+ones behind a C ABI turn a panic into an abort the proof cannot see — so this one is
+written for it: a 27 KiB state block of plain integers, the output buffer doubling as the
+dictionary, and every step either completing or leaving the state as it found it, which is
+what makes it resumable at any byte of input or output. It is held to zlib's deflate at
+every level, fed a byte at a time into a window barely larger than the dictionary, and to
+thousands of damaged streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs
+with its run-time SIMD and 599 for miniz_oxide. One thing it taught about the proof: the
+table builder took the symbol mapping as a function pointer, and a call through a pointer
+is one the compiler must assume can unwind, so the proof refused the whole inflate until
+the pointer became a value to match on. Until then the cast matrix below describes
+that layer: the format-neutral `Cell` exists for the workbook's typed cells, and the
+core's delimited path, where every cell is text, calls HyperCast's doors directly.
 
 ## The contract
 
@@ -54,11 +142,11 @@ the cast engine is written once:
 
 ### `Door` and `Plan` — what the caller declares
 
-A `Door` is one HyperCast door (`Bool`, `I8…I64`, `U8…U64`, `F32`, `F64`, `Uuid`,
-`Timestamp`, `Unix(precision)`, `Date`, `Time`, `Duration`) plus `Text`, which asks for the
-bytes themselves. HyperCast has since added three doors with no `Door` here yet:
-`cast_date_ordered` and `cast_datetime` (a caller-declared `DateOrder`, 2026-08-30) and
-`cast_excel_serial` (2026-08-31; see "Parked"). A `Column` is a door, the `NumFormat` its numeric doors use, and the
+A `Door` is one HyperCast door — all of them: `Bool`, `I8…I64`, `U8…U64`, `F32`, `F64`,
+`Decimal`, `Uuid`, `Timestamp`, `Unix(precision)`, `ExcelSerial(epoch)`, `Date`,
+`DateOrdered(order)`, `DateTime(order)`, `Time`, `Duration` — plus `Text`, which asks for
+the bytes themselves. A door that declares something carries it, numbered as HyperCast's
+own exports number it. One enum, in the core, for both layers. A `Column` is a door, the `NumFormat` its numeric doors use, and the
 source ordinal it reads. A `Plan` is the ordered list of columns to produce — a projection,
 so a 40-column file can be read into 5 typed columns. Nothing is sniffed: no type
 inference, no separator detection, no header heuristics. Culture stays out of the core
@@ -79,17 +167,23 @@ text is `Empty`). The typed cells:
 | `Span(s)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `0 ≤ s < 24h` → nanos, else OutOfRange | s | ISO 8601 `PT…` |
 | `Error(e)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `#N/A` etc. |
 
-"Serial rules" (Excel's two date systems, `hypertabular::serial`):
+"Serial rules" are HyperCast's, not a second copy of them: a `Number` cell on a temporal
+door goes through `hypercast::excel_serial`, the typed twin of `cast_excel_serial` and the
+same code, replayed against the same corpus.
 
 - 1900 system: epoch 1899-12-30. Serial `60` is the nonexistent 1900-02-29 that Lotus
-  1-2-3 invented and Excel keeps → `Malformed`. Serials `1 ≤ s < 60` are shifted one day
-  (epoch effectively 1899-12-31) so `1` is 1900-01-01. Serials ≥ 61 use the epoch as-is.
-- 1904 system: epoch 1904-01-01, no leap bug.
-- Fraction × 86 400 s, kept at nanosecond resolution (not rounded to milliseconds — the
-  double carries ~0.1 µs at serial 45 000; rounding is a presentation choice for bindings).
+  1-2-3 invented and Excel keeps → `OutOfRange`, the verdict the text `1900-02-29` gets.
+  Serials `1 ≤ s < 60` are shifted one day so `1` is 1900-01-01; a serial under `1` names
+  no day → `OutOfRange`.
+- 1904 system: epoch 1904-01-01, no leap bug; serial `0` is that day.
+- Fraction × 86 400 s, rounded to the nearest nanosecond (not to milliseconds — the double
+  resolves ~0.6 µs at serial 45 000; coarser rounding is a presentation choice for
+  bindings).
 - `s < 0` → `Malformed` (Excel renders `####`). `s ≥ 2 958 466` (past 9999-12-31) →
-  `OutOfRange`. A serial in `[0, 1)` is a `Clock`, not a `Wall`: there is no date in it,
-  so `Date`/`Timestamp` doors on it are `Malformed`, not a silent 1899-12-30.
+  `OutOfRange`.
+- What stays tabular (`hypertabular::serial`) is what a number *format* declares: a
+  date/time-formatted serial under `1` is a `Clock`, not a `Wall` — a time of day with no
+  date in it — and an elapsed-formatted serial is a `Span` of days.
 
 Reading `Wall` as UTC is the one interpretive act in the matrix, and it is unavoidable:
 neither Excel serials nor ODS date-values carry a zone. It is stated here, and bindings
@@ -216,23 +310,17 @@ own `docs/design.md`.
   advances the column; `number-rows-repeated` on empty rows is never materialised.
   `calcext:value-type="error"` is honoured.
 
-## FFI shape (shared, implemented per provider)
+## FFI shape
 
-The core is crossed once per batch. Each provider exports, over a plain C ABI:
+The delimited exports are the core's (`kernel/exports.rs`): `hypertabular_version`,
+`hypertabular_delimited_state_size`, `_init`, `_header`, `_fill` and `_unescape`, over the
+`#[repr(C)]` shapes in `kernel/abi.rs`. Return codes: `0` done; `-1` a contract violation
+(a caller bug); `-2` a structural failure, described in the result; `-3` and `-4` an arena
+or a cell table too small for one row, with the size one row takes.
 
-- `open_bytes(ptr, len, …)`, `open_path(ptr, len, …)` → opaque handle via an out-param;
-  `close(handle)`.
-- `header_count` / `header_name` — the declared header row.
-- `read_batch(handle, plan*, plan_len, max_rows, out_batch*, out_columns*) → i64` — rows
-  filled, or a negative code (`-1` contract violation, `-2` structural error, `-3` I/O)
-  with details retrievable by `last_error(handle, …)`. `out_columns[i]` receives
-  `{ values, verdicts }` pointers into the handle's batch, and `out_batch` the row count,
-  the text arena, and the fault table — all valid until the next `read_batch`/`close`.
-
-`hypertabular::ffi` owns the `#[repr(C)]` types (`CellVerdict`, `Span`, `FaultRaw`,
-`RawColumnSpec`, `RawColumnView`, `RawBatchView`) so both providers — and all seven
-bindings — share one layout. Because `hypercast` is linked statically, each provider's
-library also carries HyperCast's 20 `cast_*` exports.
+The workbook's exports (`workbook/ffi.rs`, with the shapes in `ffi.rs`) are the earlier,
+handle-based design — open a handle, `read_batch` into a batch the handle owns — and go
+when the workbook moves into the core.
 
 ## Parked, deliberately
 
@@ -243,10 +331,3 @@ library also carries HyperCast's 20 `cast_*` exports.
   is a global carry). Polars' two-state chunk analysis is the cheapest known way to
   parallelise on top of the same mask code; it is a later round, not a design constraint.
 - **Writing.** Out of scope for this version, as stated up front.
-- **Collapsing `hypertabular::serial` onto HyperCast's Excel-serial door.** HyperCast
-  shipped `cast_excel_serial` on 2026-08-31: serial *text* in, a caller-declared
-  `ExcelEpoch`, a `Timestamp` out — the door for a CSV column of serials. The conversion
-  here stays separate because it starts from the `f64` the workbook stores and produces a
-  `Wall`/`Clock`/`Span`, which are tabular concepts. The two carry the same rules (epoch,
-  the phantom serial 60, the fraction as time of day) independently, and nothing yet pins
-  them to agree.
