@@ -1,7 +1,7 @@
 # Corpus
 
-Two things live here: the conformance contract every binding replays, and the files real
-applications wrote.
+Three things live here: the two conformance contracts every binding replays — one for
+delimited text, one for workbooks — and the files real applications wrote.
 
 ## `delimited.json` — the contract for delimited text
 
@@ -44,14 +44,86 @@ A case:
 How the input is cut into chunks is the binding's business and must not change the answer;
 a binding should replay each case more than one way.
 
+## `workbook.json` and `workbook/` — the contract for workbooks
+
+`workbook/` holds ten small packages: five fixtures (`basic.xlsx`, `basic-1904.xlsx`,
+`multisheet.xlsx`, `rich.xlsx` from openpyxl and `basic.ods` from the ODF schema by hand —
+`make_fixtures.py` writes them) and five generated ones — two XLSX and two ODS, one of
+each deflated and one stored, the XLSX pair one in each date system, and `broken.xlsx`,
+whose sheet names a shared string that is not there. Between them the generated packages
+hold every kind of cell either format has: shared, inline and rich strings, numbers under
+date, time and elapsed formats, booleans, errors, ISO dates, CDATA, prefixed elements,
+sparse rows, empty rows in both spellings, gaps in the row numbers, and ODS's repeated
+rows and columns, nested tables, annotations and paragraphs.
+
+`workbook.json` is 84 cases — every sheet of every package, read four ways — 482 rows and
+12,344 cells. A case:
+
+```json
+{
+  "name": "generated-a.xlsx, sheet 0 (\"Data\"), a header, empty rows skipped",
+  "file": "workbook/generated-a.xlsx",
+  "format": "xlsx",
+  "epoch": 1,
+  "sheets": [{"hidden": false, "name": "Data"}, {"hidden": false, "name": "More & more"}, {"hidden": true, "name": "Hidden"}],
+  "sheet": 0,
+  "options": {"has_header": true, "skip_empty_rows": true},
+  "plan": [{"door": "bool", "ordinal": 0}, {"door": "i8", "ordinal": 0}],
+  "header": ["", "7000000000000", "#NUM!", "#WAT"],
+  "numbers": [4, 5, 6],
+  "rows": [
+    [{"expect": "ok", "value": true}, {"expect": "ok", "value": 1}]
+  ],
+  "failure": {"kind": "shared_string", "record": 6, "line": 3, "byte": 322, "expected": 7, "found": 99}
+}
+```
+
+- `file` is relative to this directory. `format` is `xlsx` or `ods`; `epoch` is the
+  workbook's date system as HyperCast numbers `ExcelEpoch` (`1` 1900, `2` 1904).
+- `sheets` is the workbook's whole listing; `sheet` is the index of the one this case
+  reads. A binding should open it by index and, where the name is unique, by name.
+- `plan`, `header`, `rows` and a cell are as in `delimited.json`. With the default
+  options the plan is every door over every column (ten columns for the fixtures, four
+  for the generated packages, with what a door declares varied by column); with the other
+  three the options are the point, and the plan is the text door over every column.
+- `numbers` is each row's number in the sheet, parallel to `rows`.
+- A typed cell that fails its door has the cell said as text for its `raw` and a fault
+  that spans all of it; a typed cell through the text door is that same text.
+- `failure`, when present (the one shown is `broken.xlsx`'s; no other case has one),
+  ends the sheet after the rows listed: `kind` is one of
+  `not_a_zip`, `container`, `encrypted`, `method`, `missing_part`, `xml`, `deflate`,
+  `not_a_workbook`, `shared_string`, `too_large`; `record` is the part of the package
+  being read (`6` a worksheet), `line` the sheet row, `byte` the offset in the part's
+  inflated bytes.
+- `basic.ods` is not read with empty rows delivered: a real ODS sheet ends in a million
+  empty rows, and they would be most of the file.
+
+**Where the file's authority comes from.** It was written by the std workbook reader this
+crate had before its core could read a workbook — a second implementation, which owed the
+core nothing — and the core was required to agree with it, cell for cell, before the file
+was written. That reader has been deleted. Nothing independent of the core reads a
+workbook in this repository any more, so the file is that reader's frozen word:
+`cargo run --example corpus` now writes it from the core, through the Rust binding, and
+`rust/tests/corpus_workbook.rs` fails if what it writes is not what is committed. A diff
+in `workbook.json` is a change in what the core reads, and has to be explained, not
+regenerated away. The one thing in it that was never the oracle's is a failure's fields,
+which that reader reported only as a message; the case says so in its `note`.
+
+`cargo run --example corpus -- --packages` rewrites the generated packages. Their
+deflated bytes depend on the deflate the build links, which is why they are committed and
+not rebuilt.
+
 ## The files real applications wrote
 
-HyperWorkbook's tests run on fixtures openpyxl and a hand-written ODF schema produced. This
-directory is for the files real writers produce — Excel, LibreOffice, Google Sheets, Apple
+The packages above came from openpyxl, a hand-written ODF schema and a generator. This
+directory is also for the files real writers produce — Excel, LibreOffice, Google Sheets, Apple
 Numbers — because "the reader handles what the spec allows" and "the reader handles what
 Excel actually writes" are different claims, and every one below is the first real proof of
-a code path or a design claim. The expected-output sidecar format that makes these replay
-across all three repositories is not designed yet; the files come first.
+a code path or a design claim. Once a file is here, it joins `workbook.json` the way the
+fixtures did — with one difference that has to be said: its expected output will be
+written by the core, with no second reader left to check it against, so each such file
+is to be read against the application that wrote it, by eye, before its case is
+committed.
 
 ## Ground rules
 

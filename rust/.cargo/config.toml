@@ -15,6 +15,10 @@ rustflags = ["-C", "target-feature=-crt-static"]
 [alias]
 # The shared library every binding loads: the core alone, without Rust's standard library.
 cdylib = ["rustc", "--release", "--lib", "--crate-type", "cdylib", "--no-default-features", "--features", "cdylib", "--config", 'profile.release.panic="abort"']
+# The Zend extension (the `php` feature), in its own target directory: it is a differently
+# shaped libhypertabular.so at the same path as the one every binding loads from
+# target/release/, so building it there would replace that one. Output: target/php/release/.
+php-ext = "rustc --release --lib --crate-type cdylib --features php --target-dir target/php"
 # The static library the bindings that link the core take.
 staticlib = "rustc --profile staticlib --lib --crate-type staticlib --no-default-features --features staticlib"
 # The proof that no export can panic. With std and unwinding, or it would prove nothing.

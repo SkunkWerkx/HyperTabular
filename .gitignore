@@ -2,6 +2,21 @@
 **/target/
 corpus/generate/out/
 
+# Python
+**/__pycache__/
+**/*.egg-info/
+**/.venv/
+**/dist/
+**/.pytest_cache/
+**/.mypy_cache/
+# The staged PyO3 extension for local dev/test — nested at hypertabular._native (the maturin
+# module-name), built from the core crate's python feature. abi3 wheels carry one build per
+# platform regardless of Python version (hence the plain and .abi3 spellings, not a
+# per-version-tagged glob); .pyd covers Windows.
+python/src/hypertabular/_native.so
+python/src/hypertabular/_native.abi3.so
+python/src/hypertabular/_native.pyd
+
 # .NET
 **/bin/
 **/obj/
@@ -12,3 +27,65 @@ csharp/HyperTabular/runtimes/
 # The same for the static libraries a Native AOT publish links in: staged by the forge's
 # static-libs/build-static-libs.sh at test and pack time, never committed.
 csharp/HyperTabular/staticlibs/
+
+# PHP
+# Native libs under php/src/native/{rid}/ are not ignored: as in HyperCast, Packagist has no
+# packing step — the git tree at the tag IS the package — so the libraries a release ships
+# are committed there. Without one for the platform, the binding falls back to
+# rust/target/release/ (`cargo cdylib`).
+php/vendor/
+php/composer.lock
+php/.phpunit.result.cache
+# The root composer.json exists only for Packagist, which reads the repository root; nothing
+# here runs `composer install` from the root, and a stray local one should not be committed.
+/vendor/
+/composer.lock
+
+# Swift
+# The static libraries under swift/HyperTabularCore.artifactbundle/{triple}/, and the
+# info.json that lists them, are not ignored — as in HyperCast, where they are committed,
+# because SwiftPM has no packing step for a git-URL dependency, and only by
+# stage-native-binaries.yml, after their provenance checks. Until this repository has that
+# workflow none is in the tree: the forge's static-libs/build-static-libs.sh builds them
+# (CI runs it before every Swift step), and a developer's own build of them shows up as
+# untracked and is not to be committed by hand.
+**/.build/
+# A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
+# the manifests declare, by CI as by anyone depending on this package.
+/Package.resolved
+/swift/Package.resolved
+/swift/StaticSmokeTest/Package.resolved
+
+# Gradle / Java
+**/.gradle/
+**/build/
+# CI places each leg's native library here before `gradlew test`, and the Maven publish
+# bundles every platform's at publish time; the local dev loop stages into
+# build/generated-resources instead (already covered by **/build/ above), so anything here
+# is regenerable via `cargo cdylib`.
+java/src/main/resources/native/
+# csharp/HyperTabular/build/ is NuGet's real, tracked build/{PackageId}.targets packaging
+# convention, not a build output. It collides with **/build/ above, which would otherwise
+# silently swallow anything new in it: the file would sit on disk, pack correctly in a
+# local `dotnet pack`, and simply never exist in CI. Each directory level needs its own
+# negation — git won't descend into an excluded directory to find a deeper !file
+# re-inclusion — and gitignore rules apply in file order, so this must come after the rule
+# it un-ignores. HyperCast carries the same block for the same reason.
+!csharp/HyperTabular/build/
+!csharp/HyperTabular/build/net11.0/
+!csharp/HyperTabular/build/net11.0/HyperTabular.targets
+
+# Ruby
+# CI places each leg's native lib here for `bundle exec rspec` at build-native time, and the
+# gem build stages every RID's into the gem; regenerable locally via `cargo cdylib`.
+ruby/lib/hypertabular/native/*/
+ruby/Gemfile.lock
+ruby/pkg/
+ruby/.yardoc/
+
+# go/staticlib's archives ARE committed — a Go module is whatever is in the tree — but only
+# by the staging workflow, which adds them with `git add -f` after verifying each one's
+# build provenance. Ignored here so that a developer's own build of them (the forge's
+# static-libs/build-static-libs.sh, which `go test` needs to link) can never
+# ride into a commit by accident.
+go/staticlib/*/*.a

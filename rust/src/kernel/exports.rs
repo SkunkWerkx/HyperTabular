@@ -10,9 +10,12 @@
 //! length of the call and no longer; a null where the contract needs memory is
 //! [`ERR_CONTRACT`], and a length of `0` never dereferences its pointer.
 
-use crate::kernel::abi::{ColumnBuffer, ColumnSpec, ERR_CONTRACT, Filled, OK, Span};
+use crate::kernel::abi::{
+    Buffers, ColumnBuffer, ColumnSpec, ERR_CONTRACT, Filled, OK, Opened, Span,
+};
 use crate::kernel::delimited::fill::{self, RawDialect, State};
 use crate::kernel::delimited::unescape::unescape_into;
+use crate::kernel::workbook::{Memory, State as Workbook, book, rows};
 use core::slice;
 
 macro_rules! export {
@@ -208,46 +211,265 @@ export! {
     }
 }
 
-// Parts of the core that no export reaches yet, put under the proof anyway: compiled only
-// when `check-core.sh` asks, and expected to pass. Each goes when a real export calls it.
-#[cfg(hypertabular_internals)]
+/// The buffers of a workbook call as the core takes them, or `None` for a null or for a
+/// table that is not aligned for what it holds.
+///
+/// # Safety
+/// `buffers` is null or a live [`Buffers`], and each of its pointers is null or points to
+/// as many live elements as the size beside it says — writable ones, and no two of them
+/// overlapping, for `window`, `arena`, `cells` and `row`.
+unsafe fn memory<'caller>(buffers: *const Buffers) -> Option<Memory<'caller>> {
+    if buffers.is_null() {
+        return None;
+    }
+    // SAFETY: per the function contract.
+    unsafe {
+        let buffers = buffers.read_unaligned();
+        if !buffers.cells.is_aligned() || !buffers.row.is_aligned() || !buffers.table.is_aligned() {
+            return None;
+        }
+        Some(Memory {
+            window: buffer(buffers.window, buffers.window_cap),
+            arena: buffer(buffers.arena, buffers.arena_cap),
+            cells: buffer(buffers.cells, buffers.cells_cap),
+            row: buffer(buffers.row, buffers.row_cap),
+            strings: bytes(buffers.strings, buffers.strings_len),
+            table: if buffers.table_len == 0 || buffers.table.is_null() {
+                &[]
+            } else {
+                slice::from_raw_parts(buffers.table, buffers.table_len)
+            },
+            kinds: bytes(buffers.kinds, buffers.kinds_len),
+        })
+    }
+}
+
 export! {
-    /// The core's inflate: one call of [`crate::kernel::inflate::Inflate::run`], on a
-    /// state the call starts fresh when `reset` is nonzero.
+    /// The size of a workbook state block, for a binding that allocates it as bytes. It
+    /// wants 8-byte alignment. One block reads one sheet at a time; a block that has been
+    /// opened may be copied, bytes and all, to read another.
     ///
     /// # Safety
-    /// `state` is a live, aligned `Inflate` (or writable room for one when `reset` is
-    /// nonzero); `input` is `input_len` bytes; `out` has room for `out_len`; `consumed`
-    /// and `written` are writable.
-    fn hypertabular_internal_inflate(
-        state: *mut crate::kernel::inflate::Inflate,
-        reset: u32,
-        input: *const u8,
-        input_len: usize,
-        out: *mut u8,
-        out_len: usize,
-        at: usize,
-        consumed: *mut usize,
-        written: *mut usize,
+    /// None to uphold.
+    fn hypertabular_workbook_state_size() -> usize {
+        size_of::<Workbook>()
+    }
+}
+
+export! {
+    /// Opens the workbook in `container`: writes a fresh state and says what it found. See
+    /// [`book::open`]. Uses `window` and `arena`.
+    ///
+    /// # Safety
+    /// `state` points to `hypertabular_workbook_state_size()` writable bytes, 8-byte
+    /// aligned; `container` is `container_len` bytes; `buffers` is a live [`Buffers`]
+    /// whose pointers each hold what their sizes say; `out` is writable.
+    fn hypertabular_workbook_open(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        buffers: *const Buffers,
+        out: *mut Opened,
     ) -> i32 {
-        use crate::kernel::inflate::{Inflate, Status};
-        if state.is_null() || consumed.is_null() || written.is_null() {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
             return ERR_CONTRACT;
         }
         // SAFETY: per the function contract.
         unsafe {
-            if reset != 0 {
-                state.write(Inflate::new());
-            }
-            let progress = (*state).run(bytes(input, input_len), buffer(out, out_len), at);
-            consumed.write(progress.consumed);
-            written.write(progress.written);
-            match progress.status {
-                Status::NeedsInput => 1,
-                Status::OutputFull => 2,
-                Status::Done => 0,
-                Status::Invalid => -2,
-            }
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            book::open(&mut *state, bytes(container, container_len), &mut memory, &mut *out)
+        }
+    }
+}
+
+export! {
+    /// Lists the workbook's sheets. See [`book::sheets`]. Uses `window`, `arena`, `cells`.
+    ///
+    /// # Safety
+    /// `state` was opened by `hypertabular_workbook_open` over these same `container`
+    /// bytes; `buffers` and `out` as there.
+    fn hypertabular_workbook_sheets(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        buffers: *const Buffers,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            book::sheets(&mut *state, bytes(container, container_len), &mut memory, &mut *out)
+        }
+    }
+}
+
+export! {
+    /// Loads the workbook's shared strings. See [`book::strings`]. Uses `window`, `arena`,
+    /// `cells`.
+    ///
+    /// # Safety
+    /// As `hypertabular_workbook_sheets`.
+    fn hypertabular_workbook_strings(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        buffers: *const Buffers,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            book::strings(&mut *state, bytes(container, container_len), &mut memory, &mut *out)
+        }
+    }
+}
+
+export! {
+    /// Loads the number-format kind of each cell format. See [`book::styles`]. Uses
+    /// `window`, `arena`, `cells`.
+    ///
+    /// # Safety
+    /// As `hypertabular_workbook_sheets`.
+    fn hypertabular_workbook_styles(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        buffers: *const Buffers,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            book::styles(&mut *state, bytes(container, container_len), &mut memory, &mut *out)
+        }
+    }
+}
+
+export! {
+    /// Positions the state on one sheet: the XLSX part named by the `part_len` bytes at
+    /// `part`, or the ODS table at `index` — both as `hypertabular_workbook_sheets` listed
+    /// them. See [`rows::sheet`].
+    ///
+    /// # Safety
+    /// `state` was opened by `hypertabular_workbook_open` over these same `container`
+    /// bytes; `part` is `part_len` bytes; `out` is writable.
+    fn hypertabular_workbook_sheet(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        part: *const u8,
+        part_len: usize,
+        index: u32,
+        has_header: u32,
+        skip_empty_rows: u32,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            rows::sheet(
+                &mut *state,
+                bytes(container, container_len),
+                bytes(part, part_len),
+                index,
+                has_header != 0,
+                skip_empty_rows != 0,
+                &mut *out,
+            )
+        }
+    }
+}
+
+export! {
+    /// Reads the sheet's header row. See [`rows::header`]. Uses `window`, `arena`, `cells`,
+    /// `row`, and the workbook's tables.
+    ///
+    /// # Safety
+    /// `state` was positioned by `hypertabular_workbook_sheet` over these same `container`
+    /// bytes; `buffers` and `out` as for `hypertabular_workbook_open`.
+    fn hypertabular_workbook_header(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        buffers: *const Buffers,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null() || !state.is_aligned() || out.is_null() {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            rows::header(&mut *state, bytes(container, container_len), &mut memory, &mut *out)
+        }
+    }
+}
+
+export! {
+    /// Reads up to `max_rows` rows of the sheet into the caller's column buffers. See
+    /// [`rows::fill`]. Uses every buffer.
+    ///
+    /// # Safety
+    /// `state` was positioned by `hypertabular_workbook_sheet` over these same `container`
+    /// bytes; `specs` and `columns` are `column_count` entries each, and each column's two
+    /// arrays have room for `max_rows` elements; `buffers` and `out` as for
+    /// `hypertabular_workbook_open`.
+    fn hypertabular_workbook_fill(
+        state: *mut Workbook,
+        container: *const u8,
+        container_len: usize,
+        specs: *const ColumnSpec,
+        columns: *const ColumnBuffer,
+        column_count: usize,
+        max_rows: usize,
+        buffers: *const Buffers,
+        out: *mut Filled,
+    ) -> i32 {
+        if state.is_null()
+            || !state.is_aligned()
+            || out.is_null()
+            || (column_count > 0 && (specs.is_null() || columns.is_null()))
+        {
+            return ERR_CONTRACT;
+        }
+        // SAFETY: per the function contract.
+        unsafe {
+            let Some(mut memory) = memory(buffers) else {
+                return ERR_CONTRACT;
+            };
+            let specs = if column_count == 0 { &[] } else { slice::from_raw_parts(specs, column_count) };
+            let columns =
+                if column_count == 0 { &[] } else { slice::from_raw_parts(columns, column_count) };
+            rows::fill(
+                &mut *state,
+                bytes(container, container_len),
+                specs,
+                columns,
+                max_rows,
+                &mut memory,
+                &mut *out,
+            )
         }
     }
 }

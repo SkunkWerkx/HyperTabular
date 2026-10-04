@@ -1,16 +1,23 @@
-//! The allocation-free core against the row-at-a-time reader it replaces underneath the
-//! bindings. The reader has its own conformance suite (against the `csv` crate, on every
-//! engine); here it is the reference, and the core has to land on the same cells, the same
-//! values and the same verdicts — for every door, however the input is cut into chunks,
-//! and however little room it is given.
+//! The allocation-free core against a reference that owes it nothing: the `csv` crate
+//! (BurntSushi's csv-core underneath) says which cells a file has, and HyperCast's own
+//! doors, asked directly, say what each cell's text is worth. The core has to land on the
+//! same cells, the same values and the same verdicts — for every door, on every engine
+//! this CPU can run, however the input is cut into chunks, and however little room it is
+//! given.
+//!
+//! The files are standard RFC 4180: a cell is either unquoted, or quoted from its first
+//! byte to its last with `""` for a literal quote — the quoting `csv` and this crate
+//! agree on. (Both are lenient past that, in different ways; what this crate does with a
+//! stray quote is pinned by hand in `corpus/delimited.json`.)
 
-use hypertabular::delimited::{Dialect, Reader, engine};
+use hypercast::{Fault, NumFormat};
+use hypertabular::Door;
 use hypertabular::kernel::abi::{
     CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE,
     Failure, Filled, OK, Span,
 };
+use hypertabular::kernel::delimited::engine::{self, Kind};
 use hypertabular::kernel::delimited::fill::{self, RawDialect, State};
-use hypertabular::{Cell, Column, Door, ExcelEpoch, Value};
 use std::fmt::Debug;
 
 /// xorshift64*: deterministic, no dependency.
@@ -84,8 +91,6 @@ const CELLS: &[&str] = &[
     "\"\"",
     "\"\"\"\"",
     "\"12\"\"3\"",
-    "x\"\"y",
-    "\"a\"b\"c\"",
     "12x4",
     "99999999999999999999999999",
 ];
@@ -162,46 +167,92 @@ fn show<T: Copy + Debug>(values: &[u8], row: usize) -> String {
     })
 }
 
+/// Every engine this build can run, as the standard library's own detection finds them.
+fn available() -> Vec<Kind> {
+    let mut kinds = Vec::new();
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("aes") {
+            kinds.push(Kind::NeonPmull);
+        }
+        kinds.push(Kind::Neon);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let clmul = std::arch::is_x86_feature_detected!("pclmulqdq");
+        if std::arch::is_x86_feature_detected!("avx2") && clmul {
+            kinds.push(Kind::Avx2Clmul);
+        }
+        if clmul {
+            kinds.push(Kind::Sse2Clmul);
+        }
+        kinds.push(Kind::Sse2);
+    }
+    kinds.push(Kind::Swar);
+    kinds
+}
+
+/// What HyperCast makes of a cell's text through `door` — or of no cell at all, for an
+/// ordinal past the record's width.
+fn judge(door: Door, cell: Option<&[u8]>) -> Seen {
+    fn seen<T: Debug>(verdict: Result<T, Fault>) -> Seen {
+        match verdict {
+            Ok(value) => Seen::Value(format!("{value:?}")),
+            Err(fault) => Seen::Fault(fault.reason as u32, fault.offset, fault.len),
+        }
+    }
+    let Some(text) = cell else {
+        return Seen::Fault(1, 0, 0);
+    };
+    let format = &NumFormat::INVARIANT;
+    match door {
+        Door::Bool => seen(hypercast::cast_bool(text).map(u8::from)),
+        Door::I8 => seen(hypercast::cast_i8(text, format)),
+        Door::I16 => seen(hypercast::cast_i16(text, format)),
+        Door::I32 => seen(hypercast::cast_i32(text, format)),
+        Door::I64 => seen(hypercast::cast_i64(text, format)),
+        Door::U8 => seen(hypercast::cast_u8(text, format)),
+        Door::U16 => seen(hypercast::cast_u16(text, format)),
+        Door::U32 => seen(hypercast::cast_u32(text, format)),
+        Door::U64 => seen(hypercast::cast_u64(text, format)),
+        Door::F32 => seen(hypercast::cast_f32(text, format)),
+        Door::F64 => seen(hypercast::cast_f64(text, format)),
+        Door::Decimal => seen(hypercast::cast_decimal(text, format)),
+        Door::Uuid => seen(hypercast::cast_uuid(text)),
+        Door::Timestamp => seen(hypercast::cast_timestamp(text)),
+        Door::Unix(precision) => seen(hypercast::cast_unix(text, precision)),
+        Door::ExcelSerial(epoch) => seen(hypercast::cast_excel_serial(text, epoch)),
+        Door::Date => seen(hypercast::cast_date(text)),
+        Door::DateOrdered(order) => seen(hypercast::cast_date_ordered(text, order)),
+        Door::DateTime(order) => seen(hypercast::cast_datetime(text, order)),
+        Door::Time => seen(hypercast::cast_time(text)),
+        Door::Duration => seen(hypercast::cast_duration(text)),
+        // The bytes themselves; no bytes at all is the one way to fail.
+        Door::Text if text.is_empty() => Seen::Fault(1, 0, 0),
+        Door::Text => Seen::Value(format!("{text:?}")),
+    }
+}
+
 /// What the reference says of every cell the plan reads, row by row.
 fn reference(data: &[u8], specs: &[ColumnSpec]) -> Vec<Vec<Seen>> {
-    let dialect = Dialect::CSV.with_header(false);
-    let mut reader = Reader::from_slice(data, dialect).unwrap();
+    // A byte-order mark is not part of the first cell; `csv` leaves it there.
+    let data = data.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(data);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(data);
     let mut rows = Vec::new();
-    while let Some(row) = reader.next_row().unwrap() {
-        let mut seen = Vec::new();
-        for spec in specs {
-            let door = Door::from_code(spec.door, spec.param).unwrap();
-            let column = Column::new(spec.ordinal as usize, door);
-            let cell = match row.get(spec.ordinal as usize) {
-                Some(bytes) => Cell::Text(bytes),
-                None => Cell::Empty,
-            };
-            seen.push(match column.cast(&cell, ExcelEpoch::Y1900) {
-                Ok(value) => Seen::Value(match value {
-                    Value::Bool(v) => format!("{:?}", u8::from(v)),
-                    Value::I8(v) => format!("{v:?}"),
-                    Value::I16(v) => format!("{v:?}"),
-                    Value::I32(v) => format!("{v:?}"),
-                    Value::I64(v) => format!("{v:?}"),
-                    Value::U8(v) => format!("{v:?}"),
-                    Value::U16(v) => format!("{v:?}"),
-                    Value::U32(v) => format!("{v:?}"),
-                    Value::U64(v) => format!("{v:?}"),
-                    Value::F32(v) => format!("{v:?}"),
-                    Value::F64(v) => format!("{v:?}"),
-                    Value::Uuid(v) => format!("{v:?}"),
-                    Value::Timestamp(v) => format!("{v:?}"),
-                    Value::Date(v) => format!("{v:?}"),
-                    Value::Time(v) => format!("{v:?}"),
-                    Value::Duration(v) => format!("{v:?}"),
-                    Value::Text(v) => format!("{:?}", v.as_ref()),
-                    Value::Decimal(v) => format!("{v:?}"),
-                    Value::DateTime(v) => format!("{v:?}"),
-                }),
-                Err(fault) => Seen::Fault(fault.reason as u32, fault.offset, fault.len),
-            });
-        }
-        rows.push(seen);
+    for record in reader.byte_records() {
+        let record = record.unwrap();
+        rows.push(
+            specs
+                .iter()
+                .map(|spec| {
+                    let door = Door::from_code(spec.door, spec.param).unwrap();
+                    judge(door, record.get(spec.ordinal as usize))
+                })
+                .collect(),
+        );
     }
     rows
 }
@@ -354,16 +405,16 @@ fn streamed(
 }
 
 #[test]
-fn every_door_agrees_with_the_reader_however_it_is_fed() {
+fn every_door_agrees_with_the_reference_however_it_is_fed() {
     let mut random = Random(0x00C0_FFEE_D15E_A5E5);
     let all = doors();
     // Every engine the standard library finds must be one the core, asking the CPU
     // itself, agrees it can run.
-    for kind in engine::available() {
+    for kind in available() {
         assert!(engine::usable(kind), "the core cannot run {kind:?}");
     }
     let engines: Vec<u8> = std::iter::once(0)
-        .chain(engine::available().into_iter().map(|kind| kind.code()))
+        .chain(available().into_iter().map(|kind| kind.code()))
         .collect();
     for round in 0..300 {
         let columns = 1 + random.below(7);

@@ -31,10 +31,15 @@ if grep -rnE '(^|[^_])feature[[:space:]]*=' "$kernel" | grep -v "^$kernel/export
 fi
 [ "$(grep -c 'cfg_attr(feature = ' "$kernel/exports.rs")" -eq 2 ] \
   || fail "exports.rs should hold exactly the macro's two feature attributes"
-# One way to make a symbol.
-[ "$(grep -rnE 'unsafe\(no_mangle\)' "$kernel" | wc -l)" -eq 1 ] \
+# One way to make a symbol, in the whole crate and not only in the kernel: the layers above
+# the core are Rust API, and a build with every feature on exports what the core-only build
+# does. (The two extension modules, php_ext and python_ext, register with their host through
+# their framework's macro; neither declares a C symbol of its own.)
+[ "$(grep -rnE 'unsafe\(no_mangle\)' src | wc -l)" -eq 1 ] \
   || fail "no_mangle belongs in the export! macro and nowhere else"
-if grep -rnE '#\[no_mangle\]|export_name|#\[unsafe\(export_name' "$kernel"; then
+grep -qE 'unsafe\(no_mangle\)' "$kernel/exports.rs" \
+  || fail "the one no_mangle is not the export! macro's"
+if grep -rnE '#\[no_mangle\]|export_name|#\[unsafe\(export_name' src; then
   fail "the lines above make a symbol outside the export! macro"
 fi
 echo "ok"
@@ -54,7 +59,7 @@ step "the shared library exports what exports.rs declares, and imports no alloca
 cargo cdylib --quiet
 lib=target/release/libhypertabular.so
 [ -f "$lib" ] || fail "$lib was not produced"
-declared="$(sed -n 's/^    fn \(hypertabular_[a-z0-9_]*\)(.*/\1/p' "$kernel/exports.rs" | grep -vE '^hypertabular_(canary|internal_[a-z0-9_]*)$' | sort)"
+declared="$(sed -n 's/^    fn \(hypertabular_[a-z0-9_]*\)(.*/\1/p' "$kernel/exports.rs" | grep -vx 'hypertabular_canary' | sort)"
 exported="$(nm -D --defined-only "$lib" | awk '{print $3}' | sort)"
 [ -n "$declared" ] || fail "found no declarations in exports.rs"
 [ "$declared" = "$exported" ] || fail "exports differ. declared: $(echo $declared) / exported: $(echo $exported)"
@@ -112,17 +117,6 @@ if ! cargo no-panic >"$work/no-panic.log" 2>&1; then
 fi
 echo "ok"
 
-step "nor can the parts of the core no export reaches yet"
-# The inflate, until the workbook reader that calls it is in the core: compiled behind an
-# export that exists only for this build.
-if ! RUSTFLAGS="--cfg hypertabular_internals" cargo rustc --quiet --release --lib --crate-type cdylib \
-     --features no-panic --target-dir target/no-panic-internals -- -C link-arg=-Wl,--no-undefined \
-     >"$work/internals.log" 2>&1; then
-  grep -o 'detected panic in function `[a-z0-9_]*`' "$work/internals.log" | sort -u || tail -20 "$work/internals.log"
-  fail "the internals above have a path that can panic"
-fi
-echo "ok"
-
 step "and the proof rejects one that can"
 log="$work/canary.log"
 if RUSTFLAGS="--cfg hypertabular_canary" cargo rustc --quiet --release --lib --crate-type cdylib \
@@ -138,6 +132,7 @@ fi
 echo "ok: rejected, by name"
 
 step "the core's own tests"
-cargo test --quiet --test kernel_delimited --test kernel_allocation_free --test kernel_inflate
+cargo test --quiet --test kernel_delimited --test kernel_allocation_free --test kernel_inflate \
+  --test kernel_workbook --test kernel_workbook_allocation_free --test kernel_workbook_rules
 
 printf '\ncheck-core: all of it holds.\n'

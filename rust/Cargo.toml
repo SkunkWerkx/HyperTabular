@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Forward-only tabular parsing — delimited text and spreadsheets — with a HyperCast verdict for every cell: an allocation-free, panic-free, no_std core that fills caller-owned column buffers, wrapped as a native library (libhypertabular) for direct FFI from every host language."
 license = "MIT"
-readme = "../README.md"
+# A copy of the root README inside the crate's own directory, not a path up to it: maturin
+# reads this file whenever it builds the Python wheel from this manifest, and the forge's
+# Alpine suite builds that wheel from a copy of rust/ and python/ alone (musl-suite), where
+# `../README.md` is not there to read. HyperCast's crate carries its own for the same reason.
+readme = "README.md"
 repository = "https://github.com/SkunkWerkx/HyperTabular"
 keywords = ["csv", "xlsx", "parser", "ffi", "allocation-free"]
 categories = ["parsing"]
@@ -23,19 +27,23 @@ bench = false
 # the package inside its rust/ directory — and from crates.io at that release. `exports`
 # stays off, so no library built from this crate carries HyperCast's `cast_*` symbols.
 hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master", default-features = false }
-# Streaming inflate for the workbook reader in the std layer, until the core has its own
-# (docs/workbook.md, "Container and streaming"). Never part of the core.
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
+# The Zend extension the forge builds beside the shared library (the `php` feature). Never
+# part of the core, and never of the library the shipped PHP package loads.
+ext-php-rs = { version = "0.16", optional = true }
 # Build-time check only, never shipped: see the `no-panic` feature.
 no-panic = { version = "0.1", optional = true }
+# The Python binding (src/python_ext.rs), linked into a CPython extension module.
+# abi3-py311, as HyperCast's is: one build per platform serves every CPython from the
+# package's floor up.
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"], optional = true }
 
 [features]
 # On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
-# API over the core — owned batches, a row-at-a-time reader, files, the workbook reader.
+# API over the core — the Rust binding: readers that own their buffers, and files.
 # Nothing the crate ships as a library is built with it. The core (src/kernel) is the same
 # code with or without it, and compiles with it off, where `std` cannot be named.
 default = ["std", "exports"]
-std = ["hypercast/std", "dep:flate2"]
+std = ["hypercast/std"]
 # The C ABI symbols. On by default and implied by every feature that builds a library of
 # this crate's own; off for a crate that links this one as an rlib and exports a C ABI of
 # its own, so that its library does not carry these (HyperCast's `exports`, same reason).
@@ -47,11 +55,24 @@ staticlib = ["exports"]
 # library: the `staticlib` panic handler plus what a no_std shared library needs that a
 # static one does not (lib.rs).
 cdylib = ["staticlib"]
+# This crate as a Zend extension (ext-php-rs), as HyperCast carries one and for the same
+# reason: the forge builds `--features php` on every darwin and linux leg, load-checks the
+# result and attests it. The shipped PHP package is ext-ffi over the plain shared library
+# (php/src); this is the module entry point and a version probe, nothing more
+# (src/php_ext.rs). Off by default, and outside src/kernel, which no feature reaches.
+php = ["dep:ext-php-rs", "std"]
 # Proves at link time that no C ABI export can panic: `cargo no-panic` fails with an
 # undefined symbol naming any export the optimizer could not clear of every panic path.
 # Built with std, because the proof needs the unwind edge a panic leaves and a no_std
 # build has to abort; the exports' code is the same either way.
 no-panic = ["dep:no-panic", "exports"]
+# The Python binding: a binding like any other — it allocates every buffer and the core
+# fills them — but written in Rust and linked with the core into one extension module
+# (`hypertabular._native`), so it calls the core's Rust functions instead of loading the
+# shared library. maturin builds it into the wheels (python/pyproject.toml); the forge's
+# suites build it with `cargo rustc --release --crate-type cdylib --features python`.
+# Nothing under src/kernel knows it exists.
+python = ["dep:pyo3", "std"]
 
 [dev-dependencies]
 # The comparison baseline for the delimited conformance suite and bench — never linked.
@@ -59,21 +80,18 @@ csv = "1.4"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 # The corpus is JSON: the example that writes it and the test that replays it.
 serde_json = "1"
+# Deflate for the tests, which build their workbook packages in memory and hold the core's
+# own inflate to another's. The crate itself inflates with the core and links neither.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [[bench]]
 name = "delimited_benchmarks"
 harness = false
 
-[[bench]]
-name = "workbook_benchmarks"
-harness = false
-
-# Two cfgs only `check-core.sh` sets. `hypertabular_canary` compiles in an export that can
-# panic, so the no-panic proof can be watched refusing it; `hypertabular_internals`
-# compiles in exports over the parts of the core no real export reaches yet, so the proof
-# covers them too.
+# A cfg only `check-core.sh` sets: `hypertabular_canary` compiles in an export that can
+# panic, so the no-panic proof can be watched refusing it.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)', 'cfg(hypertabular_internals)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hypertabular_canary)'] }
 
 # The same profile HyperCast ships with, for the same measured reasons.
 [profile.release]

@@ -37,7 +37,7 @@ binding calls. It reads bytes the caller hands it and writes into buffers the ca
 it. It has no standard library, allocates nothing, and cannot panic.
 
 **The Rust API** (everything else, behind the default `std` feature) is one binding among
-eight: owned batches, a row-at-a-time reader, files. It allocates, in Rust's own idiom,
+eight: readers that own their buffers, and files. It allocates, in Rust's own idiom,
 exactly as the C# binding allocates in C#'s. Nothing in it is in the library.
 
 The three properties of the core are not a discipline. Each is something a build refuses
@@ -84,71 +84,102 @@ once, in whatever its language does best, and the core is crossed once per chunk
 
 Measured on linux-x64 (a 66 MB, million-row file; six columns cast to `i64`, `f64`, text,
 a timestamp, a boolean and `i32`): about 575 MB/s through the core into the caller's
-buffers, 530 MB/s through the Rust binding (`delimited::BatchReader`, which also copies
-each batch's text into the batch), against 430 MB/s for the row-at-a-time reader filling
-the same batch a cell at a time, and 900 MB/s for the `csv` crate splitting records
-without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB).
+buffers, against 900 MB/s for the `csv` crate splitting records without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB).
+
+### Workbooks in the core
+
+A workbook is read by the same rules (`docs/workbook.md`): the container is bytes the
+caller holds, the zip directory is walked in place, a part is inflated through a window
+of the caller's and tokenized as it comes out, and a batch of rows is cast through the
+caller's plan into the caller's columns — the layout a delimited batch has, so that what
+reads one reads the other. The state block is offsets and counters and the inflate
+tables; no pointer is kept between calls.
+
+One thing the format forces. A part is a compressed stream, and a read through one cannot
+be rolled back to where a call began. So a workbook call that runs out of room does not
+start over: it stops where it is, says which buffer is too small and what size would do,
+and is made again once the caller has grown that buffer *with its contents kept*. The
+readers are written a token at a time to make that exact — a token is looked at, acted
+on, and only then stepped past.
+
+The inflate is the core's own, `kernel::inflate`. No inflate that exists can be put under
+the proof — the ones in safe Rust index their tables, and the ones behind a C ABI turn a
+panic into an abort the proof cannot see — so this one is written for it: a 27 KiB state
+block of plain integers, the output buffer doubling as the dictionary, and every step
+either completing or leaving the state as it found it, which is what makes it resumable
+at any byte of input or output. It is held to zlib's deflate at every level, fed a byte
+at a time into a window barely larger than the dictionary, and to thousands of damaged
+streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs with its run-time
+SIMD and 599 for miniz_oxide. One thing it taught about the proof: the table builder took
+the symbol mapping as a function pointer, and a call through a pointer is one the
+compiler must assume can unwind, so the proof refused the whole inflate until the pointer
+became a value to match on. Another, from the workbook's casts: converting a double to a
+128-bit integer is a call into the compiler's runtime (`__fixdfti`) that the static
+library would then have to bring along, so the core reads an integral double's bits
+instead.
 
 ### The Rust API is a binding
 
-`delimited::BatchReader` is the Rust binding over that call, and is the model for the
-other seven: it owns the input buffer and the reads that fill it, a `Batch`'s column
-vectors, the cell table and the arena — allocated once, reused — and the loop that puts
-what the core did not consume back in front of it. It copies a batch's text into the batch
-so the batch outlives its chunk, and builds the batch's fault table from the cell table.
-Those are its choices; none of it is in the core. `delimited::Reader`, the row-at-a-time
-cursor, shares the core's scanner and collects what it reports into vectors.
+`DelimitedReader`, and `Workbook` with its `Sheet`s, are the Rust binding over those
+calls, and the model for the other seven. A reader owns everything the core is handed —
+the input buffer and the reads that fill it, the column arrays, the cell table, the
+arena, a workbook's window and its shared strings — allocated once and reused; it makes
+the call, grows the buffer the core names when one is too small, and puts what the core
+did not consume back in front of it. And it lends what the core wrote instead of copying
+it: `read()` returns a `Batch` that borrows the reader, so a column is the array the core
+filled and a text cell is a slice of the input or of the shared strings. Reading the next
+batch is what ends the last.
 
-### What is not in the core yet
+```rust
+let plan = [Column::i64(0), Column::f64(2).format(continental), Column::text(3)];
 
-The workbook reader (`docs/workbook.md`) is still the first design: generic over
-`std::io::Read`, inflating through `flate2`, with handle-based exports that own their
-batches. It lives in the Rust layer and is built only with `std`. Bringing it into the
-core means the same treatment — the container read from the caller's bytes, shared strings
-and styles in caller buffers sized by a first call.
+let mut reader = DelimitedReader::open(path, Dialect::CSV, &plan)?;
+while let Some(batch) = reader.read()? {
+    let ids: &[i64] = batch.i64(0);               // a whole column
+    let verdicts = batch.verdicts(0);             // and a verdict beside each value
+    let amount: Result<f64, Fault> = batch.get(1, row);   // one cell, as HyperCast judged it
+    let name = batch.text(2, row);
+}
 
-The piece that had to exist first does: `kernel::inflate`, the core's own. No inflate
-that exists can be put under the proof — the ones in safe Rust index their tables, and the
-ones behind a C ABI turn a panic into an abort the proof cannot see — so this one is
-written for it: a 27 KiB state block of plain integers, the output buffer doubling as the
-dictionary, and every step either completing or leaving the state as it found it, which is
-what makes it resumable at any byte of input or output. It is held to zlib's deflate at
-every level, fed a byte at a time into a window barely larger than the dictionary, and to
-thousands of damaged streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs
-with its run-time SIMD and 599 for miniz_oxide. One thing it taught about the proof: the
-table builder took the symbol mapping as a function pointer, and a call through a pointer
-is one the compiler must assume can unwind, so the proof refused the whole inflate until
-the pointer became a value to match on. Until then the cast matrix below describes
-that layer: the format-neutral `Cell` exists for the workbook's typed cells, and the
-core's delimited path, where every cell is text, calls HyperCast's doors directly.
+let book = Workbook::open(path)?;
+let mut sheet = book.sheet("Data", SheetOptions::default(), &plan)?;
+while let Some(batch) = sheet.read()? { /* the same batch */ }
+```
+
+Those are the binding's choices; none of it is in the core, and the binding calls the
+core's Rust functions, not the C exports. It may panic where the core may not — asking a
+column for another door's type is the caller's bug, and says so.
 
 ## The contract
 
-### `Cell` — what a provider hands the engine
+### A workbook cell — what the core reads before it casts
 
-Delimited text only ever has bytes; a workbook has typed cells. One enum covers both, so
-the cast engine is written once:
+Delimited text only ever has bytes, and the core hands them straight to HyperCast's
+doors. A workbook has typed cells: the workbook core reads each into one of these
+(`kernel/workbook/cell.rs`), and the cast matrix below says what every door makes of each:
 
 | Variant | Produced by | Meaning |
 | --- | --- | --- |
-| `Empty` | all | no value (missing cell, blank field, sparse-row gap) |
-| `Text(&[u8])` | delimited fields; workbook string cells (shared, inline, formula-string) | UTF-8 bytes, untrimmed — the HyperCast doors trim |
+| `Empty` | all | no value (missing cell, sparse-row gap) |
+| `Text(&[u8])` | string cells (shared, inline, formula-string) | UTF-8 bytes, untrimmed — the HyperCast doors trim |
 | `Number(f64)` | workbook numeric cells with a non-temporal number format | the IEEE double the file stores |
 | `Bool(bool)` | workbook `t="b"` / `office:boolean-value` | |
 | `Wall { date, nanos }` | date-formatted Excel serials ≥ 1; ODS `office:date-value`; XLSX `t="d"` | a zoneless wall-clock instant: calendar date + nanoseconds since midnight |
 | `Clock(nanos)` | time-formatted Excel serials in `[0, 1)` | a time of day with no date |
 | `Span(Duration)` | Excel elapsed formats (`[h]:mm:ss`); ODS `office:time-value` | a signed duration |
-| `Error(CellError)` | `t="e"` / BIFF error codes / `calcext:value-type="error"` | `#N/A`, `#DIV/0!`, … |
+| `Error(code)` | `t="e"` / `calcext:value-type="error"` | `#N/A`, `#DIV/0!`, …, by BIFF code |
 
-### `Door` and `Plan` — what the caller declares
+### `Door` and `Column` — what the caller declares
 
 A `Door` is one HyperCast door — all of them: `Bool`, `I8…I64`, `U8…U64`, `F32`, `F64`,
 `Decimal`, `Uuid`, `Timestamp`, `Unix(precision)`, `ExcelSerial(epoch)`, `Date`,
 `DateOrdered(order)`, `DateTime(order)`, `Time`, `Duration` — plus `Text`, which asks for
 the bytes themselves. A door that declares something carries it, numbered as HyperCast's
-own exports number it. One enum, in the core, for both layers. A `Column` is a door, the `NumFormat` its numeric doors use, and the
-source ordinal it reads. A `Plan` is the ordered list of columns to produce — a projection,
-so a 40-column file can be read into 5 typed columns. Nothing is sniffed: no type
+own exports number it. One enum, in the core, for both layers. A `Column` is a door, the
+`NumFormat` its numeric doors use, and the source ordinal it reads — one factory per door
+(`Column::i64(0)`, `Column::unix(4, UnixPrecision::Millis)`, …), named as the bindings name
+them. A plan is a slice of columns, in the order to produce them — a projection, so a
+40-column file can be read into 5 typed columns, and one source column through two doors. Nothing is sniffed: no type
 inference, no separator detection, no header heuristics. Culture stays out of the core
 exactly as in HyperCast — `NumFormat` is declared per column.
 
@@ -192,52 +223,45 @@ present the resulting `Timestamp` as their zone-aware instant with that caveat.
 ### Verdicts and fault spans
 
 A `CellVerdict` is `{ offset: u32, len: u32, reason: u32 }` — HyperCast's `Fault` made
-`#[repr(C)]` and given a zero code for success. For a `Text` cell the span indexes the
-cell's own bytes, exactly what the HyperCast door reported. For a typed cell the span
-covers the whole rendering once the batch has rendered it (a door called directly on a
-typed cell returns a zero span — there is no text yet). So a binding can always show
-*which bytes* offended: on the failure path (and only there — `Empty` is not recorded)
-the batch copies the offending cell's raw text, or the typed cell's canonical rendering,
-into its text arena and lists it in a fault table `{ row, column, raw span }`, so the fault
-is data even after the provider's buffer has moved on. Success paths copy nothing except
-`Text`-door values.
+`#[repr(C)]` and given a zero code for success. For a text cell the span indexes the
+cell's own bytes, exactly what the HyperCast door reported. For a typed workbook cell
+that fails its door the span covers the whole of the cell said as text — its canonical
+rendering, which the core writes into the batch's arena for the purpose. So a binding can
+always show *which bytes* offended: beside the columns the core fills a cell table, a span
+per cell saying where the cell's text is, and `Batch::raw` reads it — for any cell of
+delimited text, and for a workbook's text cells and its typed cells that did not cast.
+`Empty` has no text and no span.
 
 ### `Batch` — column-major, crossing-friendly
 
-`Batch` holds, per plan column, a typed value vector (`Vec<i32>`, `Vec<f64>`, `Vec<[u8;16]>`,
-`Vec<Timestamp>`, …) and a parallel `Vec<CellVerdict>`; `Text` columns hold `(offset, len)`
-spans into one shared byte arena. The batch is reused across fills — vectors are cleared,
-never reallocated once warm — and it is the thing that crosses the FFI boundary once per
-`max_rows` rows: pointers into it stay valid until the next fill. This is the
-"column buffers in, parallel verdict arrays out" shape the HyperCast roadmap committed to.
+Per plan column, an array of the door's own values (`i32`, `f64`, `[u8; 16]`,
+`Timestamp`, …) and a parallel array of `CellVerdict`s; a text column holds spans. A cell
+that did not cast holds the door's zero. The arrays are the caller's — in Rust, the
+reader's — reused from batch to batch, and are the thing that crosses the boundary once
+per batch instead of once per cell. This is the "column buffers in, parallel verdict
+arrays out" shape the HyperCast roadmap committed to.
 
-The first-class Rust surface is both levels: `fill_batch(&mut source, &plan, &mut batch,
-max_rows)` for bulk, and `source.next_row()?` → `row.cell(i)` → `column.cast(&cell)` for
-row-at-a-time code that wants an ordinary `Result<T, Fault>` per cell.
+The Rust `Batch` is a view of them, the same for delimited text and for a sheet:
+`batch.i64(col)` and its ten siblings give a primitive column whole; `batch.verdicts(col)`
+its verdicts; `batch.get::<T>(col, row)` one cell as `Result<T, Fault>` in HyperCast's own
+types; `batch.text(col, row)` a text cell's bytes; `batch.raw(col, row)` the text a fault
+points into; `batch.line(row)` the line or the sheet row the row came from.
 
-### `TabularSource` — the provider trait
+### Errors
 
-```rust
-pub trait TabularSource {
-    type Row<'a>: Row where Self: 'a;
-    type Error;
-    fn header(&self) -> Option<&Header>;             // declared, never sniffed
-    fn date_system(&self) -> DateSystem;             // Excel1900 unless a workbook says 1904
-    fn next_row(&mut self) -> Result<Option<Self::Row<'_>>, Self::Error>;   // forward-only
-}
-```
+One type. `Error::Io` is the read; `Error::Separator`, `Error::Plan` and `Error::NoSheet`
+are the caller's own declarations, refused before any read; `Error::Structure` is data
+that is broken — a `Failure` with a `kind` (one enum over the delimited and the workbook
+failures, numbered as the core numbers them), and `record`, `line`, `byte`, `expected`,
+`found`. A structural failure is returned once every intact row before it has been
+delivered, and again on every read after: forward-only means there is no recovery point.
+A cell that does not cast is never an error.
 
-`Row` exposes `len()` and `cell(i) -> Cell<'_>`; an ordinal past the row's end is `Empty`
-(sparse workbook rows). Providers own their buffers; a `Row` borrows them and dies at the
-next `next_row`. Header lookup (`ordinal(name)`) is on `Header`, resolved once by the
-caller and reused in the hot loop — Svartalfheim's `Ordinal` idiom.
-
-## HyperDelimited
+## Delimited text
 
 Design lineage: Sep's mask fast paths and packed col-end arrays; zsv/Polars/simdcsv's
 carry-less-multiply quote mask; zsv's zero-copy cell delivery with a quoted flag. The
-provider-specific decisions and first-wave numbers are in HyperDelimited's own
-`docs/design.md`.
+decisions specific to it are in `docs/delimited.md`.
 
 - **Bytes, not chars.** The input is UTF-8 bytes; the separator is one ASCII byte (tab or
   `0x20..=0x7E`, never `"`). Non-ASCII bytes can never collide with a structural byte, so
@@ -255,7 +279,7 @@ provider-specific decisions and first-wave numbers are in HyperDelimited's own
 - **Quoting is parity, and only parity.** A `"` toggles; `""` toggles twice. A cell whose
   first and last bytes are quotes with exactly two quotes is delivered as the inner slice,
   zero-copy. A cell that starts with a quote and holds more is unescaped once, at row end,
-  into the reader's scratch arena. Anything else is delivered raw, and the HyperCast door
+  into the caller's arena. Anything else is delivered raw, and the HyperCast door
   will say `Malformed` at the exact byte. `quoting: false` turns the quote class off.
 - **Buffer model.** A slice source scans in place with no copy. A `Read` source owns one
   growable buffer; the unfinished row is moved to the front and re-scanned from its start
@@ -268,31 +292,29 @@ provider-specific decisions and first-wave numbers are in HyperDelimited's own
 - **Header.** Declared by the caller (`has_header`), read at open, exposed as `Header`
   with ordinal lookup; never trimmed or unescaped beyond the cell rules above.
 
-## HyperWorkbook
+## Workbooks
 
 Design lineage: Sylvan's forward-only sheet streaming, deferred `<v>` parsing, `t`-attribute
 dispatch and date-kind classification; calamine's parse-the-raw-bytes trick and ODS repeat
-handling. The provider-specific decisions and first-wave numbers are in HyperWorkbook's
-own `docs/design.md`.
+handling. The decisions specific to it are in `docs/workbook.md`.
 
-- **Container.** A hand-rolled central-directory zip reader (stored + deflate only, zip64
-  aware, local headers trusted only for the data offset). Inflate is `flate2` on the
-  `zlib-rs` backend — the fastest *streaming* pure-Rust inflate measured in the survey —
-  so a 300 MB `sheet1.xml` streams through a fixed window instead of materialising.
-  Sources are `Read + Seek` that can reopen themselves (file by path, cursor by clone), so
-  every `Sheet` owns an independent reader and outlives its `Workbook`.
+- **Container.** A hand-rolled central-directory zip reader over the container's bytes
+  (stored + deflate only, zip64 aware, local headers trusted only for the data offset,
+  every offset checked against the container's length). Inflate is the core's own, into
+  a window of the caller's — so a 300 MB `sheet1.xml` streams through 64 KiB instead of
+  materialising, and a deflate bomb is only as large as the window the caller will give.
 - **XML.** One small pull tokenizer (start/empty/end/text/CDATA, lazy attributes, entity
   decoding on demand, namespace prefixes ignored — `<x:c>` and `<c>` are the same cell)
-  over a refillable buffer. It serves the small parts and the big ones alike; no DOM
-  anywhere. Comments, PIs, and doctypes are recognised, not assumed absent.
+  over that window, with no state of its own. It serves the small parts and the big ones
+  alike; no DOM anywhere. Comments, PIs, and doctypes are recognised, not assumed absent.
 - **XLSX cells.** `r` gives the column (missing `r` ⇒ previous + 1, per ISO 29500), `s`
   the `cellXfs` index, `t` the type. `<v>` is parsed straight from its bytes: `s` →
   shared-string index; `b` → `0`/`1`; `e` → error; `d` → ISO wall-clock; otherwise a
   double, then classified by the style's number-format kind: number, date/time (→
   `Wall`/`Clock`), elapsed (→ `Span`). `<is>` is collected like a shared string; `<f>` is
-  skipped — the cached value is the value. Shared strings are preloaded into one byte
-  arena with an offset table (rich-text runs concatenated, `rPh` phonetics skipped); that
-  preload is the documented allocating boundary.
+  skipped — the cached value is the value. Shared strings are loaded once into a buffer
+  of the caller's with a span for each (rich-text runs concatenated, `rPh` phonetics
+  skipped), and a shared-string cell is a span into it, never a copy.
 - **Date-kind classification.** Built-in ids 14–22, 27–36, 45–47, 50–58, 71–81 are
   temporal (46 elapsed); custom codes: first `;` section only, skip `"…"` literals and
   `\`/`_`/`*` escapes, `[h]`/`[m]`/`[s]` ⇒ elapsed, any other `[…]` ignored, then any of
@@ -312,15 +334,22 @@ own `docs/design.md`.
 
 ## FFI shape
 
-The delimited exports are the core's (`kernel/exports.rs`): `hypertabular_version`,
-`hypertabular_delimited_state_size`, `_init`, `_header`, `_fill` and `_unescape`, over the
-`#[repr(C)]` shapes in `kernel/abi.rs`. Return codes: `0` done; `-1` a contract violation
-(a caller bug); `-2` a structural failure, described in the result; `-3` and `-4` an arena
-or a cell table too small for one row, with the size one row takes.
+Fourteen exports, every one declared through the one macro in `kernel/exports.rs`, over
+the `#[repr(C)]` shapes in `kernel/abi.rs`:
 
-The workbook's exports (`workbook/ffi.rs`, with the shapes in `ffi.rs`) are the earlier,
-handle-based design — open a handle, `read_batch` into a batch the handle owns — and go
-when the workbook moves into the core.
+- `hypertabular_version`
+- `hypertabular_delimited_state_size`, `_init`, `_header`, `_fill`, `_unescape`
+- `hypertabular_workbook_state_size`, `_open`, `_sheets`, `_strings`, `_styles`, `_sheet`,
+  `_header`, `_fill`
+
+Return codes: `0` done; `-1` a contract violation (a caller bug); `-2` a structural
+failure, described in the result; `-3`, `-4` and `-5` an arena, a cell table or a window
+too small, with the size that would do. For delimited text nothing was consumed and the
+call is made again from the same input; for a workbook the read stopped where it was and
+the call resumes once the buffer has been grown with its contents kept.
+
+No build of the crate exports anything else, and `check-core.sh` holds the whole crate to
+that: the layers above the core are Rust API, not symbols.
 
 ## Parked, deliberately
 
