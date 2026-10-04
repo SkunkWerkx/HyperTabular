@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "1.0",
+  "artifacts": {
+    "HyperTabularCore": {
+      "type": "staticLibrary",
+      "version": "0.1.0",
+      "variants": [
+        {
+          "path": "x86_64-unknown-linux-gnu/libhypertabular.a",
+          "supportedTriples": ["x86_64-unknown-linux-gnu"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "aarch64-unknown-linux-gnu/libhypertabular.a",
+          "supportedTriples": ["aarch64-unknown-linux-gnu"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "x86_64-swift-linux-musl/libhypertabular.a",
+          "supportedTriples": ["x86_64-swift-linux-musl"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "aarch64-swift-linux-musl/libhypertabular.a",
+          "supportedTriples": ["aarch64-swift-linux-musl"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "arm64-apple-macosx/libhypertabular.a",
+          "supportedTriples": ["arm64-apple-macosx"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "x86_64-apple-macosx/libhypertabular.a",
+          "supportedTriples": ["x86_64-apple-macosx"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "x86_64-unknown-windows-msvc/hypertabular.lib",
+          "supportedTriples": ["x86_64-unknown-windows-msvc"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "aarch64-unknown-windows-msvc/hypertabular.lib",
+          "supportedTriples": ["aarch64-unknown-windows-msvc"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        },
+        {
+          "path": "wasm32-unknown-wasip1/libhypertabular.a",
+          "supportedTriples": ["wasm32-unknown-wasip1"],
+          "staticLibraryMetadata": {
+            "headerPaths": ["include"],
+            "moduleMapPath": "include/module.modulemap"
+          }
+        }
+      ]
+    }
+  }
+}
