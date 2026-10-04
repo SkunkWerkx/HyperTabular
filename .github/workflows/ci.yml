@@ -36,8 +36,12 @@ jobs:
       csharp_runtimes_dir: csharp/HyperTabular/runtimes
       dotnet_version: "11.0.x"
       dotnet_quality: "preview"
+      # Explicit placement, as HyperCast does it: the forge puts this leg's library at
+      # src/main/resources/native/{rid}/ — where the shipped jar carries it — and the
+      # Gradle dev loop, which would otherwise stage whatever rust/target/release holds
+      # by then, stands down.
+      java_resources_dir: java/src/main/resources/native
       # Not written yet. Each comes on with its binding.
-      java: false
       ruby: false
       magnus: false
       go: false

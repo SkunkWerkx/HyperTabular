@@ -1,0 +1,18 @@
+{
+  "resources": [
+    { "glob": "native/*/*" }
+  ],
+  "foreign": {
+    "downcalls": [
+      { "returnType": "jint", "parameterTypes": [] },
+      { "returnType": "jlong", "parameterTypes": [] },
+      { "returnType": "jint", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["void*", "void*", "jlong", "jint", "void*", "jlong", "void*", "jlong", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["void*", "void*", "jlong", "jint", "void*", "void*", "jlong", "jlong",
+                           "void*", "jlong", "void*", "jlong", "void*"] },
+      { "returnType": "jlong", "parameterTypes": ["void*", "jlong", "void*", "jlong"] }
+    ]
+  }
+}
