@@ -25,3 +25,18 @@ php/.phpunit.result.cache
 # here runs `composer install` from the root, and a stray local one should not be committed.
 /vendor/
 /composer.lock
+
+# Swift
+# The static libraries under swift/HyperTabularCore.artifactbundle/{triple}/, and the
+# info.json that lists them, are not ignored — as in HyperCast, where they are committed,
+# because SwiftPM has no packing step for a git-URL dependency, and only by
+# stage-native-binaries.yml, after their provenance checks. Until this repository has that
+# workflow none is in the tree: the forge's static-libs/build-static-libs.sh builds them
+# (CI runs it before every Swift step), and a developer's own build of them shows up as
+# untracked and is not to be committed by hand.
+**/.build/
+# A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
+# the manifests declare, by CI as by anyone depending on this package.
+/Package.resolved
+/swift/Package.resolved
+/swift/StaticSmokeTest/Package.resolved

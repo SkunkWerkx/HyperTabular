@@ -1,0 +1,4 @@
+module HyperTabularCore {
+    header "hypertabular.h"
+    export *
+}
