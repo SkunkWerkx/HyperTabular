@@ -84,10 +84,8 @@ pub fn detect() -> Kind {
     #[cfg(target_arch = "aarch64")]
     {
         // The carry-less multiply: built in, or Apple silicon (which has always had it), or
-        // what Linux says of this CPU. Windows on ARM would be asked through
-        // `IsProcessorFeaturePresent`; until that is written and run on that hardware,
-        // the shift cascade is the answer there.
-        if cfg!(target_feature = "aes") || cfg!(target_vendor = "apple") || linux_pmull() {
+        // what the operating system says of this CPU.
+        if cfg!(target_feature = "aes") || cfg!(target_vendor = "apple") || system_pmull() {
             return Kind::NeonPmull;
         }
         return Kind::Neon;
@@ -96,11 +94,13 @@ pub fn detect() -> Kind {
     Kind::Swar
 }
 
-/// Whether Linux reports both AES and the polynomial multiply for this CPU — what Rust's
-/// `aes` target feature means on aarch64 — read from the auxiliary vector the kernel
-/// hands every process, through the C library's own accessor.
+/// Whether the operating system reports the AES and polynomial-multiply instructions
+/// for this CPU — what Rust's `aes` target feature means on aarch64, and what the standard
+/// library's own detection asks. On Linux, the auxiliary vector the kernel hands every
+/// process, through the C library's accessor; on Windows, the one question kernel32 has
+/// for it. Anywhere else there is nobody to ask, and the answer is no.
 #[cfg(target_arch = "aarch64")]
-fn linux_pmull() -> bool {
+fn system_pmull() -> bool {
     #[cfg(target_os = "linux")]
     {
         unsafe extern "C" {
@@ -110,6 +110,15 @@ fn linux_pmull() -> bool {
         const HWCAP_AES: core::ffi::c_ulong = 1 << 3;
         const HWCAP_PMULL: core::ffi::c_ulong = 1 << 4;
         return getauxval(AT_HWCAP) & (HWCAP_AES | HWCAP_PMULL) == HWCAP_AES | HWCAP_PMULL;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            safe fn IsProcessorFeaturePresent(feature: u32) -> i32;
+        }
+        const PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE: u32 = 30;
+        return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) != 0;
     }
     #[allow(unreachable_code)]
     false

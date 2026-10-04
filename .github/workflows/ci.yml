@@ -1,9 +1,16 @@
-name: CI — prove the core, test the crate
+name: CI — build native, test every binding
 
-# The core's three properties — no standard library, no allocation, no panic — proven on
-# the library itself by rust/check-core.sh, and the whole crate's suite, on both
-# architectures the engines are written for. This is the floor, not the pipeline: the
-# forge's build-native matrix (SkunkWerkx/.github) joins it with the first binding.
+# The forge's pipeline (SkunkWerkx/.github): the core built fresh on five real-hardware
+# legs, both musl RIDs and a cross-built Intel macOS, its own suite run on each, the
+# libraries attested and uploaded as `native-{rid}`, the nine static libraries built, and
+# every binding this repo has run against that leg's library.
+#
+# The bindings it does not have yet are switched off below. Each line goes when the PR
+# that adds the binding turns it on — that is the whole onboarding.
+#
+# Beside it, as in HyperCast, the checks that are this repo's own: rust/check-core.sh,
+# which proves on the library itself that the core has no standard library, no allocation
+# and no panic.
 #
 # No `push` trigger, as in every Hyper* repo: a PR run and a manual one are enough.
 on:
@@ -14,7 +21,31 @@ permissions:
   contents: read
 
 jobs:
-  core:
+  build-native:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@master
+    permissions:            # attestation signs with OIDC; a reusable workflow
+      contents: read        # can never escalate beyond its caller's grant
+      id-token: write
+      attestations: write
+    with:
+      project: HyperTabular
+      crate: hypertabular
+      pure_env: HYPERTABULAR_PURE
+      csharp_test_project: csharp/HyperTabular.Tests/HyperTabular.Tests.csproj
+      csharp_aot_project: csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj
+      csharp_runtimes_dir: csharp/HyperTabular/runtimes
+      dotnet_version: "11.0.x"
+      dotnet_quality: "preview"
+      # Not written yet. Each comes on with its binding.
+      java: false
+      swift: false
+      php: false
+      ruby: false
+      magnus: false
+      go: false
+      pyo3: false
+
+  check-core:
     strategy:
       fail-fast: false
       matrix:
@@ -46,58 +77,3 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy --no-default-features --features cdylib -- -D warnings
-
-  # The C# binding against this commit's core: its suite over the shared library (the
-  # corpus replay among it), then the Native AOT smoke program with the core linked in from
-  # the static archive the forge's own action builds. Until the other bindings exist this
-  # stands in for the C# leg of the forge's build-native matrix, on Linux only.
-  csharp:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-26.04
-            rid: linux-x64
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-26.04-arm
-            rid: linux-arm64
-            target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools
-
-      - uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: "11.0.x"
-          dotnet-quality: "preview"
-
-      - name: Build the native core
-        working-directory: rust
-        run: cargo cdylib
-
-      - name: Test the C# binding against it
-        run: dotnet test --project csharp/HyperTabular.Tests/HyperTabular.Tests.csproj -c Release
-
-      - name: Build this leg's static library
-        uses: SkunkWerkx/.github/.github/actions/static-libs@master
-        with:
-          crate: hypertabular
-          project: HyperTabular
-          targets: ${{ matrix.target }}
-
-      - name: Native AOT publish, the core linked in
-        run: |
-          dotnet publish csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj \
-            -c Release -r ${{ matrix.rid }} -o "$RUNNER_TEMP/aot" -warnaserror
-          # Linked in means nothing to load: no shared library beside the executable.
-          if ls "$RUNNER_TEMP/aot" | grep -q 'libhypertabular'; then
-            echo "::error::the AOT publish still carries the shared library"; exit 1
-          fi
-
-      - name: Run the AOT-published binary (must exit 0)
-        run: '"$RUNNER_TEMP/aot/HyperTabular.AotSmokeTest"'
-
