@@ -106,6 +106,46 @@ impl Values {
         }
     }
 
+    /// Room for `rows` values, emptied, and where they go. For a filler that writes the
+    /// values itself and then calls [`Values::set_rows`].
+    pub(crate) fn reserve_raw(&mut self, rows: usize) -> *mut c_void {
+        macro_rules! reserve {
+            ($($variant:ident),+) => {
+                match self {
+                    $(Values::$variant(v) => {
+                        v.clear();
+                        v.reserve(rows);
+                        v.as_mut_ptr().cast()
+                    })+
+                }
+            };
+        }
+        reserve!(
+            Bool, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Uuid, Timestamp, Date, Time,
+            Duration, Text, Decimal, DateTime
+        )
+    }
+
+    /// Declares the first `rows` values written.
+    ///
+    /// # Safety
+    /// They were, through the pointer [`Values::reserve_raw`] returned for at least that
+    /// many, each a valid value of the column's type (a `Bool` byte is `0` or `1`).
+    pub(crate) unsafe fn set_rows(&mut self, rows: usize) {
+        macro_rules! set {
+            ($($variant:ident),+) => {
+                match self {
+                    // SAFETY: per the function contract.
+                    $(Values::$variant(v) => unsafe { v.set_len(rows) },)+
+                }
+            };
+        }
+        set!(
+            Bool, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, Uuid, Timestamp, Date, Time,
+            Duration, Text, Decimal, DateTime
+        )
+    }
+
     /// The number of values.
     pub fn len(&self) -> usize {
         match self {
@@ -312,6 +352,75 @@ impl Batch {
         self.arena.clear();
         self.faults.clear();
         self.rows = 0;
+    }
+
+    /// Where a filler that writes the columns itself is to write them: for each plan
+    /// column, room for `rows` values and `rows` verdicts, appended to `out`. The batch
+    /// must have been [`Batch::prepare`]d for the plan; [`Batch::commit`] follows.
+    pub(crate) fn raw_columns(
+        &mut self,
+        rows: usize,
+        out: &mut Vec<crate::kernel::abi::ColumnBuffer>,
+    ) {
+        for data in &mut self.columns {
+            data.verdicts.clear();
+            data.verdicts.reserve(rows);
+            out.push(crate::kernel::abi::ColumnBuffer {
+                values: data.values.reserve_raw(rows),
+                verdicts: data.verdicts.as_mut_ptr(),
+            });
+        }
+    }
+
+    /// Declares `rows` rows written through [`Batch::raw_columns`]' pointers.
+    ///
+    /// # Safety
+    /// Every column's first `rows` values and verdicts were written, validly.
+    pub(crate) unsafe fn commit(&mut self, rows: usize) {
+        for data in &mut self.columns {
+            // SAFETY: per the function contract.
+            unsafe {
+                data.values.set_rows(rows);
+                data.verdicts.set_len(rows);
+            }
+        }
+        self.rows = rows;
+    }
+
+    /// Moves every `Text` value into the batch's own arena: `bytes` says where a span the
+    /// filler wrote actually points, and the span is rewritten to where the copy went.
+    pub(crate) fn own_text<'t>(&mut self, bytes: impl Fn(Span) -> &'t [u8]) {
+        let Batch { columns, arena, .. } = self;
+        for data in columns {
+            let Values::Text(spans) = &mut data.values else {
+                continue;
+            };
+            for (span, verdict) in spans.iter_mut().zip(&data.verdicts) {
+                if !verdict.is_ok() {
+                    *span = Span::default();
+                    continue;
+                }
+                let text = bytes(*span);
+                let offset = arena.len() as u32;
+                arena.extend_from_slice(text);
+                *span = Span {
+                    offset,
+                    len: text.len() as u32,
+                };
+            }
+        }
+    }
+
+    /// Records the raw text of the cell at (`row`, `column`) in the fault table.
+    pub(crate) fn push_fault(&mut self, row: u32, column: u32, raw: &[u8]) {
+        let raw = self.push_arena(raw);
+        self.faults.push(FaultRaw { row, column, raw });
+    }
+
+    /// Puts the fault table in row order, then column order.
+    pub(crate) fn sort_faults(&mut self) {
+        self.faults
+            .sort_unstable_by_key(|fault| (fault.row, fault.column));
     }
 
     fn push_arena(&mut self, bytes: &[u8]) -> Span {

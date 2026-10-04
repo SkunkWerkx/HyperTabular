@@ -83,9 +83,21 @@ once, in whatever its language does best, and the core is crossed once per chunk
   how much one row takes.
 
 Measured on linux-x64 (a 66 MB, million-row file; six columns cast to `i64`, `f64`, text,
-a timestamp, a boolean and `i32`): 548 MB/s through the core, against 441 MB/s for the
-row-at-a-time reader filling an owned batch, and 974 MB/s for the `csv` crate splitting
-records without casting anything. Chunk size makes no difference (538 MB/s at 64 KiB).
+a timestamp, a boolean and `i32`): about 575 MB/s through the core into the caller's
+buffers, 530 MB/s through the Rust binding (`delimited::BatchReader`, which also copies
+each batch's text into the batch), against 430 MB/s for the row-at-a-time reader filling
+the same batch a cell at a time, and 900 MB/s for the `csv` crate splitting records
+without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB).
+
+### The Rust API is a binding
+
+`delimited::BatchReader` is the Rust binding over that call, and is the model for the
+other seven: it owns the input buffer and the reads that fill it, a `Batch`'s column
+vectors, the cell table and the arena — allocated once, reused — and the loop that puts
+what the core did not consume back in front of it. It copies a batch's text into the batch
+so the batch outlives its chunk, and builds the batch's fault table from the cell table.
+Those are its choices; none of it is in the core. `delimited::Reader`, the row-at-a-time
+cursor, shares the core's scanner and collects what it reports into vectors.
 
 ### What is not in the core yet
 

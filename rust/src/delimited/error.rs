@@ -12,6 +12,12 @@ pub enum Error {
     /// The declared separator cannot be honoured (see [`crate::delimited::Dialect::is_valid_separator`]).
     /// A caller bug, not a data verdict.
     Separator(u8),
+    /// A plan column's numeric notation cannot be honoured: its decimal and group
+    /// separators are the same character. A caller bug, not a data verdict.
+    Notation {
+        /// The plan column's index.
+        column: usize,
+    },
     /// The underlying read failed.
     Io(Arc<io::Error>),
     /// The input ended inside a quoted cell.
@@ -51,7 +57,7 @@ pub enum Error {
 
 impl Error {
     /// The ABI code for this error's kind: `1` unclosed quote, `2` column count,
-    /// `3` row too long, `4` I/O, `5` separator.
+    /// `3` row too long, `4` I/O, `5` separator, `6` notation.
     pub const fn code(&self) -> i32 {
         match self {
             Error::UnclosedQuote { .. } => 1,
@@ -59,6 +65,7 @@ impl Error {
             Error::RowTooLong { .. } => 3,
             Error::Io(_) => 4,
             Error::Separator(_) => 5,
+            Error::Notation { .. } => 6,
         }
     }
 }
@@ -75,6 +82,10 @@ impl fmt::Display for Error {
             Error::Separator(byte) => write!(
                 f,
                 "separator byte 0x{byte:02X} is not tab or printable ASCII other than '\"'"
+            ),
+            Error::Notation { column } => write!(
+                f,
+                "plan column {column} declares the same decimal and group separator"
             ),
             Error::Io(error) => write!(f, "read failed: {error}"),
             Error::UnclosedQuote { record, line, byte } => {
