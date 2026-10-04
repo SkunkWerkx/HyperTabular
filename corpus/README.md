@@ -1,4 +1,50 @@
-# Corpus — the files real applications wrote
+# Corpus
+
+Two things live here: the conformance contract every binding replays, and the files real
+applications wrote.
+
+## `delimited.json` — the contract for delimited text
+
+Every binding reads each case and must produce exactly what it says: the header, every
+row's cells through the case's plan, and the structural failure if there is one. The Rust
+binding replays it in `rust/tests/corpus_delimited.rs`.
+
+It is written by `cargo run --example corpus` (in `rust/`), from cases that state two
+things by hand: the input, and the text that must reach each cell. What each plan column
+makes of that text is not this layer's to decide — HyperCast is the judge — so a cell's
+verdict is whatever HyperCast's own door says of the hand-written text, asked directly.
+
+A case:
+
+```json
+{
+  "name": "a cell that does not cast says where",
+  "input": "a,b,c\n12x4,256,x\n",
+  "dialect": { "separator": ",", "quoting": true, "skip_blank_lines": true, "has_header": true },
+  "plan": [ { "door": "i32", "ordinal": 0 }, { "door": "u8", "ordinal": 1 } ],
+  "header": ["a", "b", "c"],
+  "rows": [ [ { "expect": "malformed", "fault": [2, 1], "raw": "12x4" },
+              { "expect": "out_of_range", "fault": [0, 3], "raw": "256" } ] ],
+  "failure": { "kind": "column_count", "record": 2, "line": 3, "byte": 8, "expected": 2, "found": 1 }
+}
+```
+
+- `input` is UTF-8 text; a byte-order mark is written `\uFEFF`.
+- A plan entry names its door as HyperCast's corpus names its types, with what the door
+  declares beside it (`precision` for `unix`, `order` for `date_ordered` and `datetime`,
+  `epoch` for `excel_serial`, numbered as HyperCast numbers them) and a `format` in
+  HyperCast's shape where the numeric notation is not the invariant one.
+- `header` is `null` when the dialect declares none, and `[]` for an input with no record.
+- A cell is a verdict in HyperCast's corpus shape — `{"expect": "ok", …the value…}`, with
+  `text` for the text door — or `{"expect": "empty"}`, or a fault with its span and `raw`,
+  the cell's own text, which a binding has to be able to give back.
+- `failure`, when present, ends the input after the rows listed; its positions count the
+  header, skipped blank lines and a byte-order mark.
+
+How the input is cut into chunks is the binding's business and must not change the answer;
+a binding should replay each case more than one way.
+
+## The files real applications wrote
 
 HyperWorkbook's tests run on fixtures openpyxl and a hand-written ODF schema produced. This
 directory is for the files real writers produce — Excel, LibreOffice, Google Sheets, Apple
