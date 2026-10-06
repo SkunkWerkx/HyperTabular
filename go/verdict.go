@@ -31,5 +31,9 @@ func (v CellVerdict) Fault() *hypercast.Fault {
 	if v.reason == 0 {
 		return nil
 	}
-	return &hypercast.Fault{Reason: hypercast.CastFailure(v.reason), Offset: int(v.offset), Length: int(v.length)}
+	fault, ok := hypercast.FaultFromCode(v.reason, v.offset, v.length)
+	if !ok {
+		panic(contractViolation)
+	}
+	return fault
 }

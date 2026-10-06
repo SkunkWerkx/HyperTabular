@@ -1,4 +1,5 @@
 using HyperCast;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -149,18 +150,12 @@ public readonly record struct Column
 	/// <summary>A Unix-epoch column at the declared precision — never guessed from magnitude.</summary>
 	/// <exception cref="ArgumentOutOfRangeException"><paramref name="precision"/> is undefined.</exception>
 	public static Column Unix(int ordinal, UnixPrecision precision) =>
-		precision is UnixPrecision.Seconds or UnixPrecision.Milliseconds
-			or UnixPrecision.Microseconds or UnixPrecision.Nanoseconds
-			? new(ordinal, Door.Unix, (uint)precision, NumFormat.Invariant)
-			: throw new ArgumentOutOfRangeException(nameof(precision), precision,
-				"Precision must be Seconds, Milliseconds, Microseconds, or Nanoseconds.");
+		new(ordinal, Door.Unix, Abi.Code(precision), NumFormat.Invariant);
 
 	/// <summary>An Excel date-serial column under the declared date system.</summary>
 	/// <exception cref="ArgumentOutOfRangeException"><paramref name="epoch"/> is undefined.</exception>
 	public static Column ExcelSerial(int ordinal, ExcelEpoch epoch) =>
-		epoch is ExcelEpoch.Y1900 or ExcelEpoch.Y1904
-			? new(ordinal, Door.ExcelSerial, (uint)epoch, NumFormat.Invariant)
-			: throw new ArgumentOutOfRangeException(nameof(epoch), epoch, "Epoch must be Y1900 or Y1904.");
+		new(ordinal, Door.ExcelSerial, Abi.Code(epoch), NumFormat.Invariant);
 
 	/// <summary>A strict <c>yyyy-MM-dd</c> date column.</summary>
 	public static Column Date(int ordinal) => new(ordinal, Door.Date, 0, NumFormat.Invariant);
@@ -168,12 +163,12 @@ public readonly record struct Column
 	/// <summary>A separated-date column under the declared field order.</summary>
 	/// <exception cref="ArgumentOutOfRangeException"><paramref name="order"/> is undefined.</exception>
 	public static Column Date(int ordinal, DateOrder order) =>
-		new(ordinal, Door.DateOrdered, Checked(order), NumFormat.Invariant);
+		new(ordinal, Door.DateOrdered, Abi.Code(order), NumFormat.Invariant);
 
 	/// <summary>A zone-less civil date-time column under the declared field order.</summary>
 	/// <exception cref="ArgumentOutOfRangeException"><paramref name="order"/> is undefined.</exception>
 	public static Column DateTime(int ordinal, DateOrder order) =>
-		new(ordinal, Door.DateTime, Checked(order), NumFormat.Invariant);
+		new(ordinal, Door.DateTime, Abi.Code(order), NumFormat.Invariant);
 
 	/// <summary>A 24-hour time-of-day column.</summary>
 	public static Column Time(int ordinal) => new(ordinal, Door.Time, 0, NumFormat.Invariant);
@@ -183,12 +178,6 @@ public readonly record struct Column
 
 	/// <summary>A text column: the cell's bytes themselves, untrimmed.</summary>
 	public static Column Text(int ordinal) => new(ordinal, Door.Text, 0, NumFormat.Invariant);
-
-	static uint Checked(DateOrder order) =>
-		order is DateOrder.YearMonthDay or DateOrder.MonthDayYear or DateOrder.DayMonthYear
-			? (uint)order
-			: throw new ArgumentOutOfRangeException(nameof(order), order,
-				"Order must be YearMonthDay, MonthDayYear, or DayMonthYear.");
 
 	/// <summary>Bytes one value of this column's door takes in a column buffer.</summary>
 	internal int ValueSize =>

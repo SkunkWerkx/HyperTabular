@@ -229,10 +229,11 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 	if opened.format == 2 {
 		w.format = ODS
 	}
-	w.epoch = hypercast.Excel1900
-	if opened.epoch == 2 {
-		w.epoch = hypercast.Excel1904
+	epoch, ok := hypercast.ExcelEpochFromCode(opened.epoch)
+	if !ok {
+		panic(contractViolation)
 	}
+	w.epoch = epoch
 
 	if err := settled(s.drive(bookSheets, w, w.state, nil), s.filled); err != nil {
 		return nil, err

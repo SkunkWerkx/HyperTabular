@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace HyperTabular;
 
+use HyperCast\Interop\NativeValues;
+
 /**
  * The native core this package binds: whether it loaded, and which version answered.
  */
@@ -51,7 +53,6 @@ final class Tabular
      */
     public static function nativeVersion(): string
     {
-        $packed = Native::ffi()->hypertabular_version();
-        return sprintf('%d.%d.%d', $packed >> 16, ($packed >> 8) & 0xFF, $packed & 0xFF);
+        return NativeValues::version(Native::ffi()->hypertabular_version());
     }
 }

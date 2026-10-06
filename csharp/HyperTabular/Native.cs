@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -28,22 +29,6 @@ static unsafe partial class Native
 
 		public readonly int Length => (int)(Len & ~SpanFlag);
 		public readonly bool Flagged => (Len & SpanFlag) != 0;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawNumFormat
-	{
-		public uint DecimalSep;
-		public uint GroupSep;
-		public uint Flags;
-		public uint CurrencyLen;
-		public CurrencyBytes Currency;
-	}
-
-	[InlineArray(16)]
-	internal struct CurrencyBytes
-	{
-		byte _element0;
 	}
 
 	[StructLayout(LayoutKind.Sequential)]
@@ -97,46 +82,6 @@ static unsafe partial class Native
 	internal struct State
 	{
 		ulong _first;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawTimestamp
-	{
-		public long Seconds;
-		public int Nanos;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawDate
-	{
-		public ushort Year;
-		public byte Month;
-		public byte Day;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawCivil
-	{
-		public ushort Year;
-		public byte Month;
-		public byte Day;
-		public ulong NanosOfDay;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawDuration
-	{
-		public long Seconds;
-		public int Nanos;
-	}
-
-	[StructLayout(LayoutKind.Sequential)]
-	internal struct RawDecimal
-	{
-		public ulong Lo;
-		public uint Hi;
-		public byte Scale;
-		public byte Negative;
 	}
 
 	/// <summary>One cell of the row a workbook read assembles: the core's scratch, never read here.</summary>

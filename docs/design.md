@@ -216,9 +216,11 @@ same code, replayed against the same corpus.
   Serials `1 ≤ s < 60` are shifted one day so `1` is 1900-01-01; a serial under `1` names
   no day → `OutOfRange`.
 - 1904 system: epoch 1904-01-01, no leap bug; serial `0` is that day.
-- Fraction × 86 400 s, rounded to the nearest nanosecond (not to milliseconds — the double
-  resolves ~0.6 µs at serial 45 000; coarser rounding is a presentation choice for
-  bindings).
+- Fraction × 86 400 s, snapped (HyperCast): of the times that store as the same double,
+  the one with the fewest fractional-second digits. The double resolves ~0.6 µs at serial
+  45 000 and ~40 µs at 9999-12-31, so the nearest nanosecond is float noise; snapping
+  reads Excel's `23:59:59` on the second and keeps a real sub-millisecond time the double
+  can hold.
 - `s < 0` → `Malformed` (Excel renders `####`). `s ≥ 2 958 466` (past 9999-12-31) →
   `OutOfRange`.
 - What stays tabular (`hypertabular::serial`) is what a number *format* declares: a
@@ -319,16 +321,25 @@ handling. The decisions specific to it are in `docs/workbook.md`.
 - **XLSX cells.** `r` gives the column (missing `r` ⇒ previous + 1, per ISO 29500), `s`
   the `cellXfs` index, `t` the type. `<v>` is parsed straight from its bytes: `s` →
   shared-string index; `b` → `0`/`1`; `e` → error; `d` → ISO wall-clock; otherwise a
-  double, then classified by the style's number-format kind: number, date/time (→
+  double, then classified by the style's number-format kind: number, date, time (→
   `Wall`/`Clock`), elapsed (→ `Span`). `<is>` is collected like a shared string; `<f>` is
   skipped — the cached value is the value. Shared strings are loaded once into a buffer
   of the caller's with a span for each (rich-text runs concatenated, `rPh` phonetics
   skipped), and a shared-string cell is a span into it, never a copy.
-- **Date-kind classification.** Built-in ids 14–22, 27–36, 45–47, 50–58, 71–81 are
-  temporal (46 elapsed); custom codes: first `;` section only, skip `"…"` literals and
-  `\`/`_`/`*` escapes, `[h]`/`[m]`/`[s]` ⇒ elapsed, any other `[…]` ignored, then any of
-  `y m d h s` ⇒ date/time, else number. This is the intersection of what Sylvan,
-  calamine, xlrd, and POI agree on.
+- **Date-kind classification.** Built-in ids per ISO 29500 §18.8.30: 14–17, 22, 27–31,
+  36, 50, 51, 54, 57, 58, 71–74, 77, 81 are dates; 18–21, 32, 33, 45, 47, 75, 76, 78, 80
+  times; 46 and 79 (Thai `[h]:mm:ss`) elapsed. 34, 35, 52, 53, 55, 56 are times in
+  Chinese and dates in Japanese or Korean — the file does not say which UI language
+  wrote it — and are read as times, which invents no date. Custom codes: first `;`
+  section only, skip `"…"` literals and `\`/`_`/`*` escapes, `[h]`/`[m]`/`[s]` ⇒
+  elapsed, any other `[…]` ignored, then `y`, `d` or a month `m` ⇒ date, `h`, `s` or a
+  minutes `m` alone ⇒ time, else number. `m` is minutes after an `h` or before an `s`
+  (§18.8.31, "month versus minutes"), the month otherwise. The scan is the intersection
+  of what Sylvan, calamine, xlrd, and POI agree on; the date/time split is the spec's.
+- **What a date serial is.** A date format's serial is a wall clock; under one day it is
+  a time of day in the 1900 system (serial `0` is the `1900-01-00` that never was), and in
+  the 1904 system still a date — serial `0` is 1904-01-01. A time format's serial is a
+  time of day under one day and a wall clock past it.
 - **Rows.** Row `r` gaps and empty `<row>`s become empty rows only if `skip_empty_rows`
   is off (default on: a row with no cells carries nothing to cast, and LibreOffice pads
   sheets with them). Sheets are opened by index or name; hidden sheets are listed with

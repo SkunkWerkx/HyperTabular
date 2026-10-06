@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using HyperCast;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -22,7 +23,8 @@ public readonly struct CellVerdict
 	/// <summary>
 	/// Why the cell did not cast — <see cref="CastFailure.Unspecified"/> when it did.
 	/// </summary>
-	public CastFailure Reason => (CastFailure)_reason;
+	/// <exception cref="InvalidOperationException">The code names no reason — a binding bug, not data.</exception>
+	public CastFailure Reason => IsOk ? CastFailure.Unspecified : ToFault().Reason;
 
 	/// <summary>Byte offset of the offending span within the cell's text.</summary>
 	public int Offset => (int)_offset;
@@ -35,5 +37,5 @@ public readonly struct CellVerdict
 	public Fault ToFault() =>
 		IsOk
 			? throw new InvalidOperationException("The cell cast; it has no fault.")
-			: new Fault(Reason, Offset, Length);
+			: Abi.ToFault(_reason, new RawFault(_offset, _length));
 }

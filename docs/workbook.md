@@ -26,11 +26,15 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   `design.md` has the matrix.
 - **Formulas are never evaluated.** `<f>` is skipped; the cached value is the value. A
   formula with no cached value is an empty cell.
-- **Date-kind classification** (`kernel/workbook/styles.rs`): built-in ids 14–22, 27–36,
-  45, 47, 50–58, 71–81 → date/time; 46 → elapsed; 49 → text. Custom codes: first `;`
-  section, `"…"` and `\`/`_`/`*` escapes skipped, `[h]`/`[m]`/`[s]` ⇒ elapsed, any other
-  `[…]` ignored, `AM/PM` skipped, then any of `y m d h s` ⇒ date/time. A custom id
-  declared twice means what the latest declaration before the cell format says.
+- **Date-kind classification** (`kernel/workbook/styles.rs`): built-in ids per ISO 29500
+  §18.8.30 → date, time, elapsed (46, and Thai 79) or text (49); the ids that are times in
+  Chinese and dates in Japanese or Korean (34, 35, 52, 53, 55, 56) → time. Custom codes:
+  first `;` section, `"…"` and `\`/`_`/`*` escapes skipped, `[h]`/`[m]`/`[s]` ⇒ elapsed,
+  any other `[…]` ignored, `AM/PM` skipped, then `y`, `d` or a month `m` ⇒ date, `h`, `s`
+  or a minutes `m` ⇒ time (`m` is minutes after `h` or before `s`). A date format in the
+  1904 system has a date from serial `0` (1904-01-01) up; under one day anything else is a
+  time of day. A custom id declared twice means what the latest declaration before the
+  cell format says.
 - **Rows.** `<row r>` gaps and empty `<row>`s are empty rows: skipped by default
   (`skip_empty_rows`), delivered with their sheet row numbers otherwise. Missing `r` on a
   row or cell means "the next one", per ISO 29500. `dimension` is not consulted (it is

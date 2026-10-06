@@ -5,7 +5,9 @@
 //! code does.
 
 use hypertabular::kernel::workbook::cell::{Cell, render, serial, wall_from_iso};
-use hypertabular::kernel::workbook::styles::{DATE_TIME, ELAPSED, NUMBER, TEXT, builtin, classify};
+use hypertabular::kernel::workbook::styles::{
+    DATE_TIME, ELAPSED, NUMBER, TEXT, TIME, builtin, classify,
+};
 use hypertabular::{Date, Duration, ExcelEpoch};
 
 fn said(cell: Cell<'_>) -> String {
@@ -17,10 +19,23 @@ fn builtin_number_formats() {
     assert_eq!(builtin(0), NUMBER);
     assert_eq!(builtin(4), NUMBER);
     assert_eq!(builtin(14), DATE_TIME);
+    assert_eq!(builtin(18), TIME);
+    assert_eq!(builtin(21), TIME);
     assert_eq!(builtin(22), DATE_TIME);
-    assert_eq!(builtin(45), DATE_TIME);
+    assert_eq!(builtin(45), TIME);
     assert_eq!(builtin(46), ELAPSED);
-    assert_eq!(builtin(47), DATE_TIME);
+    assert_eq!(builtin(47), TIME);
+    // The locale ids: a date or a time in every locale the spec lists, or — 34, 35, 52, 53,
+    // 55, 56 — a time in Chinese and a date in Japanese or Korean, read as the time.
+    assert_eq!(builtin(31), DATE_TIME);
+    assert_eq!(builtin(32), TIME);
+    assert_eq!(builtin(34), TIME);
+    assert_eq!(builtin(54), DATE_TIME);
+    assert_eq!(builtin(56), TIME);
+    assert_eq!(builtin(76), TIME);
+    assert_eq!(builtin(77), DATE_TIME);
+    assert_eq!(builtin(79), ELAPSED);
+    assert_eq!(builtin(81), DATE_TIME);
     assert_eq!(builtin(49), TEXT);
     assert_eq!(builtin(164), NUMBER);
 }
@@ -29,7 +44,18 @@ fn builtin_number_formats() {
 fn custom_number_formats() {
     assert_eq!(classify(b"yyyy-mm-dd"), DATE_TIME);
     assert_eq!(classify(b"m/d/yyyy h:mm"), DATE_TIME);
-    assert_eq!(classify(b"h:mm AM/PM"), DATE_TIME);
+    assert_eq!(classify(b"h:mm AM/PM"), TIME);
+    // Month versus minutes: `m` after an `h` or before an `s` is minutes, else the month.
+    assert_eq!(classify(b"h:mm"), TIME);
+    assert_eq!(classify(b"mm:ss"), TIME);
+    assert_eq!(classify(b"m:ss.0"), TIME);
+    assert_eq!(classify(b"hh\"h\" mm\"m\""), TIME);
+    assert_eq!(classify(b"mmm"), DATE_TIME);
+    assert_eq!(classify(b"mm"), DATE_TIME);
+    assert_eq!(classify(b"mmmm h"), DATE_TIME);
+    assert_eq!(classify(b"h:mm mm"), DATE_TIME);
+    assert_eq!(classify(b"[$-F400]h:mm:ss AM/PM"), TIME);
+    assert_eq!(classify(b"[$-F800]dddd, mmmm dd, yyyy"), DATE_TIME);
     assert_eq!(classify(b"[h]:mm:ss"), ELAPSED);
     assert_eq!(classify(b"[mm]:ss"), ELAPSED);
     assert_eq!(classify(b"0.00"), NUMBER);
@@ -54,14 +80,21 @@ fn custom_number_formats() {
 #[test]
 fn a_serial_under_one_day_has_no_date() {
     let y1900 = ExcelEpoch::Y1900;
-    assert_eq!(serial(0.0, ExcelEpoch::Y1904, false), Some(Cell::Clock(0)));
+    let y1904 = ExcelEpoch::Y1904;
+    assert_eq!(serial(0.0, y1904, TIME), Some(Cell::Clock(0)));
+    // A date format in the 1900 system: its serial 0 is the `1900-01-00` that never was,
+    // so what is under a day is still only a time.
     assert_eq!(
-        serial(0.5, y1900, false),
+        serial(0.5, y1900, DATE_TIME),
+        Some(Cell::Clock(43_200_000_000_000))
+    );
+    assert_eq!(
+        serial(0.5, y1900, TIME),
         Some(Cell::Clock(43_200_000_000_000))
     );
     // 1 - 2^-53 days rounds up to exactly one day and carries: a date, at midnight.
     assert_eq!(
-        serial(1.0 - f64::EPSILON / 2.0, y1900, false),
+        serial(1.0 - f64::EPSILON / 2.0, y1900, TIME),
         Some(Cell::Wall {
             date: Date {
                 year: 1900,
@@ -74,23 +107,49 @@ fn a_serial_under_one_day_has_no_date() {
     // Half a nanosecond short of a day is still the day before, rounded down.
     let short = 1.0 - 0.6 / 86_400_000_000_000.0;
     assert_eq!(
-        serial(short, y1900, false),
+        serial(short, y1900, TIME),
         Some(Cell::Clock(86_399_999_999_999))
     );
-    assert_eq!(serial(-1.0, y1900, false), None);
-    assert_eq!(serial(f64::NAN, y1900, false), None);
-    assert_eq!(serial(1e16, y1900, false), None);
+    assert_eq!(serial(-1.0, y1900, TIME), None);
+    assert_eq!(serial(f64::NAN, y1900, TIME), None);
+    assert_eq!(serial(1e16, y1900, TIME), None);
+}
+
+#[test]
+fn a_1904_date_format_has_a_date_from_serial_zero() {
+    let y1904 = ExcelEpoch::Y1904;
+    let first = Date {
+        year: 1904,
+        month: 1,
+        day: 1,
+    };
+    assert_eq!(
+        serial(0.0, y1904, DATE_TIME),
+        Some(Cell::Wall {
+            date: first,
+            nanos: 0
+        })
+    );
+    assert_eq!(
+        serial(0.5, y1904, DATE_TIME),
+        Some(Cell::Wall {
+            date: first,
+            nanos: 43_200_000_000_000
+        })
+    );
+    assert_eq!(serial(-1.0, y1904, DATE_TIME), None);
+    assert_eq!(serial(f64::NAN, y1904, DATE_TIME), None);
 }
 
 #[test]
 fn a_serial_is_what_its_format_declared() {
     let (y1900, y1904) = (ExcelEpoch::Y1900, ExcelEpoch::Y1904);
     assert_eq!(
-        serial(0.75, y1900, false),
+        serial(0.75, y1900, TIME),
         Some(Cell::Clock(64_800_000_000_000))
     );
     assert_eq!(
-        serial(45_000.25, y1900, false),
+        serial(45_000.25, y1900, DATE_TIME),
         Some(Cell::Wall {
             date: Date {
                 year: 2023,
@@ -101,27 +160,27 @@ fn a_serial_is_what_its_format_declared() {
         })
     );
     assert_eq!(
-        serial(1.5, y1900, true),
+        serial(1.5, y1900, ELAPSED),
         Some(Cell::Span(Duration {
             seconds: 129_600,
             nanos: 0
         }))
     );
     assert_eq!(
-        serial(-0.000_000_5, y1904, true),
+        serial(-0.000_000_5, y1904, ELAPSED),
         Some(Cell::Span(Duration {
             seconds: 0,
             nanos: -43_200_000
         }))
     );
-    assert_eq!(serial(1e10, y1900, true), None);
-    assert_eq!(serial(f64::INFINITY, y1900, true), None);
+    assert_eq!(serial(1e10, y1900, ELAPSED), None);
+    assert_eq!(serial(f64::INFINITY, y1900, ELAPSED), None);
     // The date rules are HyperCast's: the phantom serial and a serial past 9999-12-31
     // are refused, and the 1904 system has no phantom.
-    assert_eq!(serial(60.0, y1900, false), None);
-    assert_eq!(serial(2_958_466.0, y1900, false), None);
+    assert_eq!(serial(60.0, y1900, DATE_TIME), None);
+    assert_eq!(serial(2_958_466.0, y1900, DATE_TIME), None);
     assert_eq!(
-        serial(60.0, y1904, false),
+        serial(60.0, y1904, DATE_TIME),
         Some(Cell::Wall {
             date: Date {
                 year: 1904,

@@ -1,26 +1,16 @@
+using HyperCast.Interop;
+
 namespace HyperTabular;
 
 /// <summary>The native core this assembly binds: whether it loaded, and which version answered.</summary>
 public static class Tabular
 {
-	static readonly Lazy<Version?> _nativeVersion = new(ProbeNativeVersion, LazyThreadSafetyMode.PublicationOnly);
-
 	// The one place the binding catches: loading is the caller's environment, not their
 	// data, and the point of the probe is to answer "did the native library resolve"
-	// without making the first real read the thing that finds out.
-	static Version? ProbeNativeVersion()
-	{
-		try
-		{
-			var packed = Native.hypertabular_version();
-			return new Version((int)(packed >> 16), (int)((packed >> 8) & 0xFF), (int)(packed & 0xFF));
-		}
-		catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException
-			or BadImageFormatException or PlatformNotSupportedException or TypeInitializationException)
-		{
-			return null;
-		}
-	}
+	// without making the first real read the thing that finds out. HyperCast's probe, for
+	// this library's version export.
+	static readonly Lazy<Version?> _nativeVersion =
+		new(() => Abi.ProbeVersion(Native.hypertabular_version), LazyThreadSafetyMode.PublicationOnly);
 
 	/// <summary>
 	/// <see langword="true"/> when the native library resolved and answered the version

@@ -82,17 +82,12 @@ module HyperTabular
       # development loop — the in-repo cargo build, exactly what the other bindings' local
       # staging does. Nil when neither exists.
       def library_path
-        rid, lib_name = NativePlatform.rid_and_library_name
-        path = File.join(NATIVE_DIR, rid, lib_name)
-        return path if File.exist?(path)
-
-        repo_build = File.expand_path(File.join(__dir__, "../../../rust/target/release", lib_name))
-        File.exist?(repo_build) ? repo_build : nil
+        HyperCast::Interop.library_path("hypertabular", NATIVE_DIR, File.expand_path("../../..", __dir__))
       end
 
       # Why there was nothing to load.
       def missing_library_message
-        rid, lib_name = NativePlatform.rid_and_library_name
+        rid, lib_name = HyperCast::NativePlatform.rid_and_library_name(library: "hypertabular")
         "hypertabular: #{File.join(NATIVE_DIR, rid, lib_name)} not found (unsupported platform, " \
           "or this gem was built without a native library for it)"
       end

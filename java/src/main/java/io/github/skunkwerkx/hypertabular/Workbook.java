@@ -148,8 +148,8 @@ public final class Workbook implements AutoCloseable {
             format = opened.get(ValueLayout.JAVA_INT, Native.OPENED_FORMAT) == 1
                     ? WorkbookFormat.XLSX
                     : WorkbookFormat.ODS;
-            dateSystem =
-                    opened.get(ValueLayout.JAVA_INT, Native.OPENED_EPOCH) == 2 ? ExcelEpoch.Y1904 : ExcelEpoch.Y1900;
+            dateSystem = ExcelEpoch.fromCode(opened.get(ValueLayout.JAVA_INT, Native.OPENED_EPOCH))
+                    .orElseThrow(() -> new IllegalStateException(CONTRACT_VIOLATION));
 
             MemorySegment filled = settle(scratch.drive(this, state, Native.Book.SHEETS));
             int count = (int) filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS);

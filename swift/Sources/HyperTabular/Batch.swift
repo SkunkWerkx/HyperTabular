@@ -133,6 +133,12 @@ public final class Batch {
         columnSet.valueBase[column].load(fromByteOffset: row * MemoryLayout<Raw>.stride, as: Raw.self)
     }
 
+    /// The bytes the core wrote for the cell at (`column`, `row`) — one value of the column's
+    /// door, `size` bytes — for HyperCast's ``Interop`` readers to present.
+    func bytes(_ column: Int, _ row: Int, size: Int) -> UnsafeRawBufferPointer {
+        UnsafeRawBufferPointer(start: columnSet.valueBase[column] + row * size, count: size)
+    }
+
     /// The door a column is cast through.
     func door(_ column: Int) -> Door {
         columnSet.plan[column].door
@@ -236,27 +242,22 @@ extension UInt64: CellValue {}
 extension Float: CellValue {}
 extension Double: CellValue {}
 
-/// 2⁶⁴ — the weight of a decimal's high word, exact in `Decimal`.
-private let highWordWeight = Decimal(UInt64.max) + Decimal(1)
-
 extension Decimal: CellValue {
     /// ``Door/decimal``.
     public static func isPresented(by door: Door) -> Bool { door == .decimal }
     /// Exact, as HyperCast's own `Cast.decimal` presents it. The core's magnitude is at most
     /// 2⁹⁶ − 1 (29 digits), inside `Decimal`'s 38-digit mantissa, so nothing is rounded.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> Decimal {
-        let raw = batch.load(column, row, as: hypertabular_decimal.self)
-        let magnitude = raw.hi == 0 ? Decimal(raw.lo) : Decimal(raw.hi) * highWordWeight + Decimal(raw.lo)
-        return Decimal(sign: raw.negative != 0 ? .minus : .plus, exponent: -Int(raw.scale), significand: magnitude)
+        Interop.decimal(batch.bytes(column, row, size: 16))
     }
 }
 
 extension UUID: CellValue {
     /// ``Door/uuid``.
     public static func isPresented(by door: Door) -> Bool { door == .uuid }
-    /// `uuid_t`'s tuple layout is the RFC byte order exactly, which is what the core writes.
+    /// The 16 bytes the core writes, in RFC 9562 order.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> UUID {
-        UUID(uuid: batch.load(column, row, as: uuid_t.self))
+        Interop.uuid(batch.bytes(column, row, size: 16))
     }
 }
 
@@ -268,8 +269,7 @@ extension Date: CellValue {
     /// An instant — a `Double` of seconds, so sub-microsecond fidelity degrades toward the
     /// window's edges, exactly as HyperCast's own doors present it.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> Date {
-        let raw = batch.load(column, row, as: hypertabular_timestamp.self)
-        return Date(timeIntervalSince1970: Double(raw.seconds) + Double(raw.nanos) / 1_000_000_000)
+        Interop.instant(batch.bytes(column, row, size: 16))
     }
 }
 
@@ -283,22 +283,9 @@ extension DateComponents: CellValue {
     /// The fields the door reads, digit-perfect, with no calendar or zone attached.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> DateComponents {
         switch batch.door(column) {
-        case .dateTime:
-            let raw = batch.load(column, row, as: hypertabular_civil.self)
-            let secondOfDay = raw.nanos_of_day / 1_000_000_000
-            return DateComponents(
-                year: Int(raw.date.year), month: Int(raw.date.month), day: Int(raw.date.day),
-                hour: Int(secondOfDay / 3_600), minute: Int(secondOfDay % 3_600 / 60), second: Int(secondOfDay % 60),
-                nanosecond: Int(raw.nanos_of_day % 1_000_000_000))
-        case .time:
-            let nanosOfDay = batch.load(column, row, as: UInt64.self)
-            let (secondOfDay, nano) = nanosOfDay.quotientAndRemainder(dividingBy: 1_000_000_000)
-            let (hour, rest) = secondOfDay.quotientAndRemainder(dividingBy: 3_600)
-            let (minute, second) = rest.quotientAndRemainder(dividingBy: 60)
-            return DateComponents(hour: Int(hour), minute: Int(minute), second: Int(second), nanosecond: Int(nano))
-        default:
-            let raw = batch.load(column, row, as: hypertabular_date.self)
-            return DateComponents(year: Int(raw.year), month: Int(raw.month), day: Int(raw.day))
+        case .dateTime: Interop.civil(batch.bytes(column, row, size: 16))
+        case .time: Interop.time(batch.bytes(column, row, size: 8))
+        default: Interop.date(batch.bytes(column, row, size: 4))
         }
     }
 }
@@ -308,8 +295,7 @@ extension Duration: CellValue {
     public static func isPresented(by door: Door) -> Bool { door == .duration }
     /// The core's nanoseconds carried exactly, both signs.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> Duration {
-        let raw = batch.load(column, row, as: hypertabular_duration.self)
-        return .seconds(raw.seconds) + .nanoseconds(Int64(raw.nanos))
+        Interop.duration(batch.bytes(column, row, size: 16))
     }
 }
 

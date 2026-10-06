@@ -171,13 +171,13 @@ func (b *Batch) Timestamp(column int) []time.Time {
 	out := c.times[:b.rows:b.rows]
 	if c.batch != b.generation {
 		c.batch = b.generation
-		raw := unsafe.Slice((*rawTimestamp)(c.values), b.rows)
+		raw := unsafe.Slice((*hypercast.RawTimestamp)(c.values), b.rows)
 		for row := range out {
 			if c.verdicts[row].reason != 0 {
 				out[row] = time.Time{}
 				continue
 			}
-			out[row] = time.Unix(raw[row].seconds, int64(raw[row].nanos)).UTC()
+			out[row] = raw[row].Time()
 		}
 	}
 	return out
@@ -190,9 +190,13 @@ func (b *Batch) DateOnly(column int) []hypercast.Date {
 	out := c.dates[:b.rows:b.rows]
 	if c.batch != b.generation {
 		c.batch = b.generation
-		raw := unsafe.Slice((*rawDate)(c.values), b.rows)
+		raw := unsafe.Slice((*hypercast.RawDate)(c.values), b.rows)
 		for row := range out {
-			out[row] = hypercast.Date{Year: int(raw[row].year), Month: time.Month(raw[row].month), Day: int(raw[row].day)}
+			if c.verdicts[row].reason != 0 {
+				out[row] = hypercast.Date{}
+				continue
+			}
+			out[row] = raw[row].Date()
 		}
 	}
 	return out
@@ -205,13 +209,13 @@ func (b *Batch) DateTime(column int) []hypercast.CivilDateTime {
 	out := c.civils[:b.rows:b.rows]
 	if c.batch != b.generation {
 		c.batch = b.generation
-		raw := unsafe.Slice((*rawCivil)(c.values), b.rows)
+		raw := unsafe.Slice((*hypercast.RawCivil)(c.values), b.rows)
 		for row := range out {
-			date := raw[row].date
-			out[row] = hypercast.CivilDateTime{
-				Date:      hypercast.Date{Year: int(date.year), Month: time.Month(date.month), Day: int(date.day)},
-				TimeOfDay: time.Duration(raw[row].nanosOfDay),
+			if c.verdicts[row].reason != 0 {
+				out[row] = hypercast.CivilDateTime{}
+				continue
 			}
+			out[row] = raw[row].CivilDateTime()
 		}
 	}
 	return out

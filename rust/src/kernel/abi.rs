@@ -85,11 +85,8 @@ impl CellVerdict {
 
     /// The fault, when there is one.
     pub const fn fault(&self) -> Option<Fault> {
-        let reason = match self.reason {
-            1 => Reason::Empty,
-            2 => Reason::Malformed,
-            3 => Reason::OutOfRange,
-            _ => return None,
+        let Some(reason) = Reason::from_code(self.reason) else {
+            return None;
         };
         Some(Fault {
             reason,

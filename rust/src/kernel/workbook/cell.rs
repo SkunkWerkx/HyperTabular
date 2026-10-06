@@ -8,6 +8,7 @@
 //! its door is said back as text ([`super::number::Text`]) with the fault spanning all of it.
 
 use super::number::{self, Text};
+use super::styles;
 use crate::kernel::abi::{CellVerdict, ColumnBuffer, ColumnSpec, Slot, Span};
 use crate::kernel::door::Door;
 use hypercast::{
@@ -188,18 +189,27 @@ fn spanless(reason: Reason) -> Fault {
     }
 }
 
-/// A serial read the way its number format declared: a date/time serial is a wall clock,
-/// or a time of day when it is under one day and so carries no date; an elapsed serial is
-/// a span of that many days, sign and all. `None` where the rules refuse the serial.
-pub fn serial(value: f64, system: ExcelEpoch, elapsed: bool) -> Option<Cell<'static>> {
-    if elapsed {
+/// A serial read the way its number format declared (`kind`, a [`styles`] constant): an
+/// elapsed serial is a span of that many days, sign and all; any other is a wall clock, or a
+/// time of day when it carries no date. A serial under one day carries none in the 1900
+/// system — its serial `0` is the `1900-01-00` that never was — nor under a time format;
+/// in the 1904 system a date format's serial `0` is 1904-01-01, and a date it is. `None`
+/// where the rules refuse the serial.
+///
+/// [`styles`]: super::styles
+pub fn serial(value: f64, system: ExcelEpoch, kind: u8) -> Option<Cell<'static>> {
+    if kind == styles::ELAPSED {
         return excel_duration(value).ok().map(Cell::Span);
     }
-    let nanos = excel_time(value).ok()?;
-    // Under one day once rounded to the nanosecond, as `excel_time` rounds: what is left
-    // short of half a nanosecond under a day carries into the next one, and has a date.
-    if value * (NANOS_PER_DAY as f64) < NANOS_PER_DAY as f64 - 0.5 {
-        return Some(Cell::Clock(nanos));
+    let dated = kind == styles::DATE_TIME && matches!(system, ExcelEpoch::Y1904);
+    // Under one day once snapped, as `excel_time` snaps: a candidate it picks lies inside the
+    // double's midpoints, so under a day; only its nearest-nanosecond fallback carries what
+    // is left short of half a nanosecond under a day into the next one, which has a date.
+    // Decided before either door runs, so a serial is converted once: everything
+    // `excel_time` refuses at a day or more, `excel_serial` refuses too (NaN included, which
+    // fails the comparison).
+    if !dated && value * (NANOS_PER_DAY as f64) < NANOS_PER_DAY as f64 - 0.5 {
+        return excel_time(value).ok().map(Cell::Clock);
     }
     let wall = excel_serial(value, system).ok()?;
     Some(Cell::Wall {

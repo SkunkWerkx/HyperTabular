@@ -260,11 +260,7 @@ impl<'a> Workbook<'a> {
         } else {
             Format::Ods
         };
-        let epoch = if opened.epoch == ExcelEpoch::Y1904 as u32 {
-            ExcelEpoch::Y1904
-        } else {
-            ExcelEpoch::Y1900
-        };
+        let epoch = ExcelEpoch::from_code(opened.epoch).unwrap_or(ExcelEpoch::Y1900);
 
         let none = Tables::default();
         let (code, out) = scratch.drive(&mut [], none, |memory, out| {

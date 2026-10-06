@@ -17,7 +17,7 @@ let package = Package(
         .library(name: "HyperTabular", targets: ["HyperTabular"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.6.1")
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.6.2")
     ],
     targets: [
         .binaryTarget(

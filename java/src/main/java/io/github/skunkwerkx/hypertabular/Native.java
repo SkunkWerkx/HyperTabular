@@ -1,19 +1,13 @@
 package io.github.skunkwerkx.hypertabular;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.lang.foreign.Arena;
+import io.github.skunkwerkx.hypercast.interop.NativePlatform;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
-import java.nio.ByteOrder;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 
 /**
  * The native core's C ABI: {@code libhypertabular}'s fourteen exports and the sizes and offsets
@@ -59,12 +53,8 @@ final class Native {
     static final long SPEC_ORDINAL = 0;
     static final long SPEC_DOOR = 4;
     static final long SPEC_PARAM = 8;
-    static final long SPEC_DECIMAL_SEP = 12;
-    static final long SPEC_GROUP_SEP = 16;
-    static final long SPEC_FLAGS = 20;
-    static final long SPEC_CURRENCY_LEN = 24;
-    static final long SPEC_CURRENCY = 28;
-    static final int CURRENCY_BYTES = 16;
+    /** Where the format sits in a spec: HyperCast's {@link NativeValues#FORMAT_BYTES} of it. */
+    static final long SPEC_FORMAT = 12;
 
     /** {@code ColumnBuffer}: {@code {void* values, CellVerdict* verdicts}}. */
     static final long BUFFER_BYTES = 2 * ValueLayout.ADDRESS.byteSize();
@@ -188,10 +178,6 @@ final class Native {
         //                            column_count, max_rows, buffers, out) -> i32
         private static final MethodHandle BOOK_FILL =
                 LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, PTR, USIZE, USIZE, PTR, PTR));
-
-        // A uuid value read as two big-endian longs. Here for the same reason the handles
-        // are: a layout is read through a VarHandle, which Native Image wants constant.
-        static final ValueLayout.OfLong BIG_ENDIAN_LONG = ValueLayout.JAVA_LONG.withOrder(ByteOrder.BIG_ENDIAN);
     }
 
     /**
@@ -204,7 +190,11 @@ final class Native {
     private static final class Core {
         private Core() {}
 
-        private static final SymbolLookup LOOKUP = loadLibrary(NativePlatform.current());
+        /** The library's base name: {@code libhypertabular.so}, {@code hypertabular.dll}. */
+        private static final String LIBRARY = "hypertabular";
+
+        private static final SymbolLookup LOOKUP =
+                NativePlatform.load(Native.class, LIBRARY, NativePlatform.current(LIBRARY));
 
         // Looked up here, once, so an export missing from an older core fails this class's
         // init (and isAvailable() says so) rather than the first read.
@@ -226,29 +216,6 @@ final class Native {
         private static MemorySegment export(String symbol) {
             return LOOKUP.find(symbol)
                     .orElseThrow(() -> new IllegalStateException("libhypertabular does not export " + symbol));
-        }
-
-        // The library must outlive every downcall made through it, so it is loaded into the
-        // JDK-provided global arena that lives for the process's lifetime.
-        private static SymbolLookup loadLibrary(NativePlatform.Target target) {
-            if (target == null) {
-                throw new IllegalStateException(
-                        "hypertabular: this jar carries no native library for " + NativePlatform.describe());
-            }
-            try (InputStream resource = Native.class.getResourceAsStream(target.resourcePath())) {
-                if (resource == null) {
-                    throw new IllegalStateException(target.resourcePath() + " classpath resource not found "
-                            + "(this jar was built without a native library for this platform)");
-                }
-                String libraryFileName = target.libraryFileName();
-                String extension = libraryFileName.substring(libraryFileName.lastIndexOf('.'));
-                Path tmp = Files.createTempFile("hypertabular", extension);
-                tmp.toFile().deleteOnExit();
-                Files.copy(resource, tmp, StandardCopyOption.REPLACE_EXISTING);
-                return SymbolLookup.libraryLookup(tmp, Arena.global());
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
         }
     }
 

@@ -3,7 +3,6 @@ package hypertabular
 import (
 	"fmt"
 	"math"
-	"unicode/utf8"
 
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 )
@@ -241,15 +240,15 @@ func (c Column) spec() (rawSpec, error) {
 	}
 	switch c.door {
 	case DoorUnix:
-		if p := hypercast.UnixPrecision(c.param); p < hypercast.Seconds || p > hypercast.Nanoseconds {
+		if _, ok := hypercast.UnixPrecisionFromCode(c.param); !ok {
 			return spec, fmt.Errorf("undefined UnixPrecision %d", c.param)
 		}
 	case DoorDateOnlyOrdered, DoorDateTime:
-		if o := hypercast.DateOrder(c.param); o < hypercast.YearMonthDay || o > hypercast.DayMonthYear {
+		if _, ok := hypercast.DateOrderFromCode(c.param); !ok {
 			return spec, fmt.Errorf("undefined DateOrder %d", c.param)
 		}
 	case DoorExcelSerial:
-		if e := hypercast.ExcelEpoch(c.param); e != hypercast.Excel1900 && e != hypercast.Excel1904 {
+		if _, ok := hypercast.ExcelEpochFromCode(c.param); !ok {
 			return spec, fmt.Errorf("undefined ExcelEpoch %d", c.param)
 		}
 	}
@@ -258,32 +257,16 @@ func (c Column) spec() (rawSpec, error) {
 		return spec, nil
 	}
 
-	// HyperCast's NumFormat in the core's 32-byte layout, validated as HyperCast's own Go
-	// module validates it (its NumFormat.raw, which is not exported and panics where this
-	// returns).
-	format := c.format
-	if format.DecimalSep == format.GroupSep {
-		return spec, fmt.Errorf("decimal and group separators must differ; both are %q", format.DecimalSep)
+	// HyperCast's NumFormat in the core's 32-byte layout, validated by HyperCast as its own
+	// doors validate it. A NUL decimal separator is this core's rule: its spec reads a zero
+	// separator as "no format declared".
+	format, err := c.format.Raw()
+	if err != nil {
+		return spec, err
 	}
-	if !utf8.ValidRune(format.DecimalSep) || !utf8.ValidRune(format.GroupSep) || format.DecimalSep == 0 {
-		return spec, fmt.Errorf("separators %q and %q must be Unicode scalar values, and the decimal one not NUL",
-			format.DecimalSep, format.GroupSep)
+	if format.DecimalSep == 0 {
+		return spec, fmt.Errorf("the decimal separator must not be NUL")
 	}
-	if len(format.Currency) > currencyMaxBytes {
-		return spec, fmt.Errorf("currency symbol %q exceeds %d UTF-8 bytes", format.Currency, currencyMaxBytes)
-	}
-	if !utf8.ValidString(format.Currency) {
-		return spec, fmt.Errorf("currency symbol %q is not valid UTF-8", format.Currency)
-	}
-	for i := 0; i < len(format.Currency); i++ {
-		switch b := format.Currency[i]; {
-		case b >= '0' && b <= '9', b == ' ', b == '\t', b == '\n', b == '\f', b == '\r':
-			return spec, fmt.Errorf("currency symbol %q must not contain an ASCII digit or whitespace", format.Currency)
-		}
-	}
-	spec.decimalSep = uint32(format.DecimalSep)
-	spec.groupSep = uint32(format.GroupSep)
-	spec.flags = uint32(format.Styles)
-	spec.currencyLen = uint32(copy(spec.currency[:], format.Currency))
+	spec.format = format
 	return spec, nil
 }

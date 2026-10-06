@@ -72,7 +72,7 @@ no-panic = ["dep:no-panic", "exports"]
 # shared library. maturin builds it into the wheels (python/pyproject.toml); the forge's
 # suites build it with `cargo rustc --release --crate-type cdylib --features python`.
 # Nothing under src/kernel knows it exists.
-python = ["dep:pyo3", "std"]
+python = ["dep:pyo3", "std", "hypercast/python-values"]
 
 [dev-dependencies]
 # The comparison baseline for the delimited conformance suite and bench — never linked.

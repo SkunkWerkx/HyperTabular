@@ -128,10 +128,10 @@ impl State {
 
     /// The date system as HyperCast names it.
     fn system(&self) -> ExcelEpoch {
-        if self.epoch == ExcelEpoch::Y1904 as u32 {
-            ExcelEpoch::Y1904
-        } else {
-            ExcelEpoch::Y1900
+        // Only the workbook part's `date1904` sets the 1904 code; anything else is 1900.
+        match ExcelEpoch::from_code(self.epoch) {
+            Some(epoch) => epoch,
+            None => ExcelEpoch::Y1900,
         }
     }
 

@@ -40,7 +40,7 @@ module HyperTabular
     DEFAULT_BATCH_ROWS = 4096
 
     # Encodings whose bytes already are the UTF-8 (or byte-identical) form the core reads.
-    BYTE_COMPATIBLE = [Encoding::UTF_8, Encoding::US_ASCII, Encoding::ASCII_8BIT].freeze
+    BYTE_COMPATIBLE = HyperCast::Interop::BYTE_COMPATIBLE
 
     # Opens a file of UTF-8 delimited text. With a block, yields the reader, closes it —
     # and the file — when the block ends, and returns the block's value; without one,

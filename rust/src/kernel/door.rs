@@ -72,14 +72,6 @@ impl Door {
     /// (`1` year-month-day, `2` month-day-year, `3` day-month-year), or an Excel date
     /// system (`1` 1900, `2` 1904).
     pub const fn from_code(code: u32, param: u32) -> Option<Door> {
-        const fn order(param: u32) -> Option<DateOrder> {
-            Some(match param {
-                1 => DateOrder::YearMonthDay,
-                2 => DateOrder::MonthDayYear,
-                3 => DateOrder::DayMonthYear,
-                _ => return None,
-            })
-        }
         Some(match code {
             1 => Door::Bool,
             2 => Door::I8,
@@ -94,31 +86,27 @@ impl Door {
             11 => Door::F64,
             12 => Door::Uuid,
             13 => Door::Timestamp,
-            14 => Door::Unix(match param {
-                1 => UnixPrecision::Seconds,
-                2 => UnixPrecision::Millis,
-                3 => UnixPrecision::Micros,
-                4 => UnixPrecision::Nanos,
-                _ => return None,
-            }),
+            14 => match UnixPrecision::from_code(param) {
+                Some(precision) => Door::Unix(precision),
+                None => return None,
+            },
             15 => Door::Date,
             16 => Door::Time,
             17 => Door::Duration,
             18 => Door::Text,
             19 => Door::Decimal,
-            20 => match order(param) {
+            20 => match DateOrder::from_code(param) {
                 Some(order) => Door::DateOrdered(order),
                 None => return None,
             },
-            21 => match order(param) {
+            21 => match DateOrder::from_code(param) {
                 Some(order) => Door::DateTime(order),
                 None => return None,
             },
-            22 => Door::ExcelSerial(match param {
-                1 => ExcelEpoch::Y1900,
-                2 => ExcelEpoch::Y1904,
-                _ => return None,
-            }),
+            22 => match ExcelEpoch::from_code(param) {
+                Some(epoch) => Door::ExcelSerial(epoch),
+                None => return None,
+            },
             _ => return None,
         })
     }

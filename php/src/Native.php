@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace HyperTabular;
 
 use FFI;
+use HyperCast\Interop\NativePlatform;
 
 /**
  * The native core's C ABI: libhypertabular's fourteen exports and the `#[repr(C)]` shapes that
@@ -130,27 +131,10 @@ final class Native
         if (!\extension_loaded('ffi')) {
             throw new \RuntimeException('hypertabular: the ffi extension is not loaded');
         }
-        [$rid, $libName] = NativePlatform::ridAndLibraryName();
-        $path = __DIR__ . "/native/{$rid}/{$libName}";
-        // Development loop: HYPERTABULAR_NATIVE_LIBRARY names a library to load instead of the
-        // staged one, so the suite runs against a core built from the checkout without
-        // replacing committed files (.github/scripts/local-core.sh builds one and prints it).
-        $override = getenv('HYPERTABULAR_NATIVE_LIBRARY');
-        if (\is_string($override) && $override !== '') {
-            $path = $override;
-        } elseif (!is_file($path)) {
-            // Development loop: fall back to the in-repo cargo build (`cargo cdylib`).
-            $repoBuild = \dirname(__DIR__, 2) . "/rust/target/release/{$libName}";
-            if (is_file($repoBuild)) {
-                $path = $repoBuild;
-            }
-        }
-        if (!is_file($path)) {
-            throw new \RuntimeException(
-                "hypertabular: {$path} not found (unsupported platform, or this package was built "
-                . 'without a native library for it)'
-            );
-        }
+        // HYPERTABULAR_NATIVE_LIBRARY names a library to load instead of the staged one, so the
+        // suite runs against a core built from the checkout without replacing committed files
+        // (.github/scripts/local-core.sh builds one and prints it).
+        $path = NativePlatform::libraryPath('hypertabular', __DIR__, 'HYPERTABULAR_NATIVE_LIBRARY');
 
         $ffi = FFI::cdef(self::DECLARATIONS, $path);
         // The state block is the core's to define and this binding's to allocate. A library

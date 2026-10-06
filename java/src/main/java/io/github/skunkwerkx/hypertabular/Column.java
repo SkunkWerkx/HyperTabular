@@ -346,16 +346,11 @@ public final class Column {
      * @return the column
      */
     public static Column unix(int ordinal, UnixPrecision precision) {
-        // HyperCast's enums carry the core's discriminants, but not publicly. The switches
-        // here and below have no default on purpose: a constant HyperCast adds fails this
-        // file's compile rather than being numbered by position.
-        int declared = switch (Objects.requireNonNull(precision, "precision")) {
-            case SECONDS -> 1;
-            case MILLISECONDS -> 2;
-            case MICROSECONDS -> 3;
-            case NANOSECONDS -> 4;
-        };
-        return new Column(ordinal, Door.UNIX, declared, NumFormat.INVARIANT);
+        return new Column(
+                ordinal,
+                Door.UNIX,
+                Objects.requireNonNull(precision, "precision").code(),
+                NumFormat.INVARIANT);
     }
 
     /**
@@ -366,11 +361,11 @@ public final class Column {
      * @return the column
      */
     public static Column excelSerial(int ordinal, ExcelEpoch epoch) {
-        int declared = switch (Objects.requireNonNull(epoch, "epoch")) {
-            case Y1900 -> 1;
-            case Y1904 -> 2;
-        };
-        return new Column(ordinal, Door.EXCEL_SERIAL, declared, NumFormat.INVARIANT);
+        return new Column(
+                ordinal,
+                Door.EXCEL_SERIAL,
+                Objects.requireNonNull(epoch, "epoch").code(),
+                NumFormat.INVARIANT);
     }
 
     /**
@@ -391,7 +386,11 @@ public final class Column {
      * @return the column
      */
     public static Column date(int ordinal, DateOrder order) {
-        return new Column(ordinal, Door.DATE_ORDERED, code(order), NumFormat.INVARIANT);
+        return new Column(
+                ordinal,
+                Door.DATE_ORDERED,
+                Objects.requireNonNull(order, "order").code(),
+                NumFormat.INVARIANT);
     }
 
     /**
@@ -402,7 +401,8 @@ public final class Column {
      * @return the column
      */
     public static Column dateTime(int ordinal, DateOrder order) {
-        return new Column(ordinal, Door.DATETIME, code(order), NumFormat.INVARIANT);
+        return new Column(
+                ordinal, Door.DATETIME, Objects.requireNonNull(order, "order").code(), NumFormat.INVARIANT);
     }
 
     /**
@@ -433,14 +433,6 @@ public final class Column {
      */
     public static Column text(int ordinal) {
         return plain(ordinal, Door.TEXT);
-    }
-
-    private static int code(DateOrder order) {
-        return switch (Objects.requireNonNull(order, "order")) {
-            case YEAR_MONTH_DAY -> 1;
-            case MONTH_DAY_YEAR -> 2;
-            case DAY_MONTH_YEAR -> 3;
-        };
     }
 
     @Override

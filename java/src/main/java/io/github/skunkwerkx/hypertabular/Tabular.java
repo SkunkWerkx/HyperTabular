@@ -1,5 +1,7 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
+
 /**
  * The native core this jar binds: whether it loaded, and which version answered. The
  * library rides inside the jar under {@code /native/{rid}/} and is picked by platform at
@@ -52,7 +54,6 @@ public final class Tabular {
      * @return the loaded core's version as {@code "major.minor.patch"}
      */
     public static String nativeVersion() {
-        int packed = Native.version();
-        return (packed >>> 16) + "." + ((packed >>> 8) & 0xFF) + "." + (packed & 0xFF);
+        return NativeValues.version(Native.version());
     }
 }

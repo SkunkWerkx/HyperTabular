@@ -6,6 +6,7 @@ namespace HyperTabular;
 
 use FFI;
 use FFI\CData;
+use HyperCast\Interop\NativeValues;
 
 /**
  * A plan as the core takes it, and the arrays the core casts it into: the column specs,
@@ -66,17 +67,9 @@ final class Columns
             $spec->ordinal = $column->ordinal;
             $spec->door = $column->door->value;
             $spec->param = $column->declared;
-            // HyperCast's NumFormat in the core's 32-byte layout. The object validated itself
-            // when it was built, as HyperCast validates it, so the core has nothing to refuse.
-            [$decimal, $group] = $column->format->codePoints();
-            $spec->format->decimal_sep = $decimal;
-            $spec->format->group_sep = $group;
-            $spec->format->flags = $column->format->flags;
-            $currency = $column->format->currency;
-            $spec->format->currency_len = \strlen($currency);
-            if ($currency !== '') {
-                FFI::memcpy($spec->format->currency, $currency, \strlen($currency));
-            }
+            // HyperCast's NumFormat in the core's 32-byte layout, written by HyperCast as its own
+            // doors write it. The object validated itself when it was built.
+            NativeValues::writeFormat($column->format, $spec->format);
 
             $values = $ffi->new('uint8_t[' . $batchRows * $column->door->valueSize() . ']');
             $verdicts = $ffi->new("ht_verdict[{$batchRows}]");

@@ -161,12 +161,9 @@ module HyperTabular
     datetime: HyperCast::DATE_ORDERS
   }.freeze
 
-  # Bytes per value in a column buffer, by door (rust/src/kernel/abi.rs, ColumnBuffer).
-  Column::VALUE_BYTES = {
-    bool: 1, i8: 1, u8: 1, i16: 2, u16: 2, i32: 4, u32: 4, f32: 4, date: 4, date_ordered: 4,
-    i64: 8, u64: 8, f64: 8, time: 8, text: 8,
-    decimal: 16, uuid: 16, timestamp: 16, unix: 16, excel_serial: 16, datetime: 16, duration: 16
-  }.freeze
+  # Bytes per value in a column buffer, by door (rust/src/kernel/abi.rs, ColumnBuffer):
+  # HyperCast's for its doors, and a text cell's span — two u32s — for this one's.
+  Column::VALUE_BYTES = HyperCast::Interop::VALUE_BYTES.merge(text: 8).freeze
 
   # The notation of a door that reads none: thirty-two zero bytes.
   Column::NO_FORMAT = ("\0" * 32).b.freeze

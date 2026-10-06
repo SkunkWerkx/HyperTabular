@@ -1,6 +1,5 @@
 require "date"
 require "hypercast"
-require_relative "hypertabular/native_platform"
 require_relative "hypertabular/runtime"
 require_relative "hypertabular/runtime/columns"
 require_relative "hypertabular/runtime/delimited"
@@ -55,8 +54,7 @@ module HyperTabular
     # the library itself, not from this gem, so a consumer can prove the core behind the
     # reader is the one this binding was built against.
     def native_version
-      word = Runtime::Delimited.version
-      "#{word >> 16}.#{(word >> 8) & 0xFF}.#{word & 0xFF}"
+      HyperCast::Interop.version(Runtime::Delimited.version)
     end
   end
 end

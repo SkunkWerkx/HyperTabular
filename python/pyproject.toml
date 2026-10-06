@@ -22,7 +22,7 @@ requires-python = ">=3.11"
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
 # column's notation is its `NumFormat`. 0.6.1 is the first release this was built against;
 # below 0.7 because a 0.x minor is where its surface is allowed to move.
-dependencies = ["hypercast>=0.6.1,<0.7"]
+dependencies = ["hypercast>=0.6.2,<0.7"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.

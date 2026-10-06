@@ -17,18 +17,11 @@
 // why): the two Linux ones are the musl builds, linked on glibc and musl alike, and the two
 // Windows ones are the MSVC builds, which MinGW's linker reads.
 //
-// Windows on amd64 carries one flag more, -Wl,--allow-multiple-definition, and it is there
-// for GNU ld alone. Both MSVC archives keep Rust's own 128-bit division helpers (MSVC has
-// none), which LLVM emits for that target as COFF weak externals: __divti3, defaulting to a
-// global named .weak.__divti3.default. GNU ld does not take such a default as the
-// definition — the calls resolve to libgcc's __divti3, last on gcc's link line, exactly as
-// they do when HyperCast's archive is linked alone — but it does keep searching later
-// archives for one, pulls the same helper out of the second archive, and then refuses the
-// two identical .weak.*.default globals as a multiple definition. The flag lets the first
-// stand; neither is called. It applies to the whole link, which is the cost: a duplicate
-// symbol elsewhere in a program that imports this module is no longer an error there. lld —
-// llvm-mingw's linker, the one arm64 builds with — resolves a weak external to its default,
-// never loads the second helper, and needs no flag.
+// The Windows archives Go links leave out Rust's own 128-bit division helpers (__divti3,
+// __udivti3), which the C# and Swift copies of the same MSVC build keep because MSVC has
+// none: MinGW supplies them — libgcc on amd64, compiler-rt on arm64 — and Rust emits them
+// as COFF weak externals that GNU ld, finding them in both cores' archives, refused as a
+// multiple definition. The forge's build-static-libs.sh says the rest.
 //
 // # What crosses, and the cgo pointer rules
 //
@@ -88,13 +81,13 @@ package hypertabular
 #cgo linux,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/linux_arm64/libhypertabular.a
 #cgo darwin,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_amd64/libhypertabular.a
 #cgo darwin,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_arm64/libhypertabular.a
-#cgo windows,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_amd64/libhypertabular.a -Wl,--allow-multiple-definition
+#cgo windows,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_amd64/libhypertabular.a
 #cgo windows,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_arm64/libhypertabular.a
 #cgo linux,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/linux_amd64/libhypertabular.a
 #cgo linux,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/linux_arm64/libhypertabular.a
 #cgo darwin,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_amd64/libhypertabular.a
 #cgo darwin,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_arm64/libhypertabular.a
-#cgo windows,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_amd64/libhypertabular.a -Wl,--allow-multiple-definition
+#cgo windows,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_amd64/libhypertabular.a
 #cgo windows,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_arm64/libhypertabular.a
 #include <stddef.h>
 #include <stdint.h>

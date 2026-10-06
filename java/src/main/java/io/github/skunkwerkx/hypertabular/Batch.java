@@ -1,14 +1,12 @@
 package io.github.skunkwerkx.hypertabular;
 
-import io.github.skunkwerkx.hypercast.CastFailure;
 import io.github.skunkwerkx.hypercast.Fault;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.Verdict;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -124,19 +122,10 @@ public final class Batch {
         return columns.verdicts[column].get(INT, row * Native.VERDICT_BYTES + 8);
     }
 
-    private static CastFailure reason(int code) {
-        return switch (code) {
-            case 1 -> CastFailure.EMPTY;
-            case 2 -> CastFailure.MALFORMED;
-            case 3 -> CastFailure.OUT_OF_RANGE;
-            default -> throw new IllegalStateException("libhypertabular returned unknown verdict code " + code);
-        };
-    }
-
     private <T> Fault<T> fault(int column, int row) {
         MemorySegment verdict = columns.verdicts[column];
         long at = row * Native.VERDICT_BYTES;
-        return new Fault<>(reason(verdict.get(INT, at + 8)), verdict.get(INT, at), verdict.get(INT, at + 4));
+        return NativeValues.fault(verdict.get(INT, at + 8), verdict.get(INT, at), verdict.get(INT, at + 4));
     }
 
     /**
@@ -164,9 +153,8 @@ public final class Batch {
         if (code == 0) {
             return new CellVerdict(null, 0, 0);
         }
-        MemorySegment verdict = columns.verdicts[column];
-        long at = row * Native.VERDICT_BYTES;
-        return new CellVerdict(reason(code), verdict.get(INT, at), verdict.get(INT, at + 4));
+        Fault<Object> fault = fault(column, row);
+        return new CellVerdict(fault.reason(), fault.offset(), fault.length());
     }
 
     /**
@@ -279,38 +267,16 @@ public final class Batch {
             case U32 -> Integer.toUnsignedLong(value.get(INT, row * 4L));
             case F32 -> value.get(ValueLayout.JAVA_FLOAT, row * 4L);
             case F64 -> value.get(ValueLayout.JAVA_DOUBLE, row * 8L);
-            case DECIMAL -> decimal(value, row * 16L);
-            // RFC 9562 byte order is exactly UUID's msb/lsb decomposition: two big-endian longs.
-            case UUID ->
-                new UUID(
-                        value.get(Native.Downcalls.BIG_ENDIAN_LONG, row * 16L),
-                        value.get(Native.Downcalls.BIG_ENDIAN_LONG, row * 16L + 8));
-            case TIMESTAMP, UNIX, EXCEL_SERIAL ->
-                Instant.ofEpochSecond(value.get(LONG, row * 16L), value.get(INT, row * 16L + 8));
-            case DATE, DATE_ORDERED -> day(value, row * 4L);
-            case DATETIME ->
-                LocalDateTime.of(day(value, row * 16L), LocalTime.ofNanoOfDay(value.get(LONG, row * 16L + 8)));
-            case TIME -> LocalTime.ofNanoOfDay(value.get(LONG, row * 8L));
-            // Duration.ofSeconds normalizes the core's same-signed nanos adjustment correctly.
-            case DURATION -> Duration.ofSeconds(value.get(LONG, row * 16L), value.get(INT, row * 16L + 8));
+            case DECIMAL -> NativeValues.decimal(value, row * NativeValues.DECIMAL_BYTES);
+            case UUID -> NativeValues.uuid(value, row * NativeValues.UUID_BYTES);
+            case TIMESTAMP, UNIX, EXCEL_SERIAL -> NativeValues.instant(value, row * NativeValues.TIMESTAMP_BYTES);
+            case DATE, DATE_ORDERED -> NativeValues.date(value, row * NativeValues.DATE_BYTES);
+            case DATETIME -> NativeValues.civil(value, row * NativeValues.CIVIL_BYTES);
+            case TIME -> NativeValues.time(value, row * NativeValues.TIME_BYTES);
+            case DURATION -> NativeValues.duration(value, row * NativeValues.DURATION_BYTES);
             case TEXT -> string(column, row);
         };
         return new Success<>(type.cast(cell));
-    }
-
-    // {u64 lo, u32 hi, u8 scale, u8 negative}. BigInteger takes its magnitude big-endian, so
-    // the two words are laid out high word first; the core never hands back a negative zero,
-    // so the signum needs no zero check.
-    private static BigDecimal decimal(MemorySegment value, long at) {
-        byte[] magnitude = new byte[12];
-        ByteBuffer.wrap(magnitude).putInt(value.get(INT, at + 8)).putLong(value.get(LONG, at));
-        int signum = value.get(BYTE, at + 13) != 0 ? -1 : 1;
-        return new BigDecimal(new BigInteger(signum, magnitude), value.get(BYTE, at + 12));
-    }
-
-    private static LocalDate day(MemorySegment value, long at) {
-        return LocalDate.of(
-                Short.toUnsignedInt(value.get(SHORT, at)), value.get(BYTE, at + 2), value.get(BYTE, at + 3));
     }
 
     /** The bytes a span names, read-only: the arena's when it is flagged, the base's when not. */

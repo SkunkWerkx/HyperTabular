@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using HyperCast;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -137,36 +138,19 @@ public sealed unsafe class Batch
 		if (typeof(T) == typeof(bool))
 			return As<bool, T>(values[row] != 0);
 		if (typeof(T) == typeof(decimal))
-		{
-			var value = Read<Native.RawDecimal>(values, row);
-			return As<decimal, T>(new decimal((int)value.Lo, (int)(value.Lo >> 32), (int)value.Hi, value.Negative != 0, value.Scale));
-		}
+			return As<decimal, T>(Read<RawDecimal>(values, row).ToDecimal());
 		if (typeof(T) == typeof(Guid))
-			return As<Guid, T>(new Guid(values.AsSpan(row * 16, 16), bigEndian: true));
+			return As<Guid, T>(Abi.ToGuid(values.AsSpan(row * 16, 16)));
 		if (typeof(T) == typeof(DateTimeOffset))
-		{
-			var value = Read<Native.RawTimestamp>(values, row);
-			return As<DateTimeOffset, T>(new DateTimeOffset(
-				System.DateTime.UnixEpoch.Ticks + value.Seconds * TimeSpan.TicksPerSecond + value.Nanos / 100, TimeSpan.Zero));
-		}
+			return As<DateTimeOffset, T>(Read<RawTimestamp>(values, row).ToDateTimeOffset());
 		if (typeof(T) == typeof(DateOnly))
-		{
-			var value = Read<Native.RawDate>(values, row);
-			return As<DateOnly, T>(new DateOnly(value.Year, value.Month, value.Day));
-		}
+			return As<DateOnly, T>(Read<RawDate>(values, row).ToDateOnly());
 		if (typeof(T) == typeof(System.DateTime))
-		{
-			var value = Read<Native.RawCivil>(values, row);
-			return As<System.DateTime, T>(new System.DateTime(value.Year, value.Month, value.Day, 0, 0, 0, DateTimeKind.Unspecified)
-				.AddTicks((long)(value.NanosOfDay / 100)));
-		}
+			return As<System.DateTime, T>(Read<RawCivil>(values, row).ToDateTime());
 		if (typeof(T) == typeof(TimeOnly))
-			return As<TimeOnly, T>(new TimeOnly((long)(Read<ulong>(values, row) / 100)));
+			return As<TimeOnly, T>(Abi.ToTimeOnly(Read<ulong>(values, row)));
 		if (typeof(T) == typeof(TimeSpan))
-		{
-			var value = Read<Native.RawDuration>(values, row);
-			return As<TimeSpan, T>(new TimeSpan(value.Seconds * TimeSpan.TicksPerSecond + value.Nanos / 100));
-		}
+			return As<TimeSpan, T>(Read<RawDuration>(values, row).ToTimeSpan());
 		// The primitives: the value is the bytes the core wrote.
 		return new Verdict<T>(new Success<T>(Unsafe.ReadUnaligned<T>(ref values[row * Unsafe.SizeOf<T>()])));
 	}

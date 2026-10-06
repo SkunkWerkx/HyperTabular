@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
 
   # HyperCast is the judge: the verdict, fault, number-format and decimal types and the
   # declared-option tables are its own, taken from its gem rather than copied here.
-  spec.add_dependency "hypercast", "~> 0.6.1"
+  spec.add_dependency "hypercast", "~> 0.6.2"
   # A default gem through Ruby 3.x and a bundled one from 4.0, so it is declared.
   spec.add_dependency "fiddle"
   # The test gems live in the Gemfile.

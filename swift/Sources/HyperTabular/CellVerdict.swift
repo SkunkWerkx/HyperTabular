@@ -16,7 +16,7 @@ public struct CellVerdict: Equatable, Sendable {
     public var isOk: Bool { raw.reason == 0 }
 
     /// Why the cell did not cast — `nil` when it did.
-    public var reason: CastFailure? { CastFailure(rawValue: Int32(truncatingIfNeeded: raw.reason)) }
+    public var reason: CastFailure? { fault?.reason }
 
     /// Byte offset of the offending span within the cell's text.
     public var offset: Int { Int(raw.offset) }
@@ -26,7 +26,7 @@ public struct CellVerdict: Equatable, Sendable {
 
     /// The verdict as HyperCast's `Fault` — `nil` for a cell that cast.
     public var fault: Fault? {
-        reason.map { Fault(reason: $0, offset: offset, length: length) }
+        isOk ? nil : Interop.fault(code: Int32(truncatingIfNeeded: raw.reason), offset: raw.offset, length: raw.len)
     }
 
     /// Two verdicts are equal when they say the same thing of the same span.
