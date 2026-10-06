@@ -22,27 +22,26 @@ final class ReaderTests: XCTestCase {
     func testAColumnIsABufferAndACellIsAUnion() throws {
         let reader = try DelimitedReader(bytes: Self.orders, dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
         XCTAssertEqual(reader.header, ["id", "name", "score"])
-        XCTAssertEqual(reader.rows, 0)
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.rows, 3)
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.rows, 3)
 
-        XCTAssertEqual(Array(reader.values(0, as: Int32.self)), [1, 2, 3])
-        XCTAssertEqual(Array(reader.values(2, as: Double.self)), [2.5, 0.0, 7.0])
-        XCTAssertEqual(reader.verdicts(2).map(\.isOk), [true, false, true])
-        XCTAssertEqual(reader.verdicts(2)[1].reason, .malformed)
-        XCTAssertEqual(reader.verdict(2, row: 1).fault, Fault(reason: .malformed, offset: 0, length: 1))
+        XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [1, 2, 3])
+        XCTAssertEqual(Array(batch.values(2, as: Double.self)), [2.5, 0.0, 7.0])
+        XCTAssertEqual(batch.verdicts(2).map(\.isOk), [true, false, true])
+        XCTAssertEqual(batch.verdicts(2)[1].reason, .malformed)
+        XCTAssertEqual(batch.verdict(2, row: 1).fault, Fault(reason: .malformed, offset: 0, length: 1))
 
         let described =
-            switch reader.f64(2, row: 1) {
+            switch batch.get(2, row: 1, as: Double.self) {
             case .success(let score): "\(score)"
-            case .fault(let fault): "\(fault.reason) in \"\(string(reader.raw(2, row: 1)))\""
+            case .fault(let fault): "\(fault.reason) in \"\(string(batch.raw(2, row: 1)))\""
             }
         XCTAssertEqual(described, "malformed in \"x\"")
-        XCTAssertEqual(reader.string(1, row: 1), "bob, jr")
-        XCTAssertNil(reader.string(1, row: 2))
-        XCTAssertEqual(reader.verdict(1, row: 2).reason, .empty)
-        XCTAssertFalse(try reader.read())
-        XCTAssertEqual(reader.rows, 0)
+        XCTAssertEqual(batch.string(1, row: 1), "bob, jr")
+        XCTAssertNil(batch.string(1, row: 2))
+        XCTAssertEqual(batch.verdict(1, row: 2).reason, .empty)
+        XCTAssertNil(try reader.read())
+        XCTAssertEqual(batch.rows, 0)
         XCTAssertEqual(reader.records, 4)
     }
 
@@ -68,60 +67,64 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(Set(plan.map(\.door)).count, 22, "one column per door")
         let reader = try DelimitedReader(bytes: input, dialect: dialect, plan: plan, batchRows: 8)
         XCTAssertNil(reader.header)
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.rows, 1)
-        func raw(_ column: Int) -> UnsafeRawBufferPointer { reader.raw(column, row: 0) }
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.rows, 1)
+        func raw(_ column: Int) -> UnsafeRawBufferPointer { batch.raw(column, row: 0) }
 
-        XCTAssertEqual(reader.bool(0, row: 0), .success(true))
-        XCTAssertEqual(reader.bool(0, row: 0), try Cast.bool(raw(0)))
-        XCTAssertEqual(reader.i8(1, row: 0), .success(-128))
-        XCTAssertEqual(reader.i8(1, row: 0), try Cast.i8(raw(1), format: .invariant))
-        XCTAssertEqual(reader.i16(2, row: 0), .success(32767))
-        XCTAssertEqual(reader.i16(2, row: 0), try Cast.i16(raw(2), format: .invariant))
-        XCTAssertEqual(reader.i32(3, row: 0), .success(-1234))
-        XCTAssertEqual(reader.i32(3, row: 0), try Cast.i32(raw(3), format: .invariant))
-        XCTAssertEqual(reader.i64(4, row: 0), .success(.max))
-        XCTAssertEqual(reader.i64(4, row: 0), try Cast.i64(raw(4), format: .invariant))
-        XCTAssertEqual(reader.u8(5, row: 0), .success(255))
-        XCTAssertEqual(reader.u8(5, row: 0), try Cast.u8(raw(5), format: .invariant))
-        XCTAssertEqual(reader.u16(6, row: 0), .success(65535))
-        XCTAssertEqual(reader.u16(6, row: 0), try Cast.u16(raw(6), format: .invariant))
-        XCTAssertEqual(reader.u32(7, row: 0), .success(4_294_967_295))
-        XCTAssertEqual(reader.u32(7, row: 0), try Cast.u32(raw(7), format: .invariant))
-        XCTAssertEqual(reader.u64(8, row: 0), .success(.max))
-        XCTAssertEqual(reader.u64(8, row: 0), try Cast.u64(raw(8), format: .invariant))
-        XCTAssertEqual(reader.f32(9, row: 0), .success(2.5))
-        XCTAssertEqual(reader.f32(9, row: 0), try Cast.f32(raw(9), format: .invariant))
-        XCTAssertEqual(reader.f64(10, row: 0), .success(0.255))
-        XCTAssertEqual(reader.f64(10, row: 0), try Cast.f64(raw(10), format: .invariant))
+        XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), .success(true))
+        XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), try Cast.bool(raw(0)))
+        XCTAssertEqual(batch.get(1, row: 0, as: Int8.self), .success(-128))
+        XCTAssertEqual(batch.get(1, row: 0, as: Int8.self), try Cast.i8(raw(1), format: .invariant))
+        XCTAssertEqual(batch.get(2, row: 0, as: Int16.self), .success(32767))
+        XCTAssertEqual(batch.get(2, row: 0, as: Int16.self), try Cast.i16(raw(2), format: .invariant))
+        XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), .success(-1234))
+        XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), try Cast.i32(raw(3), format: .invariant))
+        XCTAssertEqual(batch.get(4, row: 0, as: Int64.self), .success(.max))
+        XCTAssertEqual(batch.get(4, row: 0, as: Int64.self), try Cast.i64(raw(4), format: .invariant))
+        XCTAssertEqual(batch.get(5, row: 0, as: UInt8.self), .success(255))
+        XCTAssertEqual(batch.get(5, row: 0, as: UInt8.self), try Cast.u8(raw(5), format: .invariant))
+        XCTAssertEqual(batch.get(6, row: 0, as: UInt16.self), .success(65535))
+        XCTAssertEqual(batch.get(6, row: 0, as: UInt16.self), try Cast.u16(raw(6), format: .invariant))
+        XCTAssertEqual(batch.get(7, row: 0, as: UInt32.self), .success(4_294_967_295))
+        XCTAssertEqual(batch.get(7, row: 0, as: UInt32.self), try Cast.u32(raw(7), format: .invariant))
+        XCTAssertEqual(batch.get(8, row: 0, as: UInt64.self), .success(.max))
+        XCTAssertEqual(batch.get(8, row: 0, as: UInt64.self), try Cast.u64(raw(8), format: .invariant))
+        XCTAssertEqual(batch.get(9, row: 0, as: Float.self), .success(2.5))
+        XCTAssertEqual(batch.get(9, row: 0, as: Float.self), try Cast.f32(raw(9), format: .invariant))
+        XCTAssertEqual(batch.get(10, row: 0, as: Double.self), .success(0.255))
+        XCTAssertEqual(batch.get(10, row: 0, as: Double.self), try Cast.f64(raw(10), format: .invariant))
         // 96 bits of magnitude: the high word is in play, and nothing is rounded.
-        XCTAssertEqual(reader.decimal(11, row: 0), .success(Decimal(string: "79228162514264337593543950.335")!))
-        XCTAssertEqual(reader.decimal(11, row: 0), try Cast.decimal(raw(11), format: .invariant))
-        XCTAssertEqual(reader.uuid(12, row: 0), .success(UUID(uuidString: "6ba7b810-9dad-11d1-80b4-00c04fd430c8")!))
-        XCTAssertEqual(reader.uuid(12, row: 0), try Cast.uuid(raw(12)))
-        XCTAssertEqual(reader.timestamp(13, row: 0), .success(Date(timeIntervalSince1970: 1_767_348_245.25)))
-        XCTAssertEqual(reader.timestamp(13, row: 0), try Cast.timestamp(raw(13)))
-        XCTAssertEqual(reader.timestamp(14, row: 0), .success(Date(timeIntervalSince1970: 1_700_000_000.123)))
-        XCTAssertEqual(reader.timestamp(14, row: 0), try Cast.unix(raw(14), precision: .milliseconds))
-        XCTAssertEqual(reader.timestamp(15, row: 0), .success(Date(timeIntervalSince1970: 1_704_132_000)))
-        XCTAssertEqual(reader.timestamp(15, row: 0), try Cast.excelSerial(raw(15), epoch: .y1900))
-        XCTAssertEqual(reader.date(16, row: 0), .success(DateComponents(year: 2024, month: 1, day: 31)))
-        XCTAssertEqual(reader.date(16, row: 0), try Cast.date(raw(16)))
-        XCTAssertEqual(reader.date(17, row: 0), .success(DateComponents(year: 2026, month: 1, day: 7)))
-        XCTAssertEqual(reader.date(17, row: 0), try Cast.date(raw(17), order: .monthDayYear))
         XCTAssertEqual(
-            reader.dateTime(18, row: 0),
+            batch.get(11, row: 0, as: Decimal.self), .success(Decimal(string: "79228162514264337593543950.335")!))
+        XCTAssertEqual(batch.get(11, row: 0, as: Decimal.self), try Cast.decimal(raw(11), format: .invariant))
+        XCTAssertEqual(
+            batch.get(12, row: 0, as: UUID.self), .success(UUID(uuidString: "6ba7b810-9dad-11d1-80b4-00c04fd430c8")!))
+        XCTAssertEqual(batch.get(12, row: 0, as: UUID.self), try Cast.uuid(raw(12)))
+        XCTAssertEqual(batch.get(13, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_767_348_245.25)))
+        XCTAssertEqual(batch.get(13, row: 0, as: Date.self), try Cast.timestamp(raw(13)))
+        XCTAssertEqual(batch.get(14, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_700_000_000.123)))
+        XCTAssertEqual(batch.get(14, row: 0, as: Date.self), try Cast.unix(raw(14), precision: .milliseconds))
+        XCTAssertEqual(batch.get(15, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_704_132_000)))
+        XCTAssertEqual(batch.get(15, row: 0, as: Date.self), try Cast.excelSerial(raw(15), epoch: .y1900))
+        XCTAssertEqual(
+            batch.get(16, row: 0, as: DateComponents.self), .success(DateComponents(year: 2024, month: 1, day: 31)))
+        XCTAssertEqual(batch.get(16, row: 0, as: DateComponents.self), try Cast.date(raw(16)))
+        XCTAssertEqual(
+            batch.get(17, row: 0, as: DateComponents.self), .success(DateComponents(year: 2026, month: 1, day: 7)))
+        XCTAssertEqual(batch.get(17, row: 0, as: DateComponents.self), try Cast.date(raw(17), order: .monthDayYear))
+        XCTAssertEqual(
+            batch.get(18, row: 0, as: DateComponents.self),
             .success(DateComponents(year: 2026, month: 1, day: 7, hour: 15, minute: 4, second: 5, nanosecond: 7)))
-        XCTAssertEqual(reader.dateTime(18, row: 0), try Cast.dateTime(raw(18), order: .monthDayYear))
+        XCTAssertEqual(batch.get(18, row: 0, as: DateComponents.self), try Cast.dateTime(raw(18), order: .monthDayYear))
         XCTAssertEqual(
-            reader.time(19, row: 0),
+            batch.get(19, row: 0, as: DateComponents.self),
             .success(DateComponents(hour: 15, minute: 4, second: 5, nanosecond: 500_000_000)))
-        XCTAssertEqual(reader.time(19, row: 0), try Cast.time(raw(19)))
-        XCTAssertEqual(reader.duration(20, row: 0), .success(.seconds(-5400) - .nanoseconds(1)))
-        XCTAssertEqual(reader.duration(20, row: 0), try Cast.duration(raw(20)))
-        XCTAssertEqual(reader.string(21, row: 0), "a \"quoted\" cell")
+        XCTAssertEqual(batch.get(19, row: 0, as: DateComponents.self), try Cast.time(raw(19)))
+        XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), .success(.seconds(-5400) - .nanoseconds(1)))
+        XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), try Cast.duration(raw(20)))
+        XCTAssertEqual(batch.string(21, row: 0), "a \"quoted\" cell")
         XCTAssertEqual(string(raw(21)), "a \"quoted\" cell")
-        XCTAssertFalse(try reader.read())
+        XCTAssertNil(try reader.read())
     }
 
     /// The same doors on nothing at all: every one says `empty`, as HyperCast does.
@@ -136,24 +139,24 @@ final class ReaderTests: XCTestCase {
             .dateTime(0, order: .yearMonthDay), .time(0), .duration(0), .text(0),
         ]
         let reader = try DelimitedReader(bytes: Array("\n".utf8), dialect: dialect, plan: plan)
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.rows, 1)
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.rows, 1)
         let empty = Fault(reason: .empty, offset: 0, length: 0)
         for column in plan.indices {
-            XCTAssertEqual(reader.verdict(column, row: 0).fault, empty, "column \(column)")
-            XCTAssertEqual(reader.raw(column, row: 0).count, 0, "column \(column)")
+            XCTAssertEqual(batch.verdict(column, row: 0).fault, empty, "column \(column)")
+            XCTAssertEqual(batch.raw(column, row: 0).count, 0, "column \(column)")
         }
-        XCTAssertEqual(reader.bool(0, row: 0), .fault(empty))
-        XCTAssertEqual(reader.decimal(11, row: 0), .fault(empty))
-        XCTAssertEqual(reader.uuid(12, row: 0), .fault(empty))
-        XCTAssertEqual(reader.timestamp(15, row: 0), .fault(empty))
-        XCTAssertEqual(reader.date(17, row: 0), .fault(empty))
-        XCTAssertEqual(reader.dateTime(18, row: 0), .fault(empty))
-        XCTAssertEqual(reader.time(19, row: 0), .fault(empty))
-        XCTAssertEqual(reader.duration(20, row: 0), .fault(empty))
-        XCTAssertNil(reader.text(21, row: 0))
-        XCTAssertEqual(Array(reader.values(0, as: Bool.self)), [false])
-        XCTAssertEqual(Array(reader.values(8, as: UInt64.self)), [0])
+        XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), .fault(empty))
+        XCTAssertEqual(batch.get(11, row: 0, as: Decimal.self), .fault(empty))
+        XCTAssertEqual(batch.get(12, row: 0, as: UUID.self), .fault(empty))
+        XCTAssertEqual(batch.get(15, row: 0, as: Date.self), .fault(empty))
+        XCTAssertEqual(batch.get(17, row: 0, as: DateComponents.self), .fault(empty))
+        XCTAssertEqual(batch.get(18, row: 0, as: DateComponents.self), .fault(empty))
+        XCTAssertEqual(batch.get(19, row: 0, as: DateComponents.self), .fault(empty))
+        XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), .fault(empty))
+        XCTAssertNil(batch.text(21, row: 0))
+        XCTAssertEqual(Array(batch.values(0, as: Bool.self)), [false])
+        XCTAssertEqual(Array(batch.values(8, as: UInt64.self)), [0])
     }
 
     /// A declared notation and a declared currency symbol reach the core as HyperCast's
@@ -167,16 +170,16 @@ final class ReaderTests: XCTestCase {
         let input = Array("1.234,50 kr.;€€€€€x 7;$7\n".utf8)
         let plan: [Column] = [.decimal(0, format: euro), .i32(1, format: wide), .i32(2, format: wide), .f64(0)]
         let reader = try DelimitedReader(bytes: input, dialect: dialect, plan: plan)
-        XCTAssertEqual(reader.columns[0].format, euro)
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.decimal(0, row: 0), .success(Decimal(string: "1234.5")!))
-        XCTAssertEqual(reader.decimal(0, row: 0), try Cast.decimal(reader.raw(0, row: 0), format: euro))
-        XCTAssertEqual(reader.i32(1, row: 0), .success(7))
-        XCTAssertEqual(reader.i32(2, row: 0), try Cast.i32(reader.raw(2, row: 0), format: wide))
-        XCTAssertEqual(reader.verdict(2, row: 0).reason, .malformed)
+        XCTAssertEqual(reader.plan[0].format, euro)
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.get(0, row: 0, as: Decimal.self), .success(Decimal(string: "1234.5")!))
+        XCTAssertEqual(batch.get(0, row: 0, as: Decimal.self), try Cast.decimal(batch.raw(0, row: 0), format: euro))
+        XCTAssertEqual(batch.get(1, row: 0, as: Int32.self), .success(7))
+        XCTAssertEqual(batch.get(2, row: 0, as: Int32.self), try Cast.i32(batch.raw(2, row: 0), format: wide))
+        XCTAssertEqual(batch.verdict(2, row: 0).reason, .malformed)
         // The same source column through the invariant notation is a different verdict.
-        XCTAssertEqual(reader.f64(3, row: 0), try Cast.f64(reader.raw(3, row: 0), format: .invariant))
-        XCTAssertEqual(reader.verdict(3, row: 0).reason, .malformed)
+        XCTAssertEqual(batch.get(3, row: 0, as: Double.self), try Cast.f64(batch.raw(3, row: 0), format: .invariant))
+        XCTAssertEqual(batch.verdict(3, row: 0).reason, .malformed)
     }
 
     /// Text is a view of the input wherever the cell had no escaped quote in it; only a
@@ -185,23 +188,24 @@ final class ReaderTests: XCTestCase {
         let input = Array("name,note\nalice,\"a, b\"\nbob,\"say \"\"hi\"\"\"\n".utf8)
         try input.withUnsafeBytes { bytes in
             let reader = try DelimitedReader(bytesNoCopy: bytes, dialect: .csv, plan: [.text(0), .text(1), .i32(1)])
-            XCTAssertTrue(try reader.read())
-            XCTAssertEqual(reader.rows, 2)
+            let batch = try XCTUnwrap(reader.read())
+            XCTAssertEqual(batch.rows, 2)
             func inside(_ text: UnsafeRawBufferPointer?) -> Bool {
                 guard let text, let from = text.baseAddress, let base = bytes.baseAddress else { return false }
                 return from >= base && from + text.count <= base + bytes.count
             }
-            XCTAssertTrue(inside(reader.text(0, row: 0)))
-            XCTAssertEqual(reader.string(0, row: 0), "alice")
-            XCTAssertTrue(inside(reader.text(1, row: 0)), "quoted, nothing escaped: still the input")
-            XCTAssertEqual(reader.string(1, row: 0), "a, b")
-            XCTAssertTrue(inside(reader.raw(2, row: 0)))
-            XCTAssertFalse(inside(reader.text(1, row: 1)), "an escaped cell is unescaped elsewhere")
-            XCTAssertEqual(reader.string(1, row: 1), "say \"hi\"")
+            XCTAssertTrue(inside(batch.text(0, row: 0)))
+            XCTAssertEqual(batch.string(0, row: 0), "alice")
+            XCTAssertTrue(inside(batch.text(1, row: 0)), "quoted, nothing escaped: still the input")
+            XCTAssertEqual(batch.string(1, row: 0), "a, b")
+            XCTAssertTrue(inside(batch.raw(2, row: 0)))
+            XCTAssertFalse(inside(batch.text(1, row: 1)), "an escaped cell is unescaped elsewhere")
+            XCTAssertEqual(batch.string(1, row: 1), "say \"hi\"")
             // The raw text of a cell that failed to cast, escaped quotes resolved.
-            XCTAssertEqual(reader.i32(2, row: 1), .fault(Fault(reason: .malformed, offset: 0, length: 1)))
-            XCTAssertEqual(string(reader.raw(2, row: 1)), "say \"hi\"")
-            XCTAssertFalse(try reader.read())
+            XCTAssertEqual(
+                batch.get(2, row: 1, as: Int32.self), .fault(Fault(reason: .malformed, offset: 0, length: 1)))
+            XCTAssertEqual(string(batch.raw(2, row: 1)), "say \"hi\"")
+            XCTAssertNil(try reader.read())
         }
     }
 
@@ -209,17 +213,17 @@ final class ReaderTests: XCTestCase {
         let input = Array("a,b,c\n1,2,3\n4,5,6\n".utf8)
         // In its own order, one source column twice, and one past the record's last cell.
         let reader = try DelimitedReader(bytes: input, dialect: .csv, plan: [.i32(2), .text(0), .u8(2), .i32(7)])
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(Array(reader.values(0, as: Int32.self)), [3, 6])
-        XCTAssertEqual(Array(reader.values(2, as: UInt8.self)), [3, 6])
-        XCTAssertEqual(reader.string(1, row: 1), "4")
-        XCTAssertEqual(reader.i32(3, row: 0), .fault(Fault(reason: .empty, offset: 0, length: 0)))
-        XCTAssertEqual(reader.raw(3, row: 0).count, 0)
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [3, 6])
+        XCTAssertEqual(Array(batch.values(2, as: UInt8.self)), [3, 6])
+        XCTAssertEqual(batch.string(1, row: 1), "4")
+        XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), .fault(Fault(reason: .empty, offset: 0, length: 0)))
+        XCTAssertEqual(batch.raw(3, row: 0).count, 0)
 
         // No columns at all still counts the rows.
         let counter = try DelimitedReader(bytes: input, dialect: .csv, plan: [], batchRows: 1)
         var rows = 0
-        while try counter.read() { rows += counter.rows }
+        while let batch = try counter.read() { rows += batch.rows }
         XCTAssertEqual(rows, 2)
         XCTAssertEqual(counter.records, 3)
     }
@@ -248,26 +252,26 @@ final class ReaderTests: XCTestCase {
             XCTAssertEqual(reader.header?.first, unescaped)
             XCTAssertEqual(reader.header?.last, "c\(width - 1)")
             for _ in 0..<2 {
-                XCTAssertTrue(try reader.read())
-                XCTAssertEqual(reader.rows, 1)
-                XCTAssertEqual(reader.string(0, row: 0), unescaped)
-                XCTAssertEqual(reader.verdict(1, row: 0).reason, .malformed)
-                XCTAssertEqual(string(reader.raw(1, row: 0)), unescaped)
-                XCTAssertEqual(reader.i32(2, row: 0), .success(Int32(width - 1)))
-                XCTAssertEqual(reader.string(3, row: 0), "0")
+                let batch = try XCTUnwrap(reader.read())
+                XCTAssertEqual(batch.rows, 1)
+                XCTAssertEqual(batch.string(0, row: 0), unescaped)
+                XCTAssertEqual(batch.verdict(1, row: 0).reason, .malformed)
+                XCTAssertEqual(string(batch.raw(1, row: 0)), unescaped)
+                XCTAssertEqual(batch.get(2, row: 0, as: Int32.self), .success(Int32(width - 1)))
+                XCTAssertEqual(batch.string(3, row: 0), "0")
             }
-            XCTAssertFalse(try reader.read())
+            XCTAssertNil(try reader.read())
         }
 
         // And in memory, shown to the core one byte at first: the window widens instead.
         let reader = try DelimitedReader(bytes: input, dialect: .csv, plan: plan, batchRows: 1024, windowBytes: 1)
         XCTAssertEqual(reader.header?.count, width)
         var rows = 0
-        while try reader.read() {
-            for index in 0..<reader.rows {
-                XCTAssertEqual(reader.string(0, row: index), unescaped)
+        while let batch = try reader.read() {
+            for index in 0..<batch.rows {
+                XCTAssertEqual(batch.string(0, row: index), unescaped)
             }
-            rows += reader.rows
+            rows += batch.rows
         }
         XCTAssertEqual(rows, 2)
     }
@@ -291,9 +295,9 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(reader.header, ["n"])
         var sum: Int64 = 0
         var rows = 0
-        while try reader.read() {
-            sum += reader.values(0, as: Int64.self).reduce(0, +)
-            rows += reader.rows
+        while let batch = try reader.read() {
+            sum += batch.values(0, as: Int64.self).reduce(0, +)
+            rows += batch.rows
         }
         XCTAssertEqual(rows, total)
         XCTAssertEqual(sum, Int64(total) * Int64(total + 1) / 2)
@@ -302,9 +306,9 @@ final class ReaderTests: XCTestCase {
 
     func testAStructuralFailureIsThrownAfterTheIntactRows() throws {
         let reader = try DelimitedReader(bytes: Array("a,b\n1,2\n3\n".utf8), dialect: .csv, plan: [.i32(0)])
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.rows, 1)
-        XCTAssertEqual(reader.i32(0, row: 0), .success(1))
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.rows, 1)
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(1))
         let expected = TabularError(kind: .columnCount, record: 2, line: 3, byte: 8, expected: 2, found: 1)
         for _ in 0..<2 {
             XCTAssertThrowsError(try reader.read()) { error in
@@ -313,7 +317,7 @@ final class ReaderTests: XCTestCase {
                     "\(error)", "Record 2 (line 3, byte 8) has 1 cells; the first record had 2.")
                 XCTAssertEqual(error.localizedDescription, "\(error)")
             }
-            XCTAssertEqual(reader.rows, 0)
+            XCTAssertEqual(batch.rows, 0)
         }
 
         // A header that never closes its quote fails the open itself.
@@ -334,42 +338,62 @@ final class ReaderTests: XCTestCase {
                 buffer.copyBytes(from: bytes)
                 return bytes.count
             }, dialect: .csv, plan: [.i32(0)], batchRows: 1)
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.i32(0, row: 0), .success(1))
+        var batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(1))
         XCTAssertThrowsError(try reader.read()) { XCTAssertEqual($0 as? Unplugged, Unplugged()) }
         // Not a structural failure, so not final: nothing was lost, and the read goes on.
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.i32(0, row: 0), .success(2))
-        XCTAssertTrue(try reader.read())
-        XCTAssertEqual(reader.i32(0, row: 0), .success(3))
-        XCTAssertFalse(try reader.read())
+        batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(2))
+        batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(3))
+        XCTAssertNil(try reader.read())
     }
 
     func testAFileIsReadThroughTheSameReader() throws {
         #if os(WASI)
-        throw XCTSkip("a WASI sandbox has no file system to write a file into")
+            throw XCTSkip("a WASI sandbox has no file system to write a file into")
         #else
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("hypertabular-\(UUID().uuidString).csv").path
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        var text = "n\n"
-        for row in 0..<100_000 { text += "\(row)\n" }
-        try Data(text.utf8).write(to: URL(fileURLWithPath: path))
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("hypertabular-\(UUID().uuidString).csv").path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            var text = "n\n"
+            for row in 0..<100_000 { text += "\(row)\n" }
+            try Data(text.utf8).write(to: URL(fileURLWithPath: path))
 
-        let reader = try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: [.i64(0)], bufferBytes: 4096)
-        var sum: Int64 = 0
-        var rows = 0
-        while try reader.read() {
-            sum += reader.values(0, as: Int64.self).reduce(0, +)
-            rows += reader.rows
-        }
-        XCTAssertEqual(rows, 100_000)
-        XCTAssertEqual(sum, 4_999_950_000)
+            let reader = try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: [.i64(0)], bufferBytes: 4096)
+            var sum: Int64 = 0
+            var rows = 0
+            while let batch = try reader.read() {
+                sum += batch.values(0, as: Int64.self).reduce(0, +)
+                rows += batch.rows
+            }
+            XCTAssertEqual(rows, 100_000)
+            XCTAssertEqual(sum, 4_999_950_000)
 
-        XCTAssertThrowsError(
-            try DelimitedReader(contentsOfFile: path + ".missing", dialect: .csv, plan: [.i64(0)])
-        ) { XCTAssertFalse($0 is TabularError) }
+            XCTAssertThrowsError(
+                try DelimitedReader(contentsOfFile: path + ".missing", dialect: .csv, plan: [.i64(0)])
+            ) { XCTAssertFalse($0 is TabularError) }
         #endif
+    }
+
+    /// The core ends a batch early when its arena fills; the batch after one that did starts
+    /// with the arena doubled, so twenty thousand escaped rows are a handful of batches.
+    func testAnArenaThatCrampsABatchIsGrown() throws {
+        let row = "\"" + String(repeating: "say \"\"hi\"\" ", count: 8) + "\"\n"
+        let expected = String(repeating: "say \"hi\" ", count: 8)
+        let reader = try DelimitedReader(
+            bytes: Array(String(repeating: row, count: 20_000).utf8),
+            dialect: Dialect(separator: ",", hasHeader: false),
+            plan: [.text(0)])
+        var batches = 0
+        var rows = 0
+        while let batch = try reader.read() {
+            batches += 1
+            rows += batch.rows
+            XCTAssertEqual(batch.get(0, row: batch.rows - 1, as: String.self), .success(expected))
+        }
+        XCTAssertEqual(rows, 20_000)
+        XCTAssertLessThan(batches, 15)
     }
 
     /// The shapes this binding and the core share, as the header declares them.

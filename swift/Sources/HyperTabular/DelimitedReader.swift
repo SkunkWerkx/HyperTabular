@@ -15,11 +15,12 @@ import HyperTabularCore
 ///
 /// ```swift
 /// let reader = try DelimitedReader(contentsOfFile: "orders.csv", dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
-/// while try reader.read() {
-///     for row in 0..<reader.rows {
-///         switch reader.f64(2, row: row) {
-///         case .success(let score): print(reader.string(1, row: row) ?? "", score)
-///         case .fault(let fault): print("row \(row): \(fault.reason) in", String(decoding: reader.raw(2, row: row), as: UTF8.self))
+/// while let batch = try reader.read() {
+///     for row in 0..<batch.rows {
+///         switch batch.get(2, row: row, as: Double.self) {
+///         case .success(let score): print(batch.string(1, row: row) ?? "", score)
+///         case .fault(let fault):
+///             print("line \(batch.line(row)): \(fault.reason) in", String(decoding: batch.raw(2, row: row), as: UTF8.self))
 ///         }
 ///     }
 /// }
@@ -33,10 +34,9 @@ import HyperTabularCore
 /// the batch, a separator the core cannot honour — is a precondition failure, never an
 /// error to catch: the same line HyperCast's Swift binding draws.
 ///
-/// Buffers handed out for a batch — ``values(_:as:)``, ``verdicts(_:)``,
-/// ``text(_:row:)``, ``raw(_:row:)`` — point into the reader's own memory and are valid
-/// until the next ``read()`` (``raw(_:row:)`` until the next call to itself, too) and no
-/// longer than the reader. Not thread-safe.
+/// The ``Batch`` a read returns, and every buffer it hands out, point into the reader's own
+/// memory and are valid until the next ``read()`` and no longer than the reader. Not
+/// thread-safe.
 public final class DelimitedReader {
     /// The row ceiling: a single record larger than this is a ``TabularFailure/rowTooLong``.
     public static let maxRowBytes = 1 << 30
@@ -58,9 +58,6 @@ public final class DelimitedReader {
     /// The most input one native call may be shown: the core's spans are 31 bits.
     private static let callLimit = Int(Int32.max)
 
-    /// 2⁶⁴ — the weight of a decimal's high word, exact in `Decimal`.
-    private static let highWordWeight = Decimal(UInt64.max) + Decimal(1)
-
     // What this file assumes of the shapes hypertabular.h declares, held once: the state
     // block is the size the core says it is, and each value is as wide as the core writes it.
     private static let layoutChecked: Bool = {
@@ -81,21 +78,22 @@ public final class DelimitedReader {
         return true
     }()
 
-    private let plan: [Column]
-    private let batchRows: Int
-    private let hasHeader: Bool
-    /// Cell-table entries one row takes: the widest ordinal the plan reads, plus two.
-    private let perRow: Int
+    /// The dialect the text is read in.
+    public let dialect: Dialect
+    private let columnSet: Columns
+    private let batch: Batch
+    /// Cell-table entries one row takes: the widest ordinal the plan reads, plus two, or
+    /// more if the core asked for more.
+    private var perRow: Int
 
-    // Everything the core is handed, allocated once and never moved: it is given addresses.
+    // What the core is handed beside the plan's buffers, allocated once and moved only to
+    // grow: it is given addresses.
     private let state: UnsafeMutablePointer<hypertabular_delimited_state>
-    private let specs: UnsafeMutablePointer<hypertabular_column_spec>
-    private let buffers: UnsafeMutablePointer<hypertabular_column_buffer>
-    private let valueBase: [UnsafeMutableRawPointer]
-    private let verdictBase: [UnsafeMutablePointer<CellVerdict>]
     private var cells: UnsafeMutableBufferPointer<hypertabular_span>
     private var arena: UnsafeMutableBufferPointer<UInt8>
-    private var scratch: UnsafeMutableBufferPointer<UInt8>
+    /// Whether the last batch ended early because the arena filled: the next one starts with
+    /// it doubled, so that escaped text costs a few batches, not one per row.
+    private var cramped = false
 
     // The source: a stream read into `input`, or memory read in place.
     private let source: Source?
@@ -107,12 +105,7 @@ public final class DelimitedReader {
     /// The most of `input` the core is shown at once.
     private var windowLimit: Int
 
-    /// The input the batch in hand's spans index.
-    private var window: UnsafeRawPointer?
     private var failure: TabularError?
-
-    /// Rows in the batch in hand; `0` before the first ``read()`` and after the last.
-    public private(set) var rows = 0
 
     /// The header's names, when the dialect declares one — empty for an input with no
     /// record — and `nil` when it declares none.
@@ -239,9 +232,7 @@ public final class DelimitedReader {
             dialect.separator.isASCII,
             "Separator U+\(String(dialect.separator.value, radix: 16, uppercase: true)) is not a single ASCII byte")
 
-        self.plan = plan
-        self.batchRows = batchRows
-        self.hasHeader = dialect.hasHeader
+        self.dialect = dialect
         self.source = source
         self.input = input
         self.ownsInput = ownsInput
@@ -257,51 +248,24 @@ public final class DelimitedReader {
             hypertabular_delimited_init(state, &raw) == HYPERTABULAR_OK,
             "Separator '\(dialect.separator)' is not tab or printable ASCII other than '\"'")
 
-        specs = .allocate(capacity: plan.count)
-        buffers = .allocate(capacity: plan.count)
-        var values = [UnsafeMutableRawPointer]()
-        var verdicts = [UnsafeMutablePointer<CellVerdict>]()
-        var widest = -1
-        for (index, column) in plan.enumerated() {
-            widest = max(widest, column.ordinal)
-            // 16-aligned, the widest any value is, so every door's values sit as Swift
-            // lays that type out and can be handed back as a buffer of it.
-            let value = UnsafeMutableRawPointer.allocate(
-                byteCount: batchRows * column.valueSize, alignment: 16)
-            let verdict = UnsafeMutablePointer<CellVerdict>.allocate(capacity: batchRows)
-            values.append(value)
-            verdicts.append(verdict)
-            (specs + index).initialize(to: column.spec)
-            (buffers + index).initialize(
-                to: hypertabular_column_buffer(
-                    values: value,
-                    verdicts: UnsafeMutableRawPointer(verdict).assumingMemoryBound(
-                        to: hypertabular_cell_verdict.self)))
-        }
-        valueBase = values
-        verdictBase = verdicts
-        perRow = widest + 2
+        columnSet = Columns(plan: plan, batchRows: batchRows)
+        batch = Batch(columnSet, workbook: false)
+        perRow = columnSet.width + 1
         cells = .allocate(capacity: perRow * batchRows)
         arena = .allocate(capacity: 4096)
-        scratch = .allocate(capacity: 0)
     }
 
     deinit {
         state.deallocate()
-        specs.deallocate()
-        buffers.deallocate()
-        for value in valueBase { value.deallocate() }
-        for verdict in verdictBase { verdict.deallocate() }
         cells.deallocate()
         arena.deallocate()
-        scratch.deallocate()
         if ownsInput { input.deallocate() }
     }
 
     // MARK: - the plan and the position
 
-    /// The plan: the output columns, in output order.
-    public var columns: [Column] { plan }
+    /// The plan the text is read through: column `i` of every batch is `plan[i]`.
+    public var plan: [Column] { columnSet.plan }
 
     /// Records finished so far — the header and skipped blank lines included.
     public var records: Int64 { Int64(clamping: state.pointee.records) }
@@ -364,11 +328,7 @@ public final class DelimitedReader {
     }
 
     private func structural(_ raw: hypertabular_failure) -> TabularError {
-        let error = TabularError(
-            kind: raw.code == 2 ? .columnCount : .unclosedQuote,
-            record: Int64(clamping: raw.record), line: Int(clamping: raw.line),
-            byte: Int64(clamping: raw.byte), expected: Int(clamping: raw.expected),
-            found: Int(clamping: raw.found))
+        let error = TabularError(raw)
         failure = error
         return error
     }
@@ -389,7 +349,7 @@ public final class DelimitedReader {
     }
 
     private func readHeaderIfDeclared() throws {
-        guard hasHeader else { return }
+        guard dialect.hasHeader else { return }
         var names = UnsafeMutableBufferPointer<hypertabular_span>.allocate(capacity: 64)
         defer { names.deallocate() }
         var filled = hypertabular_filled()
@@ -429,42 +389,50 @@ public final class DelimitedReader {
         }
     }
 
-    /// Reads the next batch. `true` with ``rows`` rows in hand; `false` once the input is
-    /// exhausted.
+    /// Reads the next batch: up to `batchRows` whole rows, as many as one call of the core
+    /// found — fewer when the input, or what the read buffer holds of it, ran out first — or
+    /// `nil` once the input is exhausted. The batch is valid until the next read.
     ///
     /// - Throws: ``TabularError`` when the input is structurally broken — after every
     ///   intact row before the break has been delivered, and again on every later call —
     ///   and whatever a streamed source throws.
-    public func read() throws -> Bool {
+    public func read() throws -> Batch? {
+        batch.clear()
         if let failure {
             throw failure
         }
-        rows = 0
+        if cramped {
+            arena.deallocate()
+            arena = .allocate(capacity: arena.count * 2)
+            cramped = false
+        }
         var filled = hypertabular_filled()
         while true {
             let (base, length, last) = nextWindow()
             let code = hypertabular_delimited_fill(
-                state, base, UInt(length), last ? 1 : 0, specs, buffers, UInt(plan.count),
-                UInt(batchRows), cells.baseAddress, UInt(cells.count), arena.baseAddress,
-                UInt(arena.count), &filled)
+                state, base, UInt(length), last ? 1 : 0, columnSet.specs, columnSet.buffers,
+                UInt(columnSet.plan.count), UInt(columnSet.batchRows), cells.baseAddress, UInt(cells.count),
+                arena.baseAddress, UInt(arena.count), &filled)
             switch code {
             case HYPERTABULAR_OK:
                 let consumed = Int(filled.consumed)
                 start += consumed
                 if filled.rows > 0 {
-                    rows = Int(filled.rows)
-                    window = UnsafeRawPointer(base)
-                    return true
+                    let rows = Int(filled.rows)
+                    cramped = rows < columnSet.batchRows && filled.arena_used * 2 >= UInt64(arena.count)
+                    return batch.fill(
+                        rows: rows, cells: cells, perRow: perRow, base: UnsafeRawPointer(base), arena: arena)
                 }
                 if last && (consumed == length || consumed == 0) {
-                    return false
+                    return nil
                 }
                 if consumed == 0 {
                     try refill()
                 }
             case HYPERTABULAR_ERR_CELLS:
+                perRow = max(perRow, Int(clamping: filled.needed))
                 cells.deallocate()
-                cells = .allocate(capacity: Int(clamping: filled.needed) * batchRows)
+                cells = .allocate(capacity: perRow * columnSet.batchRows)
             case HYPERTABULAR_ERR_ARENA:
                 growArena(toHold: filled.needed)
             case HYPERTABULAR_ERR_STRUCTURE:
@@ -473,233 +441,5 @@ public final class DelimitedReader {
                 preconditionFailure(Self.contractViolation)
             }
         }
-    }
-
-    // MARK: - a column at a time
-
-    /// A column's verdicts for the batch in hand, one per row. Valid until the next
-    /// ``read()``.
-    public func verdicts(_ column: Int) -> UnsafeBufferPointer<CellVerdict> {
-        UnsafeBufferPointer(start: verdictBase[column], count: rows)
-    }
-
-    /// A column's values for the batch in hand, one per row, exactly as the core wrote them
-    /// — for the doors whose value is a primitive (``ColumnValue``): ``Door/bool`` as
-    /// `Bool`, the integer and floating-point doors as their own type. The value of a row
-    /// whose verdict is not ok is zero. Columns of other doors are read a cell at a time.
-    /// Valid until the next ``read()``.
-    ///
-    /// - Precondition: `T` is the type the column's door writes.
-    public func values<T: ColumnValue>(_ column: Int, as type: T.Type = T.self) -> UnsafeBufferPointer<T> {
-        let door = plan[column].door
-        precondition(
-            door == T.columnDoor, "Column \(column) is cast through \(door); it has no buffer of \(T.self)")
-        return UnsafeBufferPointer(
-            start: valueBase[column].bindMemory(to: T.self, capacity: batchRows), count: rows)
-    }
-
-    // MARK: - a cell at a time
-
-    /// The verdict of the cell at (`column`, `row`), checked against the doors the caller's
-    /// accessor reads.
-    private func checked(
-        _ column: Int, _ row: Int, _ door: Door, _ also: Door? = nil, _ orElse: Door? = nil
-    ) -> hypertabular_cell_verdict {
-        precondition(row >= 0 && row < rows, "Row \(row) is outside the batch in hand (\(rows) rows)")
-        let actual = plan[column].door
-        precondition(
-            actual == door || actual == also || actual == orElse,
-            "Column \(column) is cast through \(actual), not \(door)")
-        return verdictBase[column][row].raw
-    }
-
-    private func fault(_ verdict: hypertabular_cell_verdict) -> Fault {
-        guard let reason = CastFailure(rawValue: Int32(truncatingIfNeeded: verdict.reason)) else {
-            preconditionFailure("libhypertabular wrote unknown verdict code \(verdict.reason)")
-        }
-        return Fault(reason: reason, offset: Int(verdict.offset), length: Int(verdict.len))
-    }
-
-    /// One cell as HyperCast's union: the value the core wrote, presented, or the fault.
-    private func cell<Raw, T>(
-        _ column: Int, _ row: Int, _ door: Door, _ also: Door? = nil, _ orElse: Door? = nil,
-        present: (Raw) -> T
-    ) -> Verdict<T> {
-        let verdict = checked(column, row, door, also, orElse)
-        guard verdict.reason == 0 else {
-            return .fault(fault(verdict))
-        }
-        return .success(
-            present(valueBase[column].load(fromByteOffset: row * MemoryLayout<Raw>.stride, as: Raw.self)))
-    }
-
-    /// The verdict of the cell at (`column`, `row`), whatever its door.
-    public func verdict(_ column: Int, row: Int) -> CellVerdict {
-        precondition(row >= 0 && row < rows, "Row \(row) is outside the batch in hand (\(rows) rows)")
-        return verdictBase[column][row]
-    }
-
-    /// The cell of a ``Door/bool`` column.
-    public func bool(_ column: Int, row: Int) -> Verdict<Bool> {
-        cell(column, row, .bool) { (raw: UInt8) in raw != 0 }
-    }
-
-    /// The cell of a ``Door/i8`` column.
-    public func i8(_ column: Int, row: Int) -> Verdict<Int8> {
-        cell(column, row, .i8) { (raw: Int8) in raw }
-    }
-
-    /// The cell of a ``Door/i16`` column.
-    public func i16(_ column: Int, row: Int) -> Verdict<Int16> {
-        cell(column, row, .i16) { (raw: Int16) in raw }
-    }
-
-    /// The cell of a ``Door/i32`` column.
-    public func i32(_ column: Int, row: Int) -> Verdict<Int32> {
-        cell(column, row, .i32) { (raw: Int32) in raw }
-    }
-
-    /// The cell of a ``Door/i64`` column.
-    public func i64(_ column: Int, row: Int) -> Verdict<Int64> {
-        cell(column, row, .i64) { (raw: Int64) in raw }
-    }
-
-    /// The cell of a ``Door/u8`` column.
-    public func u8(_ column: Int, row: Int) -> Verdict<UInt8> {
-        cell(column, row, .u8) { (raw: UInt8) in raw }
-    }
-
-    /// The cell of a ``Door/u16`` column.
-    public func u16(_ column: Int, row: Int) -> Verdict<UInt16> {
-        cell(column, row, .u16) { (raw: UInt16) in raw }
-    }
-
-    /// The cell of a ``Door/u32`` column.
-    public func u32(_ column: Int, row: Int) -> Verdict<UInt32> {
-        cell(column, row, .u32) { (raw: UInt32) in raw }
-    }
-
-    /// The cell of a ``Door/u64`` column.
-    public func u64(_ column: Int, row: Int) -> Verdict<UInt64> {
-        cell(column, row, .u64) { (raw: UInt64) in raw }
-    }
-
-    /// The cell of a ``Door/f32`` column.
-    public func f32(_ column: Int, row: Int) -> Verdict<Float> {
-        cell(column, row, .f32) { (raw: Float) in raw }
-    }
-
-    /// The cell of a ``Door/f64`` column.
-    public func f64(_ column: Int, row: Int) -> Verdict<Double> {
-        cell(column, row, .f64) { (raw: Double) in raw }
-    }
-
-    /// The cell of a ``Door/decimal`` column, exact: Foundation's `Decimal`, as HyperCast's
-    /// own `Cast.decimal` presents it. The core's magnitude is at most 2⁹⁶ − 1 (29 digits),
-    /// inside `Decimal`'s 38-digit mantissa, so nothing is rounded.
-    public func decimal(_ column: Int, row: Int) -> Verdict<Decimal> {
-        cell(column, row, .decimal) { (raw: hypertabular_decimal) in
-            let magnitude =
-                raw.hi == 0 ? Decimal(raw.lo) : Decimal(raw.hi) * Self.highWordWeight + Decimal(raw.lo)
-            return Decimal(
-                sign: raw.negative != 0 ? .minus : .plus, exponent: -Int(raw.scale),
-                significand: magnitude)
-        }
-    }
-
-    /// The cell of a ``Door/uuid`` column.
-    public func uuid(_ column: Int, row: Int) -> Verdict<UUID> {
-        // uuid_t's tuple layout is the RFC byte order exactly, which is what the core writes.
-        cell(column, row, .uuid) { (raw: uuid_t) in UUID(uuid: raw) }
-    }
-
-    /// The cell of a ``Door/timestamp``, ``Door/unix`` or ``Door/excelSerial`` column: an
-    /// instant, as Foundation's `Date` — a `Double` of seconds, so sub-microsecond fidelity
-    /// degrades toward the window's edges, exactly as HyperCast's own doors present it.
-    public func timestamp(_ column: Int, row: Int) -> Verdict<Date> {
-        cell(column, row, .timestamp, .unix, .excelSerial) { (raw: hypertabular_timestamp) in
-            Date(timeIntervalSince1970: Double(raw.seconds) + Double(raw.nanos) / 1_000_000_000)
-        }
-    }
-
-    /// The cell of a ``Door/date`` or ``Door/dateOrdered`` column: year, month and day,
-    /// digit-perfect, with no calendar or zone attached.
-    public func date(_ column: Int, row: Int) -> Verdict<DateComponents> {
-        cell(column, row, .date, .dateOrdered) { (raw: hypertabular_date) in
-            DateComponents(year: Int(raw.year), month: Int(raw.month), day: Int(raw.day))
-        }
-    }
-
-    /// The cell of a ``Door/dateTime`` column: year through nanosecond with no zone — the
-    /// text named none and none is invented.
-    public func dateTime(_ column: Int, row: Int) -> Verdict<DateComponents> {
-        cell(column, row, .dateTime) { (raw: hypertabular_civil) in
-            let secondOfDay = raw.nanos_of_day / 1_000_000_000
-            return DateComponents(
-                year: Int(raw.date.year), month: Int(raw.date.month), day: Int(raw.date.day),
-                hour: Int(secondOfDay / 3_600),
-                minute: Int(secondOfDay % 3_600 / 60),
-                second: Int(secondOfDay % 60),
-                nanosecond: Int(raw.nanos_of_day % 1_000_000_000))
-        }
-    }
-
-    /// The cell of a ``Door/time`` column: hour, minute, second and nanosecond.
-    public func time(_ column: Int, row: Int) -> Verdict<DateComponents> {
-        cell(column, row, .time) { (nanosOfDay: UInt64) in
-            let (secondOfDay, nano) = nanosOfDay.quotientAndRemainder(dividingBy: 1_000_000_000)
-            let (hour, rest) = secondOfDay.quotientAndRemainder(dividingBy: 3_600)
-            let (minute, second) = rest.quotientAndRemainder(dividingBy: 60)
-            return DateComponents(
-                hour: Int(hour), minute: Int(minute), second: Int(second), nanosecond: Int(nano))
-        }
-    }
-
-    /// The cell of a ``Door/duration`` column, as Swift's `Duration` — the core's
-    /// nanoseconds carried exactly, both signs.
-    public func duration(_ column: Int, row: Int) -> Verdict<Duration> {
-        cell(column, row, .duration) { (raw: hypertabular_duration) in
-            Duration.seconds(raw.seconds) + .nanoseconds(Int64(raw.nanos))
-        }
-    }
-
-    /// The cell of a ``Door/text`` column: its bytes, untrimmed, quotes resolved — or `nil`
-    /// for a cell with no bytes at all, which is the one way text fails. The buffer points
-    /// into the reader's input — zero-copy for every cell that had no escaped quote in it —
-    /// and is valid until the next ``read()``.
-    public func text(_ column: Int, row: Int) -> UnsafeRawBufferPointer? {
-        guard checked(column, row, .text).reason == 0 else {
-            return nil
-        }
-        let span = valueBase[column].load(
-            fromByteOffset: row * MemoryLayout<hypertabular_span>.stride, as: hypertabular_span.self)
-        return located(span, in: window)
-    }
-
-    /// The cell of a ``Door/text`` column as a `String`, or `nil` for an empty cell.
-    public func string(_ column: Int, row: Int) -> String? {
-        text(column, row: row).map { String(decoding: $0, as: UTF8.self) }
-    }
-
-    /// The text the cell at (`column`, `row`) was cast from, whatever its door and whatever
-    /// its verdict — what a fault's span indexes, and what to show for a value that did not
-    /// cast. Valid until the next call to ``raw(_:row:)`` or ``read()``.
-    public func raw(_ column: Int, row: Int) -> UnsafeRawBufferPointer {
-        precondition(row >= 0 && row < rows, "Row \(row) is outside the batch in hand (\(rows) rows)")
-        let cell = cells[row * perRow + plan[column].ordinal]
-        let length = Int(cell.len & ~HYPERTABULAR_SPAN_FLAG)
-        let written = UnsafeRawBufferPointer(start: window.map { $0 + Int(cell.offset) }, count: length)
-        guard cell.len & HYPERTABULAR_SPAN_FLAG != 0 else {
-            return written
-        }
-        // A cell with an escaped quote in it: unescaped, as the core cast it.
-        if scratch.count < length {
-            scratch.deallocate()
-            scratch = .allocate(capacity: max(length, 256))
-        }
-        let unescaped = hypertabular_delimited_unescape(
-            written.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(length),
-            scratch.baseAddress, UInt(scratch.count))
-        return UnsafeRawBufferPointer(start: scratch.baseAddress, count: Int(unescaped))
     }
 }

@@ -91,6 +91,31 @@ pub fn find_byte(hay: &[u8], from: usize, needle: u8) -> Option<usize> {
     rest.iter().position(|&b| b == needle).map(|i| at + i)
 }
 
+/// Finds the first `>`, `"` or `'` in `hay[from..]` — what ends a tag, and what opens a
+/// quoted value inside one — eight bytes at a time, as [`find_byte`] finds one byte.
+fn find_tag_byte(hay: &[u8], from: usize) -> Option<usize> {
+    const LOW7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+    const GT: u64 = 0x3E3E_3E3E_3E3E_3E3E;
+    const DOUBLE: u64 = 0x2222_2222_2222_2222;
+    const SINGLE: u64 = 0x2727_2727_2727_2727;
+    // A byte of `word` that is zero sets that byte's high bit here; no other byte does.
+    let zeros = |word: u64| !((word & LOW7).wrapping_add(LOW7) | word | LOW7);
+    let mut at = from;
+    let mut rest = hay.get(from..)?;
+    while let Some((chunk, after)) = rest.split_first_chunk::<8>() {
+        let word = u64::from_le_bytes(*chunk);
+        let hit = zeros(word ^ GT) | zeros(word ^ DOUBLE) | zeros(word ^ SINGLE);
+        if hit != 0 {
+            return Some(at + (hit.trailing_zeros() / 8) as usize);
+        }
+        at += 8;
+        rest = after;
+    }
+    rest.iter()
+        .position(|&b| b == b'>' || b == b'"' || b == b'\'')
+        .map(|i| at + i)
+}
+
 /// Finds the byte sequence `pattern` in `hay[from..]`.
 pub fn find_seq(hay: &[u8], from: usize, pattern: &[u8]) -> Option<usize> {
     let first = *pattern.first()?;
@@ -141,14 +166,18 @@ pub fn scan(buf: &[u8], pos: usize, eof: bool) -> Scan {
         if rest.len() < 9 && !eof {
             return Scan::More(pos);
         }
-        let (skip, close, detail): (usize, &[u8], u32) = if rest.starts_with(b"<!--") {
-            (4, b"-->", UNTERMINATED_COMMENT)
-        } else if rest.starts_with(b"<![CDATA[") {
-            (9, b"]]>", UNTERMINATED_CDATA)
+        // `<!` first: an ordinary tag, which is almost every construct, then never meets
+        // the longer comparisons.
+        let (skip, close, detail): (usize, &[u8], u32) = if rest.starts_with(b"<!") {
+            if rest.starts_with(b"<!--") {
+                (4, b"-->", UNTERMINATED_COMMENT)
+            } else if rest.starts_with(b"<![CDATA[") {
+                (9, b"]]>", UNTERMINATED_CDATA)
+            } else {
+                (2, b">", UNTERMINATED_DECLARATION)
+            }
         } else if rest.starts_with(b"<?") {
             (2, b"?>", UNTERMINATED_INSTRUCTION)
-        } else if rest.starts_with(b"<!") {
-            (2, b">", UNTERMINATED_DECLARATION)
         } else {
             return tag(buf, pos, eof);
         };
@@ -175,20 +204,21 @@ pub fn scan(buf: &[u8], pos: usize, eof: bool) -> Scan {
 
 /// An ordinary tag at `pos`: finds the `>` outside quotes and splits name from attributes.
 fn tag(buf: &[u8], pos: usize, eof: bool) -> Scan {
-    let mut quote = 0u8;
-    let mut gt = None;
-    for (i, &b) in tail(buf, pos + 1).iter().enumerate() {
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = b;
-        } else if b == b'>' {
-            gt = Some(pos + 1 + i);
-            break;
+    // From one `>` or quote to the next: a quote is jumped to the one that closes it.
+    let mut at = pos + 1;
+    let gt = loop {
+        let Some(found) = find_tag_byte(buf, at) else {
+            break None;
+        };
+        match buf.get(found) {
+            Some(&b'>') => break Some(found),
+            Some(&quote) => match find_byte(buf, found + 1, quote) {
+                Some(close) => at = close + 1,
+                None => break None,
+            },
+            None => break None,
         }
-    }
+    };
     let Some(gt) = gt else {
         return if eof {
             Scan::Malformed(UNTERMINATED_TAG)

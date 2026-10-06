@@ -4,11 +4,9 @@
 //! the core that replaced it — written down, not computed, so they do not move when the
 //! code does.
 
-use hypertabular::kernel::workbook::cell::{
-    Cell, days_to_duration, render, serial, split, wall_from_iso,
-};
+use hypertabular::kernel::workbook::cell::{Cell, render, serial, wall_from_iso};
 use hypertabular::kernel::workbook::styles::{DATE_TIME, ELAPSED, NUMBER, TEXT, builtin, classify};
-use hypertabular::{Date, Duration, ExcelEpoch, Reason};
+use hypertabular::{Date, Duration, ExcelEpoch};
 
 fn said(cell: Cell<'_>) -> String {
     String::from_utf8(render(&cell).as_bytes().to_vec()).unwrap()
@@ -54,14 +52,34 @@ fn custom_number_formats() {
 }
 
 #[test]
-fn a_serial_splits_into_days_and_nanoseconds() {
-    assert_eq!(split(45_000.5), Ok((45_000, 43_200_000_000_000)));
-    assert_eq!(split(0.0), Ok((0, 0)));
-    // 1 - 2^-53 days rounds up to exactly one day and carries.
-    assert_eq!(split(1.0 - f64::EPSILON / 2.0), Ok((1, 0)));
-    assert_eq!(split(-1.0), Err(Reason::Malformed));
-    assert_eq!(split(f64::NAN), Err(Reason::Malformed));
-    assert_eq!(split(1e16), Err(Reason::OutOfRange));
+fn a_serial_under_one_day_has_no_date() {
+    let y1900 = ExcelEpoch::Y1900;
+    assert_eq!(serial(0.0, ExcelEpoch::Y1904, false), Some(Cell::Clock(0)));
+    assert_eq!(
+        serial(0.5, y1900, false),
+        Some(Cell::Clock(43_200_000_000_000))
+    );
+    // 1 - 2^-53 days rounds up to exactly one day and carries: a date, at midnight.
+    assert_eq!(
+        serial(1.0 - f64::EPSILON / 2.0, y1900, false),
+        Some(Cell::Wall {
+            date: Date {
+                year: 1900,
+                month: 1,
+                day: 1
+            },
+            nanos: 0
+        })
+    );
+    // Half a nanosecond short of a day is still the day before, rounded down.
+    let short = 1.0 - 0.6 / 86_400_000_000_000.0;
+    assert_eq!(
+        serial(short, y1900, false),
+        Some(Cell::Clock(86_399_999_999_999))
+    );
+    assert_eq!(serial(-1.0, y1900, false), None);
+    assert_eq!(serial(f64::NAN, y1900, false), None);
+    assert_eq!(serial(1e16, y1900, false), None);
 }
 
 #[test]
@@ -97,8 +115,7 @@ fn a_serial_is_what_its_format_declared() {
         }))
     );
     assert_eq!(serial(1e10, y1900, true), None);
-    assert_eq!(days_to_duration(1e10), Err(Reason::OutOfRange));
-    assert_eq!(days_to_duration(f64::INFINITY), Err(Reason::Malformed));
+    assert_eq!(serial(f64::INFINITY, y1900, true), None);
     // The date rules are HyperCast's: the phantom serial and a serial past 9999-12-31
     // are refused, and the 1904 system has no phantom.
     assert_eq!(serial(60.0, y1900, false), None);

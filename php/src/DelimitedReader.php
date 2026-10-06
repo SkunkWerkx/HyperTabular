@@ -4,14 +4,8 @@ declare(strict_types=1);
 
 namespace HyperTabular;
 
-use DateTimeImmutable;
 use FFI;
 use FFI\CData;
-use HyperCast\CastFailure;
-use HyperCast\Decimal;
-use HyperCast\Duration;
-use HyperCast\Fault;
-use HyperCast\Success;
 
 /**
  * Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
@@ -24,8 +18,7 @@ use HyperCast\Success;
  * array and one verdict array per column, the table that locates each cell, and the arena
  * for the rare escaped cell — once, as FFI memory, reused for every batch — and puts what
  * the core did not consume back in front of it. The native boundary is crossed once per
- * batch, not once per cell; a column is then lifted into PHP in one piece, the first time
- * it is asked for.
+ * batch, not once per cell; {@see read()} returns the rows as a {@see Batch}.
  *
  * A value that does not cast is that cell's verdict, and the read goes on. Input that is
  * not rows of cells at all — a record of the wrong width, a quote never closed — is a
@@ -35,8 +28,8 @@ use HyperCast\Success;
  * reason its `CastFailure`, and a value the same PHP carrier HyperCast's `Cast` returns
  * for that door ({@see Door} lists them).
  *
- * What is handed out for a batch is valid until the next {@see read()}. Not safe to share
- * between threads or fibers that read concurrently.
+ * A batch owns what it shows, and stays good after the next {@see read()}. Not safe to
+ * share between threads or fibers that read concurrently.
  */
 final class DelimitedReader
 {
@@ -52,15 +45,11 @@ final class DelimitedReader
     private const CONTRACT_VIOLATION =
         'hypertabular: libhypertabular reported a contract violation — a binding bug, please report it';
 
-    private static ?bool $fastInstants = null;
-
     private FFI $ffi;
 
-    /** @var list<Column> */
-    private array $plan;
-    private int $columns;
-    private int $batchRows;
-    /** Cell-table entries one row takes: the widest ordinal the plan reads, plus two. */
+    private Dialect $dialect;
+    private Columns $columns;
+    /** Cell-table entries one row takes: the widest ordinal the plan reads, plus two — or more, if the core asked. */
     private int $perRow;
 
     // Everything the core is handed, allocated once. A CData that owns memory is kept
@@ -69,18 +58,12 @@ final class DelimitedReader
     private CData $statePtr;
     private CData $filled;
     private CData $filledPtr;
-    private CData $specs;
-    private CData $buffers;
-    /** @var list<CData> */
-    private array $valueBuffers = [];
-    /** @var list<CData> */
-    private array $verdictBuffers = [];
     private CData $cells;
     private int $cellsCap;
     private CData $arena;
     private int $arenaCap;
-    private ?CData $scratch = null;
-    private int $scratchCap = 0;
+    /** Whether the last batch ended early because the arena filled: the next starts with it doubled. */
+    private bool $cramped = false;
 
     // The source: a stream, or a string handed over a chunk at a time.
     /** @var resource|null */
@@ -96,18 +79,6 @@ final class DelimitedReader
     private int $start = 0;
     private int $end = 0;
     private bool $eof = false;
-
-    // The batch in hand, and the window of input its spans point into.
-    private int $rows = 0;
-    private int $windowAt = 0;
-    private int $windowBytes = 0;
-    private int $arenaUsed = 0;
-    private ?string $window = null;
-    private ?string $arenaBytes = null;
-    /** @var array<int, list<mixed>> each decoded column's values, null where the cell did not cast */
-    private array $values = [];
-    /** @var array<int, array<int, Fault>> each decoded column's faults, by row */
-    private array $faults = [];
 
     /** @var list<string>|null */
     private ?array $header = null;
@@ -228,53 +199,10 @@ final class DelimitedReader
      */
     private function __construct(Dialect $dialect, array $plan, int $batchRows, int $bufferBytes)
     {
-        if ($batchRows < 1) {
-            throw new \InvalidArgumentException("A batch must hold at least one row; got {$batchRows}");
-        }
-        $plan = array_values($plan);
-        foreach ($plan as $index => $column) {
-            if (!$column instanceof Column) {
-                throw new \InvalidArgumentException(
-                    "Plan entry {$index} is not a Column; build one with Column's factories"
-                );
-            }
-        }
+        $this->columns = new Columns($plan, $batchRows);
         $ffi = $this->ffi = Native::ffi();
-        $this->plan = $plan;
-        $this->columns = \count($plan);
-        $this->batchRows = $batchRows;
-
-        // FFI cannot allocate nothing, and a plan may be empty (rows are still counted).
-        $slots = max(1, $this->columns);
-        $this->specs = $ffi->new("ht_column_spec[{$slots}]");
-        $this->buffers = $ffi->new("ht_column_buffer[{$slots}]");
-        $widest = -1;
-        foreach ($plan as $index => $column) {
-            $widest = max($widest, $column->ordinal);
-            $spec = $this->specs[$index];
-            $spec->ordinal = $column->ordinal;
-            $spec->door = $column->door->value;
-            $spec->param = $column->declared;
-            // HyperCast's NumFormat in the core's 32-byte layout. The object validated itself
-            // when it was built, as HyperCast validates it, so the core has nothing to refuse.
-            [$decimal, $group] = $column->format->codePoints();
-            $spec->format->decimal_sep = $decimal;
-            $spec->format->group_sep = $group;
-            $spec->format->flags = $column->format->flags;
-            $currency = $column->format->currency;
-            $spec->format->currency_len = \strlen($currency);
-            if ($currency !== '') {
-                FFI::memcpy($spec->format->currency, $currency, \strlen($currency));
-            }
-
-            $values = $ffi->new('uint8_t[' . $batchRows * $column->door->valueSize() . ']');
-            $verdicts = $ffi->new("ht_verdict[{$batchRows}]");
-            $this->valueBuffers[] = $values;
-            $this->verdictBuffers[] = $verdicts;
-            $this->buffers[$index]->values = FFI::addr($values);
-            $this->buffers[$index]->verdicts = $ffi->cast('ht_verdict *', FFI::addr($verdicts));
-        }
-        $this->perRow = $widest + 2;
+        $this->dialect = $dialect;
+        $this->perRow = $this->columns->width + 1;
         $this->cellsCap = $this->perRow * $batchRows;
         $this->cells = $ffi->new("ht_span[{$this->cellsCap}]");
         $this->arenaCap = 4096;
@@ -297,8 +225,6 @@ final class DelimitedReader
                 \ord($dialect->separator)
             ));
         }
-        self::$fastInstants ??= method_exists(DateTimeImmutable::class, 'createFromTimestamp')
-            && method_exists(DateTimeImmutable::class, 'setMicrosecond');
     }
 
     /**
@@ -321,33 +247,23 @@ final class DelimitedReader
     }
 
     /**
-     * The plan the reader was built with.
+     * The plan the reader was built with: column `i` of every batch is `plan()[i]`.
      *
      * @return list<Column> the output columns, in output order
      */
     public function plan(): array
     {
-        return $this->plan;
+        return $this->columns->plan;
     }
 
     /**
-     * The number of plan columns.
+     * The declared dialect.
      *
-     * @return int the plan's length
+     * @return Dialect the dialect the text is read in
      */
-    public function columnCount(): int
+    public function dialect(): Dialect
     {
-        return $this->columns;
-    }
-
-    /**
-     * Rows in the batch in hand: 0 before the first {@see read()} and after the last.
-     *
-     * @return int the number of rows every column of the batch holds
-     */
-    public function rows(): int
-    {
-        return $this->rows;
+        return $this->dialect;
     }
 
     /**
@@ -361,16 +277,16 @@ final class DelimitedReader
     }
 
     /**
-     * Reads the next batch: one native call fills every column. True with {@see rows()}
-     * rows in hand; false once the input is exhausted.
+     * Reads the next batch: one native call fills every column. A {@see Batch} of up to the
+     * reader's batch size of rows, or null once the input is exhausted.
      *
-     * @return bool whether a batch is in hand
+     * @return Batch|null the rows, or null at the end
      * @throws TabularException when the input is structurally broken — thrown after every
      *     intact row before the break has been delivered, and again on every later call
      * @throws \LogicException when the reader has been closed
      * @throws \RuntimeException when the stream cannot be read
      */
-    public function read(): bool
+    public function read(): ?Batch
     {
         if ($this->closed) {
             throw new \LogicException('The reader is closed');
@@ -378,13 +294,13 @@ final class DelimitedReader
         if ($this->failure !== null) {
             throw $this->failure;
         }
-        $this->rows = 0;
-        $this->window = null;
-        $this->arenaBytes = null;
-        $this->values = [];
-        $this->faults = [];
+        if ($this->cramped) {
+            $this->growArena($this->arenaCap * 2);
+            $this->cramped = false;
+        }
         $ffi = $this->ffi;
         $filled = $this->filled;
+        $columns = $this->columns;
         while (true) {
             $length = $this->end - $this->start;
             $last = $this->eof;
@@ -393,10 +309,10 @@ final class DelimitedReader
                 $this->bufferPtr + $this->start,
                 $length,
                 $last ? 1 : 0,
-                $this->specs,
-                $this->buffers,
-                $this->columns,
-                $this->batchRows,
+                $columns->specs,
+                $columns->buffers,
+                $columns->count,
+                $columns->batchRows,
                 $this->cells,
                 $this->cellsCap,
                 $this->arena,
@@ -406,24 +322,34 @@ final class DelimitedReader
             switch ($code) {
                 case Native::OK:
                     $consumed = $filled->consumed;
-                    if ($filled->rows > 0) {
-                        $this->rows = $filled->rows;
-                        $this->windowAt = $this->start;
-                        $this->windowBytes = $consumed;
-                        $this->arenaUsed = $filled->arena_used;
+                    $rows = $filled->rows;
+                    if ($rows > 0) {
+                        $this->cramped = $rows < $columns->batchRows && $filled->arena_used * 2 >= $this->arenaCap;
+                        $batch = new Batch(
+                            $columns->plan,
+                            $rows,
+                            $columns->values($rows),
+                            $columns->verdicts($rows),
+                            FFI::string($this->cells, $rows * $this->perRow * 8),
+                            $this->perRow,
+                            FFI::string($this->bufferPtr + $this->start, $consumed),
+                            FFI::string($this->arena, $filled->arena_used),
+                            false
+                        );
                         $this->start += $consumed;
-                        return true;
+                        return $batch;
                     }
                     $this->start += $consumed;
                     if ($last && ($consumed === $length || $consumed === 0)) {
-                        return false;
+                        return null;
                     }
                     if ($consumed === 0) {
                         $this->refill();
                     }
                     break;
                 case Native::ERR_CELLS:
-                    $this->cellsCap = $filled->needed * $this->batchRows;
+                    $this->perRow = max($this->perRow, $filled->needed);
+                    $this->cellsCap = $this->perRow * $columns->batchRows;
                     $this->cells = $ffi->new("ht_span[{$this->cellsCap}]");
                     break;
                 case Native::ERR_ARENA:
@@ -438,113 +364,9 @@ final class DelimitedReader
     }
 
     /**
-     * A column of the batch in hand, one value per row, each the PHP carrier of the
-     * column's door ({@see Door}) — and null where the cell did not cast, whatever the
-     * reason; {@see faults()} says why. The column is lifted out of the core's buffer in one
-     * piece the first time it is asked for, and kept until the next {@see read()}.
-     *
-     * @param int $column the plan column
-     * @return list<mixed> the values, by row
-     * @throws \OutOfRangeException when the plan has no such column
-     */
-    public function values(int $column): array
-    {
-        $this->decode($column);
-        return $this->values[$column];
-    }
-
-    /**
-     * The cells of a column of the batch in hand that did not cast: HyperCast's `Fault`
-     * for each, keyed by row. Empty when every cell cast.
-     *
-     * @param int $column the plan column
-     * @return array<int, Fault> the faults, by row, in row order
-     * @throws \OutOfRangeException when the plan has no such column
-     */
-    public function faults(int $column): array
-    {
-        $this->decode($column);
-        return $this->faults[$column];
-    }
-
-    /**
-     * A column of the batch in hand as verdicts, one per row: HyperCast's `Success` around
-     * the value, or its `Fault`.
-     *
-     * @param int $column the plan column
-     * @return list<Success|Fault> the verdicts, by row
-     * @throws \OutOfRangeException when the plan has no such column
-     */
-    public function verdicts(int $column): array
-    {
-        $this->decode($column);
-        $faults = $this->faults[$column];
-        $verdicts = [];
-        foreach ($this->values[$column] as $row => $value) {
-            $verdicts[] = $faults[$row] ?? new Success($value);
-        }
-        return $verdicts;
-    }
-
-    /**
-     * The verdict of one cell of the batch in hand: HyperCast's `Success` around the
-     * value — the PHP carrier of the column's door ({@see Door}) — or its `Fault`, whose
-     * span indexes the cell's own text ({@see raw()}).
-     *
-     * @param int $column the plan column
-     * @param int $row the row within the batch
-     * @return Success|Fault the verdict
-     * @throws \OutOfRangeException when the plan has no such column or the batch no such row
-     */
-    public function cell(int $column, int $row): Success|Fault
-    {
-        $this->decode($column);
-        if ($row < 0 || $row >= $this->rows) {
-            throw new \OutOfRangeException("The batch has {$this->rows} rows; there is no row {$row}");
-        }
-        return $this->faults[$column][$row] ?? new Success($this->values[$column][$row]);
-    }
-
-    /**
-     * The text a cell of the batch in hand was cast from, whatever its door and whatever
-     * its verdict — what a fault's span indexes, and what to show for a value that did not
-     * cast. Quotes are resolved, as the core resolved them before casting.
-     *
-     * @param int $column the plan column
-     * @param int $row the row within the batch
-     * @return string the cell's bytes
-     * @throws \OutOfRangeException when the plan has no such column or the batch no such row
-     */
-    public function raw(int $column, int $row): string
-    {
-        if ($column < 0 || $column >= $this->columns) {
-            throw new \OutOfRangeException("The plan has {$this->columns} columns; there is no column {$column}");
-        }
-        if ($row < 0 || $row >= $this->rows) {
-            throw new \OutOfRangeException("The batch has {$this->rows} rows; there is no row {$row}");
-        }
-        $cell = $this->cells[$row * $this->perRow + $this->plan[$column]->ordinal];
-        $length = $cell->len & Native::SPAN_LENGTH;
-        if ($length === 0) {
-            return '';
-        }
-        $raw = FFI::string($this->bufferPtr + ($this->windowAt + $cell->offset), $length);
-        if (($cell->len & Native::SPAN_FLAG) === 0) {
-            return $raw;
-        }
-        // A cell with an escaped quote in it: unescaped by the core, as the core cast it.
-        if ($this->scratchCap < $length) {
-            $this->scratchCap = max($length, 256);
-            $this->scratch = $this->ffi->new("uint8_t[{$this->scratchCap}]");
-        }
-        $written = $this->ffi->hypertabular_delimited_unescape($raw, $length, $this->scratch, $this->scratchCap);
-        return FFI::string($this->scratch, $written);
-    }
-
-    /**
-     * Ends the read: the batch in hand is let go, and a file the reader opened itself
-     * ({@see open()}) is closed. A stream the caller passed in stays open. Safe to call
-     * more than once.
+     * Ends the read: a file the reader opened itself ({@see open()}) is closed. A stream the
+     * caller passed in stays open, and batches already read stay good. Safe to call more
+     * than once.
      *
      * @return void
      */
@@ -554,11 +376,6 @@ final class DelimitedReader
             return;
         }
         $this->closed = true;
-        $this->rows = 0;
-        $this->values = [];
-        $this->faults = [];
-        $this->window = null;
-        $this->arenaBytes = null;
         $this->text = null;
         if ($this->ownsStream && \is_resource($this->stream)) {
             fclose($this->stream);
@@ -676,15 +493,7 @@ final class DelimitedReader
      */
     private function structural(): TabularException
     {
-        $failure = $this->filled->failure;
-        return $this->failure = new TabularException(
-            $failure->code === 2 ? TabularFailure::ColumnCount : TabularFailure::UnclosedQuote,
-            $failure->record,
-            $failure->line,
-            $failure->byte,
-            $failure->expected,
-            $failure->found
-        );
+        return $this->failure = TabularException::from($this->filled->failure);
     }
 
     /**
@@ -754,187 +563,5 @@ final class DelimitedReader
                     throw new \RuntimeException(self::CONTRACT_VIOLATION);
             }
         }
-    }
-
-    /**
-     * Lifts one column of the batch in hand out of the core's buffers — its verdict array
-     * and its value array, each read as one string and unpacked — unless it already has
-     * been.
-     *
-     * @param int $column the plan column
-     * @return void
-     * @throws \OutOfRangeException when the plan has no such column
-     */
-    private function decode(int $column): void
-    {
-        if (isset($this->values[$column])) {
-            return;
-        }
-        if ($column < 0 || $column >= $this->columns) {
-            throw new \OutOfRangeException("The plan has {$this->columns} columns; there is no column {$column}");
-        }
-        $rows = $this->rows;
-        if ($rows === 0) {
-            $this->values[$column] = [];
-            $this->faults[$column] = [];
-            return;
-        }
-
-        // A verdict is three little-endian u32s — offset, length, reason — and reason 0 is
-        // a cell that cast. unpack() numbers from 1.
-        $faults = [];
-        $verdicts = unpack('V*', FFI::string($this->verdictBuffers[$column], $rows * 12));
-        for ($row = 0, $at = 3; $row < $rows; $row++, $at += 3) {
-            if ($verdicts[$at] !== 0) {
-                $faults[$row] = new Fault(CastFailure::from($verdicts[$at]), $verdicts[$at - 2], $verdicts[$at - 1]);
-            }
-        }
-
-        $door = $this->plan[$column]->door;
-        $bytes = FFI::string($this->valueBuffers[$column], $rows * $door->valueSize());
-        $values = match ($door) {
-            Door::Bool => array_map(static fn (int $byte): bool => $byte !== 0, array_values(unpack('C*', $bytes))),
-            Door::I8 => array_values(unpack('c*', $bytes)),
-            Door::I16 => array_values(unpack('s*', $bytes)),
-            Door::I32 => array_values(unpack('l*', $bytes)),
-            // u64 rides PHP's signed int as its two's-complement bit pattern, as HyperCast's
-            // own u64 door presents it; a time of day is far inside the signed range.
-            Door::I64, Door::U64, Door::Time => array_values(unpack('q*', $bytes)),
-            Door::U8 => array_values(unpack('C*', $bytes)),
-            Door::U16 => array_values(unpack('v*', $bytes)),
-            Door::U32 => array_values(unpack('V*', $bytes)),
-            Door::F32 => array_values(unpack('g*', $bytes)),
-            Door::F64 => array_values(unpack('e*', $bytes)),
-            default => $this->structured($door, $bytes, $rows, $faults),
-        };
-        foreach ($faults as $row => $_) {
-            $values[$row] = null;
-        }
-        $this->values[$column] = $values;
-        $this->faults[$column] = $faults;
-    }
-
-    /**
-     * The values of a column whose door writes more than one number per cell, built into
-     * the carriers HyperCast's `Cast` returns for the same doors. A cell that did not cast
-     * is null here already, and is never built.
-     *
-     * @param Door $door the column's door
-     * @param string $bytes the column's value array
-     * @param int $rows rows in the batch
-     * @param array<int, Fault> $faults the column's faults, by row
-     * @return list<mixed> the values, by row
-     */
-    private function structured(Door $door, string $bytes, int $rows, array $faults): array
-    {
-        $values = [];
-        for ($row = 0; $row < $rows; $row++) {
-            if (isset($faults[$row])) {
-                $values[] = null;
-                continue;
-            }
-            switch ($door) {
-                case Door::Decimal:
-                    $raw = unpack('qlo/Vhi/Cscale/Cnegative', $bytes, $row * 16);
-                    $values[] = Decimal::fromLimbs($raw['lo'], $raw['hi'], $raw['scale'], $raw['negative'] !== 0);
-                    break;
-                case Door::Uuid:
-                    $hex = bin2hex(substr($bytes, $row * 16, 16));
-                    $values[] = substr($hex, 0, 8) . '-' . substr($hex, 8, 4) . '-' . substr($hex, 12, 4)
-                        . '-' . substr($hex, 16, 4) . '-' . substr($hex, 20);
-                    break;
-                case Door::Timestamp:
-                case Door::Unix:
-                case Door::ExcelSerial:
-                    $raw = unpack('qseconds/lnanos', $bytes, $row * 16);
-                    $values[] = self::instant($raw['seconds'], intdiv($raw['nanos'], 1000));
-                    break;
-                case Door::Date:
-                case Door::DateOrdered:
-                    $raw = unpack('vyear/Cmonth/Cday', $bytes, $row * 4);
-                    $values[] = self::instant(self::epochSeconds($raw['year'], $raw['month'], $raw['day']), 0);
-                    break;
-                case Door::DateTime:
-                    $raw = unpack('vyear/Cmonth/Cday/x4/Pnanos', $bytes, $row * 16);
-                    $values[] = self::instant(
-                        self::epochSeconds($raw['year'], $raw['month'], $raw['day'])
-                            + intdiv($raw['nanos'], 1_000_000_000),
-                        intdiv($raw['nanos'] % 1_000_000_000, 1000)
-                    );
-                    break;
-                case Door::Duration:
-                    $raw = unpack('qseconds/lnanos', $bytes, $row * 16);
-                    $values[] = new Duration($raw['seconds'], $raw['nanos']);
-                    break;
-                case Door::Text:
-                    // A span into the input the batch was read from — or, flagged, into the
-                    // arena, where the core unescaped the cell.
-                    $raw = unpack('Voffset/Vlen', $bytes, $row * 8);
-                    $values[] = ($raw['len'] & Native::SPAN_FLAG) !== 0
-                        ? substr($this->arenaText(), $raw['offset'], $raw['len'] & Native::SPAN_LENGTH)
-                        : substr($this->windowText(), $raw['offset'], $raw['len']);
-                    break;
-                default:
-                    throw new \LogicException("No carrier for door {$door->name}");
-            }
-        }
-        return $values;
-    }
-
-    /**
-     * The input the batch in hand was read from, lifted into PHP once per batch.
-     *
-     * @return string the bytes the core consumed for this batch
-     */
-    private function windowText(): string
-    {
-        return $this->window ??= FFI::string($this->bufferPtr + $this->windowAt, $this->windowBytes);
-    }
-
-    /**
-     * What the core wrote to the arena for the batch in hand, lifted into PHP once per batch.
-     *
-     * @return string the unescaped cells, end to end
-     */
-    private function arenaText(): string
-    {
-        return $this->arenaBytes ??= FFI::string($this->arena, $this->arenaUsed);
-    }
-
-    /**
-     * A UTC instant, built as HyperCast's `Cast` builds one: createFromTimestamp and
-     * setMicrosecond on PHP 8.4+, the date-string fallback below it.
-     *
-     * @param int $seconds seconds since the epoch
-     * @param int $micros microseconds within the second
-     * @return DateTimeImmutable the instant
-     */
-    private static function instant(int $seconds, int $micros): DateTimeImmutable
-    {
-        if (self::$fastInstants) {
-            $instant = DateTimeImmutable::createFromTimestamp($seconds);
-            return $micros === 0 ? $instant : $instant->setMicrosecond($micros);
-        }
-        $instant = new DateTimeImmutable("@{$seconds}");
-        return $micros === 0 ? $instant : $instant->modify("+{$micros} microseconds");
-    }
-
-    /**
-     * Epoch seconds at midnight of a civil date — Hinnant's days_from_civil, the same math
-     * the core and HyperCast's `Cast` use.
-     *
-     * @param int $year the civil year
-     * @param int $month the civil month
-     * @param int $day the civil day
-     * @return int seconds since the epoch at that date's midnight
-     */
-    private static function epochSeconds(int $year, int $month, int $day): int
-    {
-        $shifted = $month <= 2 ? $year - 1 : $year;
-        $era = intdiv($shifted >= 0 ? $shifted : $shifted - 399, 400);
-        $yearOfEra = $shifted - $era * 400;
-        $dayOfYear = intdiv(153 * ($month + ($month > 2 ? -3 : 9)) + 2, 5) + $day - 1;
-        $dayOfEra = $yearOfEra * 365 + intdiv($yearOfEra, 4) - intdiv($yearOfEra, 100) + $dayOfYear;
-        return ($era * 146_097 + $dayOfEra - 719_468) * 86_400;
     }
 }

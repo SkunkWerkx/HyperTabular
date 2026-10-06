@@ -150,9 +150,90 @@ The std reader it replaced, inflating with zlib-rs, read the same file in 505 ms
 (`tests/kernel_workbook.rs`, `throughput`, measured before that reader was deleted).
 Through the Rust binding the read costs what it costs through the core called directly
 (630 ms against 627 ms, a later run of the same test). The
-difference has not been profiled; the likeliest cause is the inflate, since the core's
-own runs at about two thirds of zlib-rs's speed (`design.md`) — the price of one that can
-be put under the no-panic proof.
+difference was long guessed to be the inflate, since the core's own runs at about two
+thirds of zlib-rs's speed (`design.md`); measured since (below), it is not.
+
+### Through every binding
+
+The two real-application files of `corpus/README.md` — Excel's `excel-win-300k.xlsx`
+(111 MB of sheet XML and 7.7 MB of shared strings in a 16.7 MB package) and LibreOffice's
+`libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) — read whole by each binding's
+own benchmark harness through one plan: `i64`, `f64`, text, date, time, bool, duration,
+`i64` (that last column holds 3 000 `#N/A` error cells, which fault). **open** is the package
+opened and nothing read; **read** is opened, then the first sheet read in batches of 4096,
+every column's verdicts looked at and every text cell's bytes. Every harness prints the
+same checksum (5 285 882: the cells that cast, plus the text column's bytes), which is what
+says they did the same work. Linux x64, i9-11900H, 2026-10-05.
+
+| Binding (harness) | xlsx open | xlsx read | ods open | ods read |
+| --- | ---: | ---: | ---: | ---: |
+| Rust (Criterion) | 37 ms | 750 ms | 550 ms | 1.94 s |
+| C# (BenchmarkDotNet) | 35 ms | 709 ms | 505 ms | 1.79 s |
+| Java (JMH) | 43 ms | 742 ms | 508 ms | 1.78 s |
+| Go (`go test -bench`) | 33 ms | 698 ms | 461 ms | 1.71 s |
+| Swift (package-benchmark) | 43 ms | 763 ms | 533 ms | 1.94 s |
+| Python (pyperf) | 42 ms | 748 ms | 466 ms | 1.74 s |
+| Ruby (benchmark-ips) | 38 ms | 1.12 s | 502 ms | 2.25 s |
+| PHP (phpbench) | 44 ms | 872 ms | 584 ms | 1.91 s |
+
+C#, Java, Go and Swift hand out views of the reader's buffers, so their read is the core's.
+Rust's row is Criterion's, and Criterion's binary is an unlucky one: the same read in a
+plain release program runs 1.69–1.77 s on the ODS file, alternated run for run with C#'s
+1.77–1.82 s, and inside the benchmark binary a hand-timed loop of it ran 2.0–2.17 s while
+adding those four lines moved Criterion's own number from 1.95 s to 1.84 s. Code layout,
+not work: compiling with every function and branch target aligned
+(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) brings
+both binaries to within 2% of each other. A difference of under about 10% between two
+rows of this table is not a finding until it survives runs alternated in one sitting.
+Python's read makes the text column's `str`s and counts faults from
+`fault_count`; its **values** scope, which makes every column's Python objects — `date`,
+`time` and `timedelta` included — is 981 ms and 1.98 s. Ruby and PHP have no way to ask
+whether a cell cast short of decoding its column, so their row is the **values** scope:
+every column made into the gem's or package's carriers (Date, Rational, DateTimeImmutable,
+HyperCast's Duration), the cells that cast counted from them. Their **verdicts** scope —
+a HyperCast `Success` or `Fault` built for every cell, what a caller who matches each cell
+pays — is 2.01 s and 3.36 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to make,
+however it is made) and 1.05 s and 2.11 s in PHP.
+
+ODS's **open** is most of a second because a package has no listing of its sheets outside
+`content.xml`, so opening one reads the whole part; the sheet's read then reads it again.
+XLSX lists its sheets in a small part of their own.
+
+Where a read's time goes (Rust, best of three): the core's inflate alone takes 117 ms over
+the xlsx sheet's 111 MB and 93 ms over the ODS part's 360 MB — it is not the cost. Casting
+is not either: with an empty plan the xlsx read is 689 ms and with the full plan 705 ms,
+the ODS read 1.66 s and 1.72 s. The rest is the XML — tokenizing the parts and assembling
+rows — about 570 ms for the xlsx sheet (195 MB/s) and, for ODS, about 380 ms of the open's
+scan and 1.1 s of the read (330 MB/s). That is where the reader is fast or slow. The text
+door is the one plan that costs more: all eight columns through it is 1.03 s and 2.01 s,
+every typed cell said as canonical text.
+
+Profiled (samply, the ODS read), the XML was most of it in two places. `tag()` found a tag's
+`>` a byte at a time, minding quotes, over ODS's long cell tags; it now jumps from one `>`
+or quote to the next eight bytes at a time, as `find_byte` finds one byte. And every
+attribute lookup walked the tag's attributes from the start — four or five a cell for ODS,
+three (`r`, `s`, `t`) for XLSX; each cell's are now gathered in one pass, each the first of
+its name as the lookups found it. A third, smaller: the nine-byte `<![CDATA[` comparison,
+a `memcmp` call, ran for every ordinary tag until `<!` was asked first. Best of several
+runs, Rust, before and after the three: XLSX read 710 → 580 ms, ODS read 1.88 → 1.19 s, ODS
+open 530 → 320 ms. The table above was taken before them; every binding reads through the
+same core, so each row moves with it once its library is rebuilt. What is left is spread
+thin: inflate is about a sixth of a read, and no other line is more than a few percent.
+
+What these numbers changed when they were first taken: Ruby and PHP each ran a scan over
+every span of a batch, in the host language, to find how much of the arena to copy, where
+the core's own `arena_used` already says (Ruby's read went from 1.05 s to 0.68 s before any
+values were made); and PHP decoded its record doors with an `unpack()` a cell, which is now
+one a column (0.28 s to 0.14 s of decoding for the xlsx file). PHP's numbers are taken with
+no `php.ini` (`runner.php_disable_ini` in `phpbench.json`): a development install with
+Xdebug loaded runs the same benchmark at more than twice the time.
+
+To run them: `cargo bench --bench workbook_benchmarks` (rust/), `dotnet run -c Release
+--project HyperTabular.Benchmarks` (csharp/), `./gradlew :benchmarks:jmh` (java/),
+`go test -run '^$' -bench Workbook -benchmem` (go/), `swift package benchmark`
+(swift/Benchmarks/), `python bench_workbook.py --fast` (python/), `ruby
+benchmark/workbook_benchmark.rb` (ruby/), `vendor/bin/phpbench run --report=aggregate` (php/).
+Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DIR`.
 
 ## Parked
 
@@ -163,5 +244,3 @@ be put under the no-panic proof.
   small read ever makes the preload the wrong trade.
 - **Cell-level styles beyond the number-format kind**, hidden rows/columns, merged
   ranges: not consulted; this reader delivers values.
-- **Decimals from workbook numbers.** The decimal door refuses a numeric cell (a binary
-  double does not say which decimal it meant); the rule is provisional.

@@ -1,6 +1,6 @@
-"""Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
-typed columns, with a `HyperCast <https://github.com/SkunkWerkx/HyperCast>`_ verdict for
-every cell.
+"""Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and
+ODS — read a batch at a time into typed columns, with a
+`HyperCast <https://github.com/SkunkWerkx/HyperCast>`_ verdict for every cell.
 
 The native core owns no memory and reads no files. It is linked straight into a CPython
 extension module (``hypertabular._native``, PyO3), and the extension is the binding: it
@@ -28,20 +28,27 @@ which anything that takes a buffer takes — with no Python call per cell::
                     case Success(value):
                         print(names.values[row], value)
                     case Fault(reason, offset, length):
-                        print(reason.name, "in", scores.raw(row))
+                        print(reason.name, "on line", batch.line(row), "in", scores.raw(row))
+
+    # A workbook reads into the same batch.
+    book = Workbook.open("orders.xlsx")
+    for batch in book.sheet("Orders", SheetOptions(), plan):
+        ...
 
 - **Nothing is sniffed.** The :class:`Dialect` states the separator, the quoting and the
-  header; the plan states each column's door and, for numbers, its ``NumFormat``.
+  header; :class:`SheetOptions` states a sheet's header and whether empty rows are skipped;
+  the plan states each column's door and, for numbers, its ``NumFormat``.
 - **HyperCast is the judge.** :class:`Success`, :class:`Fault`, :class:`CastFailure`,
   :class:`NumFormat`, :class:`UnixPrecision`, :class:`DateOrder` and :class:`ExcelEpoch`
   are the ``hypercast`` package's own objects, re-exported here unchanged — not copies. A
-  cell means exactly what ``hypercast.cast_*`` says of the same text, and its value is the
+  text cell means exactly what ``hypercast.cast_*`` says of the same text, a typed workbook
+  cell is converted by the door directly, and its value is the
   Python type that door gives: ``int``, ``float``, ``bool``, ``decimal.Decimal``,
   ``uuid.UUID``, ``datetime``, ``date``, ``time``, ``timedelta`` (and ``str`` for text).
 - **A bad value is a verdict; a broken file is an exception.** A cell that does not cast
-  is a ``Fault`` in its column and the read goes on. A record of the wrong width, or input
-  that ends inside a quoted cell, raises :class:`TabularError` — after every intact row
-  before it has been delivered.
+  is a ``Fault`` in its column and the read goes on. A record of the wrong width, input
+  that ends inside a quoted cell, a workbook whose container or parts cannot be read,
+  raises :class:`TabularError` — after every intact row before it has been delivered.
 - **A batch owns what it shows.** It stays valid after the reader has moved on.
 """
 
@@ -71,11 +78,27 @@ BACKEND: str = "native"
 __all__ = [
     "BACKEND",
     "native_version",
-    "DelimitedReader", "Batch", "ColumnData",
-    "Dialect", "Column", "Door",
-    "TabularError", "TabularFailure",
+    "DelimitedReader",
+    "Workbook",
+    "WorkbookFormat",
+    "Sheet",
+    "SheetInfo",
+    "SheetOptions",
+    "Batch",
+    "ColumnData",
+    "Dialect",
+    "Column",
+    "Door",
+    "TabularError",
+    "TabularFailure",
     # HyperCast's own, re-exported unchanged.
-    "CastFailure", "Success", "Fault", "Verdict", "NumFormat", "UnixPrecision", "DateOrder",
+    "CastFailure",
+    "Success",
+    "Fault",
+    "Verdict",
+    "NumFormat",
+    "UnixPrecision",
+    "DateOrder",
     "ExcelEpoch",
 ]
 
@@ -109,7 +132,7 @@ class Door(IntEnum):
 
 
 class TabularFailure(IntEnum):
-    """Why an input could not be read as rows at all."""
+    """Why an input could not be read as rows at all. The values are the core's codes."""
 
     UNCLOSED_QUOTE = 1
     """The input ended inside a quoted cell."""
@@ -117,13 +140,47 @@ class TabularFailure(IntEnum):
     """A record's cell count disagrees with the first record's."""
     ROW_TOO_LONG = 3
     """A single record is larger than :data:`DelimitedReader.MAX_ROW_BYTES`."""
+    NOT_A_ZIP = 16
+    """The workbook's container is not a zip file."""
+    CONTAINER = 17
+    """The zip's own structure is broken."""
+    ENCRYPTED = 18
+    """The workbook is encrypted."""
+    METHOD = 19
+    """A part is compressed by a method other than stored or deflate."""
+    MISSING_PART = 20
+    """A part the workbook cannot be read without is missing."""
+    XML = 21
+    """A part's XML ends inside a construct."""
+    DEFLATE = 22
+    """A part's bytes are not a deflate stream, or stop before the stream does."""
+    NOT_A_WORKBOOK = 23
+    """The zip is neither an XLSX nor an ODS workbook."""
+    SHARED_STRING = 24
+    """A cell names a shared string the table does not have."""
+    TOO_LARGE = 25
+    """More text than can be addressed: over 4 GiB in a batch or in the shared strings, or
+    2 GiB in a cell."""
+
+
+class WorkbookFormat(IntEnum):
+    """Which kind of workbook a :class:`Workbook` is."""
+
+    XLSX = 1
+    """Office Open XML: ``.xlsx``, ``.xlsm``."""
+    ODS = 2
+    """OpenDocument: ``.ods``."""
 
 
 class TabularError(Exception):
     """A structural failure: the input is not rows of cells — a record of the wrong width,
-    input that ends inside a quoted cell. Never a cell's verdict: a value that does not
-    cast is a ``Fault`` in its column, and the read goes on. A structural failure ends the
-    input, after every intact row before it has been delivered.
+    input that ends inside a quoted cell, a workbook whose container or parts cannot be
+    read. Never a cell's verdict: a value that does not cast is a ``Fault`` in its column,
+    and the read goes on. A structural failure ends the input, after every intact row
+    before it has been delivered.
+
+    For a workbook, :attr:`record` is the part the failure is in, :attr:`line` the sheet
+    row and :attr:`byte` the offset within the part's inflated bytes.
     """
 
     kind: TabularFailure
@@ -161,11 +218,35 @@ class TabularError(Exception):
     def __str__(self) -> str:
         """The failure in words, with its position."""
         where = f"record {self.record} (line {self.line}, byte {self.byte})"
-        if self.kind is TabularFailure.COLUMN_COUNT:
-            return f"{where} has {self.found} cells; the first record had {self.expected}"
-        if self.kind is TabularFailure.UNCLOSED_QUOTE:
-            return f"the input ended inside a quoted cell in {where}"
-        return f"{where} exceeds the {_native.DelimitedReader.MAX_ROW_BYTES}-byte row ceiling"
+        part = f"part {self.record} of the workbook"
+        match self.kind:
+            case TabularFailure.COLUMN_COUNT:
+                return f"{where} has {self.found} cells; the first record had {self.expected}"
+            case TabularFailure.UNCLOSED_QUOTE:
+                return f"the input ended inside a quoted cell in {where}"
+            case TabularFailure.ROW_TOO_LONG:
+                limit = _native.DelimitedReader.MAX_ROW_BYTES
+                return f"{where} exceeds the {limit}-byte row ceiling"
+            case TabularFailure.NOT_A_ZIP:
+                return "the workbook is not a zip file"
+            case TabularFailure.ENCRYPTED:
+                return "the workbook is encrypted"
+            case TabularFailure.METHOD:
+                return f"{part} is compressed by method {self.found}, neither stored nor deflate"
+            case TabularFailure.MISSING_PART:
+                return f"part {self.record}, which the workbook cannot be read without, is missing"
+            case TabularFailure.XML:
+                return f"{part} ends inside an XML construct (byte {self.byte})"
+            case TabularFailure.DEFLATE:
+                return f"{part} is not a whole deflate stream (byte {self.byte})"
+            case TabularFailure.NOT_A_WORKBOOK:
+                return "the zip is neither an XLSX nor an ODS workbook"
+            case TabularFailure.SHARED_STRING:
+                return f"row {self.line} names shared string {self.found}; the table has {self.expected}"
+            case TabularFailure.TOO_LARGE:
+                return "the workbook holds more text than a batch can address"
+            case _:
+                return "the workbook's zip structure is broken"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +327,9 @@ class Column:
             said.append(f"{type(self.declared).__name__}.{self.declared.name}")
         if self.format is not NumFormat.INVARIANT:
             fmt = self.format
-            said.append(f"NumFormat({fmt.decimal_sep!r}, {fmt.group_sep!r}, {fmt.flags}, {fmt.currency!r})")
+            said.append(
+                f"NumFormat({fmt.decimal_sep!r}, {fmt.group_sep!r}, {fmt.flags}, {fmt.currency!r})"
+            )
         return f"Column.{self.door.name.lower()}({', '.join(said)})"
 
     @classmethod
@@ -374,11 +457,36 @@ class Column:
         return cls(ordinal, Door.TEXT)
 
 
+@dataclass(frozen=True, slots=True)
+class SheetOptions:
+    """How a sheet of a :class:`Workbook` is read."""
+
+    has_header: bool = True
+    """Whether the sheet's first row is a header, exposed through :attr:`Sheet.header` and
+    never delivered as a row."""
+    skip_empty_rows: bool = True
+    """Whether a row with no cells is skipped rather than delivered as a row of empty
+    cells."""
+    batch_rows: int = 4096
+    """Rows per batch, at most."""
+
+    def __post_init__(self) -> None:
+        """Refuses a batch size no batch can have."""
+        if not isinstance(self.batch_rows, int) or isinstance(self.batch_rows, bool):
+            raise TypeError(f"batch_rows must be an int, not {type(self.batch_rows).__name__}")
+        if self.batch_rows < 1:
+            raise ValueError(f"batch_rows must be at least 1, not {self.batch_rows}")
+
+
 # The extension's own classes are the package surface. _bind hands it this package's plan
-# column, dialect and structural failure; it imports HyperCast's verdict types itself.
-_native._bind(Column, Dialect, TabularError, TabularFailure)
+# column, dialect, structural failure and workbook format; it imports HyperCast's verdict
+# types itself.
+_native._bind(Column, Dialect, TabularError, TabularFailure, WorkbookFormat)
 
 DelimitedReader = _native.DelimitedReader
+Workbook = _native.Workbook
+Sheet = _native.Sheet
+SheetInfo = _native.SheetInfo
 Batch = _native.Batch
 ColumnData = _native.ColumnData
 native_version = _native.native_version

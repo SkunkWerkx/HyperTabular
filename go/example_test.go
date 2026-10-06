@@ -32,25 +32,26 @@ func ExampleDelimitedReader() {
 	fmt.Println(reader.Header())
 
 	for {
-		rows, err := reader.Read()
+		batch, err := reader.Read()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			log.Fatal(err)
 		}
-		// A column at a time: typed slices, one element per row, and a verdict beside each.
-		ids, customers, totals, placed := reader.I32(0), reader.Text(1), reader.Exact(2), reader.DateOnly(3)
-		for row := 0; row < rows; row++ {
+		// A column at a time: typed slices, one element per row, and a verdict beside each…
+		ids, customers, placed := batch.I32(0), batch.Text(1), batch.DateOnly(3)
+		for row := 0; row < batch.Rows(); row++ {
 			fmt.Printf("%d %s:", ids[row], customers[row])
-			if fault := reader.Fault(2, row); fault != nil {
+			// …or a cell at a time, as the HyperCast door of the same name returns it.
+			if total, fault := hypertabular.Get[hypercast.Decimal](batch, 2, row); fault != nil {
 				// A value that did not cast is a verdict, and its text is still to hand.
-				fmt.Printf(" total %q is %v at byte %d;", reader.Raw(2, row), fault.Reason, fault.Offset)
+				fmt.Printf(" total %q is %v at byte %d;", batch.Raw(2, row), fault.Reason, fault.Offset)
 			} else {
-				fmt.Printf(" total %v;", totals[row])
+				fmt.Printf(" total %v;", total)
 			}
-			if verdict := reader.Verdicts(3)[row]; !verdict.OK() {
-				fmt.Printf(" placed %q is %v\n", reader.Raw(3, row), verdict.Reason())
+			if verdict := batch.Verdicts(3)[row]; !verdict.OK() {
+				fmt.Printf(" placed %q is %v\n", batch.Raw(3, row), verdict.Reason())
 			} else {
 				fmt.Printf(" placed %d-%02d-%02d\n", placed[row].Year, placed[row].Month, placed[row].Day)
 			}
@@ -72,7 +73,7 @@ func ExampleFailure() {
 		log.Fatal(err)
 	}
 	for {
-		rows, err := reader.Read()
+		batch, err := reader.Read()
 		if err != nil {
 			var failure *hypertabular.Failure
 			if errors.As(err, &failure) {
@@ -81,12 +82,37 @@ func ExampleFailure() {
 			}
 			break
 		}
-		fmt.Println(rows, "row:", reader.I32(0))
+		fmt.Println(batch.Rows(), "row:", batch.I32(0))
 	}
 	// Output:
 	// 1 row: [1]
 	// column count at line 3 — expected 2 cells, found 1
 	// hypertabular: record 2 (line 3, byte 8) has 1 cells; the first record had 2
+}
+
+func ExampleWorkbook() {
+	// A workbook reads into the same batch, a sheet at a time.
+	book, err := hypertabular.OpenWorkbook("../corpus/workbook/basic.xlsx")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(book.Format(), book.Sheets()[0].Name)
+	plan := []hypertabular.Column{hypertabular.Text(0), hypertabular.Text(1)}
+	sheet, err := book.Sheet(0, hypertabular.DefaultSheetOptions, plan)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(sheet.Header()[:2])
+	batch, err := sheet.Read()
+	if err != nil {
+		log.Fatal(err)
+	}
+	name, _ := hypertabular.Get[string](batch, 1, 0)
+	fmt.Println("row", batch.Line(0), name)
+	// Output:
+	// XLSX Data
+	// [id name]
+	// row 2 alice
 }
 
 func ExampleNativeVersion() {

@@ -26,7 +26,19 @@ module HyperTabular
       hypertabular_delimited_fill:
         [%i[pointer pointer size uint32 pointer pointer size size pointer size pointer size pointer], :int32],
       # (cell, len, out, cap)
-      hypertabular_delimited_unescape: [%i[pointer size pointer size], :size]
+      hypertabular_delimited_unescape: [%i[pointer size pointer size], :size],
+      hypertabular_workbook_state_size: [[], :size],
+      # (state, container, container_len, buffers, out)
+      hypertabular_workbook_open: [%i[pointer pointer size pointer pointer], :int32],
+      hypertabular_workbook_sheets: [%i[pointer pointer size pointer pointer], :int32],
+      hypertabular_workbook_strings: [%i[pointer pointer size pointer pointer], :int32],
+      hypertabular_workbook_styles: [%i[pointer pointer size pointer pointer], :int32],
+      # (state, container, container_len, part, part_len, index, has_header, skip_empty_rows, out)
+      hypertabular_workbook_sheet:
+        [%i[pointer pointer size pointer size uint32 uint32 uint32 pointer], :int32],
+      hypertabular_workbook_header: [%i[pointer pointer size pointer pointer], :int32],
+      # (state, container, container_len, specs, columns, column_count, max_rows, buffers, out)
+      hypertabular_workbook_fill: [%i[pointer pointer size pointer pointer size size pointer pointer], :int32]
     }.freeze
 
     @mutex = Mutex.new
@@ -53,6 +65,15 @@ module HyperTabular
       def pin(string)
         functions
         Fiddle::Pointer[string]
+      end
+
+      # A quoted delimited cell — the bytes a flagged cell-table entry names — with its
+      # quotes resolved, as the core cast it.
+      def unescape(quoted)
+        input = pin(quoted)
+        out = buffer([quoted.bytesize, 1].max)
+        written = function(:hypertabular_delimited_unescape).call(input, quoted.bytesize, out, quoted.bytesize)
+        out[0, written]
       end
 
       private
@@ -93,7 +114,9 @@ module HyperTabular
           uint32: Fiddle::TYPE_UINT32_T, int32: Fiddle::TYPE_INT32_T
         }
         EXPORTS.to_h do |name, (arguments, result)|
-          [name, Fiddle::Function.new(handle[name.to_s], arguments.map { |type| types.fetch(type) }, types.fetch(result))]
+          [name, Fiddle::Function.new(handle[name.to_s], arguments.map { |type|
+            types.fetch(type)
+          }, types.fetch(result))]
         end
       end
     end

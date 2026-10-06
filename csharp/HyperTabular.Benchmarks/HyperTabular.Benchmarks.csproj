@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<IsPackable>false</IsPackable>
+		<IsPublishable>false</IsPublishable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<!-- BenchmarkDotNet requires [Benchmark] methods to be instance methods. -->
+		<NoWarn>$(NoWarn);CA1822;CS1591</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="BenchmarkDotNet" Version="*" />
+		<ProjectReference Include="..\HyperTabular\HyperTabular.csproj" />
+	</ItemGroup>
+
+</Project>

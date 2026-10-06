@@ -89,3 +89,13 @@ ruby/.yardoc/
 # static-libs/build-static-libs.sh, which `go test` needs to link) can never
 # ride into a commit by accident.
 go/staticlib/*/*.a
+
+# BenchmarkDotNet
+# Writes output relative to the process's working directory when invoked via `dotnet run`
+# rather than the project directory, so this can land almost anywhere in the tree — not just
+# csharp/HyperTabular.Benchmarks/. Criterion's own output already lands under rust/target/,
+# covered by the **/target/ rule above.
+**/BenchmarkDotNet.Artifacts/
+
+# What Windows attaches to a downloaded file, when the file is copied into WSL.
+*:Zone.Identifier

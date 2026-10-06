@@ -2,6 +2,12 @@
 //! (`hypertabular._native`, PyO3, abi3-py311) — the whole Python backend, as HyperCast's
 //! extension is the whole of its own.
 //!
+//! Delimited text is read here, over the kernel directly. A workbook is read through this
+//! crate's own [`crate::Workbook`] and [`crate::Sheet`], which drive the kernel's workbook
+//! calls; each batch they produce is copied into the same Python [`Batch`] delimited text
+//! is, the shared strings it indexes held once per workbook as a `bytes` every batch
+//! shares.
+//!
 //! It is a binding like the others, written in Rust: the core
 //! ([`crate::kernel::delimited::fill`]) owns no memory and reads no files, so everything
 //! it writes into is allocated here — the read buffer, one value array and one verdict
@@ -33,8 +39,11 @@
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use pyo3::exceptions::{PyIndexError, PyMemoryError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyIndexError, PyKeyError, PyMemoryError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyList, PyMemoryView, PyString, PyTuple};
@@ -75,8 +84,12 @@ struct Companions {
     column: Py<PyAny>,
     dialect: Py<PyAny>,
     error: Py<PyAny>,
-    /// `TabularFailure.UNCLOSED_QUOTE`, `COLUMN_COUNT`, `ROW_TOO_LONG` — by code less one.
-    failures: [Py<PyAny>; 3],
+    /// `TabularFailure`, called with the core's code for its member.
+    failure: Py<PyAny>,
+    /// `WorkbookFormat`, called with the core's code for its member.
+    workbook_format: Py<PyAny>,
+    /// HyperCast's `ExcelEpoch`, likewise.
+    excel_epoch: Py<PyAny>,
     uuid: Py<PyAny>,
     decimal: Py<PyAny>,
     datetime: Py<PyAny>,
@@ -217,7 +230,8 @@ fn fault<'py>(
 /// the views of them handed out so far.
 struct Slot {
     door: Door,
-    /// The source column it reads.
+    /// Where its raw cells are in the cell table: the source column it reads, or — for a
+    /// workbook, whose table is laid out by plan column — its place in the plan.
     ordinal: usize,
     values: Py<PyBytes>,
     verdicts: Py<PyBytes>,
@@ -270,6 +284,8 @@ enum Input {
     },
     /// A stream's bytes for these rows, copied out of the read buffer before it moves on.
     Owned(Vec<u8>),
+    /// A workbook's shared strings, whole, shared by every batch of every sheet.
+    Strings(Py<PyBytes>),
 }
 
 /// One batch of rows, column by column: for each plan column, the values the core cast
@@ -285,8 +301,12 @@ struct Batch {
     /// Where each cell is in `input`: row `r`, source column `c` at `r * per_row + c`.
     cells: Vec<Span>,
     input: Input,
-    /// The unescaped bytes of the text values that had an escaped quote in them.
+    /// The unescaped bytes of the text values that had an escaped quote in them — or, for
+    /// a workbook, the text the core said typed cells as.
     arena: Vec<u8>,
+    /// Whether the rows are a sheet's: its cell table is one raw cell per plan column (in
+    /// the shared strings, or flagged, in the arena) and its row numbers are offsets.
+    workbook: bool,
 }
 
 impl Batch {
@@ -297,6 +317,7 @@ impl Batch {
                 .get(*start..*start + *len)
                 .unwrap_or_default(),
             Input::Owned(bytes) => bytes,
+            Input::Strings(bytes) => bytes.as_bytes(py),
         }
     }
 
@@ -327,6 +348,15 @@ impl Batch {
             .copied()
             .unwrap_or_default();
         let start = cell.offset as usize;
+        if self.workbook {
+            // A sheet's raw text is in the shared strings, or — flagged — in the arena.
+            let from: &[u8] = if cell.flagged() {
+                &self.arena
+            } else {
+                self.input(py)
+            };
+            return PyBytes::new(py, from.get(start..start + cell.len()).unwrap_or_default());
+        }
         let raw = self
             .input(py)
             .get(start..start + cell.len())
@@ -527,9 +557,26 @@ impl Batch {
         })
     }
 
+    /// Where row ``row`` came from: for delimited text the 1-based line its record starts
+    /// on, for a sheet its 1-based row number.
+    fn line(&self, row: isize) -> PyResult<u32> {
+        let row = self.row(row)?;
+        let entry = self
+            .cells
+            .get(row * self.per_row + self.per_row - 1)
+            .copied()
+            .unwrap_or_default();
+        Ok(if self.workbook {
+            entry.offset
+        } else {
+            entry.len
+        })
+    }
+
     /// The text the cell at (``column``, ``row``) was cast from, whatever its door and
     /// whatever its verdict — what a fault's span indexes, and what to show for a value
-    /// that did not cast. Quoting is resolved; nothing is trimmed.
+    /// that did not cast. Quoting is resolved; nothing is trimmed. For a sheet, a typed
+    /// cell that cast has none.
     fn raw<'py>(
         &self,
         py: Python<'py>,
@@ -787,6 +834,9 @@ struct DelimitedReader {
     /// The cell table: `batch_rows * per_row` entries.
     cells: Vec<Span>,
     arena: Vec<u8>,
+    /// Whether the last batch ended early because the arena filled: the next one starts
+    /// with it doubled, so that escaped text costs a few batches, not one per row.
+    cramped: bool,
     header: Option<Py<PyTuple>>,
     /// The structural failure that ended the input: final, and raised again on every read.
     failure: Option<PyErr>,
@@ -871,6 +921,7 @@ impl DelimitedReader {
             verdicts,
             cells,
             arena: vec![0; ARENA_BYTES],
+            cramped: false,
             header: None,
             failure: None,
             done: false,
@@ -889,20 +940,7 @@ impl DelimitedReader {
         (record, line, byte): (u64, u32, u64),
         (expected, found): (u32, u32),
     ) -> PyErr {
-        let made = companions(py).and_then(|companions| {
-            let kind = (code as usize)
-                .checked_sub(1)
-                .and_then(|index| companions.failures.get(index))
-                .ok_or_else(|| PyRuntimeError::new_err(CONTRACT))?;
-            companions
-                .error
-                .bind(py)
-                .call1((kind.bind(py), record, line, byte, expected, found))
-        });
-        let error = match made {
-            Ok(exception) => PyErr::from_value(exception),
-            Err(error) => error,
-        };
+        let error = tabular_error(py, code, (record, line, byte), (expected, found));
         self.failure = Some(error.clone_ref(py));
         error
     }
@@ -1054,6 +1092,11 @@ impl DelimitedReader {
                 .collect(),
         );
 
+        if self.cramped {
+            let doubled = self.arena.len().saturating_mul(2);
+            self.arena.resize(doubled, 0);
+            self.cramped = false;
+        }
         let mut out = Filled::default();
         loop {
             let (window, last) = self.source.window(py);
@@ -1083,6 +1126,8 @@ impl DelimitedReader {
                     // The batch takes its own copy of what the core wrote — the arrays
                     // are this reader's, and the next read reuses them.
                     let rows = out.rows as usize;
+                    self.cramped = rows < max_rows
+                        && (out.arena_used as usize).saturating_mul(2) >= self.arena.len();
                     let input = match &self.source {
                         Source::Bytes { bytes, at, .. } => Input::Shared {
                             bytes: bytes.clone_ref(py),
@@ -1135,6 +1180,7 @@ impl DelimitedReader {
                         cells,
                         input,
                         arena,
+                        workbook: false,
                     }));
                 }
                 OK => {
@@ -1151,7 +1197,8 @@ impl DelimitedReader {
                 // The table is sized for the plan in `build`, so this is not expected;
                 // the core says what one row takes, and the table is made to hold it.
                 ERR_CELLS => {
-                    let needed = (out.needed as usize).saturating_mul(max_rows);
+                    self.per_row = self.per_row.max(out.needed as usize);
+                    let needed = self.per_row.saturating_mul(max_rows);
                     self.cells
                         .try_reserve_exact(needed.saturating_sub(self.cells.len()))
                         .map_err(|_| {
@@ -1364,6 +1411,359 @@ impl DelimitedReader {
     }
 }
 
+/// The package's `TabularError` for a structural failure the core reported. A code this
+/// module does not know is the container's: the most general refusal.
+fn tabular_error(
+    py: Python<'_>,
+    code: u32,
+    (record, line, byte): (u64, u32, u64),
+    (expected, found): (u32, u32),
+) -> PyErr {
+    let made = companions(py).and_then(|companions| {
+        let failure = companions.failure.bind(py);
+        let kind = failure.call1((code,)).or_else(|_| failure.call1((17,)))?;
+        companions
+            .error
+            .bind(py)
+            .call1((kind, record, line, byte, expected, found))
+    });
+    match made {
+        Ok(exception) => PyErr::from_value(exception),
+        Err(error) => error,
+    }
+}
+
+/// A workbook read's error as Python raises it.
+fn workbook_error(py: Python<'_>, error: crate::Error) -> PyErr {
+    match error {
+        crate::Error::Structure(failure) => tabular_error(
+            py,
+            failure.kind as u32,
+            (failure.record, failure.line, failure.byte),
+            (failure.expected, failure.found),
+        ),
+        crate::Error::Io(error) => std::io::Error::new(error.kind(), error.to_string()).into(),
+        crate::Error::NoSheet(which) => {
+            PyKeyError::new_err(format!("the workbook has no sheet {which}"))
+        }
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+/// One sheet of a workbook, as :attr:`Workbook.sheets` lists it.
+#[pyclass(frozen, eq, module = "hypertabular")]
+#[derive(PartialEq)]
+struct SheetInfo {
+    /// The sheet's name.
+    #[pyo3(get)]
+    name: String,
+    /// Whether the workbook hides the sheet. A hidden sheet reads like any other.
+    #[pyo3(get)]
+    hidden: bool,
+}
+
+#[pymethods]
+impl SheetInfo {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "SheetInfo(name={}, hidden={})",
+            PyString::new(py, &self.name).repr()?,
+            if self.hidden { "True" } else { "False" }
+        ))
+    }
+}
+
+/// An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
+/// styles loaded: what a :class:`Sheet` reads from.
+///
+/// ``Workbook(data)`` opens ``bytes``; ``Workbook.open(path)`` reads a file. A workbook
+/// that cannot be read — not a zip, encrypted, a part missing or broken — raises
+/// :class:`TabularError`.
+#[pyclass(frozen, module = "hypertabular")]
+struct Workbook {
+    book: Arc<crate::Workbook<'static>>,
+    /// The shared strings, once, for every batch of every sheet to index.
+    strings: Py<PyBytes>,
+    sheets: Py<PyTuple>,
+}
+
+impl Workbook {
+    fn build(py: Python<'_>, bytes: Vec<u8>) -> PyResult<Self> {
+        let book = py
+            .detach(|| crate::Workbook::from_vec(bytes))
+            .map_err(|error| workbook_error(py, error))?;
+        let sheets = book.sheets().iter().map(|sheet| SheetInfo {
+            name: sheet.name.clone(),
+            hidden: sheet.hidden,
+        });
+        Ok(Workbook {
+            strings: PyBytes::new(py, book.strings()).unbind(),
+            sheets: PyTuple::new(py, sheets)?.unbind(),
+            book: Arc::new(book),
+        })
+    }
+}
+
+#[pymethods]
+impl Workbook {
+    #[new]
+    fn new(py: Python<'_>, data: &Bound<'_, PyBytes>) -> PyResult<Self> {
+        Workbook::build(py, data.as_bytes().to_vec())
+    }
+
+    /// Reads the file at ``path`` — a ``str`` or ``os.PathLike`` — and opens it.
+    #[staticmethod]
+    fn open(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+        let bytes = py.detach(|| std::fs::read(path))?;
+        Workbook::build(py, bytes)
+    }
+
+    /// Which kind of workbook this is: a :class:`WorkbookFormat`.
+    #[getter]
+    fn format<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let code = match self.book.format() {
+            crate::Format::Xlsx => 1,
+            crate::Format::Ods => 2,
+        };
+        companions(py)?.workbook_format.bind(py).call1((code,))
+    }
+
+    /// The date system the workbook's serials count in — what a date-formatted number is
+    /// read by: HyperCast's ``ExcelEpoch``.
+    #[getter]
+    fn date_system<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        companions(py)?
+            .excel_epoch
+            .bind(py)
+            .call1((self.book.date_system() as u32,))
+    }
+
+    /// The workbook's sheets, in its own order: a tuple of :class:`SheetInfo`. Sheets that
+    /// hold no cells (chart sheets, macro sheets) are not among them.
+    #[getter]
+    fn sheets<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
+        self.sheets.bind(py).clone()
+    }
+
+    /// Starts a read of one sheet — ``which`` is its index in :attr:`sheets` or its name —
+    /// through ``plan``, as ``options`` (a :class:`SheetOptions`) says. When the options
+    /// declare a header it is read here. A sheet the workbook does not have raises
+    /// ``IndexError`` for an index and ``KeyError`` for a name.
+    fn sheet(
+        &self,
+        py: Python<'_>,
+        which: &Bound<'_, PyAny>,
+        options: &Bound<'_, PyAny>,
+        plan: &Bound<'_, PyAny>,
+    ) -> PyResult<Sheet> {
+        let companions = companions(py)?;
+        let batch_rows: usize = options.getattr("batch_rows")?.extract()?;
+        if batch_rows == 0 {
+            return Err(PyValueError::new_err("batch_rows must be at least 1"));
+        }
+        let settings = crate::SheetOptions {
+            has_header: options.getattr("has_header")?.is_truthy()?,
+            skip_empty_rows: options.getattr("skip_empty_rows")?.is_truthy()?,
+            batch_rows,
+        };
+        let mut columns = Vec::new();
+        let mut planned_columns = Vec::new();
+        let mut doors = Vec::new();
+        for (index, column) in plan.try_iter()?.enumerate() {
+            let column = column?;
+            let (door, spec) = planned(py, companions, index, &column)?;
+            let format = spec.num_format().ok_or_else(|| {
+                PyValueError::new_err(format!("plan[{index}].format cannot be honoured"))
+            })?;
+            planned_columns.push(crate::Column::new(spec.ordinal as usize, door).format(format));
+            columns.push(column);
+            doors.push(door);
+        }
+
+        let book: &crate::Workbook<'static> = &self.book;
+        let shared = &self.book;
+        let opened = if let Ok(index) = which.extract::<isize>() {
+            let index = usize::try_from(index)
+                .ok()
+                .filter(|index| *index < book.sheets().len())
+                .ok_or_else(|| {
+                    PyIndexError::new_err(format!(
+                        "the workbook has {} sheets, and no sheet {index}",
+                        book.sheets().len()
+                    ))
+                })?;
+            py.detach(|| {
+                crate::Workbook::shared_sheet(shared, index.into(), settings, &planned_columns)
+            })
+        } else if let Ok(name) = which.extract::<String>() {
+            py.detach(|| {
+                crate::Workbook::shared_sheet(
+                    shared,
+                    name.as_str().into(),
+                    settings,
+                    &planned_columns,
+                )
+            })
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "which must be an int or a str, not {}",
+                which.get_type().name()?
+            )));
+        };
+        let sheet = opened.map_err(|error| workbook_error(py, error))?;
+        let header = sheet.header().map(|header| {
+            let names: Vec<_> = header.names().map(|name| text(py, name)).collect();
+            PyTuple::new(py, names).map(Bound::unbind)
+        });
+        Ok(Sheet {
+            sheet,
+            book: Arc::clone(&self.book),
+            strings: self.strings.clone_ref(py),
+            options: options.clone().unbind(),
+            plan: PyTuple::new(py, columns)?.unbind(),
+            doors,
+            header: header.transpose()?,
+            failure: None,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<hypertabular.Workbook {:?} sheets={}>",
+            self.book.format(),
+            self.book.sheets().len()
+        )
+    }
+}
+
+/// A forward-only read of one sheet of a :class:`Workbook`, a batch at a time, through a
+/// plan — into the same :class:`Batch` delimited text is read into.
+///
+/// Iterating yields batches of up to ``options.batch_rows`` rows. A typed cell is converted
+/// directly by its door — a stored ``42.0`` never passes through text to become an
+/// ``int`` — and a text cell goes through the door as delimited text would. A sheet that is
+/// structurally broken raises :class:`TabularError` after every intact row before the break
+/// has been delivered, and again on every later read. Each sheet has buffers of its own,
+/// so several can be read at once; each keeps its workbook alive.
+#[pyclass(module = "hypertabular")]
+struct Sheet {
+    /// The read itself, holding its own clone of the workbook's `Arc`.
+    sheet: crate::Sheet<'static>,
+    book: Arc<crate::Workbook<'static>>,
+    strings: Py<PyBytes>,
+    options: Py<PyAny>,
+    plan: Py<PyTuple>,
+    doors: Vec<Door>,
+    header: Option<Py<PyTuple>>,
+    /// The structural failure that ended the sheet: final, and the same exception raised
+    /// again on every read.
+    failure: Option<PyErr>,
+}
+
+impl Sheet {
+    fn next_batch(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone_ref(py));
+        }
+        let batch = match self.sheet.read() {
+            Ok(Some(batch)) => batch,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                let error = workbook_error(py, error);
+                self.failure = Some(error.clone_ref(py));
+                return Err(error);
+            }
+        };
+        let (cells, per_row, _, arena) = batch.tables();
+        // The arena as far as any span of this batch reaches into it: the text typed cells
+        // were said as, and the raw text of those that failed.
+        let mut reach = 0;
+        let mut slots = Vec::with_capacity(self.doors.len());
+        for (index, door) in self.doors.iter().enumerate() {
+            let (values, verdicts) = batch.column_bytes(index);
+            if *door == Door::Text {
+                for at in (0..values.len()).step_by(size_of::<Span>()) {
+                    // SAFETY: a text column's values are spans, eight bytes each; they
+                    // need not be aligned.
+                    let span = unsafe { values.as_ptr().add(at).cast::<Span>().read_unaligned() };
+                    if span.flagged() {
+                        reach = reach.max(span.offset as usize + span.len());
+                    }
+                }
+            }
+            // SAFETY: a verdict array is plain integers, viewed as its bytes.
+            let verdict_bytes = unsafe {
+                std::slice::from_raw_parts(verdicts.as_ptr().cast::<u8>(), size_of_val(verdicts))
+            };
+            slots.push(Slot {
+                door: *door,
+                ordinal: index,
+                values: PyBytes::new(py, values).unbind(),
+                verdicts: PyBytes::new(py, verdict_bytes).unbind(),
+                faults: verdicts.iter().filter(|verdict| !verdict.is_ok()).count(),
+                values_view: PyOnceLock::new(),
+                verdicts_view: PyOnceLock::new(),
+            });
+        }
+        for cell in cells.iter().filter(|cell| cell.flagged()) {
+            reach = reach.max(cell.offset as usize + cell.len());
+        }
+        Ok(Some(Batch {
+            rows: batch.rows(),
+            per_row,
+            plan: self.plan.clone_ref(py),
+            slots,
+            cells: cells.to_vec(),
+            input: Input::Strings(self.strings.clone_ref(py)),
+            arena: arena.get(..reach).unwrap_or(arena).to_vec(),
+            workbook: true,
+        }))
+    }
+}
+
+#[pymethods]
+impl Sheet {
+    /// The options the sheet is read with.
+    #[getter]
+    fn options<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
+        self.options.bind(py).clone()
+    }
+
+    /// The plan every batch is filled through: a tuple of :class:`Column`.
+    #[getter]
+    fn plan<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
+        self.plan.bind(py).clone()
+    }
+
+    /// The header row's names — a typed cell said the way the text door says it — as a
+    /// tuple of ``str``, or ``None`` when the options declare no header.
+    #[getter]
+    fn header<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
+        self.header.as_ref().map(|header| header.bind(py).clone())
+    }
+
+    /// Reads the next batch, or returns ``None`` once the sheet has no more rows.
+    fn read(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
+        self.next_batch(py)
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
+        self.next_batch(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "<hypertabular.Sheet of a {:?} workbook plan={}>",
+            self.book.format(),
+            self.plan.bind(py).len()
+        ))
+    }
+}
+
 fn stream(reads: Reads, buffer_bytes: usize) -> PyResult<Source> {
     if buffer_bytes == 0 {
         return Err(PyValueError::new_err("buffer_bytes must be at least 1"));
@@ -1394,7 +1794,7 @@ fn native_version() -> String {
 }
 
 /// Hands this module the package's own classes — the plan column, the dialect, the
-/// structural failure and its kinds — and has it import HyperCast's.
+/// structural failure and its kinds, the workbook format — and has it import HyperCast's.
 #[pyfunction]
 fn _bind(
     py: Python<'_>,
@@ -1402,6 +1802,7 @@ fn _bind(
     dialect: Bound<'_, PyAny>,
     error: Bound<'_, PyAny>,
     failure: Bound<'_, PyAny>,
+    workbook_format: Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let hypercast = py.import("hypercast")?;
     let reason = hypercast.getattr("CastFailure")?;
@@ -1418,11 +1819,9 @@ fn _bind(
         column: column.unbind(),
         dialect: dialect.unbind(),
         error: error.unbind(),
-        failures: [
-            failure.getattr("UNCLOSED_QUOTE")?.unbind(),
-            failure.getattr("COLUMN_COUNT")?.unbind(),
-            failure.getattr("ROW_TOO_LONG")?.unbind(),
-        ],
+        failure: failure.unbind(),
+        workbook_format: workbook_format.unbind(),
+        excel_epoch: hypercast.getattr("ExcelEpoch")?.unbind(),
         uuid: py.import("uuid")?.getattr("UUID")?.unbind(),
         decimal: py.import("decimal")?.getattr("Decimal")?.unbind(),
         datetime: datetime.getattr("datetime")?.unbind(),
@@ -1455,6 +1854,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DelimitedReader>()?;
     m.add_class::<Batch>()?;
     m.add_class::<ColumnData>()?;
+    m.add_class::<Workbook>()?;
+    m.add_class::<SheetInfo>()?;
+    m.add_class::<Sheet>()?;
     m.add_function(wrap_pyfunction!(native_version, m)?)?;
     m.add_function(wrap_pyfunction!(_bind, m)?)?;
     m.add_function(wrap_pyfunction!(_limits, m)?)?;

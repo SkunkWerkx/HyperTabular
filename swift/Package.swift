@@ -1,6 +1,14 @@
 // swift-tools-version:6.2
 import PackageDescription
 
+// The development loop: HYPERTABULAR_LOCAL_CORE=1 links the bundle
+// .github/scripts/local-core.sh builds from the checkout, under rust/target/ (which git
+// ignores), in place of the committed one, so the suite can run against the core as it stands
+// without replacing a committed archive.
+let coreBundle =
+    Context.environment["HYPERTABULAR_LOCAL_CORE"] == nil
+    ? "HyperTabularCore.artifactbundle" : "../rust/target/local-core/swift/HyperTabularCore.artifactbundle"
+
 let package = Package(
     name: "HyperTabular",
     // macOS 13 floor: the duration door presents Swift's own Duration type, as HyperCast's
@@ -27,7 +35,7 @@ let package = Package(
         // `HyperTabularCore` module, and the build stops there rather than at run time.
         .binaryTarget(
             name: "HyperTabularCore",
-            path: "HyperTabularCore.artifactbundle"
+            path: coreBundle
         ),
         .target(
             name: "HyperTabular",

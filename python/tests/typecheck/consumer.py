@@ -27,15 +27,21 @@ from hypertabular import (
     ExcelEpoch,
     Fault,
     NumFormat,
+    Sheet,
+    SheetInfo,
+    SheetOptions,
     Success,
     TabularError,
     TabularFailure,
     UnixPrecision,
     Verdict,
+    Workbook,
+    WorkbookFormat,
 )
 
 
 def describe(verdict: Verdict[Any]) -> str:
+    """Presents a verdict by matching its two cases, exhaustively."""
     match verdict:
         case Success(value):
             return f"got {value}"
@@ -85,6 +91,7 @@ with DelimitedReader.open(Path("rows.csv"), Dialect.PSV, plan) as opened:
             assert_type(batch.rows, int)
             assert_type(batch.columns, tuple[ColumnData, ...])
             assert_type(batch.raw(0, 0), bytes)
+            assert_type(batch.line(0), int)
             column = batch.column(0)
             assert_type(column, ColumnData)
             assert_type(column.column, Column)
@@ -105,6 +112,24 @@ with DelimitedReader.open(Path("rows.csv"), Dialect.PSV, plan) as opened:
         assert_type(error.byte, int)
         assert_type(error.expected, int)
         assert_type(error.found, int)
+
+book = Workbook.open(Path("orders.xlsx"))
+assert_type(book, Workbook)
+assert_type(Workbook(b""), Workbook)
+assert_type(book.format, WorkbookFormat)
+assert_type(book.date_system, ExcelEpoch)
+assert_type(book.sheets, tuple[SheetInfo, ...])
+assert_type(book.sheets[0].name, str)
+assert_type(book.sheets[0].hidden, bool)
+sheet = book.sheet("Orders", SheetOptions(skip_empty_rows=False, batch_rows=256), plan)
+assert_type(sheet, Sheet)
+assert_type(book.sheet(0, SheetOptions(), plan), Sheet)
+assert_type(sheet.options, SheetOptions)
+assert_type(sheet.header, tuple[str, ...] | None)
+assert_type(sheet.plan, tuple[Column, ...])
+assert_type(sheet.read(), Batch | None)
+for rows in sheet:
+    assert_type(rows, Batch)
 
 assert_type(hypertabular.native_version(), str)
 assert_type(hypertabular.BACKEND, str)

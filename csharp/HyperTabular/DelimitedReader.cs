@@ -22,15 +22,11 @@ namespace HyperTabular;
 /// batch, not once per cell.
 /// </para>
 /// <para>
-/// A value that does not cast is that cell's verdict, and the read goes on. Input that is
-/// not rows of cells at all — a record of the wrong width, a quote never closed — is a
-/// <see cref="TabularException"/>, raised after every intact row before it has been
-/// delivered.
-/// </para>
-/// <para>
-/// Spans handed out for a batch — <see cref="Values{T}"/>, <see cref="Verdicts"/>,
-/// <see cref="TryGetText"/>, <see cref="Raw"/> — point into the reader's own buffers and
-/// are valid until the next <see cref="Read"/>. Not thread-safe.
+/// <see cref="Read"/> hands out a <see cref="Batch"/> that is a view of those buffers, valid
+/// until the next <see cref="Read"/>. A value that does not cast is that cell's verdict, and
+/// the read goes on. Input that is not rows of cells at all — a record of the wrong width, a
+/// quote never closed — is a <see cref="TabularException"/>, raised after every intact row
+/// before it has been delivered. Not thread-safe.
 /// </para>
 /// </remarks>
 [SkipLocalsInit]
@@ -70,21 +66,18 @@ public sealed unsafe class DelimitedReader : IDisposable
 		public Native.RawFailure Failure;
 	}
 
-	readonly Column[] _plan;
-	readonly int _batchRows;
-	/// <summary>Cell-table entries one row takes: the widest ordinal the plan reads, plus two.</summary>
-	readonly int _perRow;
+	readonly Dialect _dialect;
+	readonly Columns _columns;
+	readonly Batch _batch;
+	/// <summary>Cell-table entries one row takes: one per source column the plan reaches, and one more.</summary>
+	int _perRow;
 
-	// Every array below is on the pinned object heap: the core is given their addresses, and
-	// an address that could move is one that would have to be pinned again on every call.
+	// Pinned, as the column arrays are: the core is given their addresses.
 	readonly State[] _state;
-	readonly Native.RawColumnSpec[] _specs;
-	readonly Native.RawColumnBuffer[] _buffers;
-	readonly byte[][] _values;
-	readonly CellVerdict[][] _verdicts;
 	Native.RawSpan[] _cells;
 	byte[] _arena;
-	byte[] _scratch = [];
+	/// <summary>The last batch came up short with the arena mostly used: it wants a larger one.</summary>
+	bool _cramped;
 
 	// The source: a stream read into _buffer, or memory read in place.
 	readonly Stream? _stream;
@@ -95,10 +88,6 @@ public sealed unsafe class DelimitedReader : IDisposable
 	int _start;
 	int _end;
 	bool _eof;
-
-	// The batch in hand, and the window of input its spans point into.
-	byte* _window;
-	int _rows;
 
 	string[]? _header;
 	TabularException? _failure;
@@ -182,37 +171,10 @@ public sealed unsafe class DelimitedReader : IDisposable
 
 	DelimitedReader(Dialect dialect, ReadOnlySpan<Column> plan, int batchRows)
 	{
-		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchRows);
-		_plan = plan.ToArray();
-		_batchRows = batchRows;
-
-		var widest = -1;
-		_specs = GC.AllocateUninitializedArray<Native.RawColumnSpec>(_plan.Length, pinned: true);
-		_buffers = GC.AllocateUninitializedArray<Native.RawColumnBuffer>(_plan.Length, pinned: true);
-		_values = new byte[_plan.Length][];
-		_verdicts = new CellVerdict[_plan.Length][];
-		for (var index = 0; index < _plan.Length; index++)
-		{
-			var column = _plan[index];
-			if (column.Door == Door.Unspecified)
-				throw new ArgumentException($"Plan column {index} is default(Column); build one with Column's factories.", nameof(plan));
-			widest = Math.Max(widest, column.Ordinal);
-			_specs[index] = new Native.RawColumnSpec
-			{
-				Ordinal = (uint)column.Ordinal,
-				Door = (uint)column.Door,
-				Param = column.Declared,
-				Format = ToRaw(column.Format, index),
-			};
-			_values[index] = GC.AllocateUninitializedArray<byte>(checked(batchRows * column.ValueSize), pinned: true);
-			_verdicts[index] = GC.AllocateUninitializedArray<CellVerdict>(batchRows, pinned: true);
-			_buffers[index] = new Native.RawColumnBuffer
-			{
-				Values = Address(_values[index]),
-				Verdicts = Address(_verdicts[index]),
-			};
-		}
-		_perRow = widest + 2;
+		_dialect = dialect;
+		_columns = new Columns(plan, batchRows);
+		_batch = new Batch(_columns, workbook: false);
+		_perRow = _columns.Width + 1;
 		_cells = GC.AllocateUninitializedArray<Native.RawSpan>(checked(_perRow * batchRows), pinned: true);
 		_arena = GC.AllocateUninitializedArray<byte>(4096, pinned: true);
 
@@ -225,54 +187,21 @@ public sealed unsafe class DelimitedReader : IDisposable
 			Quoting = dialect.Quoting ? (byte)1 : (byte)0,
 			SkipBlankLines = dialect.SkipBlankLines ? (byte)1 : (byte)0,
 		};
-		if (Native.hypertabular_delimited_init((Native.State*)Address(_state), &raw) != Native.Ok)
+		if (Native.hypertabular_delimited_init((Native.State*)Columns.Address(_state), &raw) != Native.Ok)
 			throw new ArgumentException(
 				$"Separator '{dialect.Separator}' is not tab or printable ASCII other than '\"'.", nameof(dialect));
 	}
 
-	/// <summary>The address of a pinned array's first element — stable for the array's lifetime.</summary>
-	static T* Address<T>(T[] pinned) where T : unmanaged =>
-		(T*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(pinned));
+	static T* Address<T>(T[] pinned) where T : unmanaged => Columns.Address(pinned);
 
-	/// <summary>HyperCast's <see cref="NumFormat"/> in the core's 32-byte layout, validated as HyperCast validates it.</summary>
-	static Native.RawNumFormat ToRaw(NumFormat format, int column)
-	{
-		if (format.DecimalSeparator == format.GroupSeparator)
-			throw new ArgumentException(
-				$"Plan column {column}: decimal and group separators must differ; both are '{format.DecimalSeparator}'.", "plan");
-		if (char.IsSurrogate(format.DecimalSeparator) || char.IsSurrogate(format.GroupSeparator))
-			throw new ArgumentException($"Plan column {column}: separators must be whole code points.", "plan");
-		var raw = new Native.RawNumFormat
-		{
-			DecimalSep = format.DecimalSeparator,
-			GroupSep = format.GroupSeparator,
-			Flags = (uint)format.Styles,
-		};
-		var symbol = format.CurrencySymbol;
-		if (symbol.Length == 0)
-			return raw;
-		foreach (var c in symbol)
-			if (char.IsAsciiDigit(c) || char.IsWhiteSpace(c))
-				throw new ArgumentException(
-					$"Plan column {column}: currency symbol '{symbol}' must not contain a digit or whitespace.", "plan");
-		if (!Encoding.UTF8.TryGetBytes(symbol, raw.Currency, out var written))
-			throw new ArgumentException(
-				$"Plan column {column}: currency symbol '{symbol}' exceeds {NumFormat.MaxCurrencyBytes} UTF-8 bytes.", "plan");
-		raw.CurrencyLen = (uint)written;
-		return raw;
-	}
+	/// <summary>The dialect the reader was built with.</summary>
+	public Dialect Dialect => _dialect;
+
+	/// <summary>The plan the reader reads through: column <c>i</c> of every batch is <c>Plan[i]</c>.</summary>
+	public IReadOnlyList<Column> Plan => _columns.Plan;
 
 	/// <summary>The header's names, when the dialect declares one; empty for an input with no record.</summary>
 	public IReadOnlyList<string>? Header => _header;
-
-	/// <summary>The number of plan columns.</summary>
-	public int ColumnCount => _plan.Length;
-
-	/// <summary>The plan column at <paramref name="column"/>.</summary>
-	public Column Column(int column) => _plan[column];
-
-	/// <summary>Rows in the batch in hand; <c>0</c> before the first <see cref="Read"/> and after the last.</summary>
-	public int Rows => _rows;
 
 	/// <summary>Records finished so far — the header and skipped blank lines included.</summary>
 	public long Records => (long)_state[0].Records;
@@ -316,11 +245,7 @@ public sealed unsafe class DelimitedReader : IDisposable
 		_end += read;
 	}
 
-	TabularException Structural(in Native.RawFailure failure) =>
-		_failure = new TabularException(
-			failure.Code == 2 ? TabularFailure.ColumnCount : TabularFailure.UnclosedQuote,
-			(long)failure.Record, (int)failure.Line, (long)failure.Byte,
-			(int)failure.Expected, (int)failure.Found);
+	TabularException Structural(in Native.RawFailure failure) => _failure = TabularException.From(failure);
 
 	void ReadHeader()
 	{
@@ -372,26 +297,35 @@ public sealed unsafe class DelimitedReader : IDisposable
 	}
 
 	/// <summary>
-	/// Reads the next batch. <see langword="true"/> with <see cref="Rows"/> rows in hand;
-	/// <see langword="false"/> once the input is exhausted.
+	/// Reads the next batch: up to the reader's batch size of rows, or <see langword="null"/>
+	/// once the input is exhausted. The batch is valid until the next call.
 	/// </summary>
 	/// <exception cref="TabularException">
 	/// The input is structurally broken. Raised after every intact row before the break has
 	/// been delivered, and again on every later call.
 	/// </exception>
-	public bool Read()
+	public Batch? Read()
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
+		_batch.Clear();
 		if (_failure is not null)
 			throw _failure;
-		_rows = 0;
+		// The core stops a batch at the row the arena has no room for, so an arena too small
+		// for a batch's unescaped text makes for short batches, not for an error. The batch
+		// that was short has been given back by now, and the arena can move.
+		if (_cramped)
+		{
+			_cramped = false;
+			_arena = GC.AllocateUninitializedArray<byte>(checked(_arena.Length * 2), pinned: true);
+		}
+		var batchRows = _columns.BatchRows;
 		Native.RawFilled filled;
 		while (true)
 		{
 			var window = Window(out var length, out var last);
 			var code = Native.hypertabular_delimited_fill(
 				(Native.State*)Address(_state), window, (nuint)length, last ? 1u : 0u,
-				Address(_specs), Address(_buffers), (nuint)_plan.Length, (nuint)_batchRows,
+				Address(_columns.Specs), Address(_columns.Buffers), (nuint)_columns.Plan.Length, (nuint)batchRows,
 				Address(_cells), (nuint)_cells.Length, Address(_arena), (nuint)_arena.Length, &filled);
 			switch (code)
 			{
@@ -400,18 +334,20 @@ public sealed unsafe class DelimitedReader : IDisposable
 					_start += consumed;
 					if (filled.Rows > 0)
 					{
-						_rows = (int)filled.Rows;
-						_window = window;
-						return true;
+						var rows = (int)filled.Rows;
+						_cramped = rows < batchRows && (long)filled.ArenaUsed * 2 >= _arena.Length;
+						return _batch.Fill(rows, _cells, _perRow, window, _arena);
 					}
 					if (last && (consumed == length || consumed == 0))
-						return false;
+						return null;
 					if (consumed == 0)
 						Refill();
 					break;
 				case Native.ErrCells:
+					// The core says how many entries one row takes; the table holds a batch of them.
+					_perRow = Math.Max(_perRow, (int)filled.Needed);
 					_cells = GC.AllocateUninitializedArray<Native.RawSpan>(
-						checked((int)filled.Needed * _batchRows), pinned: true);
+						checked((int)filled.Needed * batchRows), pinned: true);
 					break;
 				case Native.ErrArena:
 					_arena = GC.AllocateUninitializedArray<byte>(
@@ -425,226 +361,13 @@ public sealed unsafe class DelimitedReader : IDisposable
 		}
 	}
 
-	/// <summary>A column's verdicts for the batch in hand, one per row.</summary>
-	public ReadOnlySpan<CellVerdict> Verdicts(int column) => _verdicts[column].AsSpan(0, _rows);
-
-	/// <summary>
-	/// A column's values for the batch in hand, one per row, exactly as the core wrote them
-	/// — for the doors whose value is a primitive: <see cref="Door.Boolean"/> as
-	/// <see cref="bool"/>, the integer and floating-point doors as their own type. The value
-	/// of a row whose verdict is not ok is zero. Columns of other doors are read a cell at
-	/// a time.
-	/// </summary>
-	/// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not the type the column's door writes.</exception>
-	public ReadOnlySpan<T> Values<T>(int column) where T : unmanaged
-	{
-		var door = _plan[column].Door;
-		var matches =
-			typeof(T) == typeof(bool) ? door == Door.Boolean
-			: typeof(T) == typeof(sbyte) ? door == Door.SByte
-			: typeof(T) == typeof(short) ? door == Door.Int16
-			: typeof(T) == typeof(int) ? door == Door.Int32
-			: typeof(T) == typeof(long) ? door == Door.Int64
-			: typeof(T) == typeof(byte) ? door == Door.Byte
-			: typeof(T) == typeof(ushort) ? door == Door.UInt16
-			: typeof(T) == typeof(uint) ? door == Door.UInt32
-			: typeof(T) == typeof(ulong) ? door == Door.UInt64
-			: typeof(T) == typeof(float) ? door == Door.Single
-			: typeof(T) == typeof(double) && door == Door.Double;
-		if (!matches)
-			throw new InvalidOperationException(
-				$"Column {column} is cast through {door}; it has no span of {typeof(T).Name}.");
-		return MemoryMarshal.Cast<byte, T>(_values[column].AsSpan(0, _rows * sizeof(T)));
-	}
-
-	/// <summary>The verdict of the cell at (<paramref name="column"/>, <paramref name="row"/>), checked against the doors the caller's accessor reads.</summary>
-	CellVerdict At(int column, int row, Door door, Door also = Door.Unspecified, Door orElse = Door.Unspecified)
-	{
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)row, (uint)_rows, nameof(row));
-		var actual = _plan[column].Door;
-		if (actual != door && actual != also && actual != orElse)
-			throw new InvalidOperationException($"Column {column} is cast through {actual}, not {door}.");
-		return _verdicts[column][row];
-	}
-
-	T Value<T>(int column, int row) where T : unmanaged =>
-		Unsafe.ReadUnaligned<T>(ref _values[column][row * sizeof(T)]);
-
-	Verdict<T> Cell<T>(int column, int row, Door door) where T : unmanaged
-	{
-		var verdict = At(column, row, door);
-		return verdict.IsOk ? Value<T>(column, row) : new Verdict<T>(verdict.ToFault());
-	}
-
-	/// <summary>The cell of a <see cref="Door.Boolean"/> column.</summary>
-	public Verdict<bool> Boolean(int column, int row)
-	{
-		var verdict = At(column, row, Door.Boolean);
-		return verdict.IsOk ? Value<byte>(column, row) != 0 : new Verdict<bool>(verdict.ToFault());
-	}
-
-	/// <summary>The cell of a <see cref="Door.SByte"/> column.</summary>
-	public Verdict<sbyte> SByte(int column, int row) => Cell<sbyte>(column, row, Door.SByte);
-
-	/// <summary>The cell of a <see cref="Door.Int16"/> column.</summary>
-	public Verdict<short> Int16(int column, int row) => Cell<short>(column, row, Door.Int16);
-
-	/// <summary>The cell of a <see cref="Door.Int32"/> column.</summary>
-	public Verdict<int> Int32(int column, int row) => Cell<int>(column, row, Door.Int32);
-
-	/// <summary>The cell of a <see cref="Door.Int64"/> column.</summary>
-	public Verdict<long> Int64(int column, int row) => Cell<long>(column, row, Door.Int64);
-
-	/// <summary>The cell of a <see cref="Door.Byte"/> column.</summary>
-	public Verdict<byte> Byte(int column, int row) => Cell<byte>(column, row, Door.Byte);
-
-	/// <summary>The cell of a <see cref="Door.UInt16"/> column.</summary>
-	public Verdict<ushort> UInt16(int column, int row) => Cell<ushort>(column, row, Door.UInt16);
-
-	/// <summary>The cell of a <see cref="Door.UInt32"/> column.</summary>
-	public Verdict<uint> UInt32(int column, int row) => Cell<uint>(column, row, Door.UInt32);
-
-	/// <summary>The cell of a <see cref="Door.UInt64"/> column.</summary>
-	public Verdict<ulong> UInt64(int column, int row) => Cell<ulong>(column, row, Door.UInt64);
-
-	/// <summary>The cell of a <see cref="Door.Single"/> column.</summary>
-	public Verdict<float> Single(int column, int row) => Cell<float>(column, row, Door.Single);
-
-	/// <summary>The cell of a <see cref="Door.Double"/> column.</summary>
-	public Verdict<double> Double(int column, int row) => Cell<double>(column, row, Door.Double);
-
-	/// <summary>The cell of a <see cref="Door.Decimal"/> column, exact.</summary>
-	public Verdict<decimal> Decimal(int column, int row)
-	{
-		var verdict = At(column, row, Door.Decimal);
-		if (!verdict.IsOk)
-			return new Verdict<decimal>(verdict.ToFault());
-		var value = Value<Native.RawDecimal>(column, row);
-		return new decimal((int)value.Lo, (int)(value.Lo >> 32), (int)value.Hi, value.Negative != 0, value.Scale);
-	}
-
-	/// <summary>The cell of a <see cref="Door.Uuid"/> column.</summary>
-	public Verdict<Guid> Uuid(int column, int row)
-	{
-		var verdict = At(column, row, Door.Uuid);
-		return verdict.IsOk
-			? new Guid(_values[column].AsSpan(row * 16, 16), bigEndian: true)
-			: new Verdict<Guid>(verdict.ToFault());
-	}
-
-	/// <summary>
-	/// The cell of a <see cref="Door.Timestamp"/>, <see cref="Door.Unix"/> or
-	/// <see cref="Door.ExcelSerial"/> column: an instant, at .NET's 100 ns fidelity
-	/// (sub-tick nanoseconds truncate).
-	/// </summary>
-	public Verdict<DateTimeOffset> Timestamp(int column, int row)
-	{
-		var verdict = At(column, row, Door.Timestamp, Door.Unix, Door.ExcelSerial);
-		if (!verdict.IsOk)
-			return new Verdict<DateTimeOffset>(verdict.ToFault());
-		var value = Value<Native.RawTimestamp>(column, row);
-		return new DateTimeOffset(
-			System.DateTime.UnixEpoch.Ticks + value.Seconds * TimeSpan.TicksPerSecond + value.Nanos / 100,
-			TimeSpan.Zero);
-	}
-
-	/// <summary>The cell of a <see cref="Door.Date"/> or <see cref="Door.DateOrdered"/> column.</summary>
-	public Verdict<DateOnly> Date(int column, int row)
-	{
-		var verdict = At(column, row, Door.Date, Door.DateOrdered);
-		if (!verdict.IsOk)
-			return new Verdict<DateOnly>(verdict.ToFault());
-		var value = Value<Native.RawDate>(column, row);
-		return new DateOnly(value.Year, value.Month, value.Day);
-	}
-
-	/// <summary>
-	/// The cell of a <see cref="Door.DateTime"/> column: a wall clock with
-	/// <see cref="DateTimeKind.Unspecified"/> — the text named no zone and none is invented.
-	/// </summary>
-	public Verdict<DateTime> DateTime(int column, int row)
-	{
-		var verdict = At(column, row, Door.DateTime);
-		if (!verdict.IsOk)
-			return new Verdict<DateTime>(verdict.ToFault());
-		var value = Value<Native.RawCivil>(column, row);
-		return new DateTime(value.Year, value.Month, value.Day, 0, 0, 0, DateTimeKind.Unspecified)
-			.AddTicks((long)(value.NanosOfDay / 100));
-	}
-
-	/// <summary>The cell of a <see cref="Door.Time"/> column.</summary>
-	public Verdict<TimeOnly> Time(int column, int row)
-	{
-		var verdict = At(column, row, Door.Time);
-		return verdict.IsOk
-			? new TimeOnly((long)(Value<ulong>(column, row) / 100))
-			: new Verdict<TimeOnly>(verdict.ToFault());
-	}
-
-	/// <summary>The cell of a <see cref="Door.Duration"/> column.</summary>
-	public Verdict<TimeSpan> Duration(int column, int row)
-	{
-		var verdict = At(column, row, Door.Duration);
-		if (!verdict.IsOk)
-			return new Verdict<TimeSpan>(verdict.ToFault());
-		var value = Value<Native.RawDuration>(column, row);
-		return new TimeSpan(value.Seconds * TimeSpan.TicksPerSecond + value.Nanos / 100);
-	}
-
-	/// <summary>
-	/// The cell of a <see cref="Door.Text"/> column: its bytes, untrimmed, quotes resolved.
-	/// <see langword="false"/> for a cell with no bytes at all, which is the one way text
-	/// fails. The span points into the reader's buffers — zero-copy for every cell that
-	/// had no escaped quote in it — and is valid until the next <see cref="Read"/>.
-	/// </summary>
-	public bool TryGetText(int column, int row, out ReadOnlySpan<byte> utf8)
-	{
-		if (!At(column, row, Door.Text).IsOk)
-		{
-			utf8 = default;
-			return false;
-		}
-		var span = Value<Native.RawSpan>(column, row);
-		utf8 = new ReadOnlySpan<byte>((span.Flagged ? Address(_arena) : _window) + span.Offset, span.Length);
-		return true;
-	}
-
-	/// <summary>The cell of a <see cref="Door.Text"/> column as a string, or <see langword="null"/> for an empty cell.</summary>
-	public string? GetString(int column, int row) =>
-		TryGetText(column, row, out var utf8) ? Encoding.UTF8.GetString(utf8) : null;
-
-	/// <summary>
-	/// The text the cell at (<paramref name="column"/>, <paramref name="row"/>) was cast
-	/// from, whatever its door and whatever its verdict — what a fault's span indexes, and
-	/// what to show for a value that did not cast. Valid until the next call to
-	/// <see cref="Raw"/> or <see cref="Read"/>.
-	/// </summary>
-	public ReadOnlySpan<byte> Raw(int column, int row)
-	{
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)row, (uint)_rows, nameof(row));
-		var cell = _cells[row * _perRow + _plan[column].Ordinal];
-		var raw = new ReadOnlySpan<byte>(_window + cell.Offset, cell.Length);
-		if (!cell.Flagged)
-			return raw;
-		// A cell with an escaped quote in it: unescaped, as the core cast it.
-		if (_scratch.Length < raw.Length)
-			_scratch = new byte[Math.Max(raw.Length, 256)];
-		fixed (byte* source = raw)
-		fixed (byte* target = _scratch)
-		{
-			var written = Native.hypertabular_delimited_unescape(
-				source, (nuint)raw.Length, target, (nuint)_scratch.Length);
-			return _scratch.AsSpan(0, (int)written);
-		}
-	}
-
 	/// <summary>Releases the pinned memory, and the stream unless it was to be left open.</summary>
 	public void Dispose()
 	{
 		if (_disposed)
 			return;
 		_disposed = true;
-		_rows = 0;
+		_batch.Clear();
 		_pin.Dispose();
 		if (!_leaveOpen)
 			_stream?.Dispose();

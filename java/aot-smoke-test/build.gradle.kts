@@ -28,6 +28,12 @@ java {
     targetCompatibility = JavaVersion.VERSION_25
 }
 
+// The workbook the smoke reads, carried in the program itself so the native binary needs
+// no corpus beside it.
+tasks.processResources {
+    from(rootProject.file("../corpus/workbook/basic.xlsx"))
+}
+
 // The library's own floor, enforced the same way it is there.
 tasks.withType<JavaCompile>().configureEach {
     options.release = 25
@@ -40,6 +46,8 @@ graalvmNative {
             // report so a failed reachability/linking analysis is diagnosable.
             buildArgs.add("--enable-native-access=ALL-UNNAMED")
             buildArgs.add("-H:+ReportExceptionStackTraces")
+            // The program's own resource; the library's are its own business, below.
+            buildArgs.add("-H:IncludeResources=basic\\.xlsx")
             // Deliberately NO `resources { includedPatterns.add("native/.*") }` here: the
             // resource glob and the downcall signatures ship inside the library, in its own
             // reachability-metadata.json, so a consumer inherits them with zero

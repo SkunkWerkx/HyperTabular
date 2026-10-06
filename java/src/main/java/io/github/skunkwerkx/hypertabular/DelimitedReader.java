@@ -1,9 +1,5 @@
 package io.github.skunkwerkx.hypertabular;
 
-import io.github.skunkwerkx.hypercast.CastFailure;
-import io.github.skunkwerkx.hypercast.Fault;
-import io.github.skunkwerkx.hypercast.NumFormat;
-import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.Verdict;
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,21 +7,13 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 
 /**
  * Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
@@ -40,29 +28,28 @@ import java.util.UUID;
  * and puts what the core did not consume back in front of it. The native boundary is
  * crossed once per batch, not once per cell.
  *
- * <p>A value that does not cast is that cell's verdict, and the read goes on. Input that is
- * not rows of cells at all — a record of the wrong width, a quote never closed — is a
- * {@link TabularException}, raised after every intact row before it has been delivered.
+ * <p>{@link #read()} hands out a {@link Batch} that is a view of those buffers, valid until
+ * the next {@link #read()}. A value that does not cast is that cell's verdict, and the read
+ * goes on. Input that is not rows of cells at all — a record of the wrong width, a quote never
+ * closed — is a {@link TabularException}, raised after every intact row before it has been
+ * delivered.
  *
  * {@snippet :
  * List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
  * try (DelimitedReader reader = DelimitedReader.open(Path.of("orders.csv"), Dialect.CSV, plan)) {
- *     while (reader.read()) {
- *         for (int row = 0; row < reader.rows(); row++) {
- *             String line = switch (reader.f64(2, row)) {
- *                 case Success<Double> score -> reader.string(1, row) + ": " + score.value();
- *                 case Fault<Double> fault -> fault.reason() + " in \"" + reader.rawString(2, row) + "\"";
+ *     for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+ *         for (int row = 0; row < batch.rows(); row++) {
+ *             String line = switch (batch.get(2, row, Double.class)) {
+ *                 case Success<Double> score -> batch.string(1, row) + ": " + score.value();
+ *                 case Fault<Double> fault -> fault.reason() + " in \"" + batch.rawString(2, row) + "\"";
  *             };
  *         }
  *     }
  * }
  * }
  *
- * <p>Segments handed out for a batch — {@link #values}, {@link #verdicts}, {@link #text},
- * {@link #raw} — are read-only views into the reader's own buffers: valid until the next
- * {@link #read()}, and refused by the runtime after {@link #close()}. A failure of the
- * underlying stream or file is an {@link UncheckedIOException}, from the factory or from
- * {@link #read()}.
+ * <p>A failure of the underlying stream or file is an {@link UncheckedIOException}, from the
+ * factory or from {@link #read()}.
  *
  * <p>Not thread-safe, and confined: the buffers are a confined {@link Arena}'s, so a reader
  * belongs to the thread that built it, and the runtime refuses a call from any other.
@@ -88,54 +75,6 @@ public final class DelimitedReader implements AutoCloseable {
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
 
-    /**
-     * Native memory that can be outgrown: its own confined arena, closed when a larger one
-     * replaces it, so a buffer that doubled ten times holds one allocation, not eleven.
-     */
-    private static final class Block {
-        private final long alignment;
-        private Arena arena;
-        MemorySegment segment;
-        MemorySegment readOnly;
-
-        Block(long bytes, long alignment) {
-            this.alignment = alignment;
-            this.arena = Arena.ofConfined();
-            try {
-                this.segment = arena.allocate(bytes, alignment);
-            } catch (RuntimeException | Error failure) {
-                arena.close();
-                throw failure;
-            }
-            this.readOnly = segment.asReadOnly();
-        }
-
-        long bytes() {
-            return segment.byteSize();
-        }
-
-        /** Replaces the memory with {@code bytes} of it, the first {@code keep} carried over. */
-        void resize(long bytes, long keep) {
-            Arena next = Arena.ofConfined();
-            MemorySegment larger;
-            try {
-                larger = next.allocate(bytes, alignment);
-                MemorySegment.copy(segment, 0, larger, 0, keep);
-            } catch (RuntimeException | Error failure) {
-                next.close();
-                throw failure;
-            }
-            arena.close();
-            arena = next;
-            segment = larger;
-            readOnly = larger.asReadOnly();
-        }
-
-        void close() {
-            arena.close();
-        }
-    }
-
     /** Where a stream's or a file's bytes come from, read straight into native memory. */
     private interface Source {
         /** Reads at least one byte into {@code target} at {@code at}, or returns -1 at the end. */
@@ -154,7 +93,8 @@ public final class DelimitedReader implements AutoCloseable {
 
         @Override
         public int read(MemorySegment target, long at, long room) throws IOException {
-            ByteBuffer view = target.asSlice(at, Math.min(room, Integer.MAX_VALUE)).asByteBuffer();
+            ByteBuffer view =
+                    target.asSlice(at, Math.min(room, Integer.MAX_VALUE)).asByteBuffer();
             int read;
             do {
                 read = channel.read(view);
@@ -202,23 +142,21 @@ public final class DelimitedReader implements AutoCloseable {
         }
     }
 
-    private final Column[] plan;
-    private final int batchRows;
-    /** Cell-table entries one row takes: the widest ordinal the plan reads, plus two. */
-    private final int perRow;
+    private final Dialect dialect;
+    private final Columns columns;
+    private final Batch batch;
+    /** Cell-table entries one row takes: one per source column the plan reaches, and one more. */
+    private int perRow;
 
     // Everything the core is handed, allocated once: the fixed-size blocks in one arena,
     // and each buffer that can be outgrown in its own.
     private final Arena arena;
     private MemorySegment state;
-    private MemorySegment specs;
-    private MemorySegment buffers;
     private MemorySegment filled;
-    private MemorySegment[] values;
-    private MemorySegment[] verdicts;
     private Block cells;
     private Block unescaped;
-    private Block scratch;
+    /** The last batch came up short with the arena mostly used: it wants a larger one. */
+    private boolean cramped;
 
     // The source: a stream or file read into `buffer`, or memory read in place.
     private Source source;
@@ -229,12 +167,6 @@ public final class DelimitedReader implements AutoCloseable {
     private long start;
     private long end;
     private boolean eof;
-
-    // The batch in hand, and the window of input its spans point into.
-    private MemorySegment window;
-    private MemorySegment windowReadOnly;
-    private long windowStart;
-    private int rows;
 
     private List<String> header;
     private TabularException failure;
@@ -394,7 +326,8 @@ public final class DelimitedReader implements AutoCloseable {
             }
             throw failure;
         }
-        return reader.overSource(new StreamSource(utf8, bufferBytes), bufferBytes).begin(dialect);
+        return reader.overSource(new StreamSource(utf8, bufferBytes), bufferBytes)
+                .begin(dialect);
     }
 
     /**
@@ -429,8 +362,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the file cannot be opened or read
      */
-    public static DelimitedReader open(
-            Path path, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
+    public static DelimitedReader open(Path path, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
         Objects.requireNonNull(path, "path");
         if (bufferBytes <= 0) {
             throw new IllegalArgumentException("bufferBytes must be positive; got " + bufferBytes);
@@ -450,25 +382,12 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     private DelimitedReader(Dialect dialect, List<Column> plan, int batchRows) {
-        Objects.requireNonNull(dialect, "dialect");
-        this.plan = Objects.requireNonNull(plan, "plan").toArray(Column[]::new);
-        if (batchRows <= 0) {
-            throw new IllegalArgumentException("batchRows must be positive; got " + batchRows);
-        }
+        this.dialect = Objects.requireNonNull(dialect, "dialect");
+        Column[] checked = Columns.checked(plan, batchRows);
         if (dialect.separator() > 0x7E) {
-            throw new IllegalArgumentException(String.format(
-                    "Separator U+%04X is not a single ASCII byte.", (int) dialect.separator()));
+            throw new IllegalArgumentException(
+                    String.format("Separator U+%04X is not a single ASCII byte.", (int) dialect.separator()));
         }
-        this.batchRows = batchRows;
-        int widest = -1;
-        for (int index = 0; index < this.plan.length; index++) {
-            Column column = Objects.requireNonNull(this.plan[index], "plan column " + index);
-            widest = Math.max(widest, column.ordinal());
-        }
-        if (widest > Integer.MAX_VALUE - 2) {
-            throw new IllegalArgumentException("A plan ordinal of " + widest + " is out of range.");
-        }
-        this.perRow = widest + 2;
 
         // Asked of the library before anything is allocated: this is the call that loads
         // it, and a library that will not load must not leave an arena behind.
@@ -479,35 +398,11 @@ public final class DelimitedReader implements AutoCloseable {
         }
         this.arena = Arena.ofConfined();
         try {
-            int count = this.plan.length;
             state = arena.allocate(stateBytes, 8);
             filled = arena.allocate(Native.FILLED_BYTES, 8);
-            specs = arena.allocate(Math.max(count, 1) * Native.SPEC_BYTES, 4);
-            buffers = arena.allocate(Math.max(count, 1) * Native.BUFFER_BYTES, 8);
-            values = new MemorySegment[count];
-            verdicts = new MemorySegment[count];
-            for (int index = 0; index < count; index++) {
-                Column column = this.plan[index];
-                long spec = index * Native.SPEC_BYTES;
-                specs.set(INT, spec + Native.SPEC_ORDINAL, column.ordinal());
-                specs.set(INT, spec + Native.SPEC_DOOR, column.door().code());
-                specs.set(INT, spec + Native.SPEC_PARAM, column.declared());
-                NumFormat format = column.format();
-                byte[] symbol = format.currencySymbol().getBytes(StandardCharsets.UTF_8);
-                specs.set(INT, spec + Native.SPEC_DECIMAL_SEP, format.decimalSeparator());
-                specs.set(INT, spec + Native.SPEC_GROUP_SEP, format.groupSeparator());
-                specs.set(INT, spec + Native.SPEC_FLAGS, format.styles());
-                specs.set(INT, spec + Native.SPEC_CURRENCY_LEN, symbol.length);
-                // NumFormat's own constructor holds the symbol to the 16 bytes there are.
-                MemorySegment.copy(symbol, 0, specs, BYTE, spec + Native.SPEC_CURRENCY, symbol.length);
-
-                // 8-aligned whatever the door, so every value reads through an aligned layout.
-                values[index] = arena.allocate((long) batchRows * column.door().valueBytes(), 8);
-                verdicts[index] = arena.allocate(batchRows * Native.VERDICT_BYTES, 4);
-                long entry = index * Native.BUFFER_BYTES;
-                buffers.set(ValueLayout.ADDRESS, entry, values[index]);
-                buffers.set(ValueLayout.ADDRESS, entry + Native.BUFFER_VERDICTS, verdicts[index]);
-            }
+            columns = new Columns(checked, batchRows, arena);
+            batch = new Batch(columns, false);
+            perRow = columns.width + 1;
             cells = new Block(Math.multiplyExact((long) perRow * batchRows, Native.SPAN_BYTES), 4);
             unescaped = new Block(4096, 1);
 
@@ -579,32 +474,22 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     /**
-     * The number of plan columns.
+     * The dialect the reader was built with.
      *
-     * @return the plan's length
+     * @return the dialect
      */
-    public int columnCount() {
-        return plan.length;
+    public Dialect dialect() {
+        return dialect;
     }
 
     /**
-     * The plan column at {@code column}.
+     * The plan the reader reads through: column {@code i} of every batch is
+     * {@code plan().get(i)}.
      *
-     * @param column index into the plan
-     * @return the plan column
+     * @return the plan, unmodifiable
      */
-    public Column column(int column) {
-        return plan[column];
-    }
-
-    /**
-     * Rows in the batch in hand; {@code 0} before the first {@link #read()} and after the
-     * last.
-     *
-     * @return the batch's row count
-     */
-    public int rows() {
-        return rows;
+    public List<Column> plan() {
+        return columns.planList;
     }
 
     /**
@@ -627,7 +512,8 @@ public final class DelimitedReader implements AutoCloseable {
                 state.get(LONG, Native.STATE_RECORDS),
                 state.get(INT, Native.STATE_LINE),
                 state.get(LONG, Native.STATE_OFFSET),
-                0, 0);
+                0,
+                0);
     }
 
     /** Puts the unfinished record at the front of the buffer and reads more behind it. */
@@ -664,15 +550,7 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     private TabularException structural() {
-        return failure = new TabularException(
-                filled.get(INT, Native.FAILURE_CODE) == 2
-                        ? TabularFailure.COLUMN_COUNT
-                        : TabularFailure.UNCLOSED_QUOTE,
-                filled.get(LONG, Native.FAILURE_RECORD),
-                filled.get(INT, Native.FAILURE_LINE),
-                filled.get(LONG, Native.FAILURE_BYTE),
-                filled.get(INT, Native.FAILURE_EXPECTED),
-                filled.get(INT, Native.FAILURE_FOUND));
+        return failure = TabularException.from(filled, Native.FAILURE_CODE);
     }
 
     private static String decode(MemorySegment from, long offset, int length) {
@@ -695,8 +573,15 @@ public final class DelimitedReader implements AutoCloseable {
                 }
                 MemorySegment base = base();
                 int code = Native.header(
-                        state, base.asSlice(start, length), length, last,
-                        names, capacity, unescaped.segment, unescaped.bytes(), filled);
+                        state,
+                        base.asSlice(start, length),
+                        length,
+                        last,
+                        names,
+                        capacity,
+                        unescaped.segment,
+                        unescaped.bytes(),
+                        filled);
                 switch (code) {
                     case Native.OK -> {
                         long consumed = filled.get(LONG, Native.FILLED_CONSUMED);
@@ -738,24 +623,32 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     /**
-     * Reads the next batch. {@code true} with {@link #rows()} rows in hand; {@code false}
-     * once the input is exhausted.
+     * Reads the next batch: up to the reader's batch size of rows, or {@code null} once the
+     * input is exhausted. The batch is valid until the next call.
      *
-     * @return whether a batch was read
+     * @return the batch, or {@code null}
      * @throws TabularException if the input is structurally broken — raised after every
      *     intact row before the break has been delivered, and again, the same exception, on
      *     every later call
      * @throws UncheckedIOException if the stream or file fails
      * @throws IllegalStateException if the reader is closed
      */
-    public boolean read() {
+    public Batch read() {
         if (closed) {
             throw new IllegalStateException("The reader is closed.");
         }
+        batch.clear();
         if (failure != null) {
             throw failure;
         }
-        rows = 0;
+        // The core stops a batch at the row the arena has no room for, so an arena too small
+        // for a batch's unescaped text makes for short batches, not for an error. The batch
+        // that was short has been given back by now, and the arena can move.
+        if (cramped) {
+            cramped = false;
+            unescaped.resize(unescaped.bytes() * 2, 0);
+        }
+        int batchRows = columns.batchRows;
         while (true) {
             long length = Math.min(end - start, maxWindow);
             boolean last = eof && start + length == end;
@@ -766,10 +659,19 @@ public final class DelimitedReader implements AutoCloseable {
             }
             MemorySegment base = base();
             int code = Native.fill(
-                    state, base.asSlice(start, length), length, last,
-                    specs, buffers, plan.length, batchRows,
-                    cells.segment, cells.bytes() / Native.SPAN_BYTES,
-                    unescaped.segment, unescaped.bytes(), filled);
+                    state,
+                    base.asSlice(start, length),
+                    length,
+                    last,
+                    columns.specs,
+                    columns.buffers,
+                    columns.plan.length,
+                    batchRows,
+                    cells.segment,
+                    cells.bytes() / Native.SPAN_BYTES,
+                    unescaped.segment,
+                    unescaped.bytes(),
+                    filled);
             switch (code) {
                 case Native.OK -> {
                     long consumed = filled.get(LONG, Native.FILLED_CONSUMED);
@@ -777,499 +679,41 @@ public final class DelimitedReader implements AutoCloseable {
                     long at = start;
                     start += consumed;
                     if (count > 0) {
-                        rows = (int) count;
-                        window = base;
-                        windowReadOnly = source == null ? memoryReadOnly : buffer.readOnly;
-                        windowStart = at;
-                        return true;
+                        int rows = (int) count;
+                        cramped =
+                                rows < batchRows && filled.get(LONG, Native.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
+                        return batch.fill(rows, cells.segment, perRow, base, at, unescaped.segment);
                     }
                     if (last && (consumed == length || consumed == 0)) {
-                        return false;
+                        return null;
                     }
                     if (consumed == 0) {
                         refill();
                     }
                 }
-                case Native.ERR_CELLS -> cells.resize(
-                        Math.multiplyExact(
-                                Math.multiplyExact(filled.get(LONG, Native.FILLED_NEEDED), batchRows),
-                                Native.SPAN_BYTES),
-                        0);
-                case Native.ERR_ARENA -> unescaped.resize(
-                        Math.max(filled.get(LONG, Native.FILLED_NEEDED), unescaped.bytes() * 2), 0);
+                // The core says how many entries one row takes; the table holds a batch of them.
+                case Native.ERR_CELLS -> {
+                    long needed = filled.get(LONG, Native.FILLED_NEEDED);
+                    perRow = (int) Math.max(perRow, needed);
+                    cells.resize(Math.multiplyExact(Math.multiplyExact(needed, batchRows), Native.SPAN_BYTES), 0);
+                }
+                case Native.ERR_ARENA ->
+                    unescaped.resize(Math.max(filled.get(LONG, Native.FILLED_NEEDED), unescaped.bytes() * 2), 0);
                 case Native.ERR_STRUCTURE -> throw structural();
                 default -> throw new IllegalStateException(CONTRACT_VIOLATION);
             }
         }
     }
 
-    /** The reason code of the cell at ({@code column}, {@code row}): {@code 0} when it cast. */
-    private int code(int column, int row) {
-        Objects.checkIndex(row, rows);
-        return verdicts[column].get(INT, row * Native.VERDICT_BYTES + 8);
-    }
-
-    private static CastFailure reason(int code) {
-        return switch (code) {
-            case 1 -> CastFailure.EMPTY;
-            case 2 -> CastFailure.MALFORMED;
-            case 3 -> CastFailure.OUT_OF_RANGE;
-            default -> throw new IllegalStateException("libhypertabular returned unknown verdict code " + code);
-        };
-    }
-
-    private IllegalStateException wrongDoor(int column, String asked) {
-        return new IllegalStateException(
-                "Column " + column + " is cast through " + plan[column].door() + ", not " + asked + ".");
-    }
-
-    /** Whether the cell cast, once the column is known to be one {@code door} reads. */
-    private boolean cast(int column, int row, Door door) {
-        if (plan[column].door() != door) {
-            throw wrongDoor(column, door.toString());
-        }
-        return code(column, row) == 0;
-    }
-
-    private <T> Fault<T> fault(int column, int row) {
-        MemorySegment verdict = verdicts[column];
-        long at = row * Native.VERDICT_BYTES;
-        return new Fault<>(reason(verdict.get(INT, at + 8)), verdict.get(INT, at), verdict.get(INT, at + 4));
-    }
-
-    /**
-     * Whether the cell at ({@code column}, {@code row}) cast, whatever its door — the
-     * allocation-free question.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return {@code true} when the cell cast
-     */
-    public boolean isOk(int column, int row) {
-        return code(column, row) == 0;
-    }
-
-    /**
-     * The verdict of the cell at ({@code column}, {@code row}), whatever its door: whether
-     * it cast, and if not, why and where in the cell's own text.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the cell's verdict
-     */
-    public CellVerdict verdict(int column, int row) {
-        int code = code(column, row);
-        if (code == 0) {
-            return new CellVerdict(null, 0, 0);
-        }
-        MemorySegment verdict = verdicts[column];
-        long at = row * Native.VERDICT_BYTES;
-        return new CellVerdict(reason(code), verdict.get(INT, at), verdict.get(INT, at + 4));
-    }
-
-    /**
-     * A column's verdicts for the batch in hand, exactly as the core wrote them: one
-     * {@link CellVerdict#LAYOUT} entry per row. Read-only, and valid until the next
-     * {@link #read()}.
-     *
-     * @param column index into the plan
-     * @return the column's verdict array
-     */
-    public MemorySegment verdicts(int column) {
-        return verdicts[column].asSlice(0, rows * Native.VERDICT_BYTES).asReadOnly();
-    }
-
-    /**
-     * A column's values for the batch in hand, one per row, exactly as the core wrote them
-     * — for the doors whose value is a primitive: {@link Door#BOOL} as one byte ({@code 0}
-     * or {@code 1}), the integer and floating-point doors as their own width, read with the
-     * matching {@link ValueLayout} ({@code values.getAtIndex(ValueLayout.JAVA_INT, row)}
-     * for {@link Door#I32} and {@link Door#U32}, and so on). The value of a row whose
-     * verdict is not ok is zero. Columns of the other doors are read a cell at a time.
-     * Read-only, and valid until the next {@link #read()}.
-     *
-     * @param column index into the plan
-     * @return the column's value array
-     * @throws IllegalStateException if the column's door does not write a primitive
-     */
-    public MemorySegment values(int column) {
-        Door door = plan[column].door();
-        if (!door.isPrimitive()) {
-            throw new IllegalStateException(
-                    "Column " + column + " is cast through " + door + "; it has no array of primitives.");
-        }
-        return values[column].asSlice(0, (long) rows * door.valueBytes()).asReadOnly();
-    }
-
-    /**
-     * The cell of a {@link Door#BOOL} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Boolean> bool(int column, int row) {
-        return cast(column, row, Door.BOOL)
-                ? new Success<>(values[column].get(BYTE, row) != 0)
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#I8} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Byte> i8(int column, int row) {
-        return cast(column, row, Door.I8)
-                ? new Success<>(values[column].get(BYTE, row))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#I16} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Short> i16(int column, int row) {
-        return cast(column, row, Door.I16)
-                ? new Success<>(values[column].get(SHORT, row * 2L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#I32} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Integer> i32(int column, int row) {
-        return cast(column, row, Door.I32)
-                ? new Success<>(values[column].get(INT, row * 4L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#I64} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Long> i64(int column, int row) {
-        return cast(column, row, Door.I64)
-                ? new Success<>(values[column].get(LONG, row * 8L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#U8} column, widened to an {@code int}.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Integer> u8(int column, int row) {
-        return cast(column, row, Door.U8)
-                ? new Success<>(Byte.toUnsignedInt(values[column].get(BYTE, row)))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#U16} column, widened to an {@code int}.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Integer> u16(int column, int row) {
-        return cast(column, row, Door.U16)
-                ? new Success<>(Short.toUnsignedInt(values[column].get(SHORT, row * 2L)))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#U32} column, widened to a {@code long}.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Long> u32(int column, int row) {
-        return cast(column, row, Door.U32)
-                ? new Success<>(Integer.toUnsignedLong(values[column].get(INT, row * 4L)))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#U64} column: the {@code long} with the same bits, to be
-     * read with {@link Long#toUnsignedString(long)} and the other {@code Long} unsigned
-     * methods.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Long> u64(int column, int row) {
-        return cast(column, row, Door.U64)
-                ? new Success<>(values[column].get(LONG, row * 8L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#F32} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Float> f32(int column, int row) {
-        return cast(column, row, Door.F32)
-                ? new Success<>(values[column].get(ValueLayout.JAVA_FLOAT, row * 4L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#F64} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Double> f64(int column, int row) {
-        return cast(column, row, Door.F64)
-                ? new Success<>(values[column].get(ValueLayout.JAVA_DOUBLE, row * 8L))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#DECIMAL} column, exact: built straight from the core's
-     * sign, 96-bit magnitude and scale, with no {@code double} formed on the way.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<BigDecimal> decimal(int column, int row) {
-        if (!cast(column, row, Door.DECIMAL)) {
-            return fault(column, row);
-        }
-        // {u64 lo, u32 hi, u8 scale, u8 negative}. BigInteger takes its magnitude
-        // big-endian, so the two words are laid out high word first; the core never hands
-        // back a negative zero, so the signum needs no zero check.
-        MemorySegment value = values[column];
-        long at = row * 16L;
-        byte[] magnitude = new byte[12];
-        ByteBuffer.wrap(magnitude).putInt(value.get(INT, at + 8)).putLong(value.get(LONG, at));
-        int signum = value.get(BYTE, at + 13) != 0 ? -1 : 1;
-        return new Success<>(new BigDecimal(new BigInteger(signum, magnitude), value.get(BYTE, at + 12)));
-    }
-
-    /**
-     * The cell of a {@link Door#UUID} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<UUID> uuid(int column, int row) {
-        if (!cast(column, row, Door.UUID)) {
-            return fault(column, row);
-        }
-        // RFC 9562 byte order is exactly UUID's msb/lsb decomposition: two big-endian longs.
-        MemorySegment value = values[column];
-        long at = row * 16L;
-        return new Success<>(new UUID(
-                value.get(Native.Downcalls.BIG_ENDIAN_LONG, at),
-                value.get(Native.Downcalls.BIG_ENDIAN_LONG, at + 8)));
-    }
-
-    /**
-     * The cell of a {@link Door#TIMESTAMP}, {@link Door#UNIX} or {@link Door#EXCEL_SERIAL}
-     * column: an instant, at the full nanosecond fidelity the core parsed.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Instant> timestamp(int column, int row) {
-        Door door = plan[column].door();
-        if (door != Door.TIMESTAMP && door != Door.UNIX && door != Door.EXCEL_SERIAL) {
-            throw wrongDoor(column, "TIMESTAMP, UNIX or EXCEL_SERIAL");
-        }
-        if (code(column, row) != 0) {
-            return fault(column, row);
-        }
-        MemorySegment value = values[column];
-        long at = row * 16L;
-        return new Success<>(Instant.ofEpochSecond(value.get(LONG, at), value.get(INT, at + 8)));
-    }
-
-    private LocalDate day(int column, long at) {
-        MemorySegment value = values[column];
-        return LocalDate.of(
-                Short.toUnsignedInt(value.get(SHORT, at)), value.get(BYTE, at + 2), value.get(BYTE, at + 3));
-    }
-
-    /**
-     * The cell of a {@link Door#DATE} or {@link Door#DATE_ORDERED} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<LocalDate> date(int column, int row) {
-        Door door = plan[column].door();
-        if (door != Door.DATE && door != Door.DATE_ORDERED) {
-            throw wrongDoor(column, "DATE or DATE_ORDERED");
-        }
-        return code(column, row) == 0 ? new Success<>(day(column, row * 4L)) : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#DATETIME} column: a wall clock with no zone — the text
-     * named none and none is invented.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<LocalDateTime> dateTime(int column, int row) {
-        if (!cast(column, row, Door.DATETIME)) {
-            return fault(column, row);
-        }
-        long at = row * 16L;
-        return new Success<>(LocalDateTime.of(
-                day(column, at), LocalTime.ofNanoOfDay(values[column].get(LONG, at + 8))));
-    }
-
-    /**
-     * The cell of a {@link Door#TIME} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<LocalTime> time(int column, int row) {
-        return cast(column, row, Door.TIME)
-                ? new Success<>(LocalTime.ofNanoOfDay(values[column].get(LONG, row * 8L)))
-                : fault(column, row);
-    }
-
-    /**
-     * The cell of a {@link Door#DURATION} column.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the value, or the fault
-     */
-    public Verdict<Duration> duration(int column, int row) {
-        if (!cast(column, row, Door.DURATION)) {
-            return fault(column, row);
-        }
-        // Duration.ofSeconds normalizes the core's same-signed nanos adjustment correctly.
-        MemorySegment value = values[column];
-        long at = row * 16L;
-        return new Success<>(Duration.ofSeconds(value.get(LONG, at), value.get(INT, at + 8)));
-    }
-
-    /**
-     * The cell of a {@link Door#TEXT} column: its bytes, untrimmed, quotes resolved, or
-     * {@code null} for a cell with no bytes at all — which is the one way text fails. The
-     * segment is a read-only view into the reader's buffers — zero-copy for every cell that
-     * had no escaped quote in it — and is valid until the next {@link #read()}.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the cell's UTF-8 bytes, or {@code null} for an empty cell
-     */
-    public MemorySegment text(int column, int row) {
-        if (!cast(column, row, Door.TEXT)) {
-            return null;
-        }
-        MemorySegment value = values[column];
-        int offset = value.get(INT, row * 8L);
-        int span = value.get(INT, row * 8L + 4);
-        // Flagged: the bytes are in the arena, unescaped, rather than in the input.
-        return span < 0
-                ? unescaped.readOnly.asSlice(offset, span & Native.SPAN_LENGTH)
-                : windowReadOnly.asSlice(windowStart + offset, span);
-    }
-
-    /**
-     * The cell of a {@link Door#TEXT} column as a string, or {@code null} for an empty cell.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the cell's text, or {@code null} for an empty cell
-     */
-    public String string(int column, int row) {
-        if (!cast(column, row, Door.TEXT)) {
-            return null;
-        }
-        MemorySegment value = values[column];
-        int offset = value.get(INT, row * 8L);
-        int span = value.get(INT, row * 8L + 4);
-        return span < 0
-                ? decode(unescaped.segment, offset, span & Native.SPAN_LENGTH)
-                : decode(window, windowStart + offset, span);
-    }
-
-    /**
-     * The text the cell at ({@code column}, {@code row}) was cast from, whatever its door
-     * and whatever its verdict — what a fault's span indexes, and what to show for a value
-     * that did not cast. A read-only view, valid until the next call to {@code raw},
-     * {@link #rawString} or {@link #read()}.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the cell's UTF-8 bytes
-     */
-    public MemorySegment raw(int column, int row) {
-        Objects.checkIndex(row, rows);
-        long entry = ((long) row * perRow + plan[column].ordinal()) * Native.SPAN_BYTES;
-        int offset = cells.segment.get(INT, entry);
-        int span = cells.segment.get(INT, entry + 4);
-        if (span >= 0) {
-            return windowReadOnly.asSlice(windowStart + offset, span);
-        }
-        // A cell with an escaped quote in it: unescaped, as the core cast it.
-        int length = span & Native.SPAN_LENGTH;
-        if (scratch == null) {
-            scratch = new Block(Math.max(length, 256), 1);
-        } else if (scratch.bytes() < length) {
-            scratch.resize(length, 0);
-        }
-        long written = Native.unescape(
-                window.asSlice(windowStart + offset, length), length, scratch.segment, scratch.bytes());
-        return scratch.readOnly.asSlice(0, written);
-    }
-
-    /**
-     * {@link #raw} as a string: the text the cell was cast from, for a diagnostic.
-     *
-     * @param column index into the plan
-     * @param row row of the batch in hand
-     * @return the cell's text
-     */
-    public String rawString(int column, int row) {
-        MemorySegment raw = raw(column, row);
-        return decode(raw, 0, (int) raw.byteSize());
-    }
-
     private void release() {
+        if (batch != null) {
+            batch.close();
+        }
         if (cells != null) {
             cells.close();
         }
         if (unescaped != null) {
             unescaped.close();
-        }
-        if (scratch != null) {
-            scratch.close();
         }
         if (buffer != null) {
             buffer.close();
@@ -1290,7 +734,6 @@ public final class DelimitedReader implements AutoCloseable {
         }
         recordsAtClose = state.get(LONG, Native.STATE_RECORDS);
         closed = true;
-        rows = 0;
         release();
         if (source != null) {
             try {

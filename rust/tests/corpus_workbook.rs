@@ -42,6 +42,19 @@ fn every_case_reads_as_the_corpus_says() {
             case["file"].as_str().expect("file")
         );
         let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        // A package the core refuses: every way of opening it gives the one failure.
+        if case.get("sheet").is_none() {
+            let refusals = [
+                Workbook::from_slice(&bytes).err(),
+                Workbook::from_vec(bytes.clone()).err(),
+                Workbook::open(&path).err(),
+            ];
+            for refusal in refusals {
+                let error = refusal.unwrap_or_else(|| panic!("{name}: it opened"));
+                assert_eq!(failure_json(&error), case["failure"], "{name}");
+            }
+            continue;
+        }
         let plan: Vec<Column> = case["plan"]
             .as_array()
             .expect("plan")

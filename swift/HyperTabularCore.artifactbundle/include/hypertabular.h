@@ -1,4 +1,4 @@
-// The C ABI of the hypertabular core: the six functions rust/src/kernel/exports.rs exports,
+// The C ABI of the hypertabular core: the fourteen functions rust/src/kernel/exports.rs exports,
 // which is everything the static libraries in this bundle define, and the #[repr(C)] shapes
 // that cross them (rust/src/kernel/abi.rs, rust/src/kernel/delimited/fill.rs). The Swift
 // binding imports this as the module HyperTabularCore; every other binding declares the
@@ -21,12 +21,15 @@ extern "C" {
 // the contract rules out. ERR_STRUCTURE: the data is structurally broken, the result's
 // failure says where, and the same state block reports it again on every later call.
 // ERR_ARENA / ERR_CELLS: one row does not fit the arena / the cell table; nothing was
-// consumed, and the result's `needed` says how much one row takes.
+// consumed, and the result's `needed` says how much one row takes. ERR_WINDOW: a workbook
+// call's window is too small. For a workbook call, ERR_WINDOW, ERR_ARENA and ERR_CELLS
+// undo nothing: grow the buffer named, keeping what it held, and make the same call again.
 #define HYPERTABULAR_OK 0
 #define HYPERTABULAR_ERR_CONTRACT (-1)
 #define HYPERTABULAR_ERR_STRUCTURE (-2)
 #define HYPERTABULAR_ERR_ARENA (-3)
 #define HYPERTABULAR_ERR_CELLS (-4)
+#define HYPERTABULAR_ERR_WINDOW (-5)
 
 // The flag in the top bit of a span's `len`. On a cell-table entry: the cell is quoted with
 // "" inside and has to be unescaped to be read. On a text value or a header name: the bytes
@@ -77,7 +80,11 @@ typedef struct hypertabular_column_buffer {
 } hypertabular_column_buffer;
 
 // Why the data could not be read. `code`: 0 none, 1 the input ended inside a quoted cell,
-// 2 a record's cell count disagrees with the first record's.
+// 2 a record's cell count disagrees with the first record's; for a workbook, 16 not a zip,
+// 17 a broken container, 18 encrypted, 19 an unsupported compression method, 20 a missing
+// part, 21 unfinished XML, 22 a broken deflate stream, 23 a zip that is no workbook, 24 a
+// shared string out of range, 25 more text than can be addressed. For a workbook `record`
+// is the part, `line` the sheet row and `byte` the offset in the part's inflated bytes.
 typedef struct hypertabular_failure {
     uint32_t code;
     uint32_t line;     // one-based line the offending record starts on
@@ -150,6 +157,42 @@ typedef struct hypertabular_decimal { // value = ±(hi·2⁶⁴ + lo) × 10^-sca
     uint8_t negative;
 } hypertabular_decimal;
 
+// One cell of the row a workbook read assembles: scratch the caller supplies and never reads.
+typedef struct hypertabular_slot {
+    uint32_t tag;
+    uint32_t aux;
+    uint64_t bits;
+} hypertabular_slot;
+
+// The memory a workbook call works in, all the caller's; a call uses the buffers its own
+// comment names and ignores the rest (NULL with a zero size is fine for those).
+typedef struct hypertabular_buffers {
+    uint8_t *window;            // where a part is inflated: at least 64 KiB; ERR_WINDOW grows it
+    uintptr_t window_cap;
+    uint8_t *arena;             // text the call produces; ERR_ARENA grows it
+    uintptr_t arena_cap;
+    hypertabular_span *cells;   // spans the call produces; ERR_CELLS grows it
+    uintptr_t cells_cap;
+    hypertabular_slot *row;     // one per source column the plan reaches; never grown
+    uintptr_t row_cap;
+    const uint8_t *strings;     // the shared strings' bytes, as _strings wrote them
+    uintptr_t strings_len;
+    const hypertabular_span *table; // the span of each shared string
+    uintptr_t table_len;
+    const uint8_t *kinds;       // the kind of each cell format, as _styles wrote them
+    uintptr_t kinds_len;
+} hypertabular_buffers;
+
+// What opening a workbook found.
+typedef struct hypertabular_opened {
+    uint32_t format;        // 1 XLSX, 2 ODS
+    uint32_t epoch;         // HyperCast's ExcelEpoch: 1 1900, 2 1904
+    uint64_t strings_bytes; // an upper bound on the bytes the shared strings take
+    uint64_t strings_count; // the count the part declares: a hint
+    uint64_t needed;        // on ERR_WINDOW or ERR_ARENA, the size that buffer needs
+    hypertabular_failure failure;
+} hypertabular_opened;
+
 // The crate version, packed major << 16 | minor << 8 | patch.
 uint32_t hypertabular_version(void);
 
@@ -186,6 +229,46 @@ int32_t hypertabular_delimited_fill(hypertabular_delimited_state *state,
 // returns the bytes written: never more than `len - 1`, and no more than `cap`.
 uintptr_t hypertabular_delimited_unescape(const uint8_t *cell, uintptr_t len,
                                           uint8_t *out, uintptr_t cap);
+
+// The size of a workbook state block, 8-byte aligned. A block that has been opened may be
+// copied, bytes and all, to read another sheet.
+uintptr_t hypertabular_workbook_state_size(void);
+
+// Opens the workbook in `container`. Uses window and arena; starts over when called again.
+int32_t hypertabular_workbook_open(void *state, const uint8_t *container, uintptr_t container_len,
+                                   const hypertabular_buffers *buffers, hypertabular_opened *out);
+
+// Lists the sheets: three spans of `cells` each — the name and the part, both in the arena,
+// then one whose offset bit 0 says hidden and whose len is the sheet's index.
+int32_t hypertabular_workbook_sheets(void *state, const uint8_t *container, uintptr_t container_len,
+                                     const hypertabular_buffers *buffers, hypertabular_filled *out);
+
+// Loads the shared strings: the bytes in the arena (arena_used), a span each in cells (rows).
+int32_t hypertabular_workbook_strings(void *state, const uint8_t *container, uintptr_t container_len,
+                                      const hypertabular_buffers *buffers, hypertabular_filled *out);
+
+// Loads the kind of each cell format: a byte each in the arena (rows).
+int32_t hypertabular_workbook_styles(void *state, const uint8_t *container, uintptr_t container_len,
+                                     const hypertabular_buffers *buffers, hypertabular_filled *out);
+
+// Positions the state on one sheet: the part and index its listing gave.
+int32_t hypertabular_workbook_sheet(void *state, const uint8_t *container, uintptr_t container_len,
+                                    const uint8_t *part, uintptr_t part_len, uint32_t index,
+                                    uint32_t has_header, uint32_t skip_empty_rows,
+                                    hypertabular_filled *out);
+
+// Reads the header row: a span per name in cells — in the shared strings, or flagged, in the
+// arena.
+int32_t hypertabular_workbook_header(void *state, const uint8_t *container, uintptr_t container_len,
+                                     const hypertabular_buffers *buffers, hypertabular_filled *out);
+
+// Reads up to `max_rows` rows into `columns`. `cells` is (plan columns + 1) entries a row: a
+// raw cell per plan column, and the row's number in the last entry's offset.
+int32_t hypertabular_workbook_fill(void *state, const uint8_t *container, uintptr_t container_len,
+                                   const hypertabular_column_spec *specs,
+                                   const hypertabular_column_buffer *columns,
+                                   uintptr_t column_count, uintptr_t max_rows,
+                                   const hypertabular_buffers *buffers, hypertabular_filled *out);
 
 #ifdef __cplusplus
 }

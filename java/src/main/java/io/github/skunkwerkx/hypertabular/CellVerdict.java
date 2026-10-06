@@ -8,11 +8,11 @@ import java.lang.foreign.ValueLayout;
 
 /**
  * One cell's verdict whatever its door: whether it cast, and if not, HyperCast's reason and
- * the offending span within the cell's own text. What {@link DelimitedReader#verdict} reads
+ * the offending span within the cell's own text. What {@link Batch#verdict} reads
  * out of a column's verdict array, for code that wants the verdict without the value.
  *
  * <p>{@link #LAYOUT} is the entry the core writes, for code that scans a whole column's
- * verdicts in place through {@link DelimitedReader#verdicts}.
+ * verdicts in place through {@link Batch#verdicts}.
  *
  * @param reason why the cell did not cast, or {@code null} when it did
  * @param offset byte offset of the offending span within the cell's text; {@code 0} for a

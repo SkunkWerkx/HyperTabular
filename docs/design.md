@@ -115,8 +115,8 @@ the symbol mapping as a function pointer, and a call through a pointer is one th
 compiler must assume can unwind, so the proof refused the whole inflate until the pointer
 became a value to match on. Another, from the workbook's casts: converting a double to a
 128-bit integer is a call into the compiler's runtime (`__fixdfti`) that the static
-library would then have to bring along, so the core reads an integral double's bits
-instead.
+library would then have to bring along, so HyperCast's typed doors, which the core casts
+a number through, read an integral double's bits instead.
 
 ### The Rust API is a binding
 
@@ -189,14 +189,23 @@ Every `(Cell, Door)` pair has one defined outcome. `Empty` is `Reason::Empty` fo
 door. `Text` goes through the HyperCast door verbatim (the `Text` door copies bytes; empty
 text is `Empty`). The typed cells:
 
-| Cell → Door | integers | reals | Bool | Uuid | Timestamp | Unix | Date | Time | Duration | Text |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `Number(v)` | integral & in range → value; non-integral → Malformed; else OutOfRange | in range → value (f32 overflow → OutOfRange) | 0/1 only, else Malformed | Malformed | serial rules ⇒ UTC | integral v at declared precision | serial rules | serial fraction | v days → seconds | shortest round-trip text |
-| `Bool(b)` | Malformed | Malformed | b | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `true`/`false` |
-| `Wall{d,n}` | Malformed | Malformed | Malformed | Malformed | d+n read as UTC | as Timestamp | d | n | Malformed | ISO 8601 `yyyy-MM-ddTHH:mm:ss[.fffffffff]` |
-| `Clock(n)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | n | n as a span | `HH:mm:ss[.f]` |
-| `Span(s)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `0 ≤ s < 24h` → nanos, else OutOfRange | s | ISO 8601 `PT…` |
-| `Error(e)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `#N/A` etc. |
+| Cell → Door | integers | reals | Decimal | Bool | Uuid | Timestamp | Unix | Date | Time | Duration | Text |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `Number(v)` | whole & in range → value; fractional → Malformed; else OutOfRange | in range → value (f32 overflow → OutOfRange) | shortest round-trip decimal; past 96 bits or 28 places → OutOfRange | 0/1 only, else Malformed | Malformed | serial rules ⇒ UTC | whole v at declared precision | serial rules | serial fraction | v days → seconds | shortest round-trip text |
+| `Bool(b)` | Malformed | Malformed | Malformed | b | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `true`/`false` |
+| `Wall{d,n}` | Malformed | Malformed | Malformed | Malformed | Malformed | d+n read as UTC | as Timestamp | d | n | Malformed | ISO 8601 `yyyy-MM-ddTHH:mm:ss[.fffffffff]` |
+| `Clock(n)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | n | n as a span | `HH:mm:ss[.f]` |
+| `Span(s)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `0 ≤ s < 24h` → nanos, else OutOfRange | s | ISO 8601 `PT…` |
+| `Error(e)` | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | Malformed | `#N/A` etc. |
+
+The `Number` row is HyperCast's too: every cell there goes through the typed twin of the
+text door (`i32_from_f64`, `decimal_from_f64`, `bool_from_f64`, `unix_from_f64`,
+`excel_time`, `excel_duration`, …). All of them read a double as the one number it names,
+the shortest decimal that rounds back to it — the digits Excel and LibreOffice write into
+the file, whichever of them wrote it — so the stored `2.5` is the decimal `2.5`, the sum
+`0.1 + 0.2` is `0.30000000000000004`, and an integer above 2⁵³ is that decimal's digits
+(`2^63` is `9223372036854776000`). HyperCast holds each twin to its text door read on that
+text.
 
 "Serial rules" are HyperCast's, not a second copy of them: a `Number` cell on a temporal
 door goes through `hypercast::excel_serial`, the typed twin of `cast_excel_serial` and the
@@ -350,6 +359,29 @@ the call resumes once the buffer has been grown with its contents kept.
 
 No build of the crate exports anything else, and `check-core.sh` holds the whole crate to
 that: the layers above the core are Rust API, not symbols.
+
+### The bindings, side by side
+
+Every binding mirrors the Rust API — one `Batch` from `read()`, a per-cell getter, `line`,
+`raw`, `Workbook`/`Sheet` — in its own language's grain. Two things differ on purpose.
+
+**How long a batch lives.** C#, Java, Go and Swift hand out a batch as a view of the
+reader's buffers, valid until the next `read()`: no copy per batch, and a language that can
+say "valid until" says it. Python, Ruby and PHP copy what the core wrote into the batch
+as it is made, so a batch outlives the reader's next read: a garbage-collected dynamic
+language has no way to hold a caller to "until the next read", and `list(reader)` is the
+first thing anyone writes.
+
+**What a fault's span counts in.** HyperCast's rule, kept here: a span is in the units of
+the text you were handed. Where `raw` is bytes — C#, Java, Go, Swift, Python, PHP — the
+span is bytes, as the core wrote it. Ruby's `raw` is a String, so its span is in the
+characters `String#[]` slices by, as HyperCast's own gem reports it. A helper that turns
+`raw` into a string for display (Java's `rawString`) does not move the span.
+
+Each binding also replays `corpus/workbook.json` with every buffer a workbook call works in
+starting at one element (C#, Java, Go, Swift, Ruby and PHP behind a test-only switch;
+Python reads through the Rust `Sheet`, whose buffers are `Vec`s grown by `resize`), so the
+grow-and-keep path above runs mid-part thousands of times against the corpus.
 
 ## Parked, deliberately
 

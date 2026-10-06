@@ -104,11 +104,15 @@ def _expected_value(column: Column, cell: dict[str, Any]) -> Any:
         case Door.UUID:
             return uuidlib.UUID(hex=cell["value"])
         case Door.TIMESTAMP | Door.UNIX | Door.EXCEL_SERIAL:
-            return _EPOCH + dt.timedelta(seconds=cell["seconds"], microseconds=cell["nanos"] // 1000)
+            return _EPOCH + dt.timedelta(
+                seconds=cell["seconds"], microseconds=cell["nanos"] // 1000
+            )
         case Door.DATE | Door.DATE_ORDERED:
             return dt.date(cell["year"], cell["month"], cell["day"])
         case Door.DATETIME:
-            return dt.datetime(cell["year"], cell["month"], cell["day"], *_time_of(cell["nanos_of_day"]))
+            return dt.datetime(
+                cell["year"], cell["month"], cell["day"], *_time_of(cell["nanos_of_day"])
+            )
         case Door.TIME:
             return dt.time(*_time_of(cell["nanos"]))
         case Door.DURATION:
@@ -138,8 +142,17 @@ def _judge(column: Column, raw: bytes) -> Any:
             return getattr(hypercast, f"cast_{column.door.name.lower()}")(raw, column.format)
 
 
-def _assert_cell(label: str, column: Column, data: Any, row: int, expected: dict[str, Any]) -> None:
-    """Holds one cell of a batch's column to what the corpus says of it."""
+def _assert_cell(
+    label: str,
+    column: Column,
+    data: Any,
+    row: int,
+    expected: dict[str, Any],
+    judged: bool = True,
+) -> None:
+    """Holds one cell of a batch's column to what the corpus says of it — and, when
+    ``judged``, to what HyperCast's own package says of its raw text (a typed workbook cell
+    that cast has none: the door converted the stored value directly)."""
     verdict = data[row]
     offset, length, reason = data.verdicts[row, 0], data.verdicts[row, 1], data.verdicts[row, 2]
     raw = data.raw(row)
@@ -175,7 +188,7 @@ def _assert_cell(label: str, column: Column, data: Any, row: int, expected: dict
             raise AssertionError(f"{label}: produced no case: {other!r}")
 
     # HyperCast is the judge: the cell is what its own package makes of the same text.
-    if column.door is not Door.TEXT:
+    if judged and column.door is not Door.TEXT:
         assert verdict == _judge(column, raw), f"{label}: disagrees with hypercast on {raw!r}"
 
 
@@ -194,7 +207,9 @@ def _assert_column(label: str, column: Column, data: Any, expected: list[dict[st
                 assert values[row] == value, f"{label}, row {row}"
             case Fault():
                 # A primitive column holds zero where a cell did not cast; a list holds None.
-                assert values[row] == (0 if isinstance(values, memoryview) else None), f"{label}, row {row}"
+                assert values[row] == (0 if isinstance(values, memoryview) else None), (
+                    f"{label}, row {row}"
+                )
 
     faults = [(row, verdict) for row, verdict in enumerate(verdicts) if isinstance(verdict, Fault)]
     assert data.faults() == faults, label
@@ -211,16 +226,23 @@ def _assert_failure(label: str, actual: TabularError | None, case: dict[str, Any
         assert actual is None, f"{label}: {actual}"
         return
     assert actual is not None, f"{label}: no failure raised"
-    kinds = {"column_count": TabularFailure.COLUMN_COUNT, "unclosed_quote": TabularFailure.UNCLOSED_QUOTE}
-    assert actual.kind is kinds[expected["kind"]], label
+    # The corpus names a kind as the core does: the member's name, in lower case.
+    assert actual.kind is TabularFailure[expected["kind"].upper()], label
     assert (actual.record, actual.line, actual.byte) == (
-        expected["record"], expected["line"], expected["byte"]), label
-    if expected["kind"] == "column_count":
+        expected["record"],
+        expected["line"],
+        expected["byte"],
+    ), label
+    if "expected" in expected:
         assert (actual.expected, actual.found) == (expected["expected"], expected["found"]), label
 
 
-def _replay(label: str, case: dict[str, Any], batch_rows: int,
-            open_reader: Callable[[Dialect, list[Column]], DelimitedReader]) -> None:
+def _replay(
+    label: str,
+    case: dict[str, Any],
+    batch_rows: int,
+    open_reader: Callable[[Dialect, list[Column]], DelimitedReader],
+) -> None:
     dialect = Dialect(**case["dialect"])
     plan = [_column_of(entry) for entry in case["plan"]]
     rows = case["rows"]
@@ -238,9 +260,11 @@ def _replay(label: str, case: dict[str, Any], batch_rows: int,
             columns = batch.columns
             assert len(columns) == len(plan), label
             for index, (column, data) in enumerate(zip(plan, columns)):
-                expected = [row[index] for row in rows[seen:seen + batch.rows]]
+                expected = [row[index] for row in rows[seen : seen + batch.rows]]
                 for row, cell in enumerate(expected):
-                    _assert_cell(f"{label}, row {seen + row}, column {index}", column, data, row, cell)
+                    _assert_cell(
+                        f"{label}, row {seen + row}, column {index}", column, data, row, cell
+                    )
                     assert batch.raw(index, row) == data.raw(row), label
                 _assert_column(f"{label}, column {index}", column, data, expected)
             seen += batch.rows
@@ -271,7 +295,7 @@ class _Dribble:
     def read(self, size: int = -1) -> bytes:
         self._reads += 1
         take = min(size, self._reads % 3 + 1) if size > 0 else 0
-        chunk = self._data[self._at:self._at + take]
+        chunk = self._data[self._at : self._at + take]
         self._at += len(chunk)
         return chunk
 
@@ -280,6 +304,7 @@ _BATCH_ROWS = (1, 2, 1024)
 
 
 def test_the_corpus_is_the_whole_contract():
+    """The delimited corpus is present and exercises every door."""
     assert len(CORPUS) >= 30
     doors = {entry["door"] for case in CORPUS for entry in case["plan"]}
     assert doors == {door.name.lower() for door in Door}, "a door the corpus never opens"
@@ -288,41 +313,64 @@ def test_the_corpus_is_the_whole_contract():
 @pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_from_memory(case: dict[str, Any], batch_rows: int) -> None:
+    """Every corpus case reads the same from bytes in memory, at every batch size."""
     data = case["input"].encode("utf-8")
-    _replay(f"{case['name']} (memory, {batch_rows} rows a batch)", case, batch_rows,
-            lambda dialect, plan: DelimitedReader(data, dialect, plan, batch_rows=batch_rows))
+    _replay(
+        f"{case['name']} (memory, {batch_rows} rows a batch)",
+        case,
+        batch_rows,
+        lambda dialect, plan: DelimitedReader(data, dialect, plan, batch_rows=batch_rows),
+    )
 
 
 @pytest.mark.parametrize("buffer_bytes", (1, 5, 64, DelimitedReader.DEFAULT_BUFFER_BYTES))
 @pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
-def test_corpus_from_a_file_object(case: dict[str, Any], batch_rows: int, buffer_bytes: int) -> None:
+def test_corpus_from_a_file_object(
+    case: dict[str, Any], batch_rows: int, buffer_bytes: int
+) -> None:
+    """Every corpus case reads the same streamed from a file object through a small buffer."""
     data = case["input"].encode("utf-8")
-    _replay(f"{case['name']} (stream through {buffer_bytes} bytes, {batch_rows} rows a batch)",
-            case, batch_rows,
-            lambda dialect, plan: DelimitedReader(
-                io.BytesIO(data), dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes))
+    _replay(
+        f"{case['name']} (stream through {buffer_bytes} bytes, {batch_rows} rows a batch)",
+        case,
+        batch_rows,
+        lambda dialect, plan: DelimitedReader(
+            io.BytesIO(data), dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes
+        ),
+    )
 
 
 @pytest.mark.parametrize("buffer_bytes", (2, DelimitedReader.DEFAULT_BUFFER_BYTES))
 @pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_from_short_reads(case: dict[str, Any], batch_rows: int, buffer_bytes: int) -> None:
+    """Every corpus case reads the same from a stream that returns a few bytes per read."""
     data = case["input"].encode("utf-8")
-    _replay(f"{case['name']} (short reads into {buffer_bytes} bytes, {batch_rows} rows a batch)",
-            case, batch_rows,
-            lambda dialect, plan: DelimitedReader(
-                _Dribble(data), dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes))
+    _replay(
+        f"{case['name']} (short reads into {buffer_bytes} bytes, {batch_rows} rows a batch)",
+        case,
+        batch_rows,
+        lambda dialect, plan: DelimitedReader(
+            _Dribble(data), dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes
+        ),
+    )
 
 
 @pytest.mark.parametrize("buffer_bytes", (3, DelimitedReader.DEFAULT_BUFFER_BYTES))
 @pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
-def test_corpus_from_a_path(case: dict[str, Any], batch_rows: int, buffer_bytes: int,
-                            tmp_path: Path) -> None:
+def test_corpus_from_a_path(
+    case: dict[str, Any], batch_rows: int, buffer_bytes: int, tmp_path: Path
+) -> None:
+    """Every corpus case reads the same from a path on disk."""
     path = tmp_path / "case.csv"
     path.write_bytes(case["input"].encode("utf-8"))
-    _replay(f"{case['name']} (file through {buffer_bytes} bytes, {batch_rows} rows a batch)",
-            case, batch_rows,
-            lambda dialect, plan: DelimitedReader.open(
-                path, dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes))
+    _replay(
+        f"{case['name']} (file through {buffer_bytes} bytes, {batch_rows} rows a batch)",
+        case,
+        batch_rows,
+        lambda dialect, plan: DelimitedReader.open(
+            path, dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes
+        ),
+    )

@@ -565,6 +565,33 @@ fn every_door_over(width: usize) -> Vec<Column> {
     plan
 }
 
+/// The most rows a reading with empty rows delivered may have and still be a case.
+const DELIVERED_ROWS: usize = 100;
+
+/// How many leading columns of a package's sheets the plan covers, and one more it reads
+/// as text beyond them. The generated packages are four wide and the library-written
+/// fixtures within ten. A file a real application wrote uses the dataset in
+/// `corpus/README.md`: seventeen columns of values, and one cell far to the right, in
+/// column Z, which is there to make a row sparse — so the columns between are not read,
+/// and that one is read once, not through every door.
+fn columns_of(file: &str) -> (usize, Option<usize>) {
+    const FIXTURES: [&str; 6] = [
+        "basic.xlsx",
+        "basic-1904.xlsx",
+        "basic.ods",
+        "multisheet.xlsx",
+        "rich.xlsx",
+        "broken.xlsx",
+    ];
+    if file.starts_with("generated") {
+        (4, None)
+    } else if FIXTURES.contains(&file) {
+        (10, None)
+    } else {
+        (17, Some(25))
+    }
+}
+
 /// The workbook cases: every sheet of every package in `corpus/workbook/`, each way of
 /// reading it.
 pub fn workbook_cases() -> Vec<Value> {
@@ -577,13 +604,29 @@ pub fn workbook_cases() -> Vec<Value> {
                 .into_string()
                 .expect("a name")
         })
-        .filter(|name| name.ends_with(".xlsx") || name.ends_with(".ods"))
+        .filter(|name| {
+            [".xlsx", ".xlsm", ".ods"]
+                .iter()
+                .any(|ext| name.ends_with(ext))
+        })
         .collect();
     files.sort();
     let mut cases = Vec::new();
     for file in &files {
-        let book = Workbook::open(format!("{WORKBOOK_DIR}/{file}")).expect("a workbook");
-        let width = if file.starts_with("generated") { 4 } else { 10 };
+        // A package the core refuses to open — an encrypted one, say — is a case of its
+        // own: the file, and the failure every way of opening it must give.
+        let book = match Workbook::open(format!("{WORKBOOK_DIR}/{file}")) {
+            Ok(book) => book,
+            Err(error) => {
+                cases.push(json!({
+                    "name": format!("{file}, refused"),
+                    "file": format!("workbook/{file}"),
+                    "failure": failure_json(&error),
+                }));
+                continue;
+            }
+        };
+        let (width, beyond) = columns_of(file);
         let sheets: Vec<Value> = book
             .sheets()
             .iter()
@@ -600,31 +643,38 @@ pub fn workbook_cases() -> Vec<Value> {
             .into_iter()
             .enumerate()
             {
-                // A real ODS sheet ends in a million empty rows; delivered, they would be
-                // most of the file.
-                if file == "basic.ods" && !options.skip_empty_rows {
-                    continue;
-                }
                 // Every door over every column once; the other options change which rows
                 // there are, which the text door shows.
-                let plan: Vec<Column> = if at == 0 {
+                let mut plan: Vec<Column> = if at == 0 {
                     every_door_over(width)
                 } else {
                     (0..width).map(Column::text).collect()
                 };
+                plan.extend(beyond.map(Column::text));
                 let mut sheet = book.sheet(index, options, &plan).expect("a sheet");
                 let header = header_json(sheet.header());
                 let (mut numbers, mut rows) = (Vec::new(), Vec::new());
+                let mut padded = false;
                 let failure = loop {
                     match sheet.read() {
                         Ok(Some(batch)) => {
                             numbers.extend((0..batch.rows()).map(|row| batch.line(row)));
                             rows_json(&batch, &mut rows);
+                            // A sheet LibreOffice wrote ends in a million empty rows, as
+                            // one element. Delivered, they would be most of this file and
+                            // say nothing a few do not: such a reading is not a case.
+                            if !options.skip_empty_rows && numbers.len() > DELIVERED_ROWS {
+                                padded = true;
+                                break None;
+                            }
                         }
                         Ok(None) => break None,
                         Err(error) => break Some(error),
                     }
                 };
+                if padded {
+                    continue;
+                }
                 let plan: Vec<Value> = plan
                     .iter()
                     .map(|column| {
@@ -663,8 +713,11 @@ pub fn workbook_cases() -> Vec<Value> {
                 });
                 if let Some(error) = failure {
                     case["failure"] = failure_json(&error);
-                    case["note"] =
-                        json!("the rows are the oracle's; the failure's fields are the core's own");
+                    if file == "broken.xlsx" {
+                        case["note"] = json!(
+                            "the rows are the oracle's; the failure's fields are the core's own"
+                        );
+                    }
                 }
                 cases.push(case);
             }
