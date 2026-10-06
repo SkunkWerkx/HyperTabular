@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -196,50 +197,98 @@ var expectedReason = map[string]hypercast.CastFailure{
 
 // got is the cell at (column, row) of the batch in hand, read through the accessor its
 // door has, boxed.
-func got(r *DelimitedReader, column, row int) any {
-	switch door := r.Column(column).Door(); door {
+func got(b *Batch, column, row int) any {
+	switch door := b.Columns()[column].Door(); door {
 	case DoorBool:
-		return r.Bool(column)[row]
+		return b.Bool(column)[row]
 	case DoorI8:
-		return r.I8(column)[row]
+		return b.I8(column)[row]
 	case DoorI16:
-		return r.I16(column)[row]
+		return b.I16(column)[row]
 	case DoorI32:
-		return r.I32(column)[row]
+		return b.I32(column)[row]
 	case DoorI64:
-		return r.I64(column)[row]
+		return b.I64(column)[row]
 	case DoorU8:
-		return r.U8(column)[row]
+		return b.U8(column)[row]
 	case DoorU16:
-		return r.U16(column)[row]
+		return b.U16(column)[row]
 	case DoorU32:
-		return r.U32(column)[row]
+		return b.U32(column)[row]
 	case DoorU64:
-		return r.U64(column)[row]
+		return b.U64(column)[row]
 	case DoorF32:
-		return r.F32(column)[row]
+		return b.F32(column)[row]
 	case DoorF64:
-		return r.F64(column)[row]
+		return b.F64(column)[row]
 	case DoorExact:
-		return r.Exact(column)[row]
+		return b.Exact(column)[row]
 	case DoorUuid:
-		return r.Uuid(column)[row]
+		return b.Uuid(column)[row]
 	case DoorTimestamp, DoorUnix, DoorExcelSerial:
-		return r.Timestamp(column)[row]
+		return b.Timestamp(column)[row]
 	case DoorDateOnly, DoorDateOnlyOrdered:
-		return r.DateOnly(column)[row]
+		return b.DateOnly(column)[row]
 	case DoorDateTime:
-		return r.DateTime(column)[row]
+		return b.DateTime(column)[row]
 	case DoorTimeOfDay:
-		return r.TimeOfDay(column)[row]
+		return b.TimeOfDay(column)[row]
 	case DoorSpan:
-		return r.Span(column)[row]
+		return b.Span(column)[row]
 	case DoorText:
-		return r.Text(column)[row]
+		return b.Text(column)[row]
 	default:
 		panic(fmt.Sprintf("no accessor for %v", door))
 	}
 }
+
+// viaGet is the cell at (column, row) read through Get, as the type its door presents.
+func viaGet(b *Batch, column, row int) (any, *hypercast.Fault) {
+	switch door := b.Columns()[column].Door(); door {
+	case DoorBool:
+		return boxed(Get[bool](b, column, row))
+	case DoorI8:
+		return boxed(Get[int8](b, column, row))
+	case DoorI16:
+		return boxed(Get[int16](b, column, row))
+	case DoorI32:
+		return boxed(Get[int32](b, column, row))
+	case DoorI64:
+		return boxed(Get[int64](b, column, row))
+	case DoorU8:
+		return boxed(Get[uint8](b, column, row))
+	case DoorU16:
+		return boxed(Get[uint16](b, column, row))
+	case DoorU32:
+		return boxed(Get[uint32](b, column, row))
+	case DoorU64:
+		return boxed(Get[uint64](b, column, row))
+	case DoorF32:
+		return boxed(Get[float32](b, column, row))
+	case DoorF64:
+		return boxed(Get[float64](b, column, row))
+	case DoorExact:
+		return boxed(Get[hypercast.Decimal](b, column, row))
+	case DoorUuid:
+		return boxed(Get[uuid.UUID](b, column, row))
+	case DoorTimestamp, DoorUnix, DoorExcelSerial:
+		return boxed(Get[time.Time](b, column, row))
+	case DoorDateOnly, DoorDateOnlyOrdered:
+		return boxed(Get[hypercast.Date](b, column, row))
+	case DoorDateTime:
+		return boxed(Get[hypercast.CivilDateTime](b, column, row))
+	case DoorTimeOfDay:
+		return boxed(Get[time.Duration](b, column, row))
+	case DoorSpan:
+		return boxed(Get[hypercast.Duration](b, column, row))
+	case DoorText:
+		return boxed(Get[[]byte](b, column, row))
+	default:
+		panic(fmt.Sprintf("no Get for %v", door))
+	}
+}
+
+func boxed[T any](value T, fault *hypercast.Fault) (any, *hypercast.Fault) { return value, fault }
 
 // want is what the corpus says the cell holds, as the Go value the door presents it as —
 // the type HyperCast's own Go door returns. A cell that did not cast holds the zero value.
@@ -370,11 +419,11 @@ func want(t *testing.T, label string, door Door, cell *corpusCell) any {
 }
 
 // assertCell holds one cell of the batch in hand to what the corpus says of it.
-func assertCell(t *testing.T, label string, r *DelimitedReader, column, row int, expected *corpusCell) {
+func assertCell(t *testing.T, label string, b *Batch, column, row int, expected *corpusCell) {
 	t.Helper()
-	door := r.Column(column).Door()
-	verdict := r.Verdicts(column)[row]
-	fault := r.Fault(column, row)
+	door := b.Columns()[column].Door()
+	verdict := b.Verdicts(column)[row]
+	fault := b.Fault(column, row)
 
 	if expected.Expect == "ok" {
 		if !verdict.OK() || fault != nil {
@@ -387,7 +436,7 @@ func assertCell(t *testing.T, label string, r *DelimitedReader, column, row int,
 			t.Fatalf("%s: unknown expectation %q", label, expected.Expect)
 		}
 		if verdict.OK() || fault == nil {
-			t.Errorf("%s: expected %s, got the value %v", label, expected.Expect, got(r, column, row))
+			t.Errorf("%s: expected %s, got the value %v", label, expected.Expect, got(b, column, row))
 			return
 		}
 		if verdict.Reason() != reason || fault.Reason != reason {
@@ -401,18 +450,24 @@ func assertCell(t *testing.T, label string, r *DelimitedReader, column, row int,
 				t.Errorf("%s: fault span (%d,%d), want (%d,%d)", label, fault.Offset, fault.Length, expected.Fault[0], expected.Fault[1])
 			}
 			// The cell's own text is still to hand, for the diagnostic a fault deserves.
-			if raw := string(r.Raw(column, row)); expected.Raw == nil || raw != *expected.Raw {
+			if raw := string(b.Raw(column, row)); expected.Raw == nil || raw != *expected.Raw {
 				t.Errorf("%s: raw text %q, want %v", label, raw, expected.Raw)
 			}
 		}
 	}
 
-	if value, expectation := got(r, column, row), want(t, label, door, expected); !reflect.DeepEqual(value, expectation) {
+	if value, expectation := got(b, column, row), want(t, label, door, expected); !reflect.DeepEqual(value, expectation) {
 		t.Errorf("%s: %v (%T), want %v (%T)", label, value, value, expectation, expectation)
+	}
+	// Get says what the column accessor and the verdict say together.
+	if value, getFault := viaGet(b, column, row); !reflect.DeepEqual(getFault, fault) {
+		t.Errorf("%s: Get's fault %v, want %v", label, getFault, fault)
+	} else if expectation := want(t, label, door, expected); !reflect.DeepEqual(value, expectation) {
+		t.Errorf("%s: Get %v (%T), want %v (%T)", label, value, value, expectation, expectation)
 	}
 	if door == DoorText && expected.Expect == "ok" {
 		// A text cell is its own raw text, escaped quotes resolved either way.
-		if raw := string(r.Raw(column, row)); raw != *expected.Text {
+		if raw := string(b.Raw(column, row)); raw != *expected.Text {
 			t.Errorf("%s: raw text %q, want %q", label, raw, *expected.Text)
 		}
 	}
@@ -431,13 +486,12 @@ func assertFailure(t *testing.T, label string, actual error, expected *corpusFai
 		t.Errorf("%s: ended with %v, want a %s failure", label, actual, expected.Kind)
 		return
 	}
-	kind := UnclosedQuote
-	if expected.Kind == "column_count" {
-		kind = ColumnCount
-	} else if expected.Kind != "unclosed_quote" {
-		t.Fatalf("%s: unknown failure kind %q", label, expected.Kind)
+	// The corpus names a kind as the core does: its name, in snake case.
+	kind := failure.Kind
+	if name := strings.ReplaceAll(kind.String(), " ", "_"); name != expected.Kind {
+		t.Errorf("%s: a %s failure, want %s", label, name, expected.Kind)
 	}
-	if failure.Kind != kind || failure.Record != expected.Record || failure.Line != expected.Line || failure.Byte != expected.Byte {
+	if failure.Record != expected.Record || failure.Line != expected.Line || failure.Byte != expected.Byte {
 		t.Errorf("%s: failure %+v, want %+v", label, *failure, *expected)
 	}
 	if kind == ColumnCount && (failure.Expected != expected.Expected || failure.Found != expected.Found) {
@@ -481,30 +535,30 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 	case header == nil || !reflect.DeepEqual(header, *c.Header):
 		t.Errorf("%s: header %q, want %q", label, header, *c.Header)
 	}
-	if r.Columns() != len(plan) {
-		t.Errorf("%s: %d columns, want %d", label, r.Columns(), len(plan))
+	if !reflect.DeepEqual(r.Plan(), plan) {
+		t.Errorf("%s: plan %v, want %v", label, r.Plan(), plan)
 	}
 
 	seen := 0
 	var ended error
 	for {
-		rows, err := r.Read()
+		b, err := r.Read()
 		if err != nil {
 			ended = err
-			if rows != 0 || r.Rows() != 0 {
-				t.Errorf("%s: %d rows beside the error %v", label, rows, err)
+			if b != nil {
+				t.Errorf("%s: a batch beside the error %v", label, err)
 			}
 			break
 		}
-		if rows == 0 || rows != r.Rows() {
-			t.Fatalf("%s: Read returned %d rows and no error, with %d in hand", label, rows, r.Rows())
+		if b.Rows() == 0 {
+			t.Fatalf("%s: Read returned an empty batch and no error", label)
 		}
-		for row := 0; row < rows; row, seen = row+1, seen+1 {
+		for row := 0; row < b.Rows(); row, seen = row+1, seen+1 {
 			if seen >= len(c.Rows) {
 				t.Fatalf("%s: more than the %d rows expected", label, len(c.Rows))
 			}
 			for column := range plan {
-				assertCell(t, fmt.Sprintf("%s, row %d, column %d", label, seen, column), r, column, row, &c.Rows[seen][column])
+				assertCell(t, fmt.Sprintf("%s, row %d, column %d", label, seen, column), b, column, row, &c.Rows[seen][column])
 			}
 		}
 	}

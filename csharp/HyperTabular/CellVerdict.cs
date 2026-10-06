@@ -6,7 +6,7 @@ namespace HyperTabular;
 /// <summary>
 /// One cell's verdict as the core writes it into a column's verdict array: HyperCast's
 /// reason code, with <c>0</c> for a cell that cast, and the offending span within the
-/// cell's own text. <see cref="DelimitedReader.Verdicts"/> hands a column's verdicts out as
+/// cell's own text. <see cref="Batch.Verdicts"/> hands a column's verdicts out as
 /// a span of these, for code that wants to scan a batch without a union per cell.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]

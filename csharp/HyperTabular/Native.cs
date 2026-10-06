@@ -15,6 +15,7 @@ static unsafe partial class Native
 	internal const int ErrStructure = -2;
 	internal const int ErrArena = -3;
 	internal const int ErrCells = -4;
+	internal const int ErrWindow = -5;
 
 	/// <summary>The flag in the top bit of a span's length; its meaning is the field's.</summary>
 	internal const uint SpanFlag = 1u << 31;
@@ -138,6 +139,47 @@ static unsafe partial class Native
 		public byte Negative;
 	}
 
+	/// <summary>One cell of the row a workbook read assembles: the core's scratch, never read here.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawSlot
+	{
+		public uint Tag;
+		public uint Aux;
+		public ulong Bits;
+	}
+
+	/// <summary>The memory a workbook call works in, handed over again on every call.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawBuffers
+	{
+		public byte* Window;
+		public nuint WindowCap;
+		public byte* Arena;
+		public nuint ArenaCap;
+		public RawSpan* Cells;
+		public nuint CellsCap;
+		public RawSlot* Row;
+		public nuint RowCap;
+		public byte* Strings;
+		public nuint StringsLen;
+		public RawSpan* Table;
+		public nuint TableLen;
+		public byte* Kinds;
+		public nuint KindsLen;
+	}
+
+	/// <summary>What opening a workbook found.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawOpened
+	{
+		public uint Format;
+		public uint Epoch;
+		public ulong StringsBytes;
+		public ulong StringsCount;
+		public ulong Needed;
+		public RawFailure Failure;
+	}
+
 	[LibraryImport("hypertabular")]
 	internal static partial uint hypertabular_version();
 
@@ -160,4 +202,37 @@ static unsafe partial class Native
 
 	[LibraryImport("hypertabular")]
 	internal static partial nuint hypertabular_delimited_unescape(byte* cell, nuint len, byte* output, nuint cap);
+
+	[LibraryImport("hypertabular")]
+	internal static partial nuint hypertabular_workbook_state_size();
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_open(
+		void* state, byte* container, nuint containerLen, RawBuffers* buffers, RawOpened* opened);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_sheets(
+		void* state, byte* container, nuint containerLen, RawBuffers* buffers, RawFilled* filled);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_strings(
+		void* state, byte* container, nuint containerLen, RawBuffers* buffers, RawFilled* filled);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_styles(
+		void* state, byte* container, nuint containerLen, RawBuffers* buffers, RawFilled* filled);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_sheet(
+		void* state, byte* container, nuint containerLen, byte* part, nuint partLen, uint index,
+		uint hasHeader, uint skipEmptyRows, RawFilled* filled);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_header(
+		void* state, byte* container, nuint containerLen, RawBuffers* buffers, RawFilled* filled);
+
+	[LibraryImport("hypertabular")]
+	internal static partial int hypertabular_workbook_fill(
+		void* state, byte* container, nuint containerLen, RawColumnSpec* specs, RawColumnBuffer* columns,
+		nuint columnCount, nuint maxRows, RawBuffers* buffers, RawFilled* filled);
 }

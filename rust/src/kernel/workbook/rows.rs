@@ -386,15 +386,27 @@ impl Run<'_> {
 
     /// The column, type and format kind an XLSX `<c>` declares.
     fn cell_attrs(&mut self, tag: &Tag<'_>) {
+        // `r`, `s` and `t` in one pass over the tag, each the first of its local name.
+        let (mut r, mut s, mut t) = (None, None, None);
+        for (name, value) in tag.attrs() {
+            let slot = match xml::local_name(name) {
+                b"r" => &mut r,
+                b"s" => &mut s,
+                b"t" => &mut t,
+                _ => continue,
+            };
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        }
         let sheet = &mut *self.sheet;
-        sheet.col = tag.attr(b"r").and_then(column_of).unwrap_or(sheet.next_col);
+        sheet.col = r.and_then(column_of).unwrap_or(sheet.next_col);
         sheet.next_col = sheet.col.saturating_add(1);
-        sheet.kind = tag
-            .attr(b"s")
+        sheet.kind = s
             .and_then(parse_u32)
             .and_then(|s| self.kinds.get(s as usize))
             .map_or(u32::from(styles::NUMBER), |&kind| u32::from(kind));
-        sheet.cell_type = match tag.attr(b"t") {
+        sheet.cell_type = match t {
             None | Some(b"n") => T_NUMBER,
             Some(b"s") => T_SHARED,
             Some(b"b") => T_BOOL,
@@ -515,17 +527,18 @@ impl Run<'_> {
 
     /// The repeat count, type and value an ODS cell's tag declares; the value is gathered.
     fn ods_attrs(&mut self, tag: &Tag<'_>, part: &Part) -> Result<(), Stop> {
-        let repeat = tag
-            .attr(b"number-columns-repeated")
-            .and_then(parse_u32)
-            .unwrap_or(1)
-            .max(1);
-        let declared = tag
-            .attr_qualified(b"office:value-type")
-            .or_else(|| tag.attr(b"value-type"));
+        // Every attribute this reads, in one pass over the tag: what each lookup below
+        // would find on its own — the first attribute of that local or qualified name —
+        // without walking the attributes once a lookup.
+        let mut found = OdsAttrs::default();
+        for (name, value) in tag.attrs() {
+            found.see(name, value);
+        }
+        let repeat = found.repeated.and_then(parse_u32).unwrap_or(1).max(1);
+        let declared = found.office_type.or(found.any_type);
         // LibreOffice marks an error cell `office:value-type="string"` *and*
         // `calcext:value-type="error"`; the extension is the truth there.
-        let value_type = if tag.attr_qualified(b"calcext:value-type") == Some(b"error") {
+        let value_type = if found.calcext_type == Some(b"error") {
             V_ERROR
         } else {
             match declared {
@@ -539,11 +552,11 @@ impl Run<'_> {
             }
         };
         let raw = match value_type {
-            V_FLOAT => tag.attr(b"value"),
-            V_BOOL => tag.attr(b"boolean-value"),
-            V_DATE => tag.attr(b"date-value"),
-            V_TIME => tag.attr(b"time-value"),
-            V_STRING => tag.attr(b"string-value"),
+            V_FLOAT => found.value,
+            V_BOOL => found.boolean,
+            V_DATE => found.date,
+            V_TIME => found.time,
+            V_STRING => found.string,
             _ => None,
         };
         self.begin_text();
@@ -1162,6 +1175,52 @@ pub unsafe fn fill(
                 out.rows = sheet.rows;
             }
             refuse(stop, &mut out.needed, &mut out.failure)
+        }
+    }
+}
+
+/// The attributes of an ODS cell's start tag that the reader consults, each the first of
+/// its name — gathered in one pass by [`OdsAttrs::see`].
+#[derive(Default)]
+struct OdsAttrs<'a> {
+    /// `number-columns-repeated`, by local name.
+    repeated: Option<&'a [u8]>,
+    /// `office:value-type`, qualified.
+    office_type: Option<&'a [u8]>,
+    /// The first `value-type` under any prefix (which may be `calcext:`'s).
+    any_type: Option<&'a [u8]>,
+    /// `calcext:value-type`, qualified.
+    calcext_type: Option<&'a [u8]>,
+    /// The value attributes, by local name.
+    value: Option<&'a [u8]>,
+    boolean: Option<&'a [u8]>,
+    date: Option<&'a [u8]>,
+    time: Option<&'a [u8]>,
+    string: Option<&'a [u8]>,
+}
+
+impl<'a> OdsAttrs<'a> {
+    /// Notes one attribute, unless one of its name was noted already.
+    fn see(&mut self, name: &'a [u8], value: &'a [u8]) {
+        let first = |slot: &mut Option<&'a [u8]>| {
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        };
+        match name {
+            b"office:value-type" => first(&mut self.office_type),
+            b"calcext:value-type" => first(&mut self.calcext_type),
+            _ => {}
+        }
+        match xml::local_name(name) {
+            b"number-columns-repeated" => first(&mut self.repeated),
+            b"value-type" => first(&mut self.any_type),
+            b"value" => first(&mut self.value),
+            b"boolean-value" => first(&mut self.boolean),
+            b"date-value" => first(&mut self.date),
+            b"time-value" => first(&mut self.time),
+            b"string-value" => first(&mut self.string),
+            _ => {}
         }
     }
 }

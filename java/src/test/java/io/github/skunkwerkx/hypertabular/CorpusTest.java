@@ -21,7 +21,6 @@ import io.github.skunkwerkx.hypercast.Fault;
 import io.github.skunkwerkx.hypercast.NumFormat;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
-import io.github.skunkwerkx.hypercast.Verdict;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -56,20 +55,28 @@ final class CorpusTest {
     private static final int[] BATCH_ROWS = {1, 2, 1024};
     private static final int[] BUFFER_BYTES = {1, 5, 64, DelimitedReader.DEFAULT_BUFFER_BYTES};
 
-    private static final JsonArray CORPUS = load();
+    /** The {@code corpus} directory at the repository root. */
+    static final Path CORPUS_DIRECTORY = corpusDirectory();
 
-    private static JsonArray load() {
+    private static final JsonArray CORPUS = load("delimited.json");
+
+    private static Path corpusDirectory() {
         for (Path dir = Path.of("").toAbsolutePath(); dir != null; dir = dir.getParent()) {
-            Path corpus = dir.resolve("corpus").resolve("delimited.json");
-            if (Files.isRegularFile(corpus)) {
-                try {
-                    return JsonParser.parseString(Files.readString(corpus)).getAsJsonArray();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
+            if (Files.isRegularFile(dir.resolve("corpus").resolve("delimited.json"))) {
+                return dir.resolve("corpus");
             }
         }
-        throw new IllegalStateException("corpus/delimited.json not found above " + Path.of("").toAbsolutePath());
+        throw new IllegalStateException("corpus/ not found above " + Path.of("").toAbsolutePath());
+    }
+
+    /** One of the corpus's JSON files, parsed. */
+    static JsonArray load(String file) {
+        try {
+            return JsonParser.parseString(Files.readString(CORPUS_DIRECTORY.resolve(file)))
+                    .getAsJsonArray();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     /** How one replay gets its reader: the case's bytes, cut up one particular way. */
@@ -95,7 +102,7 @@ final class CorpusTest {
         return constants[entry.get(key).getAsInt() - 1];
     }
 
-    private static Column columnOf(JsonObject entry) {
+    static Column columnOf(JsonObject entry) {
         int ordinal = entry.get("ordinal").getAsInt();
         NumFormat format = formatOf(entry);
         String door = entry.get("door").getAsString();
@@ -126,33 +133,32 @@ final class CorpusTest {
         };
     }
 
-    /** The cell through the typed accessor its door has. */
-    private static Verdict<?> typed(DelimitedReader reader, int column, int row, Door door) {
+    /** The Java type a door's value is presented as: what {@link Batch#get} is asked for. */
+    private static Class<?> typeOf(Door door) {
         return switch (door) {
-            case BOOL -> reader.bool(column, row);
-            case I8 -> reader.i8(column, row);
-            case I16 -> reader.i16(column, row);
-            case I32 -> reader.i32(column, row);
-            case I64 -> reader.i64(column, row);
-            case U8 -> reader.u8(column, row);
-            case U16 -> reader.u16(column, row);
-            case U32 -> reader.u32(column, row);
-            case U64 -> reader.u64(column, row);
-            case F32 -> reader.f32(column, row);
-            case F64 -> reader.f64(column, row);
-            case DECIMAL -> reader.decimal(column, row);
-            case UUID -> reader.uuid(column, row);
-            case TIMESTAMP, UNIX, EXCEL_SERIAL -> reader.timestamp(column, row);
-            case DATE, DATE_ORDERED -> reader.date(column, row);
-            case DATETIME -> reader.dateTime(column, row);
-            case TIME -> reader.time(column, row);
-            case DURATION -> reader.duration(column, row);
-            case TEXT -> throw new IllegalStateException("text is read through text() and string()");
+            case BOOL -> Boolean.class;
+            case I8 -> Byte.class;
+            case I16 -> Short.class;
+            case I32, U8, U16 -> Integer.class;
+            case I64, U32, U64 -> Long.class;
+            case F32 -> Float.class;
+            case F64 -> Double.class;
+            case DECIMAL -> BigDecimal.class;
+            case UUID -> UUID.class;
+            case TIMESTAMP, UNIX, EXCEL_SERIAL -> Instant.class;
+            case DATE, DATE_ORDERED -> LocalDate.class;
+            case DATETIME -> LocalDateTime.class;
+            case TIME -> LocalTime.class;
+            case DURATION -> Duration.class;
+            case TEXT -> String.class;
         };
     }
 
     private static LocalDate dayOf(JsonObject cell) {
-        return LocalDate.of(cell.get("year").getAsInt(), cell.get("month").getAsInt(), cell.get("day").getAsInt());
+        return LocalDate.of(
+                cell.get("year").getAsInt(),
+                cell.get("month").getAsInt(),
+                cell.get("day").getAsInt());
     }
 
     /** What the corpus says a cell that cast is worth, as the Java type its door presents. */
@@ -181,12 +187,17 @@ final class CorpusTest {
                         Long.parseUnsignedLong(hex.substring(16), 16));
             }
             case TIMESTAMP, UNIX, EXCEL_SERIAL ->
-                    Instant.ofEpochSecond(cell.get("seconds").getAsLong(), cell.get("nanos").getAsInt());
+                Instant.ofEpochSecond(
+                        cell.get("seconds").getAsLong(), cell.get("nanos").getAsInt());
             case DATE, DATE_ORDERED -> dayOf(cell);
-            case DATETIME -> LocalDateTime.of(
-                    dayOf(cell), LocalTime.ofNanoOfDay(cell.get("nanos_of_day").getAsLong()));
+            case DATETIME ->
+                LocalDateTime.of(
+                        dayOf(cell),
+                        LocalTime.ofNanoOfDay(cell.get("nanos_of_day").getAsLong()));
             case TIME -> LocalTime.ofNanoOfDay(cell.get("nanos").getAsLong());
-            case DURATION -> Duration.ofSeconds(cell.get("seconds").getAsLong(), cell.get("nanos").getAsInt());
+            case DURATION ->
+                Duration.ofSeconds(
+                        cell.get("seconds").getAsLong(), cell.get("nanos").getAsInt());
             case TEXT -> cell.get("text").getAsString();
         };
     }
@@ -196,47 +207,49 @@ final class CorpusTest {
     }
 
     /** Holds one cell of the batch in hand to what the corpus says of it. */
-    private static void assertCell(String label, DelimitedReader reader, int column, int row, JsonObject expected) {
-        CellVerdict verdict = reader.verdict(column, row);
-        Door door = reader.column(column).door();
+    static void assertCell(String label, Batch batch, int column, int row, JsonObject expected) {
+        CellVerdict verdict = batch.verdict(column, row);
+        Door door = batch.columns().get(column).door();
         String expect = expected.get("expect").getAsString();
         // The verdict array, read in place, says what the per-cell verdict says.
-        MemorySegment entry = reader.verdicts(column).asSlice(row * CellVerdict.LAYOUT.byteSize());
+        MemorySegment entry = batch.verdicts(column).asSlice(row * CellVerdict.LAYOUT.byteSize());
         assertEquals(verdict.isOk() ? 0 : verdict.reason().code(), entry.get(ValueLayout.JAVA_INT, 8), label);
         assertEquals(verdict.offset(), entry.get(ValueLayout.JAVA_INT, 0), label);
         assertEquals(verdict.length(), entry.get(ValueLayout.JAVA_INT, 4), label);
-        assertEquals(verdict.isOk(), reader.isOk(column, row), label);
+        assertEquals(verdict.isOk(), batch.isOk(column, row), label);
 
         if (!expect.equals("ok")) {
             assertFalse(verdict.isOk(), label);
-            assertEquals(switch (expect) {
-                case "empty" -> CastFailure.EMPTY;
-                case "malformed" -> CastFailure.MALFORMED;
-                case "out_of_range" -> CastFailure.OUT_OF_RANGE;
-                default -> throw new IllegalStateException("unknown expectation " + expect);
-            }, verdict.reason(), label);
+            assertEquals(
+                    switch (expect) {
+                        case "empty" -> CastFailure.EMPTY;
+                        case "malformed" -> CastFailure.MALFORMED;
+                        case "out_of_range" -> CastFailure.OUT_OF_RANGE;
+                        default -> throw new IllegalStateException("unknown expectation " + expect);
+                    },
+                    verdict.reason(),
+                    label);
             if (expected.has("fault")) {
                 JsonArray span = expected.getAsJsonArray("fault");
                 assertEquals(span.get(0).getAsInt(), verdict.offset(), label);
                 assertEquals(span.get(1).getAsInt(), verdict.length(), label);
                 // The cell's own text is still to hand, for the diagnostic a fault deserves.
                 String raw = expected.get("raw").getAsString();
-                assertEquals(raw, reader.rawString(column, row), label);
-                assertEquals(raw, utf8(reader.raw(column, row)), label);
+                assertEquals(raw, batch.rawString(column, row), label);
+                assertEquals(raw, utf8(batch.raw(column, row)), label);
             } else {
                 // An empty cell: the corpus states no span and no text, and the text there
                 // was — none, or only what the door trims — is still there to be asked for.
-                assertEquals(reader.rawString(column, row), utf8(reader.raw(column, row)), label);
+                assertEquals(batch.rawString(column, row), utf8(batch.raw(column, row)), label);
             }
             if (door == Door.TEXT) {
-                assertNull(reader.text(column, row), label);
-                assertNull(reader.string(column, row), label);
-            } else {
-                // The typed accessor's own fault, as HyperCast's union.
-                switch (typed(reader, column, row, door)) {
-                    case Success<?> success -> fail(label + ": expected a fault, got " + success);
-                    case Fault<?> fault -> assertEquals(verdict.toFault(), fault, label);
-                }
+                assertNull(batch.text(column, row), label);
+                assertNull(batch.string(column, row), label);
+            }
+            // The typed getter's own fault, as HyperCast's union.
+            switch (batch.get(column, row, typeOf(door))) {
+                case Success<?> success -> fail(label + ": expected a fault, got " + success);
+                case Fault<?> fault -> assertEquals(verdict.toFault(), fault, label);
             }
             return;
         }
@@ -245,15 +258,16 @@ final class CorpusTest {
         assertNull(verdict.reason(), label);
         Object value = valueOf(expected, door);
         if (door == Door.TEXT) {
-            MemorySegment text = reader.text(column, row);
+            MemorySegment text = batch.text(column, row);
             assertNotNull(text, label);
             assertEquals(value, utf8(text), label);
-            assertEquals(value, reader.string(column, row), label);
+            assertEquals(value, batch.string(column, row), label);
             // A text cell's raw text is its text: unescaped, as the core cast it.
-            assertEquals(value, reader.rawString(column, row), label);
+            assertEquals(value, batch.rawString(column, row), label);
+            assertEquals(new Success<>(value), batch.get(column, row, String.class), label);
             return;
         }
-        switch (typed(reader, column, row, door)) {
+        switch (batch.get(column, row, typeOf(door))) {
             case Success<?> success -> assertEquals(value, success.value(), label);
             case Fault<?> fault -> fail(label + ": expected " + value + ", got " + fault);
         }
@@ -274,7 +288,8 @@ final class CorpusTest {
         String kind = expected.get("kind").getAsString();
         assertEquals(
                 kind.equals("column_count") ? TabularFailure.COLUMN_COUNT : TabularFailure.UNCLOSED_QUOTE,
-                actual.failure(), label);
+                actual.failure(),
+                label);
         assertEquals(expected.get("record").getAsLong(), actual.record(), label);
         assertEquals(expected.get("line").getAsInt(), actual.line(), label);
         assertEquals(expected.get("byte").getAsLong(), actual.byteOffset(), label);
@@ -310,17 +325,20 @@ final class CorpusTest {
             int seen = 0;
             TabularException failure = null;
             try {
-                while (reader.read()) {
-                    for (int row = 0; row < reader.rows(); row++, seen++) {
+                for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+                    for (int row = 0; row < batch.rows(); row++, seen++) {
                         assertTrue(seen < rows.size(), label + ": more rows than the corpus lists");
                         JsonArray cells = rows.get(seen).getAsJsonArray();
                         for (int column = 0; column < plan.size(); column++) {
-                            assertCell(label + ", row " + seen + ", column " + column,
-                                    reader, column, row, cells.get(column).getAsJsonObject());
+                            assertCell(
+                                    label + ", row " + seen + ", column " + column,
+                                    batch,
+                                    column,
+                                    row,
+                                    cells.get(column).getAsJsonObject());
                         }
                     }
                 }
-                assertEquals(0, reader.rows(), label);
             } catch (TabularException e) {
                 failure = e;
                 // A structure failure is final: the same one, again.
@@ -349,9 +367,10 @@ final class CorpusTest {
 
     @Test
     void fromAByteArray() {
-        everyCase((name, vector, input, batchRows) ->
-                replay(name + " (byte[], " + batchRows + " rows a batch)", vector,
-                        (dialect, plan) -> DelimitedReader.of(input, dialect, plan, batchRows)));
+        everyCase((name, vector, input, batchRows) -> replay(
+                name + " (byte[], " + batchRows + " rows a batch)",
+                vector,
+                (dialect, plan) -> DelimitedReader.of(input, dialect, plan, batchRows)));
     }
 
     @Test
@@ -359,10 +378,14 @@ final class CorpusTest {
         everyCase((name, vector, input, batchRows) -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment text = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
-                replay(name + " (native segment, " + batchRows + " rows a batch)", vector,
+                replay(
+                        name + " (native segment, " + batchRows + " rows a batch)",
+                        vector,
                         (dialect, plan) -> DelimitedReader.of(text, dialect, plan, batchRows));
                 // And a heap segment, which is copied in as a byte array is.
-                replay(name + " (heap segment, " + batchRows + " rows a batch)", vector,
+                replay(
+                        name + " (heap segment, " + batchRows + " rows a batch)",
+                        vector,
                         (dialect, plan) -> DelimitedReader.of(MemorySegment.ofArray(input), dialect, plan, batchRows));
             }
         });
@@ -396,7 +419,9 @@ final class CorpusTest {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment text = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
                 for (int windowBytes : new int[] {Math.max(smallest, 4), smallest + 7}) {
-                    replay(name + " (windows of " + windowBytes + " bytes, " + batchRows + " rows a batch)", vector,
+                    replay(
+                            name + " (windows of " + windowBytes + " bytes, " + batchRows + " rows a batch)",
+                            vector,
                             (dialect, plan) -> DelimitedReader.windowed(text, dialect, plan, batchRows, windowBytes));
                 }
             }
@@ -407,7 +432,9 @@ final class CorpusTest {
     void fromAStreamThroughBuffersOfEverySize() {
         everyCase((name, vector, input, batchRows) -> {
             for (int bufferBytes : BUFFER_BYTES) {
-                replay(name + " (stream through " + bufferBytes + " bytes, " + batchRows + " rows a batch)", vector,
+                replay(
+                        name + " (stream through " + bufferBytes + " bytes, " + batchRows + " rows a batch)",
+                        vector,
                         (dialect, plan) -> DelimitedReader.of(
                                 new ByteArrayInputStream(input), dialect, plan, batchRows, bufferBytes));
             }
@@ -425,7 +452,9 @@ final class CorpusTest {
             assertArrayEquals(input, Files.readAllBytes(file));
             for (int batchRows : BATCH_ROWS) {
                 for (int bufferBytes : new int[] {3, DelimitedReader.DEFAULT_BUFFER_BYTES}) {
-                    replay(name + " (file through " + bufferBytes + " bytes, " + batchRows + " rows a batch)", vector,
+                    replay(
+                            name + " (file through " + bufferBytes + " bytes, " + batchRows + " rows a batch)",
+                            vector,
                             (dialect, plan) -> DelimitedReader.open(file, dialect, plan, batchRows, bufferBytes));
                 }
             }

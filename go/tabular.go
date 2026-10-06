@@ -1,25 +1,31 @@
-// Package hypertabular reads delimited text — CSV, TSV, any single-byte ASCII separator — a
-// batch at a time into typed columns, with a HyperCast verdict for every cell.
+// Package hypertabular reads delimited text — CSV, TSV, any single-byte ASCII separator — and
+// workbooks — XLSX and ODS — a batch at a time into typed columns, with a HyperCast verdict
+// for every cell.
 //
 // The native core (libhypertabular) owns no memory and reads no files. It is handed a chunk
 // of input and the buffers to fill, casts each plan column in one native loop, and says how
-// many rows it wrote and how many bytes it is finished with. Everything else is here: a
-// DelimitedReader allocates the input buffer, the column buffers, the table that locates
-// each cell and the arena for the rare escaped cell — once, as ordinary Go memory, reused
-// for every batch — and puts what the core did not consume back in front of it. The cgo
-// boundary is crossed once per batch, not once per cell.
+// many rows it wrote and how far it got. Everything else is here: a DelimitedReader or a
+// Sheet allocates the column buffers, the table that locates each cell and the arena for the
+// rare text that is not in the input — once, as ordinary Go memory, reused for every batch.
+// The cgo boundary is crossed once per batch, not once per cell.
 //
-//   - Nothing is sniffed. The Dialect states the separator, the quoting and the header; the
-//     plan states each column's door and, for numbers, its hypercast.NumFormat.
+//   - One batch type. Read returns a *Batch — Rows, Columns, Line, Verdicts, a whole column
+//     at a time (I32, F64, Text and the rest), and Get for any one cell — for delimited text
+//     and for a sheet alike.
+//   - Nothing is sniffed. The Dialect states the separator, the quoting and the header;
+//     SheetOptions states a sheet's header and whether empty rows are skipped; the plan
+//     states each column's door and, for numbers, its hypercast.NumFormat.
 //   - HyperCast is the judge. Fault, CastFailure, NumFormat, Decimal, Date, CivilDateTime,
 //     Duration, UnixPrecision, DateOrder and ExcelEpoch are HyperCast's own types, from its
-//     own module. A cell means exactly what the HyperCast door of the same name would say of
-//     the same text.
+//     own module. A text cell means exactly what the HyperCast door of the same name would
+//     say of the same text; a typed workbook cell is converted by the door directly.
 //   - A bad value is a verdict; a broken file is an error. A cell that does not cast is a
-//     fault in its column and the read goes on. A record of the wrong width, or input that
-//     ends inside a quoted cell, is a *Failure, returned after every intact row before it.
-//   - Text is not copied. A Text column's cells are slices of the input itself; only a cell
-//     with "" inside is unescaped, into an arena.
+//     fault in its column and the read goes on. A record of the wrong width, input that ends
+//     inside a quoted cell, a workbook whose container or parts cannot be read, is a
+//     *Failure, returned after every intact row before it.
+//   - Text is not copied. A Text column's cells are slices of the input itself, or of a
+//     workbook's shared strings; only a cell with "" inside, or a typed workbook cell said as
+//     text, is written to an arena.
 //
 // The core is a static library linked in through cgo (backend_static.go), as HyperCast's is:
 // nothing is embedded, extracted or loaded at run time. It builds on Linux, macOS and

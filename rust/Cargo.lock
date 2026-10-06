@@ -710,7 +710,7 @@ dependencies = [
 [[package]]
 name = "hypercast"
 version = "0.6.2"
-source = "git+https://github.com/SkunkWerkx/HyperCast?branch=master#e0f0b12a14def24a26ade82a66998242e3e4b8a2"
+source = "git+https://github.com/SkunkWerkx/HyperCast?branch=master#ee058bc93bc564420ef3ab285e029ebb21169389"
 
 [[package]]
 name = "hypertabular"

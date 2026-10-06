@@ -4,6 +4,7 @@ plugins {
     `java-library`
     `maven-publish`
     id("com.vanniktech.maven.publish") version "0.37.0"
+    id("com.diffplug.spotless") version "8.10.3"
 }
 
 // io.github.skunkwerkx — the SkunkWerkx org's Central Portal namespace, the one HyperCast
@@ -17,6 +18,17 @@ version = System.getenv("HYPERTABULAR_VERSION") ?: "0.1.0"
 
 repositories {
     mavenCentral()
+}
+
+// The formatter, over every Java file in the build: the library, its tests, the AOT smoke
+// test and the benchmarks. palantir-java-format is google-java-format's rules at a 4-space
+// indent and 120 columns, the shape this code was already written in.
+// `./gradlew spotlessApply` formats; `./gradlew spotlessCheck` (CI) fails on any drift.
+spotless {
+    java {
+        target("src/**/*.java", "aot-smoke-test/src/**/*.java", "benchmarks/src/**/*.java")
+        palantirJavaFormat("2.102.0")
+    }
 }
 
 dependencies {
@@ -152,7 +164,7 @@ mavenPublishing {
     pom {
         name.set("hypertabular")
         description.set(
-            "Forward-only tabular parsing — delimited text read a batch at a time into typed " +
+            "Forward-only tabular parsing — delimited text and XLSX/ODS workbooks read a batch at a time into typed " +
                 "columns, every cell a HyperCast Verdict (value or reason + offending span, " +
                 "never an exception) — over FFM bindings straight into a native Rust core " +
                 "(libhypertabular) that never allocates. JDK 25+."

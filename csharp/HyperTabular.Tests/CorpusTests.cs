@@ -13,9 +13,9 @@ namespace HyperTabular.Tests;
 /// </summary>
 public sealed class CorpusTests
 {
-	static readonly string _corpusDirectory = FindCorpusDirectory();
+	internal static readonly string _corpusDirectory = FindCorpusDirectory();
 
-	static string FindCorpusDirectory()
+	internal static string FindCorpusDirectory()
 	{
 		for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
 		{
@@ -26,7 +26,7 @@ public sealed class CorpusTests
 		throw new DirectoryNotFoundException($"corpus directory not found above {AppContext.BaseDirectory}");
 	}
 
-	static JsonElement[] Corpus(string name)
+	internal static JsonElement[] Corpus(string name)
 	{
 		using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(_corpusDirectory, name)));
 		return [.. document.RootElement.EnumerateArray().Select(vector => vector.Clone())];
@@ -44,7 +44,7 @@ public sealed class CorpusTests
 			currency);
 	}
 
-	static Column ColumnOf(JsonElement entry)
+	internal static Column ColumnOf(JsonElement entry)
 	{
 		var ordinal = entry.GetProperty("ordinal").GetInt32();
 		var format = FormatOf(entry);
@@ -81,11 +81,11 @@ public sealed class CorpusTests
 			+ cell.GetProperty("seconds").GetInt64() * TimeSpan.TicksPerSecond
 			+ cell.GetProperty("nanos").GetInt32() / 100, TimeSpan.Zero);
 
-	/// <summary>Holds one cell of the batch in hand to what the corpus says of it.</summary>
-	static void AssertCell(string label, DelimitedReader reader, int column, int row, JsonElement expected)
+	/// <summary>Holds one cell of a batch to what the corpus says of it.</summary>
+	internal static void AssertCell(string label, Batch batch, int column, int row, JsonElement expected)
 	{
-		var verdict = reader.Verdicts(column)[row];
-		var door = reader.Column(column).Door;
+		var verdict = batch.Verdicts(column)[row];
+		var door = batch.Columns[column].Door;
 		var expect = expected.GetProperty("expect").GetString();
 		if (expect != "ok")
 		{
@@ -100,12 +100,12 @@ public sealed class CorpusTests
 			{
 				(verdict.Offset, verdict.Length).ShouldBe((span[0].GetInt32(), span[1].GetInt32()), label);
 				// The cell's own text is still to hand, for the diagnostic a fault deserves.
-				Encoding.UTF8.GetString(reader.Raw(column, row)).ShouldBe(expected.GetProperty("raw").GetString(), label);
+				Encoding.UTF8.GetString(batch.Raw(column, row)).ShouldBe(expected.GetProperty("raw").GetString(), label);
 			}
 			if (door == Door.Text)
-				reader.TryGetText(column, row, out _).ShouldBeFalse(label);
+				batch.TryGetText(column, row, out _).ShouldBeFalse(label);
 			else
-				FaultOf(reader, column, row, door).ShouldBe(verdict.ToFault(), label);
+				FaultOf(batch, column, row, door).ShouldBe(verdict.ToFault(), label);
 			return;
 		}
 
@@ -113,78 +113,78 @@ public sealed class CorpusTests
 		switch (door)
 		{
 			case Door.Boolean:
-				Value(reader.Boolean(column, row)).ShouldBe(expected.GetProperty("value").GetBoolean(), label);
+				Value(batch.Get<bool>(column, row)).ShouldBe(expected.GetProperty("value").GetBoolean(), label);
 				break;
 			case Door.SByte:
-				Value(reader.SByte(column, row)).ShouldBe(expected.GetProperty("value").GetSByte(), label);
+				Value(batch.Get<sbyte>(column, row)).ShouldBe(expected.GetProperty("value").GetSByte(), label);
 				break;
 			case Door.Int16:
-				Value(reader.Int16(column, row)).ShouldBe(expected.GetProperty("value").GetInt16(), label);
+				Value(batch.Get<short>(column, row)).ShouldBe(expected.GetProperty("value").GetInt16(), label);
 				break;
 			case Door.Int32:
-				Value(reader.Int32(column, row)).ShouldBe(expected.GetProperty("value").GetInt32(), label);
+				Value(batch.Get<int>(column, row)).ShouldBe(expected.GetProperty("value").GetInt32(), label);
 				break;
 			case Door.Int64:
-				Value(reader.Int64(column, row)).ShouldBe(expected.GetProperty("value").GetInt64(), label);
+				Value(batch.Get<long>(column, row)).ShouldBe(expected.GetProperty("value").GetInt64(), label);
 				break;
 			case Door.Byte:
-				Value(reader.Byte(column, row)).ShouldBe(expected.GetProperty("value").GetByte(), label);
+				Value(batch.Get<byte>(column, row)).ShouldBe(expected.GetProperty("value").GetByte(), label);
 				break;
 			case Door.UInt16:
-				Value(reader.UInt16(column, row)).ShouldBe(expected.GetProperty("value").GetUInt16(), label);
+				Value(batch.Get<ushort>(column, row)).ShouldBe(expected.GetProperty("value").GetUInt16(), label);
 				break;
 			case Door.UInt32:
-				Value(reader.UInt32(column, row)).ShouldBe(expected.GetProperty("value").GetUInt32(), label);
+				Value(batch.Get<uint>(column, row)).ShouldBe(expected.GetProperty("value").GetUInt32(), label);
 				break;
 			case Door.UInt64:
-				Value(reader.UInt64(column, row)).ShouldBe(expected.GetProperty("value").GetUInt64(), label);
+				Value(batch.Get<ulong>(column, row)).ShouldBe(expected.GetProperty("value").GetUInt64(), label);
 				break;
 			case Door.Single:
-				Value(reader.Single(column, row)).ShouldBe((float)expected.GetProperty("value").GetDouble(), label);
+				Value(batch.Get<float>(column, row)).ShouldBe((float)expected.GetProperty("value").GetDouble(), label);
 				break;
 			case Door.Double:
-				Value(reader.Double(column, row)).ShouldBe(expected.GetProperty("value").GetDouble(), label);
+				Value(batch.Get<double>(column, row)).ShouldBe(expected.GetProperty("value").GetDouble(), label);
 				break;
 			case Door.Decimal:
 				// The raw triple is the contract; decimal's own constructor is exact for it.
 				var magnitude = UInt128.Parse(expected.GetProperty("magnitude").GetString()!, CultureInfo.InvariantCulture);
 				var lo = (ulong)magnitude;
-				Value(reader.Decimal(column, row)).ShouldBe(new decimal(
+				Value(batch.Get<decimal>(column, row)).ShouldBe(new decimal(
 					(int)lo, (int)(lo >> 32), (int)(uint)(magnitude >> 64),
 					expected.GetProperty("negative").GetBoolean(),
 					expected.GetProperty("scale").GetByte()), label);
 				break;
 			case Door.Uuid:
-				Value(reader.Uuid(column, row)).ShouldBe(Guid.ParseExact(expected.GetProperty("value").GetString()!, "N"), label);
+				Value(batch.Get<Guid>(column, row)).ShouldBe(Guid.ParseExact(expected.GetProperty("value").GetString()!, "N"), label);
 				break;
 			case Door.Timestamp or Door.Unix or Door.ExcelSerial:
-				Value(reader.Timestamp(column, row)).ShouldBe(Instant(expected), label);
+				Value(batch.Get<DateTimeOffset>(column, row)).ShouldBe(Instant(expected), label);
 				break;
 			case Door.Date or Door.DateOrdered:
-				Value(reader.Date(column, row)).ShouldBe(new DateOnly(
+				Value(batch.Get<DateOnly>(column, row)).ShouldBe(new DateOnly(
 					expected.GetProperty("year").GetInt32(),
 					expected.GetProperty("month").GetInt32(),
 					expected.GetProperty("day").GetInt32()), label);
 				break;
 			case Door.DateTime:
-				Value(reader.DateTime(column, row)).ShouldBe(new DateTime(
+				Value(batch.Get<DateTime>(column, row)).ShouldBe(new DateTime(
 					expected.GetProperty("year").GetInt32(),
 					expected.GetProperty("month").GetInt32(),
 					expected.GetProperty("day").GetInt32(), 0, 0, 0, DateTimeKind.Unspecified)
 					.AddTicks((long)(expected.GetProperty("nanos_of_day").GetUInt64() / 100)), label);
 				break;
 			case Door.Time:
-				Value(reader.Time(column, row)).ShouldBe(new TimeOnly((long)(expected.GetProperty("nanos").GetUInt64() / 100)), label);
+				Value(batch.Get<TimeOnly>(column, row)).ShouldBe(new TimeOnly((long)(expected.GetProperty("nanos").GetUInt64() / 100)), label);
 				break;
 			case Door.Duration:
-				Value(reader.Duration(column, row)).ShouldBe(new TimeSpan(
+				Value(batch.Get<TimeSpan>(column, row)).ShouldBe(new TimeSpan(
 					expected.GetProperty("seconds").GetInt64() * TimeSpan.TicksPerSecond
 					+ expected.GetProperty("nanos").GetInt32() / 100), label);
 				break;
 			case Door.Text:
-				reader.TryGetText(column, row, out var utf8).ShouldBeTrue(label);
+				batch.TryGetText(column, row, out var utf8).ShouldBeTrue(label);
 				Encoding.UTF8.GetString(utf8).ShouldBe(expected.GetProperty("text").GetString(), label);
-				reader.GetString(column, row).ShouldBe(expected.GetProperty("text").GetString(), label);
+				batch.GetString(column, row).ShouldBe(expected.GetProperty("text").GetString(), label);
 				break;
 			default:
 				throw new InvalidOperationException($"{label}: no accessor for {door}");
@@ -201,28 +201,28 @@ public sealed class CorpusTests
 			? fault
 			: throw new InvalidOperationException($"expected a fault, got {verdict}");
 
-	/// <summary>The typed accessor's own fault for a cell that did not cast.</summary>
-	static Fault FaultOf(DelimitedReader reader, int column, int row, Door door) =>
+	/// <summary>The generic accessor's own fault for a cell that did not cast.</summary>
+	static Fault FaultOf(Batch batch, int column, int row, Door door) =>
 		door switch
 		{
-			Door.Boolean => Fault(reader.Boolean(column, row)),
-			Door.SByte => Fault(reader.SByte(column, row)),
-			Door.Int16 => Fault(reader.Int16(column, row)),
-			Door.Int32 => Fault(reader.Int32(column, row)),
-			Door.Int64 => Fault(reader.Int64(column, row)),
-			Door.Byte => Fault(reader.Byte(column, row)),
-			Door.UInt16 => Fault(reader.UInt16(column, row)),
-			Door.UInt32 => Fault(reader.UInt32(column, row)),
-			Door.UInt64 => Fault(reader.UInt64(column, row)),
-			Door.Single => Fault(reader.Single(column, row)),
-			Door.Double => Fault(reader.Double(column, row)),
-			Door.Decimal => Fault(reader.Decimal(column, row)),
-			Door.Uuid => Fault(reader.Uuid(column, row)),
-			Door.Timestamp or Door.Unix or Door.ExcelSerial => Fault(reader.Timestamp(column, row)),
-			Door.Date or Door.DateOrdered => Fault(reader.Date(column, row)),
-			Door.DateTime => Fault(reader.DateTime(column, row)),
-			Door.Time => Fault(reader.Time(column, row)),
-			Door.Duration => Fault(reader.Duration(column, row)),
+			Door.Boolean => Fault(batch.Get<bool>(column, row)),
+			Door.SByte => Fault(batch.Get<sbyte>(column, row)),
+			Door.Int16 => Fault(batch.Get<short>(column, row)),
+			Door.Int32 => Fault(batch.Get<int>(column, row)),
+			Door.Int64 => Fault(batch.Get<long>(column, row)),
+			Door.Byte => Fault(batch.Get<byte>(column, row)),
+			Door.UInt16 => Fault(batch.Get<ushort>(column, row)),
+			Door.UInt32 => Fault(batch.Get<uint>(column, row)),
+			Door.UInt64 => Fault(batch.Get<ulong>(column, row)),
+			Door.Single => Fault(batch.Get<float>(column, row)),
+			Door.Double => Fault(batch.Get<double>(column, row)),
+			Door.Decimal => Fault(batch.Get<decimal>(column, row)),
+			Door.Uuid => Fault(batch.Get<Guid>(column, row)),
+			Door.Timestamp or Door.Unix or Door.ExcelSerial => Fault(batch.Get<DateTimeOffset>(column, row)),
+			Door.Date or Door.DateOrdered => Fault(batch.Get<DateOnly>(column, row)),
+			Door.DateTime => Fault(batch.Get<DateTime>(column, row)),
+			Door.Time => Fault(batch.Get<TimeOnly>(column, row)),
+			Door.Duration => Fault(batch.Get<TimeSpan>(column, row)),
 			_ => throw new InvalidOperationException($"no typed accessor for {door}"),
 		};
 
@@ -266,13 +266,14 @@ public sealed class CorpusTests
 		TabularException? failure = null;
 		try
 		{
-			while (reader.Read())
+			while (reader.Read() is { } batch)
 			{
-				for (var row = 0; row < reader.Rows; row++, seen++)
+				batch.Rows.ShouldBeGreaterThan(0, label);
+				for (var row = 0; row < batch.Rows; row++, seen++)
 				{
 					seen.ShouldBeLessThan(rows.GetArrayLength(), label);
 					for (var column = 0; column < plan.Length; column++)
-						AssertCell($"{label}, row {seen}, column {column}", reader, column, row, rows[seen][column]);
+						AssertCell($"{label}, row {seen}, column {column}", batch, column, row, rows[seen][column]);
 				}
 			}
 		}

@@ -76,3 +76,109 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy --no-default-features --features cdylib -- -D warnings
+
+  # Each binding's formatter and doc linter, every PR, over all of its code — library,
+  # tests, benchmarks and smoke tests — against the config committed beside it. Static analysis only,
+  # no native build needed. (Rust's are check-core's cargo fmt and clippy.)
+  lint-go:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - run: go install github.com/mgechev/revive@v1.16.0
+      - working-directory: go
+        run: revive -config revive.toml ./...
+      - name: gofmt
+        working-directory: go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-formatted (run gofmt -w .): $unformatted"
+            exit 1
+          fi
+
+  lint-python:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: pip install ruff==0.16.5
+      # Docstrings and formatting over the whole package (pyproject.toml's [tool.ruff]).
+      - working-directory: python
+        run: ruff check .
+      - working-directory: python
+        run: ruff format --check .
+
+  lint-php:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: ffi
+      - working-directory: php
+        run: composer install --no-progress --prefer-dist
+      # phpcs.xml: PSR-12 over src and tests, doc comments on the public API.
+      - working-directory: php
+        run: vendor/bin/phpcs
+
+  lint-ruby:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: ruby
+      - working-directory: ruby
+        run: bundle exec rake docs:check
+      # .rubocop.yml: layout only, over every Ruby file in the gem.
+      - working-directory: ruby
+        run: bundle exec rubocop
+
+  format-csharp:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          dotnet-quality: preview
+      # csharp/.editorconfig: tabs, LF, a final newline.
+      - working-directory: csharp
+        run: dotnet format whitespace HyperTabular.slnx --verify-no-changes
+
+  format-java:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+      # Spotless with palantir-java-format (java/build.gradle.kts).
+      - working-directory: java
+        run: ./gradlew --no-daemon spotlessCheck
+
+  format-swift:
+    runs-on: ubuntu-26.04
+    # swift-format ships in the toolchain, so the formatter is the version of the Swift the
+    # matrix builds with (the forge's swift_version).
+    container: swift:6.4
+    steps:
+      - uses: actions/checkout@v7
+      # swift/.swift-format: 4-space indent, 120 columns, every lint rule off — layout only.
+      - working-directory: swift
+        run: >-
+          swift format lint --strict --recursive
+          Package.swift Sources Tests
+          StaticSmokeTest/Package.swift StaticSmokeTest/Sources
+          Benchmarks/Package.swift Benchmarks/Benchmarks
+

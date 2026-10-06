@@ -7,7 +7,7 @@ namespace HyperTabular;
 use FFI;
 
 /**
- * The native core's C ABI: libhypertabular's six exports and the `#[repr(C)]` shapes that
+ * The native core's C ABI: libhypertabular's fourteen exports and the `#[repr(C)]` shapes that
  * cross them (rust/src/kernel/abi.rs), declared once and bound with PHP's built-in ext-ffi.
  * Every pointer handed over is this binding's own memory for the length of the call; the
  * core keeps nothing.
@@ -26,6 +26,8 @@ final class Native
     public const ERR_ARENA = -3;
     /** The cell table cannot hold one row; the result says how many entries one takes. */
     public const ERR_CELLS = -4;
+    /** A workbook call's window is too small; the result says how large it has to be. */
+    public const ERR_WINDOW = -5;
 
     /** The flag in the top bit of a span's length; what it means is the field's to say. */
     public const SPAN_FLAG = 0x80000000;
@@ -67,6 +69,35 @@ final class Native
             const ht_column_spec *specs, const ht_column_buffer *columns, size_t column_count, size_t max_rows,
             ht_span *cells, size_t cells_cap, uint8_t *arena, size_t arena_cap, ht_filled *out);
         size_t hypertabular_delimited_unescape(const char *cell, size_t len, uint8_t *out, size_t cap);
+        typedef struct { uint32_t tag; uint32_t aux; uint64_t bits; } ht_slot;
+        typedef struct {
+            uint8_t *window; size_t window_cap; uint8_t *arena; size_t arena_cap;
+            ht_span *cells; size_t cells_cap; ht_slot *row; size_t row_cap;
+            const uint8_t *strings; size_t strings_len; const ht_span *table; size_t table_len;
+            const uint8_t *kinds; size_t kinds_len;
+        } ht_buffers;
+        typedef struct {
+            uint32_t format; uint32_t epoch; uint64_t strings_bytes; uint64_t strings_count; uint64_t needed;
+            ht_failure failure;
+        } ht_opened;
+        size_t hypertabular_workbook_state_size(void);
+        int32_t hypertabular_workbook_open(
+            void *state, const uint8_t *container, size_t container_len, const ht_buffers *buffers, ht_opened *out);
+        int32_t hypertabular_workbook_sheets(
+            void *state, const uint8_t *container, size_t container_len, const ht_buffers *buffers, ht_filled *out);
+        int32_t hypertabular_workbook_strings(
+            void *state, const uint8_t *container, size_t container_len, const ht_buffers *buffers, ht_filled *out);
+        int32_t hypertabular_workbook_styles(
+            void *state, const uint8_t *container, size_t container_len, const ht_buffers *buffers, ht_filled *out);
+        int32_t hypertabular_workbook_sheet(
+            void *state, const uint8_t *container, size_t container_len, const char *part, size_t part_len,
+            uint32_t index, uint32_t has_header, uint32_t skip_empty_rows, ht_filled *out);
+        int32_t hypertabular_workbook_header(
+            void *state, const uint8_t *container, size_t container_len, const ht_buffers *buffers, ht_filled *out);
+        int32_t hypertabular_workbook_fill(
+            void *state, const uint8_t *container, size_t container_len,
+            const ht_column_spec *specs, const ht_column_buffer *columns, size_t column_count, size_t max_rows,
+            const ht_buffers *buffers, ht_filled *out);
         C;
 
     private static ?FFI $ffi = null;
@@ -101,7 +132,13 @@ final class Native
         }
         [$rid, $libName] = NativePlatform::ridAndLibraryName();
         $path = __DIR__ . "/native/{$rid}/{$libName}";
-        if (!is_file($path)) {
+        // Development loop: HYPERTABULAR_NATIVE_LIBRARY names a library to load instead of the
+        // staged one, so the suite runs against a core built from the checkout without
+        // replacing committed files (.github/scripts/local-core.sh builds one and prints it).
+        $override = getenv('HYPERTABULAR_NATIVE_LIBRARY');
+        if (\is_string($override) && $override !== '') {
+            $path = $override;
+        } elseif (!is_file($path)) {
             // Development loop: fall back to the in-repo cargo build (`cargo cdylib`).
             $repoBuild = \dirname(__DIR__, 2) . "/rust/target/release/{$libName}";
             if (is_file($repoBuild)) {

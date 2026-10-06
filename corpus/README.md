@@ -127,8 +127,8 @@ committed.
 
 ## Ground rules
 
-- Files land in `corpus/xlsx/` and `corpus/ods/`, named `<writer>-<what>.<ext>` exactly as
-  the table at the bottom lists them.
+- Files land in `corpus/workbook/`, beside the packages already there, named
+  `<writer>-<what>.<ext>` exactly as the table at the bottom lists them.
 - Record the writer's version beside each file in that table (Excel: File → Account →
   About Excel; LibreOffice: Help → About). A fixture nobody can attribute is a fixture
   nobody can regenerate.
@@ -142,6 +142,17 @@ committed.
 One small sheet, reused by every writer so the outputs compare. Sheet name **`Data`**
 (add a second sheet named **`Ünïcödé sheet`** with a single cell `1` in A1). Row 1 is the
 header; rows 2–4 are values. Type values, don't paste from another spreadsheet.
+
+`corpus/dataset.tsv` holds the same values, rows 1 to 10, to paste as text into A1 instead of
+typing them: pasted text is read the way typing is. Three things a paste cannot do, to be
+done before or after it:
+
+- format column F as **Text** *before* pasting, or its three cells arrive as a number, a
+  date and a boolean;
+- retype E3 (`'123`) by hand — pasted, the apostrophe is a character in the cell, not the
+  prefix — and bold the word in E2;
+- apply every number format in the tables below, and the merge of B10:C10; the file
+  carries values only.
 
 | Col | Header | Row 2 | Row 3 | Row 4 | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -226,8 +237,10 @@ Proves: `state="hidden"` / `"veryHidden"` from Excel, and that chart, dialog and
 sheets are filtered out of the listing on their real relationship types.
 
 **5. `excel-win-encrypted.xlsx`** — the dataset workbook, File → Info → Protect Workbook →
-**Encrypt with Password** → `hypercast`, save. Excel writes an OLE container, not a zip.
-Proves `NotAWorkbook` on the real thing. Also **6. `excel-win-protected.xlsx`**: the same
+**Encrypt with Password** → `hypercast`, save. Excel writes an OLE container, not a zip,
+with the package in a stream named `EncryptedPackage`. Proves the refusal as `encrypted`
+on the real thing; an OLE container without that stream (a legacy `.xls`) is
+`not_a_workbook`. Also **6. `excel-win-protected.xlsx`**: the same
 menu → **Protect Workbook Structure** → `hypercast`. That one is still a zip with a
 `<workbookProtection>` element and must read normally.
 
@@ -305,18 +318,19 @@ path from the desktop writer, cheap to collect.
 
 | File | Writer and version | OS | sha256 (out-of-tree files only) |
 | --- | --- | --- | --- |
-| `xlsx/excel-win-data.xlsx` | | | |
-| `xlsx/excel-win-strict.xlsx` | | | |
-| `xlsx/excel-win-1904.xlsx` | | | |
-| `xlsx/excel-win-sheets.xlsm` | | | |
-| `xlsx/excel-win-encrypted.xlsx` | | | |
-| `xlsx/excel-win-protected.xlsx` | | | |
-| `excel-win-300k.xlsx` (out of tree) | | | |
-| `ods/libreoffice-data.ods` | | | |
-| `xlsx/libreoffice-data.xlsx` | | | |
-| `ods/libreoffice-encrypted.ods` | | | |
-| `libreoffice-300k.ods` (out of tree) | | | |
-| `xlsx/google-data.xlsx` | | | |
-| `ods/google-data.ods` | | | |
-| `xlsx/numbers-data.xlsx` | | | |
-| `xlsx/excel-web-data.xlsx` | | | |
+| `excel-win-data.xlsx` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-strict.xlsx` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-1904.xlsx` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-sheets.xlsm` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-encrypted.xlsx` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-protected.xlsx` | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | |
+| `excel-win-zip64.xlsx` | `excel-win-data.xlsx` re-wrapped by Python `zipfile` with its zip64 limits lowered; the parts are Excel's | — | |
+| `excel-win-300k.xlsx` (out of tree) | Microsoft Excel 16.0 (AppVersion 16.0300) | Windows | `f11b3f99944f72c1251ea703358c33d601e8b0c3e34bb2be90cf2e077367053b` |
+| `libreoffice-data.ods` | LibreOffice 26.2.6.3 | Linux x86-64 | |
+| `libreoffice-data.xlsx` | LibreOffice 26.2.6.3 | Linux x86-64 | |
+| `libreoffice-encrypted.ods` | LibreOffice 26.2.6.3 | Linux x86-64 | |
+| `libreoffice-300k.ods` (out of tree) | LibreOffice 26.2.6.3 | Linux x86-64 | `74db9cf843bac6961c5962fe0a435313ea3c3c1c1bc1172013ec6929bd75df0c` |
+| `google-data.xlsx` | Google Sheets, downloaded 2026-10-04 | web | |
+| `google-data.ods` | Google Sheets, downloaded 2026-10-04 (generator: LibreOfficeDev 6.0.5.2) | web | |
+| `numbers-data.xlsx` | | | |
+| `excel-web-data.xlsx` | Microsoft Excel Online (AppVersion 16.0300) | web | |

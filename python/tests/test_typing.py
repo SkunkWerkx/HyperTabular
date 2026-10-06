@@ -25,7 +25,11 @@ def _functions(body: list[ast.stmt]) -> dict[str, ast.FunctionDef]:
 
 
 def _classes() -> dict[str, ast.ClassDef]:
-    return {node.name: node for node in STUB.body if isinstance(node, ast.ClassDef) and not node.name.startswith("_")}
+    return {
+        node.name: node
+        for node in STUB.body
+        if isinstance(node, ast.ClassDef) and not node.name.startswith("_")
+    }
 
 
 def _is_static(node: ast.FunctionDef) -> bool:
@@ -33,10 +37,12 @@ def _is_static(node: ast.FunctionDef) -> bool:
 
 
 def test_the_package_is_marked_typed():
+    """The package ships py.typed."""
     assert (PACKAGE / "py.typed").is_file()
 
 
 def test_the_stub_and_the_loaded_backend_name_the_same_surface():
+    """_native.pyi names exactly what the loaded extension defines."""
     stubbed = set(_functions(STUB.body)) | set(_classes())
     missing = {name for name in stubbed if not hasattr(_native, name)}
     assert not missing, f"in _native.pyi but not on the extension: {missing}"
@@ -44,12 +50,24 @@ def test_the_stub_and_the_loaded_backend_name_the_same_surface():
     # package re-exports from it.
     loaded = {name for name in dir(_native) if not name.startswith("__")}
     assert loaded <= stubbed, f"on the extension but not in _native.pyi: {loaded - stubbed}"
-    reexported = {name for name in hypertabular.__all__ if getattr(_native, name, None) is getattr(hypertabular, name)}
-    assert reexported == {"DelimitedReader", "Batch", "ColumnData", "native_version"}
+    reexported = {
+        name
+        for name in hypertabular.__all__
+        if getattr(_native, name, None) is getattr(hypertabular, name)
+    }
+    assert reexported == {
+        "DelimitedReader",
+        "Workbook",
+        "Sheet",
+        "SheetInfo",
+        "Batch",
+        "ColumnData",
+        "native_version",
+    }
 
 
 def test_the_stub_and_the_loaded_backend_agree_on_parameter_names():
-    # Parameter names are part of the surface — a keyword call must work.
+    """Parameter names are part of the surface — a keyword call must work."""
     for name, node in _functions(STUB.body).items():
         expected = [arg.arg for arg in node.args.args]
         actual = list(inspect.signature(getattr(_native, name)).parameters)
@@ -71,6 +89,7 @@ def test_the_stub_and_the_loaded_backend_agree_on_parameter_names():
 
 
 def test_the_stub_and_the_loaded_backend_agree_on_class_members():
+    """The stub's classes declare the members the extension's classes have."""
     for name, node in _classes().items():
         cls = getattr(_native, name)
         declared = set(_functions(node.body)) - {"__new__"}
@@ -83,21 +102,27 @@ def test_the_stub_and_the_loaded_backend_agree_on_class_members():
         assert not missing, f"{name} on the extension lacks {missing}"
         # And nothing public on the class the stub does not say.
         public = {member for member in vars(cls) if not member.startswith("_")}
-        assert public <= declared, f"{name} has {public - declared}, which _native.pyi does not declare"
+        assert public <= declared, (
+            f"{name} has {public - declared}, which _native.pyi does not declare"
+        )
 
 
 def test_a_consumers_code_type_checks(monkeypatch):
+    """mypy --strict accepts a consumer of the package."""
     api = pytest.importorskip("mypy.api")
     # The package as this checkout has it, the way conftest.py puts it on sys.path. --strict
     # follows the import, so hypertabular's own annotations are checked against the stub too.
     monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
-    out, err, status = api.run(["--strict", "--cache-dir", os.devnull, str(SAMPLES / "consumer.py")])
+    out, err, status = api.run(
+        ["--strict", "--cache-dir", os.devnull, str(SAMPLES / "consumer.py")]
+    )
     assert status == 0, out + err
 
 
 def test_the_checker_catches_a_missing_case(monkeypatch, tmp_path):
-    # The other half of the promise: drop the Fault arm and the same assert_never is an
-    # error. Without this, "it type-checks" could just mean the checker saw Any.
+    """The other half of the promise: drop the Fault arm and the same assert_never is an error.
+    Without this, "it type-checks" could just mean the checker saw Any.
+    """
     api = pytest.importorskip("mypy.api")
     monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
     sample = tmp_path / "missing_case.py"
@@ -119,6 +144,7 @@ def test_the_checker_catches_a_missing_case(monkeypatch, tmp_path):
 
 
 def test_the_checker_catches_a_plan_that_is_not_columns(monkeypatch, tmp_path):
+    """mypy rejects a plan that is not a list of Column."""
     api = pytest.importorskip("mypy.api")
     monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
     sample = tmp_path / "bad_plan.py"

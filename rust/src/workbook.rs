@@ -335,6 +335,13 @@ impl<'a> Workbook<'a> {
         &self.sheets
     }
 
+    /// The shared strings' bytes, which every batch of every sheet indexes — what the
+    /// Python binding shares among them rather than copying into each.
+    #[cfg(feature = "python")]
+    pub(crate) fn strings(&self) -> &[u8] {
+        &self.strings
+    }
+
     /// Starts a read of one sheet — by index or by name — through `plan`.
     pub fn sheet<'n>(
         &self,
@@ -342,23 +349,72 @@ impl<'a> Workbook<'a> {
         options: SheetOptions,
         plan: &[Column],
     ) -> Result<Sheet<'_>, Error> {
-        let info = match which.into() {
-            SheetRef::Index(index) => self
+        Sheet::open(Book::Borrowed(self), which.into(), options, plan)
+    }
+
+    /// The sheet `which` of a workbook shared behind an `Arc`, read by a sheet that holds a
+    /// clone of it — which is what lets the Python binding keep a sheet in an object of its
+    /// own, beside the workbook rather than borrowing from it.
+    #[cfg(feature = "python")]
+    pub(crate) fn shared_sheet(
+        book: &std::sync::Arc<Workbook<'static>>,
+        which: SheetRef<'_>,
+        options: SheetOptions,
+        plan: &[Column],
+    ) -> Result<Sheet<'static>, Error> {
+        Sheet::open(
+            Book::Shared(std::sync::Arc::clone(book)),
+            which,
+            options,
+            plan,
+        )
+    }
+}
+
+/// The workbook a sheet reads from: borrowed, or — for the Python binding — shared.
+enum Book<'w> {
+    Borrowed(&'w Workbook<'w>),
+    #[cfg(feature = "python")]
+    Shared(std::sync::Arc<Workbook<'static>>),
+}
+
+impl<'w> Book<'w> {
+    fn get(&self) -> &Workbook<'w> {
+        match self {
+            Book::Borrowed(book) => book,
+            #[cfg(feature = "python")]
+            Book::Shared(book) => book,
+        }
+    }
+}
+
+impl<'w> Sheet<'w> {
+    fn open(
+        book: Book<'w>,
+        which: SheetRef<'_>,
+        options: SheetOptions,
+        plan: &[Column],
+    ) -> Result<Sheet<'w>, Error> {
+        let workbook = book.get();
+        let info = match which {
+            SheetRef::Index(index) => workbook
                 .sheets
                 .get(index)
                 .ok_or_else(|| Error::NoSheet(format!("at index {index}")))?,
-            SheetRef::Name(name) => self
+            SheetRef::Name(name) => workbook
                 .sheets
                 .iter()
                 .find(|sheet| sheet.name == name)
                 .ok_or_else(|| Error::NoSheet(format!("named {name:?}")))?,
         };
+        let (part, index) = (info.part.clone(), info.index);
         let (specs, width) = column::specs(plan)?;
         let batch_rows = options.batch_rows.max(1);
+        let state = copy_of(&workbook.state);
         let mut sheet = Sheet {
-            book: self,
+            book,
             options,
-            state: copy_of(&self.state),
+            state,
             scratch: Scratch {
                 window: Vec::new(),
                 arena: vec![0; 4096],
@@ -374,9 +430,9 @@ impl<'a> Workbook<'a> {
         let mut out = Filled::default();
         let code = rows::sheet(
             &mut sheet.state,
-            &self.container,
-            &info.part,
-            info.index,
+            &sheet.book.get().container,
+            &part,
+            index,
             options.has_header,
             options.skip_empty_rows,
             &mut out,
@@ -391,7 +447,7 @@ impl<'a> Workbook<'a> {
 
 /// A forward-only read of one sheet. See the module documentation.
 pub struct Sheet<'w> {
-    book: &'w Workbook<'w>,
+    book: Book<'w>,
     options: SheetOptions,
     state: Box<State>,
     scratch: Scratch,
@@ -406,17 +462,19 @@ pub struct Sheet<'w> {
     error: Option<Error>,
 }
 
-impl<'w> Sheet<'w> {
-    fn tables(&self) -> Tables<'w> {
-        Tables {
-            strings: &self.book.strings,
-            table: &self.book.table,
-            kinds: &self.book.kinds,
-        }
+/// The workbook's tables, as a read of one of its sheets is handed them.
+fn tables<'b>(book: &'b Workbook<'_>) -> Tables<'b> {
+    Tables {
+        strings: &book.strings,
+        table: &book.table,
+        kinds: &book.kinds,
     }
+}
 
+impl<'w> Sheet<'w> {
     fn read_header(&mut self) -> Result<(), Error> {
-        let (book, tables) = (self.book, self.tables());
+        let book = self.book.get();
+        let tables = tables(book);
         let state = &mut *self.state;
         let (code, out) = self.scratch.drive(&mut self.row, tables, |memory, out| {
             rows::header(state, &book.container, memory, out)
@@ -466,7 +524,8 @@ impl<'w> Sheet<'w> {
         if let Some(error) = &self.error {
             return Err(error.clone());
         }
-        let (book, tables) = (self.book, self.tables());
+        let book = self.book.get();
+        let tables = tables(book);
         let max_rows = self.columns.batch_rows();
         let state = &mut *self.state;
         let (specs, buffers) = self.columns.for_core();

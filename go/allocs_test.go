@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"testing"
+	"time"
 
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 )
@@ -50,14 +51,14 @@ func allocationInput(rows int) ([]byte, []Column) {
 // memory is full until the input runs out; one from a stream is as many whole rows as the
 // buffer held, which can be fewer.
 func readBatch(t *testing.T, r *DelimitedReader, atLeast int) {
-	rows, err := r.Read()
-	if err != nil || rows < atLeast {
-		t.Fatalf("Read returned %d, %v; want a batch of at least %d", rows, err, atLeast)
+	b, err := r.Read()
+	if err != nil || b.Rows() < atLeast {
+		t.Fatalf("Read returned %v, %v; want a batch of at least %d", b, err, atLeast)
 	}
-	ids, verdicts := r.I32(0), r.Verdicts(0)
-	names, instants, amounts := r.Text(1), r.Timestamp(2), r.Exact(3)
-	days, notes, flags, civils, reals := r.DateOnly(4), r.Text(5), r.Bool(6), r.DateTime(7), r.F64(8)
-	for row := 0; row < rows; row++ {
+	ids, verdicts := b.I32(0), b.Verdicts(0)
+	names, instants, amounts := b.Text(1), b.Timestamp(2), b.Exact(3)
+	days, notes, flags, civils, reals := b.DateOnly(4), b.Text(5), b.Bool(6), b.DateTime(7), b.F64(8)
+	for row := 0; row < b.Rows(); row++ {
 		if !verdicts[row].OK() && (ids[row] != 0 || verdicts[row].Reason() != hypercast.Malformed) {
 			t.Fatalf("row %d: id %d, verdict %v", row, ids[row], verdicts[row])
 		}
@@ -101,14 +102,15 @@ func TestRawAllocatesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows, err := r.Read(); err != nil || rows != 8 {
-		t.Fatalf("Read returned %d, %v", rows, err)
+	b, err := r.Read()
+	if err != nil || b.Rows() != 8 {
+		t.Fatalf("Read returned %v, %v", b, err)
 	}
-	if string(r.Raw(0, 3)) != "12x4" || string(r.Raw(5, 3)) != `said "3"` {
-		t.Fatalf("raw %q and %q", r.Raw(0, 3), r.Raw(5, 3))
+	if string(b.Raw(0, 3)) != "12x4" || string(b.Raw(5, 3)) != `said "3"` {
+		t.Fatalf("raw %q and %q", b.Raw(0, 3), b.Raw(5, 3))
 	}
-	assertAllocs(t, "Raw (in place)", 0, func() { r.Raw(0, 3) })
-	assertAllocs(t, "Raw (unescaped)", 0, func() { r.Raw(5, 3) })
+	assertAllocs(t, "Raw (in place)", 0, func() { b.Raw(0, 3) })
+	assertAllocs(t, "Raw (unescaped)", 0, func() { b.Raw(5, 3) })
 }
 
 // The verdict array is free to scan. Asking for HyperCast's *Fault is the one allocation a
@@ -120,15 +122,26 @@ func TestAFaultIsTheOnlyAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows, err := r.Read(); err != nil || rows != 8 {
-		t.Fatalf("Read returned %d, %v", rows, err)
+	b, err := r.Read()
+	if err != nil || b.Rows() != 8 {
+		t.Fatalf("Read returned %v, %v", b, err)
 	}
-	if r.Fault(0, 0) != nil || r.Fault(0, 3) == nil {
-		t.Fatalf("faults %v and %v", r.Fault(0, 0), r.Fault(0, 3))
+	if b.Fault(0, 0) != nil || b.Fault(0, 3) == nil {
+		t.Fatalf("faults %v and %v", b.Fault(0, 0), b.Fault(0, 3))
 	}
-	assertAllocs(t, "Fault (a cell that cast)", 0, func() { kept = r.Fault(0, 0) })
-	assertAllocs(t, "Fault (a cell that did not)", 1, func() { kept = r.Fault(0, 3) })
+	assertAllocs(t, "Fault (a cell that cast)", 0, func() { kept = b.Fault(0, 0) })
+	assertAllocs(t, "Fault (a cell that did not)", 1, func() { kept = b.Fault(0, 3) })
+	// Get is the same: a value costs nothing, whatever its type, and a fault is the one
+	// allocation.
+	assertAllocs(t, "Get (a value)", 0, func() { keptTime, kept = Get[time.Time](b, 2, 0) })
+	assertAllocs(t, "Get (text)", 0, func() { keptText, kept = Get[[]byte](b, 1, 0) })
+	assertAllocs(t, "Get (a fault)", 1, func() { _, kept = Get[int32](b, 0, 3) })
 }
+
+var (
+	keptTime time.Time
+	keptText []byte
+)
 
 // kept is where the faults above go, so that the compiler cannot prove they are unused and
 // leave them on the stack.

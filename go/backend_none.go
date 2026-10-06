@@ -6,9 +6,19 @@
 
 package hypertabular
 
+import "unsafe"
+
 func packedVersion() uint32 { return 0 }
 
 func (r *DelimitedReader) nativeInit(Dialect) int32                   { return errContract }
 func (r *DelimitedReader) nativeHeader([]byte, bool, []rawSpan) int32 { return errContract }
 func (r *DelimitedReader) nativeFill([]byte, bool, int) int32         { return errContract }
 func nativeUnescape([]byte, []byte) int                               { return 0 }
+
+func nativeWorkbookStateSize() int { return 0 }
+
+func nativeBook(bookCall, []uint64, []byte, *scratch, *Workbook, *columns, unsafe.Pointer) int32 {
+	return errContract
+}
+
+func nativeSheet([]uint64, []byte, *SheetInfo, SheetOptions, *rawFilled) int32 { return errContract }

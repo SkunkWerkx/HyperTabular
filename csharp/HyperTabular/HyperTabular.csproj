@@ -10,7 +10,7 @@
          overwrite the other in the output directory: HyperCast's rename, for its reason. -->
     <AssemblyName>HyperTabular.Managed</AssemblyName>
     <RootNamespace>HyperTabular</RootNamespace>
-    <Description>Forward-only delimited text (CSV, TSV, any ASCII separator) read into typed column batches with a HyperCast Verdict for every cell — AOT/trim-friendly P/Invoke bindings into a native Rust core (libhypertabular) that owns no memory: this assembly allocates the buffers, the core fills them, once per batch.</Description>
+    <Description>Forward-only delimited text (CSV, TSV, any ASCII separator) and workbooks (XLSX, ODS) read into typed column batches with a HyperCast Verdict for every cell — AOT/trim-friendly P/Invoke bindings into a native Rust core (libhypertabular) that owns no memory: this assembly allocates the buffers, the core fills them, once per batch.</Description>
     <Authors>Brian Buvinghausen</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/SkunkWerkx/HyperTabular</PackageProjectUrl>
@@ -72,4 +72,8 @@
           Link="hypertabular.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The suite drives the workbook reader with stingy buffers (Workbook.Stingy). -->
+    <InternalsVisibleTo Include="HyperTabular.Tests" />
+  </ItemGroup>
 </Project>

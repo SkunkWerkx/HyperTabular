@@ -68,10 +68,14 @@ final class TabularTest extends TestCase
      */
     private static function probe(string $src, string ...$phpFlags): string
     {
+        // Without the dev-loop override, or the probe would load the library it names.
+        $env = array_diff_key(getenv(), ['HYPERTABULAR_NATIVE_LIBRARY' => true]);
         $process = proc_open(
             [PHP_BINARY, ...$phpFlags, __DIR__ . '/fixtures/probe.php', $src],
             [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-            $pipes
+            $pipes,
+            null,
+            $env
         );
         self::assertIsResource($process);
         $stdout = stream_get_contents($pipes[1]);

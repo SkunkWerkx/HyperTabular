@@ -74,8 +74,34 @@ pub struct Located {
     pub method: u16,
 }
 
+/// What a compound file is, or `None` for a container that is not one. Excel encrypts a
+/// workbook into an OLE compound file — the container of the legacy formats — and puts
+/// the package in a stream named `EncryptedPackage`; any other compound file is one of
+/// those legacy formats, or something else that is not a workbook this core reads. Asked
+/// before the zip directory is looked for: what is encrypted may hold any bytes, a
+/// directory's signature among them.
+fn compound(container: &[u8]) -> Option<u32> {
+    const MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    // The stream's name as a compound file's directory spells one: UTF-16, little end first.
+    const PACKAGE: [u8; 32] = *b"E\0n\0c\0r\0y\0p\0t\0e\0d\0P\0a\0c\0k\0a\0g\0e\0";
+    if !container.starts_with(&MAGIC) {
+        return None;
+    }
+    let encrypted = container
+        .windows(PACKAGE.len())
+        .any(|window| window == PACKAGE);
+    Some(if encrypted {
+        Failure::ENCRYPTED
+    } else {
+        Failure::NOT_A_WORKBOOK
+    })
+}
+
 /// Finds and checks the central directory: every entry it claims must be there.
 pub fn directory(container: &[u8]) -> Result<Directory, u32> {
+    if let Some(code) = compound(container) {
+        return Err(code);
+    }
     // The record is 22 bytes plus a comment of at most 65 535.
     let tail_start = container.len().saturating_sub(22 + 65_535);
     let end = tail(container, tail_start);

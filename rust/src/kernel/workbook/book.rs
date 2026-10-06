@@ -530,26 +530,100 @@ fn sheets_inner(
 
     if state.phase == PHASE_CONTENT {
         // ODS: every table of the document is a sheet; a table inside a cell is not.
+        //
+        // A sheet is hidden by its style, not by an attribute of its own: the automatic
+        // styles, which come before the body, hold `style:style style:family="table"`
+        // elements, and one whose `style:table-properties` says `table:display="false"`
+        // hides every table that names it. So each table style met before the first table
+        // is a record ahead of the sheets' — its name, and whether it hides — and the
+        // records are sorted by name when the first table arrives, so that a table finds
+        // its style by search and not by a walk. The sheets are listed after them and
+        // moved to the front at the end, as the XLSX listing moves its own.
         loop {
             let token = reader.peek()?;
             match token.kind {
-                Kind::Eof => return Ok(()),
-                Kind::Start => {}
+                Kind::Eof => break,
+                Kind::Start | Kind::Empty => {}
                 _ => {
                     reader.take(&token);
                     continue;
                 }
             }
             let tag = Tag::of(reader.buf(), &token);
-            if !is_table(&tag) {
+            let styles = state.extra as usize;
+            if state.count == 0
+                && token.kind == Kind::Start
+                && tag.local() == b"style"
+                && tag.attr(b"family") == Some(&b"table"[..])
+            {
+                let raw = tag.attr(b"name").unwrap_or_default();
+                if cells.len() < (styles + 1) * 3 {
+                    return Err(Stop::Cells(
+                        ((styles as u64 + 1) * 3).max(cells.len() as u64 * 2),
+                    ));
+                }
+                room(arena.len(), state.used, raw.len() as u64, reader.part)?;
+                let mut scratch = Scratch {
+                    bytes: &mut *arena,
+                    used: state.used as usize,
+                };
+                let run = scratch.push(&[raw])?;
+                let name = Span {
+                    offset: run.0 as u32,
+                    len: run.1 as u32,
+                };
+                set_record(cells, styles, [name, Span::default(), Span::default()]);
+                state.used = scratch.used as u64;
+                state.extra += 1;
                 reader.take(&token);
                 continue;
             }
+            if state.count == 0
+                && styles > 0
+                && tag.local() == b"table-properties"
+                && tag.attr(b"display") == Some(&b"false"[..])
+            {
+                // The properties of the style listed last: the one this element is inside.
+                let [name, part, _] = record(cells, styles - 1);
+                let hides = Span { offset: 1, len: 0 };
+                set_record(cells, styles - 1, [name, part, hides]);
+                reader.take(&token);
+                continue;
+            }
+            if token.kind != Kind::Start || !is_table(&tag) {
+                reader.take(&token);
+                continue;
+            }
+            let hidden = {
+                let arena = &*arena;
+                if state.count == 0 {
+                    heap_sort(
+                        cells,
+                        styles,
+                        |cells, a, b| {
+                            text(arena, record(cells, a)[0]) < text(arena, record(cells, b)[0])
+                        },
+                        |cells, a, b| {
+                            let (left, right) = (record(cells, a), record(cells, b));
+                            set_record(cells, a, right);
+                            set_record(cells, b, left);
+                        },
+                    );
+                }
+                tag.attr(b"style-name").is_some_and(|wanted| {
+                    let at = partition_point(styles, |index| {
+                        text(arena, record(cells, index)[0]) < wanted
+                    });
+                    let [name, _, hides] = record(cells, at);
+                    at < styles && text(arena, name) == wanted && hides.offset != 0
+                })
+            };
             let raw = tag.attr(b"name").unwrap_or_default();
             let count = state.count as usize;
-            if cells.len() < (count + 1) * 3 {
+            let slot = styles + count;
+            if cells.len() < (slot + 1) * 3 {
                 return Err(Stop::Cells(
-                    ((count as u64 + 1) * 3).max(cells.len() as u64 * 2),
+                    ((slot as u64 + 1) * 3).max(cells.len() as u64 * 2),
                 ));
             }
             room(arena.len(), state.used, raw.len() as u64, reader.part)?;
@@ -559,14 +633,20 @@ fn sheets_inner(
                 len: written as u32,
             };
             let index = Span {
-                offset: 0,
+                offset: u32::from(hidden),
                 len: count as u32,
             };
-            set_record(cells, count, [name, Span::default(), index]);
+            set_record(cells, slot, [name, Span::default(), index]);
             state.used += written as u64;
             state.count += 1;
             reader.skip_element(&token);
         }
+        let styles = state.extra as usize;
+        for index in 0..state.count as usize {
+            let sheet = record(cells, styles + index);
+            set_record(cells, index, sheet);
+        }
+        return Ok(());
     }
 
     // XLSX. A sheet names its part by a relationship id, so the relationships come first:

@@ -25,7 +25,14 @@ if importlib.util.find_spec("hypercast") is None:
     # The requirement as pyproject.toml declares it: one place says which HyperCast.
     project = tomllib.loads((PYTHON / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
-         *project["dependencies"]]
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--disable-pip-version-check",
+            *project["dependencies"],
+        ]
     )
     importlib.invalidate_caches()

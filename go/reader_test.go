@@ -39,17 +39,19 @@ func open(t *testing.T, input string, dialect Dialect, plan []Column, opts ...Op
 	return r
 }
 
-func read(t *testing.T, r *DelimitedReader, rows int) {
+func read(t *testing.T, r *DelimitedReader, rows int) *Batch {
 	t.Helper()
-	if n, err := r.Read(); err != nil || n != rows {
-		t.Fatalf("Read returned %d, %v; want %d rows", n, err, rows)
+	b, err := r.Read()
+	if err != nil || b.Rows() != rows {
+		t.Fatalf("Read returned %v, %v; want %d rows", b, err, rows)
 	}
+	return b
 }
 
 func end(t *testing.T, r *DelimitedReader) {
 	t.Helper()
-	if n, err := r.Read(); err != io.EOF || n != 0 {
-		t.Fatalf("Read returned %d, %v; want the end of the input", n, err)
+	if b, err := r.Read(); err != io.EOF || b != nil {
+		t.Fatalf("Read returned %v, %v; want the end of the input", b, err)
 	}
 }
 
@@ -82,25 +84,25 @@ func TestAPlanIsAProjection(t *testing.T) {
 	if header := r.Header(); len(header) != 5 || header[4] != "flag" {
 		t.Fatalf("header %q", header)
 	}
-	read(t, r, 2)
-	if dates := r.DateOnly(0); dates[0] != (hypercast.Date{Year: 2026, Month: time.January, Day: 7}) || dates[1] != (hypercast.Date{}) {
+	b := read(t, r, 2)
+	if dates := b.DateOnly(0); dates[0] != (hypercast.Date{Year: 2026, Month: time.January, Day: 7}) || dates[1] != (hypercast.Date{}) {
 		t.Errorf("dates %v", dates)
 	}
-	if fault := r.Fault(0, 1); fault == nil || fault.Reason != hypercast.OutOfRange {
+	if fault := b.Fault(0, 1); fault == nil || fault.Reason != hypercast.OutOfRange {
 		t.Errorf("2026-02-30: %v", fault)
 	}
-	if text, ids := r.Text(1), r.I32(2); string(text[0]) != "7" || string(text[1]) != "8" || ids[0] != 7 || ids[1] != 8 {
+	if text, ids := b.Text(1), b.I32(2); string(text[0]) != "7" || string(text[1]) != "8" || ids[0] != 7 || ids[1] != 8 {
 		t.Errorf("one source column through two doors: %q, %v", text, ids)
 	}
-	if scores := r.F64(3); scores[0] != 2.5 || scores[1] != 0 || r.Verdicts(3)[1].Reason() != hypercast.Malformed {
-		t.Errorf("scores %v, %v", scores, r.Verdicts(3))
+	if scores := b.F64(3); scores[0] != 2.5 || scores[1] != 0 || b.Verdicts(3)[1].Reason() != hypercast.Malformed {
+		t.Errorf("scores %v, %v", scores, b.Verdicts(3))
 	}
 	// A source column past the record's last cell reads as empty.
-	if missing := r.Text(4); missing[0] != nil || missing[1] != nil || r.Verdicts(4)[0].Reason() != hypercast.Empty {
-		t.Errorf("a column no record has: %q, %v", missing, r.Verdicts(4))
+	if missing := b.Text(4); missing[0] != nil || missing[1] != nil || b.Verdicts(4)[0].Reason() != hypercast.Empty {
+		t.Errorf("a column no record has: %q, %v", missing, b.Verdicts(4))
 	}
-	if string(r.Raw(4, 0)) != "" {
-		t.Errorf("a column no record has: raw %q", r.Raw(4, 0))
+	if string(b.Raw(4, 0)) != "" {
+		t.Errorf("a column no record has: raw %q", b.Raw(4, 0))
 	}
 	if r.Records() != 3 {
 		t.Errorf("Records() = %d, want 3", r.Records())
@@ -116,59 +118,59 @@ func TestEveryDoorSaysWhatHyperCastSays(t *testing.T) {
 	type door struct {
 		column Column
 		direct func(text string) (any, *hypercast.Fault)
-		read   func(r *DelimitedReader) any
+		read   func(b *Batch) any
 		texts  []string
 	}
 	doors := []door{
 		{Bool(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Bool(s); return v, f },
-			func(r *DelimitedReader) any { return r.Bool(0)[0] }, []string{"yes", "OFF", "maybe"}},
+			func(b *Batch) any { return b.Bool(0)[0] }, []string{"yes", "OFF", "maybe"}},
 		{I8(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.I8(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.I8(0)[0] }, []string{"-128", "0xFF", "128"}},
+			func(b *Batch) any { return b.I8(0)[0] }, []string{"-128", "0xFF", "128"}},
 		{I16(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.I16(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.I16(0)[0] }, []string{"(1234)", "40000"}},
+			func(b *Batch) any { return b.I16(0)[0] }, []string{"(1234)", "40000"}},
 		{I32(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.I32(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.I32(0)[0] }, []string{"1e3", "  12x4"}},
+			func(b *Batch) any { return b.I32(0)[0] }, []string{"1e3", "  12x4"}},
 		{I64(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.I64(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.I64(0)[0] }, []string{"-9223372036854775808", "9223372036854775808"}},
+			func(b *Batch) any { return b.I64(0)[0] }, []string{"-9223372036854775808", "9223372036854775808"}},
 		{U8(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.U8(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.U8(0)[0] }, []string{"255", "256", "-1"}},
+			func(b *Batch) any { return b.U8(0)[0] }, []string{"255", "256", "-1"}},
 		{U16(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.U16(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.U16(0)[0] }, []string{"0xFFFF", "65536"}},
+			func(b *Batch) any { return b.U16(0)[0] }, []string{"0xFFFF", "65536"}},
 		{U32(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.U32(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.U32(0)[0] }, []string{"4294967295", "4294967296"}},
+			func(b *Batch) any { return b.U32(0)[0] }, []string{"4294967295", "4294967296"}},
 		{U64(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.U64(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.U64(0)[0] }, []string{"18446744073709551615", "1.5"}},
+			func(b *Batch) any { return b.U64(0)[0] }, []string{"18446744073709551615", "1.5"}},
 		{F32(0, hypercast.Invariant), func(s string) (any, *hypercast.Fault) { v, f := hypercast.F32(s, hypercast.Invariant); return v, f },
-			func(r *DelimitedReader) any { return r.F32(0)[0] }, []string{"1.5e3", "1e40", "NaN"}},
+			func(b *Batch) any { return b.F32(0)[0] }, []string{"1.5e3", "1e40", "NaN"}},
 		{F64(0, euro), func(s string) (any, *hypercast.Fault) { v, f := hypercast.F64(s, euro); return v, f },
-			func(r *DelimitedReader) any { return r.F64(0)[0] }, []string{"€ 1.234,50", "50%", "1,2,3"}},
+			func(b *Batch) any { return b.F64(0)[0] }, []string{"€ 1.234,50", "50%", "1,2,3"}},
 		{Exact(0, euro), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Exact(s, euro); return v, f },
-			func(r *DelimitedReader) any { return r.Exact(0)[0] }, []string{"(1.234,50 €)", "-0,025", "1e40"}},
+			func(b *Batch) any { return b.Exact(0)[0] }, []string{"(1.234,50 €)", "-0,025", "1e40"}},
 		{Uuid(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Uuid(s); return v, f },
-			func(r *DelimitedReader) any { return r.Uuid(0)[0] }, []string{"urn:uuid:01020304-0506-0708-090a-0b0c0d0e0f10", "0102"}},
+			func(b *Batch) any { return b.Uuid(0)[0] }, []string{"urn:uuid:01020304-0506-0708-090a-0b0c0d0e0f10", "0102"}},
 		{Timestamp(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Timestamp(s); return v, f },
-			func(r *DelimitedReader) any { return r.Timestamp(0)[0] }, []string{"2026-01-02T15:04:05.123456789+05:00", "2026-01-02 15:04:05"}},
+			func(b *Batch) any { return b.Timestamp(0)[0] }, []string{"2026-01-02T15:04:05.123456789+05:00", "2026-01-02 15:04:05"}},
 		{Unix(0, hypercast.Milliseconds), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Unix(s, hypercast.Milliseconds); return v, f },
-			func(r *DelimitedReader) any { return r.Timestamp(0)[0] }, []string{"1700000000123", "-1", "soon"}},
+			func(b *Batch) any { return b.Timestamp(0)[0] }, []string{"1700000000123", "-1", "soon"}},
 		{ExcelSerial(0, hypercast.Excel1900), func(s string) (any, *hypercast.Fault) {
 			v, f := hypercast.ExcelSerial(s, hypercast.Excel1900)
 			return v, f
 		},
-			func(r *DelimitedReader) any { return r.Timestamp(0)[0] }, []string{"45292.75", "60"}},
+			func(b *Batch) any { return b.Timestamp(0)[0] }, []string{"45292.75", "60"}},
 		{DateOnly(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.DateOnly(s); return v, f },
-			func(r *DelimitedReader) any { return r.DateOnly(0)[0] }, []string{"2026-01-07", "1/7/2026"}},
+			func(b *Batch) any { return b.DateOnly(0)[0] }, []string{"2026-01-07", "1/7/2026"}},
 		{DateOnlyOrdered(0, hypercast.DayMonthYear), func(s string) (any, *hypercast.Fault) {
 			v, f := hypercast.DateOnlyOrdered(s, hypercast.DayMonthYear)
 			return v, f
-		}, func(r *DelimitedReader) any { return r.DateOnly(0)[0] }, []string{"1/7/2026", "31.12.1999", "13/13/2026"}},
+		}, func(b *Batch) any { return b.DateOnly(0)[0] }, []string{"1/7/2026", "31.12.1999", "13/13/2026"}},
 		{DateTime(0, hypercast.MonthDayYear), func(s string) (any, *hypercast.Fault) {
 			v, f := hypercast.DateTime(s, hypercast.MonthDayYear)
 			return v, f
-		}, func(r *DelimitedReader) any { return r.DateTime(0)[0] }, []string{"1/7/2026 3:04 PM", "1/7/2026 25:00"}},
+		}, func(b *Batch) any { return b.DateTime(0)[0] }, []string{"1/7/2026 3:04 PM", "1/7/2026 25:00"}},
 		{TimeOfDay(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.TimeOfDay(s); return v, f },
-			func(r *DelimitedReader) any { return r.TimeOfDay(0)[0] }, []string{"15:04:05.123456789", "24:00:01"}},
+			func(b *Batch) any { return b.TimeOfDay(0)[0] }, []string{"15:04:05.123456789", "24:00:01"}},
 		{Span(0), func(s string) (any, *hypercast.Fault) { v, f := hypercast.Span(s); return v, f },
-			func(r *DelimitedReader) any { return r.Span(0)[0] }, []string{"PT1H30M15.5S", "-1.5s", "a while"}},
+			func(b *Batch) any { return b.Span(0)[0] }, []string{"PT1H30M15.5S", "-1.5s", "a while"}},
 	}
 	if len(doors) != 21 {
 		t.Fatalf("%d doors here; every door but Text has a HyperCast door to agree with, and that is 21", len(doors))
@@ -177,16 +179,16 @@ func TestEveryDoorSaysWhatHyperCastSays(t *testing.T) {
 	for _, door := range doors {
 		for _, text := range door.texts {
 			r := open(t, text, dialect, []Column{door.column})
-			read(t, r, 1)
+			b := read(t, r, 1)
 			value, fault := door.direct(text)
-			if got := door.read(r); got != value {
+			if got := door.read(b); got != value {
 				t.Errorf("%v %q: %v, HyperCast says %v", door.column.Door(), text, got, value)
 			}
-			switch got := r.Fault(0, 0); {
+			switch got := b.Fault(0, 0); {
 			case fault == nil && got != nil, fault != nil && (got == nil || *got != *fault):
 				t.Errorf("%v %q: fault %v, HyperCast says %v", door.column.Door(), text, got, fault)
 			}
-			if raw := string(r.Raw(0, 0)); raw != text {
+			if raw := string(b.Raw(0, 0)); raw != text {
 				t.Errorf("%v %q: raw text %q", door.column.Door(), text, raw)
 			}
 		}
@@ -208,8 +210,8 @@ func TestTextIsNotCopied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read(t, r, 1)
-	plain, quoted, escaped, empty := r.Text(0)[0], r.Text(1)[0], r.Text(2)[0], r.Text(3)[0]
+	b := read(t, r, 1)
+	plain, quoted, escaped, empty := b.Text(0)[0], b.Text(1)[0], b.Text(2)[0], b.Text(3)[0]
 	if string(plain) != "plain" || !within(plain, input) {
 		t.Errorf("a plain cell: %q, a slice of the input: %v", plain, within(plain, input))
 	}
@@ -220,15 +222,15 @@ func TestTextIsNotCopied(t *testing.T) {
 	if string(escaped) != `an "escaped" one` || within(escaped, input) {
 		t.Errorf("an escaped cell: %q, a slice of the input: %v", escaped, within(escaped, input))
 	}
-	if empty != nil || r.Verdicts(3)[0].Reason() != hypercast.Empty {
-		t.Errorf("an empty cell: %q, %v", empty, r.Verdicts(3)[0])
+	if empty != nil || b.Verdicts(3)[0].Reason() != hypercast.Empty {
+		t.Errorf("an empty cell: %q, %v", empty, b.Verdicts(3)[0])
 	}
 	// A cell's capacity stops at its own end: appending to one cannot write into the input.
 	if cap(plain) != len(plain) {
 		t.Errorf("a cell's capacity is %d, its length %d", cap(plain), len(plain))
 	}
 	// The same slices again for the same batch, not a second conversion.
-	if again := r.Text(0); unsafe.SliceData(again) != unsafe.SliceData(r.Text(0)) || unsafe.SliceData(again[0]) != unsafe.SliceData(plain) {
+	if again := b.Text(0); unsafe.SliceData(again) != unsafe.SliceData(b.Text(0)) || unsafe.SliceData(again[0]) != unsafe.SliceData(plain) {
 		t.Error("a second call for the same batch handed out different slices")
 	}
 }
@@ -239,19 +241,19 @@ func TestRawIsTheTextACellWasCastFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read(t, r, 3)
+	b := read(t, r, 3)
 	// A cell that did not cast: its text, in place, and the span the fault indexes it by.
-	raw, fault := r.Raw(0, 0), r.Fault(0, 0)
+	raw, fault := b.Raw(0, 0), b.Fault(0, 0)
 	if string(raw) != "12x4" || !within(raw, input) || fault == nil || string(raw[fault.Offset:fault.Offset+fault.Length]) != "x" {
 		t.Errorf("raw %q, fault %v", raw, fault)
 	}
 	// A cell with an escaped quote in it: unescaped, as the core cast it.
-	if raw := r.Raw(0, 1); string(raw) != `1,"2"` || within(raw, input) {
+	if raw := b.Raw(0, 1); string(raw) != `1,"2"` || within(raw, input) {
 		t.Errorf("raw %q", raw)
 	}
 	// A cell that cast: untrimmed.
-	if raw := r.Raw(0, 2); string(raw) != "  7 " || r.I32(0)[2] != 7 {
-		t.Errorf("raw %q, value %d", raw, r.I32(0)[2])
+	if raw := b.Raw(0, 2); string(raw) != "  7 " || b.I32(0)[2] != 7 {
+		t.Errorf("raw %q, value %d", raw, b.I32(0)[2])
 	}
 	for _, row := range []int{-1, 3} {
 		func() {
@@ -260,19 +262,19 @@ func TestRawIsTheTextACellWasCastFrom(t *testing.T) {
 					t.Errorf("Raw(0, %d) did not panic", row)
 				}
 			}()
-			r.Raw(0, row)
+			b.Raw(0, row)
 		}()
 	}
 }
 
 func TestAskingAColumnForAnotherDoorsTypePanics(t *testing.T) {
 	r := open(t, "1\n", Dialect{Separator: ','}, []Column{I32(0, hypercast.Invariant), Unix(0, hypercast.Seconds)})
-	read(t, r, 1)
+	b := read(t, r, 1)
 	for name, call := range map[string]func(){
-		"I64 on an I32 column":      func() { r.I64(0) },
-		"Text on an I32 column":     func() { r.Text(0) },
-		"DateOnly on a Unix column": func() { r.DateOnly(1) },
-		"a column the plan lacks":   func() { r.I32(2) },
+		"I64 on an I32 column":      func() { b.I64(0) },
+		"Text on an I32 column":     func() { b.Text(0) },
+		"DateOnly on a Unix column": func() { b.DateOnly(1) },
+		"a column the plan lacks":   func() { b.I32(2) },
 	} {
 		func() {
 			defer func() {
@@ -284,7 +286,7 @@ func TestAskingAColumnForAnotherDoorsTypePanics(t *testing.T) {
 		}()
 	}
 	// The three instant doors share an accessor.
-	if instants := r.Timestamp(1); !instants[0].Equal(time.Unix(1, 0)) {
+	if instants := b.Timestamp(1); !instants[0].Equal(time.Unix(1, 0)) {
 		t.Errorf("Timestamp on a Unix column: %v", instants)
 	}
 }
@@ -350,8 +352,8 @@ func TestAStructuralFailureComesAfterTheIntactRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read(t, r, 2)
-	if ids := r.I32(0); ids[0] != 1 || ids[1] != 3 {
+	b := read(t, r, 2)
+	if ids := b.I32(0); ids[0] != 1 || ids[1] != 3 {
 		t.Errorf("the rows before the break: %v", ids)
 	}
 	_, err = r.Read()
@@ -365,8 +367,8 @@ func TestAStructuralFailureComesAfterTheIntactRows(t *testing.T) {
 	if got, want := failure.Error(), "hypertabular: record 3 (line 4, byte 12) has 1 cells; the first record had 2"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
-	if r.Rows() != 0 || len(r.I32(0)) != 0 {
-		t.Errorf("%d rows in hand beside the failure", r.Rows())
+	if b.Rows() != 0 || len(b.I32(0)) != 0 {
+		t.Errorf("%d rows in hand beside the failure", b.Rows())
 	}
 	// Final: the same failure, and never the rows behind it.
 	if _, again := r.Read(); again != err {
@@ -398,7 +400,7 @@ func TestARecordPastTheRowCeilingIsAFailure(t *testing.T) {
 		}
 		seen := 0
 		for {
-			rows, err := r.Read()
+			b, err := r.Read()
 			if err != nil {
 				var failure *Failure
 				if !errors.As(err, &failure) || *failure != want {
@@ -411,7 +413,7 @@ func TestARecordPastTheRowCeilingIsAFailure(t *testing.T) {
 				}
 				break
 			}
-			seen += rows
+			seen += b.Rows()
 		}
 		if seen != 2 {
 			t.Errorf("%s: %d rows before the failure, want 2", name, seen)
@@ -472,14 +474,14 @@ func TestOpenDelimitedOwnsItsFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read(t, r, 2)
-	names := r.Text(1)
+	b := read(t, r, 2)
+	names := b.Text(1)
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
 	// Closed: no batch in hand, no more reads, and closing again is nothing.
-	if r.Rows() != 0 || len(r.I32(0)) != 0 {
-		t.Errorf("%d rows in hand after Close", r.Rows())
+	if b.Rows() != 0 || len(b.I32(0)) != 0 {
+		t.Errorf("%d rows in hand after Close", b.Rows())
 	}
 	if _, err := r.Read(); !errors.Is(err, os.ErrClosed) {
 		t.Errorf("Read after Close returned %v", err)
@@ -528,8 +530,8 @@ func TestAReaderDoesNotCloseASourceItWasHanded(t *testing.T) {
 
 func TestAnEmptyPlanCountsRows(t *testing.T) {
 	r := open(t, "a,b\n1,2\n\n3,4\n5,6\n", CSV, nil, BatchRows(2))
-	if r.Columns() != 0 {
-		t.Fatalf("%d columns", r.Columns())
+	if len(r.Plan()) != 0 {
+		t.Fatalf("%d columns", len(r.Plan()))
 	}
 	read(t, r, 2)
 	read(t, r, 1)
@@ -564,7 +566,7 @@ func TestAPlanWiderThanTheShimsStackTable(t *testing.T) {
 	}
 	seen := 0
 	for {
-		n, err := r.Read()
+		b, err := r.Read()
 		if err == io.EOF {
 			break
 		}
@@ -572,15 +574,15 @@ func TestAPlanWiderThanTheShimsStackTable(t *testing.T) {
 			t.Fatal(err)
 		}
 		for column := 0; column < width; column++ {
-			values, texts := r.I64(2*column), r.Text(2*column+1)
-			for row := 0; row < n; row++ {
+			values, texts := b.I64(2*column), b.Text(2*column+1)
+			for row := 0; row < b.Rows(); row++ {
 				want := int64((seen+row)*1000 + column)
-				if values[row] != want || string(texts[row]) != fmt.Sprint(want) || !r.Verdicts(2 * column)[row].OK() {
+				if values[row] != want || string(texts[row]) != fmt.Sprint(want) || !b.Verdicts(2 * column)[row].OK() {
 					t.Fatalf("row %d, column %d: %d and %q, want %d", seen+row, column, values[row], texts[row], want)
 				}
 			}
 		}
-		seen += n
+		seen += b.Rows()
 		runtime.GC()
 	}
 	if seen != rows {
@@ -627,16 +629,16 @@ func TestAnEscapedCellLargerThanTheArena(t *testing.T) {
 		r := open(t, input, Dialect{Separator: ',', Quoting: true}, []Column{Text(0), Text(1)}, BatchRows(batchRows))
 		var first, second [][]string
 		for {
-			n, err := r.Read()
+			b, err := r.Read()
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			for row := 0; row < n; row++ {
-				first = append(first, []string{string(r.Text(0)[row]), string(r.Raw(0, row))})
-				second = append(second, []string{string(r.Text(1)[row]), string(r.Raw(1, row))})
+			for row := 0; row < b.Rows(); row++ {
+				first = append(first, []string{string(b.Text(0)[row]), string(b.Raw(0, row))})
+				second = append(second, []string{string(b.Text(1)[row]), string(b.Raw(1, row))})
 			}
 		}
 		if len(first) != 2 || first[0][0] != "small" || first[1][0] != `a"b` || first[1][1] != `a"b` {
@@ -688,22 +690,22 @@ func TestReadingWhileTheCollectorRuns(t *testing.T) {
 		}
 		seen := 0
 		for {
-			n, err := r.Read()
+			b, err := r.Read()
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			ids, names, instants, amounts := r.I32(0), r.Text(1), r.Timestamp(2), r.Exact(3)
-			for row := 0; row < n; row++ {
+			ids, names, instants, amounts := b.I32(0), b.Text(1), b.Timestamp(2), b.Exact(3)
+			for row := 0; row < b.Rows(); row++ {
 				id := seen + row
 				if int(ids[row]) != id || string(names[row]) != fmt.Sprintf(`name "%d"`, id) ||
 					instants[row].Nanosecond() != id || amounts[row].String() != fmt.Sprintf("%d.25", id) {
 					t.Fatalf("row %d: %d, %q, %v, %v", id, ids[row], names[row], instants[row], amounts[row])
 				}
 			}
-			seen += n
+			seen += b.Rows()
 		}
 		if seen != rows {
 			t.Errorf("%d rows, want %d", seen, rows)
@@ -713,11 +715,37 @@ func TestReadingWhileTheCollectorRuns(t *testing.T) {
 	<-done
 }
 
+// The core ends a batch early when its arena fills; the batch after one that did starts with
+// the arena doubled, so twenty thousand escaped rows are a handful of batches, not thousands.
+func TestAnArenaThatCrampsABatchIsGrown(t *testing.T) {
+	row := `"` + strings.Repeat(`say ""hi"" `, 8) + `"` + "\n"
+	want := strings.Repeat(`say "hi" `, 8)
+	r := open(t, strings.Repeat(row, 20000), Dialect{Separator: ',', Quoting: true}, []Column{Text(0)})
+	batches, rows := 0, 0
+	for {
+		b, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		batches++
+		rows += b.Rows()
+		if last, _ := Get[string](b, 0, b.Rows()-1); last != want {
+			t.Fatalf("batch %d: %q", batches, last)
+		}
+	}
+	if rows != 20000 || batches >= 15 {
+		t.Errorf("%d rows in %d batches", rows, batches)
+	}
+}
+
 func TestTheNamesOfThings(t *testing.T) {
 	if got := fmt.Sprint(DoorI32, DoorDateOnlyOrdered, DoorText, Door(0), Door(23)); got != "I32 DateOnlyOrdered Text Door(0) Door(23)" {
 		t.Errorf("doors: %s", got)
 	}
-	if got := fmt.Sprint(UnclosedQuote, ColumnCount, RowTooLong, FailureKind(0)); got != "unclosed quote column count row too long FailureKind(0)" {
+	if got := fmt.Sprint(UnclosedQuote, ColumnCount, RowTooLong, NotAZip, SharedString, FailureKind(0)); got != "unclosed quote column count row too long not a zip shared string FailureKind(0)" {
 		t.Errorf("failure kinds: %s", got)
 	}
 	column := F64(3, hypercast.Detect)

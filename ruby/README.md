@@ -1,8 +1,8 @@
 # hypertabular
 
-Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
-typed columns, with a [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for
-every cell.
+Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and ODS —
+read a batch at a time into typed columns, with a
+[HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell.
 
 ```ruby
 require "hypertabular"
@@ -16,49 +16,63 @@ plan = [
 HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV, plan) do |reader|
   reader.header                       # => ["id", "name", "score"]
 
-  while reader.read
+  while (batch = reader.read)
     # A column at a time, decoded in one pass — nil where a cell did not cast…
-    ids = reader.values(0)
+    ids = batch.values(0)
 
     # …or a cell at a time, as HyperCast's union.
-    reader.rows.times do |row|
-      case reader.verdict(2, row)
+    batch.rows.times do |row|
+      case batch.get(2, row)
       in HyperCast::Success(value:)
-        puts "#{reader.values(1)[row]}: #{value}"
+        puts "#{batch.values(1)[row]}: #{value}"
       in HyperCast::Fault(reason:, offset:, length:)
-        warn "row #{row}: #{reason} in #{reader.raw(2, row).inspect}"
+        warn "line #{batch.line(row)}: #{reason} in #{batch.raw(2, row).inspect}"
       end
     end
   end
 end
+
+# A workbook reads into the same batch.
+book = HyperTabular::Workbook.open("orders.xlsx")
+book.sheets                           # => [#<data HyperTabular::SheetInfo name="Orders", hidden=false>]
+sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT, plan)
+while (batch = sheet.read)
+  # …
+end
 ```
 
 `reader.each_row` walks every remaining row as an Array of verdicts, for when a row at a
-time is what the caller wants.
+time is what the caller wants; `sheet.each_batch` walks a sheet's batches.
 
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
-allocates the buffers — one value array and one verdict array per column, the table that
-locates each cell — once, and reuses them for every batch. The core fills them in one
+and `Sheet` allocate the buffers — one value array and one verdict array per column, the
+table that locates each cell — once, and reuse them for every batch. The core fills them in one
 native call per batch, and a column comes out of its buffer in one `String#unpack`: the
 boundary is crossed once per few thousand rows, not once per cell.
 
+- **One batch class.** `read` returns a `HyperTabular::Batch` — `rows`, `columns`,
+  `line(row)`, `values(column)`, `verdicts(column)`, `get(column, row)` and `raw(column,
+  row)` — or `nil` once there are no more rows, for delimited text and a sheet alike. A
+  batch owns what it shows: it stays good after the reader has moved on.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  the plan states each column's door and, for numbers, its `HyperCast::NumFormat`.
+  `SheetOptions` states a sheet's header and whether empty rows are skipped; the plan
+  states each column's door and, for numbers, its `HyperCast::NumFormat`.
 - **HyperCast is the judge.** `HyperCast::Success`, `HyperCast::Fault`,
   `HyperCast::NumFormat`, `HyperCast::Decimal` and the declared options (`:milliseconds`,
-  `:day_month_year`, `:y1904`) are the `hypercast` gem's own. A cell means exactly what
-  HyperCast's door would say of the same text, and comes back as the Ruby type that gem
-  returns for it.
+  `:day_month_year`, `:y1904`) are the `hypercast` gem's own. A text cell means exactly
+  what HyperCast's door would say of the same text, a typed workbook cell is converted by
+  the door directly, and either comes back as the Ruby type that gem returns for it.
 - **A bad value is a verdict; a broken file is an exception.** A cell that does not cast
-  is a `Fault` in its column and the read goes on. A record of the wrong width, or input
-  that ends inside a quoted cell, is a `HyperTabular::TabularError` carrying `kind`,
-  `record`, `line`, `byte`, `expected` and `found`, raised after every intact row before
-  it.
-- **The text of any cell is to hand.** `reader.raw(column, row)` is what the cell was cast
-  from, whatever its door and verdict, and a `Fault`'s span indexes it:
-  `raw[fault.offset, fault.length]` is the offending text.
+  is a `Fault` in its column and the read goes on. A record of the wrong width, input that
+  ends inside a quoted cell, a workbook whose container or parts cannot be read, is a
+  `HyperTabular::TabularError` carrying `kind`, `record`, `line`, `byte`, `expected` and
+  `found`, raised after every intact row before it.
+- **The text of any cell is to hand.** `batch.raw(column, row)` is what the cell was cast
+  from, whatever its door and verdict, and a `Fault`'s span indexes it in the units
+  `String#[]` slices by, as HyperCast's gem does: `raw[fault.offset, fault.length]` is the
+  offending text.
 - **A String is read in place.** An IO is read forward only, through a buffer that grows
   when a record does not fit it.
 
@@ -96,6 +110,6 @@ answer whether the native library resolved, without the first read being what fi
 ```sh
 cd rust && cargo cdylib                 # builds rust/target/release/libhypertabular.*
 cd ../ruby && bundle install
-HYPERTABULAR_PURE=1 bundle exec rspec   # replays corpus/delimited.json, among the rest
+HYPERTABULAR_PURE=1 bundle exec rspec   # replays corpus/delimited.json and workbook.json
 bundle exec rake docs:check
 ```

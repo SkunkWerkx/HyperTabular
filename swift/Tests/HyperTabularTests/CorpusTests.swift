@@ -12,19 +12,19 @@ final class CorpusTests: XCTestCase {
     /// `nil` only under WASI, where the test module runs sandboxed with no view of the
     /// source tree; the corpus is skipped there, and the reader is exercised by
     /// `ReaderTests` and by swift/StaticSmokeTest instead.
-    private static let corpusDirectory: URL? = {
+    static let corpusDirectory: URL? = {
         #if os(WASI)
-        return nil
+            return nil
         #else
-        var dir = URL(fileURLWithPath: #filePath)
-        while dir.path != "/" {
-            let candidate = dir.appendingPathComponent("corpus")
-            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("delimited.json").path) {
-                return candidate
+            var dir = URL(fileURLWithPath: #filePath)
+            while dir.path != "/" {
+                let candidate = dir.appendingPathComponent("corpus")
+                if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("delimited.json").path) {
+                    return candidate
+                }
+                dir.deleteLastPathComponent()
             }
-            dir.deleteLastPathComponent()
-        }
-        fatalError("corpus directory not found above \(#filePath)")
+            fatalError("corpus directory not found above \(#filePath)")
         #endif
     }()
 
@@ -33,7 +33,7 @@ final class CorpusTests: XCTestCase {
     // Decoded with JSONDecoder, not JSONSerialization: on Linux the latter drops a U+FEFF
     // that begins a string, which would quietly turn every byte-order-mark case into one
     // without a mark — and the positions a failure reports into the wrong ones.
-    private struct Case: Decodable {
+    struct Case: Decodable {
         let name: String
         let input: String
         let dialect: Declared
@@ -43,14 +43,14 @@ final class CorpusTests: XCTestCase {
         let failure: Failure?
     }
 
-    private struct Declared: Decodable {
+    struct Declared: Decodable {
         let separator: String
         let quoting: Bool
         let has_header: Bool
         let skip_blank_lines: Bool
     }
 
-    private struct Entry: Decodable {
+    struct Entry: Decodable {
         let door: String
         let ordinal: Int
         let precision: UInt32?
@@ -59,14 +59,14 @@ final class CorpusTests: XCTestCase {
         let format: Notation?
     }
 
-    private struct Notation: Decodable {
+    struct Notation: Decodable {
         let decimal_sep: String
         let group_sep: String
         let flags: UInt32
         let currency: String?
     }
 
-    private struct Failure: Decodable {
+    struct Failure: Decodable {
         let kind: String
         let record: Int64
         let line: Int
@@ -76,7 +76,7 @@ final class CorpusTests: XCTestCase {
     }
 
     /// A cell in HyperCast's corpus shape: the verdict, then whichever fields its door has.
-    private struct Cell: Decodable {
+    struct Cell: Decodable {
         let expect: String
         let fault: [Int]?
         let raw: String?
@@ -95,7 +95,7 @@ final class CorpusTests: XCTestCase {
 
     /// `value` is a boolean, an integer anywhere from i64's minimum to u64's maximum, a
     /// real, or a string, as the door has it.
-    private enum Value: Decodable {
+    enum Value: Decodable {
         case bool(Bool)
         case signed(Int64)
         case unsigned(UInt64)
@@ -150,7 +150,7 @@ final class CorpusTests: XCTestCase {
         }
     }
 
-    private func corpus() throws -> [Case] {
+    func corpus() throws -> [Case] {
         guard let directory = Self.corpusDirectory else {
             throw XCTSkip("the conformance corpus is not reachable from a WASI sandbox")
         }
@@ -160,7 +160,7 @@ final class CorpusTests: XCTestCase {
 
     // MARK: - the case, as this binding's types
 
-    private func dialect(of vector: Case) -> Dialect {
+    func dialect(of vector: Case) -> Dialect {
         Dialect(
             separator: vector.dialect.separator.unicodeScalars.first!,
             quoting: vector.dialect.quoting,
@@ -168,7 +168,7 @@ final class CorpusTests: XCTestCase {
             skipBlankLines: vector.dialect.skip_blank_lines)
     }
 
-    private func format(of entry: Entry) -> NumFormat {
+    func format(of entry: Entry) -> NumFormat {
         guard let format = entry.format else { return .invariant }
         return NumFormat(
             decimalSeparator: format.decimal_sep.unicodeScalars.first!,
@@ -177,7 +177,7 @@ final class CorpusTests: XCTestCase {
             currencySymbol: format.currency ?? "")
     }
 
-    private func column(of entry: Entry) -> Column {
+    func column(of entry: Entry) -> Column {
         let ordinal = entry.ordinal
         let format = format(of: entry)
         switch entry.door {
@@ -210,40 +210,38 @@ final class CorpusTests: XCTestCase {
     // MARK: - one cell
 
     /// A typed cell with its type set aside, so that one comparison serves every door.
-    private func erased<T: Hashable>(_ verdict: Verdict<T>) -> Verdict<AnyHashable> {
+    func erased<T: Hashable>(_ verdict: Verdict<T>) -> Verdict<AnyHashable> {
         switch verdict {
         case .success(let value): .success(AnyHashable(value))
         case .fault(let fault): .fault(fault)
         }
     }
 
-    /// The cell through its door's own accessor; `nil` for text, which has none.
-    private func typed(_ reader: DelimitedReader, _ column: Int, _ row: Int) -> Verdict<AnyHashable>? {
-        switch reader.columns[column].door {
-        case .bool: erased(reader.bool(column, row: row))
-        case .i8: erased(reader.i8(column, row: row))
-        case .i16: erased(reader.i16(column, row: row))
-        case .i32: erased(reader.i32(column, row: row))
-        case .i64: erased(reader.i64(column, row: row))
-        case .u8: erased(reader.u8(column, row: row))
-        case .u16: erased(reader.u16(column, row: row))
-        case .u32: erased(reader.u32(column, row: row))
-        case .u64: erased(reader.u64(column, row: row))
-        case .f32: erased(reader.f32(column, row: row))
-        case .f64: erased(reader.f64(column, row: row))
-        case .decimal: erased(reader.decimal(column, row: row))
-        case .uuid: erased(reader.uuid(column, row: row))
-        case .timestamp, .unix, .excelSerial: erased(reader.timestamp(column, row: row))
-        case .date, .dateOrdered: erased(reader.date(column, row: row))
-        case .dateTime: erased(reader.dateTime(column, row: row))
-        case .time: erased(reader.time(column, row: row))
-        case .duration: erased(reader.duration(column, row: row))
-        case .text: nil
+    /// The cell through ``Batch/get(_:row:as:)``, as the type its door presents.
+    func typed(_ batch: Batch, _ column: Int, _ row: Int) -> Verdict<AnyHashable> {
+        switch batch.columns[column].door {
+        case .bool: erased(batch.get(column, row: row, as: Bool.self))
+        case .i8: erased(batch.get(column, row: row, as: Int8.self))
+        case .i16: erased(batch.get(column, row: row, as: Int16.self))
+        case .i32: erased(batch.get(column, row: row, as: Int32.self))
+        case .i64: erased(batch.get(column, row: row, as: Int64.self))
+        case .u8: erased(batch.get(column, row: row, as: UInt8.self))
+        case .u16: erased(batch.get(column, row: row, as: UInt16.self))
+        case .u32: erased(batch.get(column, row: row, as: UInt32.self))
+        case .u64: erased(batch.get(column, row: row, as: UInt64.self))
+        case .f32: erased(batch.get(column, row: row, as: Float.self))
+        case .f64: erased(batch.get(column, row: row, as: Double.self))
+        case .decimal: erased(batch.get(column, row: row, as: Decimal.self))
+        case .uuid: erased(batch.get(column, row: row, as: UUID.self))
+        case .timestamp, .unix, .excelSerial: erased(batch.get(column, row: row, as: Date.self))
+        case .date, .dateOrdered, .dateTime, .time: erased(batch.get(column, row: row, as: DateComponents.self))
+        case .duration: erased(batch.get(column, row: row, as: Duration.self))
+        case .text: erased(batch.get(column, row: row, as: String.self))
         }
     }
 
     /// The value the corpus states for an `ok` cell, as the Swift type the door presents.
-    private func expectedValue(_ door: Door, _ cell: Cell) -> AnyHashable {
+    func expectedValue(_ door: Door, _ cell: Cell) -> AnyHashable {
         func instant() -> Date {
             Date(timeIntervalSince1970: Double(cell.seconds!) + Double(cell.nanos!) / 1_000_000_000)
         }
@@ -301,12 +299,12 @@ final class CorpusTests: XCTestCase {
     }
 
     /// Holds one cell of the batch in hand to what the corpus says of it.
-    private func assertCell(
-        _ label: String, _ reader: DelimitedReader, _ column: Int, _ row: Int, _ expected: Cell
+    func assertCell(
+        _ label: String, _ batch: Batch, _ column: Int, _ row: Int, _ expected: Cell
     ) {
-        let verdict = reader.verdict(column, row: row)
-        XCTAssertEqual(reader.verdicts(column)[row], verdict, label)
-        let door = reader.columns[column].door
+        let verdict = batch.verdict(column, row: row)
+        XCTAssertEqual(batch.verdicts(column)[row], verdict, label)
+        let door = batch.columns[column].door
 
         guard expected.expect == "ok" else {
             let reason: CastFailure? =
@@ -324,14 +322,13 @@ final class CorpusTests: XCTestCase {
                 XCTAssertEqual(verdict.length, span[1], "\(label): fault length")
                 // The cell's own text is still to hand, for the diagnostic a fault deserves.
                 XCTAssertEqual(
-                    String(decoding: reader.raw(column, row: row), as: UTF8.self), expected.raw,
+                    String(decoding: batch.raw(column, row: row), as: UTF8.self), expected.raw,
                     "\(label): raw text")
             }
-            if let typed = typed(reader, column, row) {
-                XCTAssertEqual(typed, verdict.fault.map { .fault($0) }, label)
-            } else {
-                XCTAssertNil(reader.text(column, row: row), label)
-                XCTAssertNil(reader.string(column, row: row), label)
+            XCTAssertEqual(typed(batch, column, row), verdict.fault.map { .fault($0) }, label)
+            if door == .text {
+                XCTAssertNil(batch.text(column, row: row), label)
+                XCTAssertNil(batch.string(column, row: row), label)
             }
             return
         }
@@ -339,29 +336,36 @@ final class CorpusTests: XCTestCase {
         XCTAssertTrue(verdict.isOk, label)
         XCTAssertNil(verdict.reason, label)
         XCTAssertNil(verdict.fault, label)
-        if let typed = typed(reader, column, row) {
-            XCTAssertEqual(typed, .success(expectedValue(door, expected)), label)
-        } else {
+        XCTAssertEqual(typed(batch, column, row), .success(expectedValue(door, expected)), label)
+        if door == .text {
             let text = expected.text!
-            XCTAssertEqual(reader.text(column, row: row).map { Array($0) }, Array(text.utf8), label)
-            XCTAssertEqual(reader.string(column, row: row), text, label)
+            XCTAssertEqual(batch.text(column, row: row).map { Array($0) }, Array(text.utf8), label)
+            XCTAssertEqual(batch.string(column, row: row), text, label)
             // Text is the bytes as they are, so the cell's raw text is the same bytes.
-            XCTAssertEqual(String(decoding: reader.raw(column, row: row), as: UTF8.self), text, "\(label): raw text")
+            XCTAssertEqual(String(decoding: batch.raw(column, row: row), as: UTF8.self), text, "\(label): raw text")
         }
     }
 
     // MARK: - one case, one way
 
-    private func expectedFailure(_ vector: Case) -> TabularError? {
-        vector.failure.map { failure in
+    /// The corpus names a failure as the core does, in snake case.
+    static let failureKinds: [String: TabularFailure] = [
+        "unclosed_quote": .unclosedQuote, "column_count": .columnCount, "row_too_long": .rowTooLong,
+        "not_a_zip": .notAZip, "container": .container, "encrypted": .encrypted, "method": .method,
+        "missing_part": .missingPart, "xml": .xml, "deflate": .deflate, "not_a_workbook": .notAWorkbook,
+        "shared_string": .sharedString, "too_large": .tooLarge,
+    ]
+
+    func expectedFailure(_ failure: Failure?) -> TabularError? {
+        failure.map { failure in
             TabularError(
-                kind: failure.kind == "column_count" ? .columnCount : .unclosedQuote,
+                kind: Self.failureKinds[failure.kind]!,
                 record: failure.record, line: failure.line, byte: failure.byte,
                 expected: failure.expected ?? 0, found: failure.found ?? 0)
         }
     }
 
-    private func replay(_ label: String, _ vector: Case, open: (Dialect, [Column]) throws -> DelimitedReader) {
+    func replay(_ label: String, _ vector: Case, open: (Dialect, [Column]) throws -> DelimitedReader) {
         let plan = vector.plan.map(column(of:))
         let rows = vector.rows
         var seen = 0
@@ -370,22 +374,22 @@ final class CorpusTests: XCTestCase {
             // A header that is itself broken fails the open, after no rows at all.
             let reader = try open(dialect(of: vector), plan)
             XCTAssertEqual(reader.header, vector.header, "\(label): header")
-            XCTAssertEqual(reader.columns, plan, label)
+            XCTAssertEqual(reader.plan, plan, label)
             do {
-                while try reader.read() {
-                    XCTAssertGreaterThan(reader.rows, 0, label)
-                    for row in 0..<reader.rows {
+                while let batch = try reader.read() {
+                    XCTAssertGreaterThan(batch.rows, 0, label)
+                    for row in 0..<batch.rows {
                         guard seen < rows.count else {
                             XCTFail("\(label): more rows than the corpus lists")
                             return
                         }
                         for column in plan.indices {
-                            assertCell("\(label), row \(seen), column \(column)", reader, column, row, rows[seen][column])
+                            assertCell(
+                                "\(label), row \(seen), column \(column)", batch, column, row, rows[seen][column])
                         }
                         seen += 1
                     }
                 }
-                XCTAssertEqual(reader.rows, 0, "\(label): nothing in hand after the last batch")
             } catch let error as TabularError {
                 failure = error
                 // A structural failure is final: the same one, again.
@@ -397,11 +401,11 @@ final class CorpusTests: XCTestCase {
             XCTFail("\(label): \(error)")
         }
         XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
-        XCTAssertEqual(failure, expectedFailure(vector), "\(label): structural failure")
+        XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
     }
 
     /// A source that hands the input over at most `chunk` bytes at a time.
-    private func chunked(_ input: [UInt8], _ chunk: Int) -> DelimitedReader.Source {
+    func chunked(_ input: [UInt8], _ chunk: Int) -> DelimitedReader.Source {
         var position = 0
         return { buffer in
             let count = min(chunk, buffer.count, input.count - position)

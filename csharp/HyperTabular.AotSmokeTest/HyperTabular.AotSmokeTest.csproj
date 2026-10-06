@@ -11,6 +11,13 @@
 		<ProjectReference Include="../HyperTabular/HyperTabular.csproj" />
 	</ItemGroup>
 
+	<!-- One real workbook, compiled into the program: the binary is run where it is
+	     published, and the musl leg publishes it inside a container that has csharp/ and no
+	     corpus/. -->
+	<ItemGroup>
+		<EmbeddedResource Include="../../corpus/workbook/basic.xlsx" LogicalName="basic.xlsx" />
+	</ItemGroup>
+
 	<!-- A project reference gets none of a NuGet package's build/ imports, so the file a real
 	     consumer has imported for it is imported by hand here: this is the project that proves
 	     the Native AOT wiring in it. The archive it links is

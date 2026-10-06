@@ -22,23 +22,25 @@ public sealed class ReaderTests
 		Column[] plan = [Column.Int32(0), Column.Text(1), Column.Double(2)];
 		using var reader = new DelimitedReader(_orders.AsMemory(), Dialect.Csv, plan);
 		reader.Header.ShouldBe(["id", "name", "score"]);
-		reader.Read().ShouldBeTrue();
-		reader.Rows.ShouldBe(3);
+		var batch = reader.Read().ShouldNotBeNull();
+		batch.Rows.ShouldBe(3);
+		batch.Columns.ShouldBe(plan);
+		batch.Line(2).ShouldBe(4);
 
-		reader.Values<int>(0).ToArray().ShouldBe([1, 2, 3]);
-		reader.Values<double>(2).ToArray().ShouldBe([2.5, 0.0, 7.0]);
-		reader.Verdicts(2)[1].Reason.ShouldBe(CastFailure.Malformed);
+		batch.Values<int>(0).ToArray().ShouldBe([1, 2, 3]);
+		batch.Values<double>(2).ToArray().ShouldBe([2.5, 0.0, 7.0]);
+		batch.Verdicts(2)[1].Reason.ShouldBe(CastFailure.Malformed);
 
-		var described = reader.Double(2, 1) switch
+		var described = batch.Get<double>(2, 1) switch
 		{
 			Success<double> score => $"{score.Value}",
-			Fault fault => $"{fault.Reason} in \"{Encoding.UTF8.GetString(reader.Raw(2, 1))}\"",
+			Fault fault => $"{fault.Reason} in \"{Encoding.UTF8.GetString(batch.Raw(2, 1))}\"",
 		};
 		described.ShouldBe("Malformed in \"x\"");
-		reader.GetString(1, 1).ShouldBe("bob, jr");
-		reader.GetString(1, 2).ShouldBeNull();
-		reader.Read().ShouldBeFalse();
-		reader.Rows.ShouldBe(0);
+		batch.GetString(1, 1).ShouldBe("bob, jr");
+		batch.GetString(1, 2).ShouldBeNull();
+		reader.Read().ShouldBeNull();
+		batch.Rows.ShouldBe(0, "a batch is over when the next is asked for");
 		reader.Records.ShouldBe(4);
 	}
 
@@ -48,11 +50,14 @@ public sealed class ReaderTests
 		Column[] plan = [Column.Int32(0), Column.Timestamp(1)];
 		using var reader = new DelimitedReader(
 			Encoding.UTF8.GetBytes("1,2024-01-31T10:30:00Z\n").AsMemory(), Dialect.Csv with { HasHeader = false }, plan);
-		reader.Read().ShouldBeTrue();
-		Should.Throw<InvalidOperationException>(() => reader.Values<long>(0));
-		Should.Throw<InvalidOperationException>(() => reader.Values<long>(1));
-		Should.Throw<InvalidOperationException>(() => reader.Int64(0, 0));
-		Should.Throw<ArgumentOutOfRangeException>(() => reader.Int32(0, 1));
+		var batch = reader.Read().ShouldNotBeNull();
+		Should.Throw<InvalidOperationException>(() => batch.Values<long>(0));
+		Should.Throw<InvalidOperationException>(() => batch.Values<long>(1));
+		Should.Throw<InvalidOperationException>(() => batch.Get<long>(0, 0));
+		Should.Throw<InvalidOperationException>(() => batch.Get<DateOnly>(1, 0));
+		Should.Throw<InvalidOperationException>(() => batch.TryGetText(0, 0, out _));
+		Should.Throw<ArgumentOutOfRangeException>(() => batch.Get<int>(0, 1));
+		batch.Get<DateTimeOffset>(1, 0).ShouldBe(new DateTimeOffset(2024, 1, 31, 10, 30, 0, TimeSpan.Zero));
 	}
 
 	[Fact]
@@ -82,11 +87,11 @@ public sealed class ReaderTests
 			}
 			using var reader = DelimitedReader.Open(path, Dialect.Csv, [Column.Int64(0)], bufferBytes: 4096);
 			long sum = 0, rows = 0;
-			while (reader.Read())
+			while (reader.Read() is { } batch)
 			{
-				foreach (var value in reader.Values<long>(0))
+				foreach (var value in batch.Values<long>(0))
 					sum += value;
-				rows += reader.Rows;
+				rows += batch.Rows;
 			}
 			(rows, sum).ShouldBe((100_000L, 4_999_950_000L));
 		}
@@ -94,5 +99,26 @@ public sealed class ReaderTests
 		{
 			File.Delete(path);
 		}
+	}
+
+	[Fact]
+	void An_arena_too_small_for_a_batch_grows_instead_of_shortening_every_batch()
+	{
+		// Every cell is quoted with an escaped quote, so its unescaped text goes to the arena,
+		// which starts at 4 KiB: the first batches come up short, until it has grown to hold one.
+		var text = new StringBuilder();
+		for (var row = 0; row < 20_000; row++)
+			text.Append($"\"{new string('x', 40)}\"\"{row}\"\n");
+		using var reader = new DelimitedReader(
+			Encoding.UTF8.GetBytes(text.ToString()).AsMemory(), Dialect.Csv with { HasHeader = false }, [Column.Text(0)]);
+		var sizes = new List<int>();
+		while (reader.Read() is { } batch)
+		{
+			batch.GetString(0, batch.Rows - 1)!.ShouldEndWith("\"" + (sizes.Sum() + batch.Rows - 1));
+			sizes.Add(batch.Rows);
+		}
+		sizes.Sum().ShouldBe(20_000);
+		// The arena doubles after each short batch, so a handful come up short — not every one.
+		sizes.Count.ShouldBeLessThan(15, $"batches of {string.Join(", ", sizes)}");
 	}
 }

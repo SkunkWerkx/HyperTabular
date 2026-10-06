@@ -48,7 +48,7 @@ RSpec.describe HyperTabular do
     it "runs on Fiddle, and accepts HYPERTABULAR_PURE whether or not it is set" do
       expect(HyperTabular::BACKEND).to eq(:fiddle)
       script = 'r = HyperTabular::DelimitedReader.new("a\n7\n", HyperTabular::Dialect::CSV, ' \
-               "[HyperTabular::Column.u8(0)]); r.read; print HyperTabular::BACKEND, ' ', r.values(0).inspect"
+               "[HyperTabular::Column.u8(0)]); print HyperTabular::BACKEND, ' ', r.read.values(0).inspect"
       expect(ruby(script, "HYPERTABULAR_PURE" => "1")).to eq("fiddle [7]")
       expect(ruby(script, "HYPERTABULAR_PURE" => nil)).to eq("fiddle [7]")
     end
@@ -63,8 +63,7 @@ RSpec.describe HyperTabular do
 
     it "takes its verdict types from HyperCast's gem rather than carrying copies" do
       reader = reader_class.new("a\n1\nx\n", csv, [column.i32(0)])
-      reader.read
-      expect(reader.verdicts(0).map(&:class)).to eq([HyperCast::Success, HyperCast::Fault])
+      expect(reader.read.verdicts(0).map(&:class)).to eq([HyperCast::Success, HyperCast::Fault])
       expect(HyperTabular.constants).not_to include(:Success, :Fault, :NumFormat, :Decimal)
     end
   end
@@ -162,39 +161,42 @@ RSpec.describe HyperTabular do
       reader = described_class.new("id,name,score\n1,alice,2.5\n2,bob,3\n", csv,
                                    [column.i32(0), column.text(1), column.f64(2)])
       expect(reader.header).to eq(%w[id name score]).and be_frozen
-      expect([reader.rows, reader.records, reader.column_count]).to eq([0, 1, 3])
-      expect(reader.column(1)).to eq(column.text(1))
+      expect(reader.records).to eq(1)
       expect(reader.plan).to eq([column.i32(0), column.text(1), column.f64(2)]).and be_frozen
+      expect(reader.dialect).to equal(csv)
 
-      expect(reader.read).to be(true)
-      expect([reader.rows, reader.records]).to eq([2, 3])
-      expect(reader.values(0)).to eq([1, 2]).and be_frozen
-      expect(reader.values(1)).to eq(%w[alice bob])
-      expect(reader.values(2)).to eq([2.5, 3.0])
-      expect(reader.verdicts(0)).to eq([success(1), success(2)]).and be_frozen
-      expect(reader.verdict(1, 1)).to eq(success("bob"))
+      batch = reader.read
+      expect(batch).to be_a(HyperTabular::Batch)
+      expect([batch.rows, reader.records]).to eq([2, 3])
+      expect(batch.columns).to equal(reader.plan)
+      expect([batch.line(0), batch.line(1)]).to eq([2, 3])
+      expect(batch.values(0)).to eq([1, 2]).and be_frozen
+      expect(batch.values(1)).to eq(%w[alice bob])
+      expect(batch.values(2)).to eq([2.5, 3.0])
+      expect(batch.verdicts(0)).to eq([success(1), success(2)]).and be_frozen
+      expect(batch.get(1, 1)).to eq(success("bob"))
+      expect(batch.inspect).to eq("#<HyperTabular::Batch rows=2 columns=3>")
 
-      expect(reader.read).to be(false)
-      expect(reader.rows).to eq(0)
-      expect(reader.values(0)).to eq([])
-      expect(reader.verdicts(0)).to eq([])
-      expect(reader.read).to be(false)
+      expect(reader.read).to be_nil
+      expect(reader.read).to be_nil
+      # The batch owns what it shows: the reader having moved on changes none of it.
+      expect(batch.values(1)).to eq(%w[alice bob])
     end
 
     it "hands out a verdict per cell that Ruby's pattern matching reads" do
       reader = described_class.new("n\n12\n12x4\n\n256\n", csv.with(skip_blank_lines: false), [column.u8(0)])
-      reader.read
-      seen = reader.rows.times.map do |row|
-        case reader.verdict(0, row)
+      batch = reader.read
+      seen = batch.rows.times.map do |row|
+        case batch.get(0, row)
         in HyperCast::Success(value:) then "got #{value}"
         in HyperCast::Fault(reason: :empty) then "nothing"
-        in HyperCast::Fault(reason:, offset:, length:) then "#{reason} #{reader.raw(0, row)[offset, length].inspect}"
+        in HyperCast::Fault(reason:, offset:, length:) then "#{reason} #{batch.raw(0, row)[offset, length].inspect}"
         end
       end
       expect(seen).to eq(["got 12", 'malformed "x"', "nothing", 'out_of_range "256"'])
-      expect(reader.values(0)).to eq([12, nil, nil, nil])
-      expect(reader.verdict(0, 2)).to equal(described_class::EMPTY)
-      expect(HyperCast.optional(reader.verdict(0, 2))).to be_nil
+      expect(batch.values(0)).to eq([12, nil, nil, nil])
+      expect(batch.get(0, 2)).to equal(HyperTabular::Batch::EMPTY)
+      expect(HyperCast.optional(batch.get(0, 2))).to be_nil
     end
 
     it "gives each door the Ruby type HyperCast's gem gives it" do
@@ -208,8 +210,8 @@ RSpec.describe HyperTabular do
       ]
       reader = described_class.new(text, csv.with(has_header: false), plan)
       expect(reader.header).to be_nil
-      reader.read
-      values = plan.each_index.map { |index| reader.values(index).first }
+      batch = reader.read
+      values = plan.each_index.map { |index| batch.values(index).first }
       expect(values).to eq([
         true, 3, -4, 2.5, HyperCast::Decimal.new(magnitude: 12_345, scale: 1, negative: false),
         "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
@@ -229,20 +231,20 @@ RSpec.describe HyperTabular do
       # The same answers HyperCast's own doors give for the same text.
       cells = text.chomp.split(",")
       invariant = HyperCast::NumFormat::INVARIANT
-      expect(reader.verdict(4, 0)).to eq(HyperCast.decimal(cells[4], invariant))
-      expect(reader.verdict(5, 0)).to eq(HyperCast.uuid(cells[5]))
-      expect(reader.verdict(6, 0)).to eq(HyperCast.timestamp(cells[6]))
-      expect(reader.verdict(8, 0)).to eq(HyperCast.excel_serial(cells[8], :y1900))
-      expect(reader.verdict(11, 0)).to eq(HyperCast.datetime(cells[11], :month_day_year))
-      expect(reader.verdict(13, 0)).to eq(HyperCast.duration(cells[13]))
+      expect(batch.get(4, 0)).to eq(HyperCast.decimal(cells[4], invariant))
+      expect(batch.get(5, 0)).to eq(HyperCast.uuid(cells[5]))
+      expect(batch.get(6, 0)).to eq(HyperCast.timestamp(cells[6]))
+      expect(batch.get(8, 0)).to eq(HyperCast.excel_serial(cells[8], :y1900))
+      expect(batch.get(11, 0)).to eq(HyperCast.datetime(cells[11], :month_day_year))
+      expect(batch.get(13, 0)).to eq(HyperCast.duration(cells[13]))
     end
 
     it "keeps u64 and the 96-bit decimal whole" do
       reader = described_class.new("18446744073709551615,79228162514264337593543950335\n",
                                    csv.with(has_header: false), [column.u64(0), column.decimal(1)])
-      reader.read
-      expect(reader.values(0)).to eq([2**64 - 1])
-      expect(reader.values(1).first.magnitude).to eq(2**96 - 1)
+      batch = reader.read
+      expect(batch.values(0)).to eq([2**64 - 1])
+      expect(batch.values(1).first.magnitude).to eq(2**96 - 1)
     end
 
     it "reads a column under the notation its plan declares" do
@@ -250,74 +252,72 @@ RSpec.describe HyperTabular do
       dollars = HyperCast::NumFormat.new(decimal_sep: ".", group_sep: ",", flags: HyperCast::ALL_STYLES, currency: "$")
       reader = described_class.new("1.234,5;($1,234.50)\n", csv.with(separator: ";", has_header: false),
                                    [column.f64(0, eurozone), column.decimal(1, dollars), column.f64(0)])
-      reader.read
-      expect(reader.values(0)).to eq([1234.5])
-      expect(reader.values(1).map(&:to_s)).to eq(["-1234.5"])
-      expect(reader.verdict(2, 0)).to eq(fault(:malformed, 5, 1))
-      expect(reader.verdict(2, 0)).to eq(HyperCast.f64("1.234,5", HyperCast::NumFormat::INVARIANT)) if judge
+      batch = reader.read
+      expect(batch.values(0)).to eq([1234.5])
+      expect(batch.values(1).map(&:to_s)).to eq(["-1234.5"])
+      expect(batch.get(2, 0)).to eq(fault(:malformed, 5, 1))
+      expect(batch.get(2, 0)).to eq(HyperCast.f64("1.234,5", HyperCast::NumFormat::INVARIANT)) if judge
     end
 
     it "projects: any source column, in any order, through more than one door, and past the end as empty" do
-      reader = described_class.new("a,b,c\n1,x,2\n", csv, [column.text(2), column.i32(0), column.text(0), column.i32(7)])
+      reader = described_class.new("a,b,c\n1,x,2\n", csv,
+                                   [column.text(2), column.i32(0), column.text(0), column.i32(7)])
       expect(drain(reader)).to eq([[success("2"), success(1), success("1"), fault(:empty)]])
     end
 
     it "counts rows through an empty plan" do
       reader = described_class.new("a\n1\n2\n3\n", csv, [], batch_rows: 2)
-      expect([reader.read, reader.rows, reader.read, reader.rows, reader.read]).to eq([true, 2, true, 1, false])
+      expect([reader.read.rows, reader.read.rows, reader.read]).to eq([2, 1, nil])
     end
 
     it "speaks of a fault's span in the characters String#[] slices by, as HyperCast's gem does" do
       reader = described_class.new("n\né12x4\n\"é\"\"1x\"\n", csv, [column.i32(0), column.text(0)])
-      reader.read
+      batch = reader.read
       # The core counts in bytes: é is two of them, and one character.
-      expect(reader.verdicts(0)).to eq([fault(:malformed, 0, 1), fault(:malformed, 0, 1)])
-      expect(reader.raw(0, 0)[0, 1]).to eq("é")
+      expect(batch.verdicts(0)).to eq([fault(:malformed, 0, 1), fault(:malformed, 0, 1)])
+      expect(batch.raw(0, 0)[0, 1]).to eq("é")
       # A cell that had to be unescaped is judged, and given back, unescaped.
-      expect(reader.raw(0, 1)).to eq('é"1x')
-      expect(reader.values(1)).to eq(["é12x4", 'é"1x'])
+      expect(batch.raw(0, 1)).to eq('é"1x')
+      expect(batch.values(1)).to eq(["é12x4", 'é"1x'])
 
       late = described_class.new("n
 1é2é3x
-", csv, [column.i32(0)])
-      late.read
-      expect(late.verdict(0, 0)).to eq(fault(:malformed, 1, 1))
+", csv, [column.i32(0)]).read
+      expect(late.get(0, 0)).to eq(fault(:malformed, 1, 1))
       expect(late.raw(0, 0).byteslice(1, 2)).to eq("é")
 
       # With characters ahead of it, the span's offset moves too: x is byte 5, character 3.
       euros = HyperCast::NumFormat.new(decimal_sep: ",", group_sep: ".", flags: HyperCast::ALL_STYLES, currency: "€")
       priced = described_class.new("n
 €12x4
-", csv, [column.i32(0, euros)])
-      priced.read
-      expect(priced.verdict(0, 0)).to eq(fault(:malformed, 3, 1))
+", csv, [column.i32(0, euros)]).read
+      expect(priced.get(0, 0)).to eq(fault(:malformed, 3, 1))
       expect(priced.raw(0, 0)[3, 1]).to eq("x")
       next unless judge
 
-      expect(reader.verdict(0, 0)).to eq(HyperCast.i32("é12x4", HyperCast::NumFormat::INVARIANT))
-      expect(reader.verdict(0, 1)).to eq(HyperCast.i32('é"1x', HyperCast::NumFormat::INVARIANT))
-      expect(late.verdict(0, 0)).to eq(HyperCast.i32("1é2é3x", HyperCast::NumFormat::INVARIANT))
-      expect(priced.verdict(0, 0)).to eq(HyperCast.i32("€12x4", euros))
+      expect(batch.get(0, 0)).to eq(HyperCast.i32("é12x4", HyperCast::NumFormat::INVARIANT))
+      expect(batch.get(0, 1)).to eq(HyperCast.i32('é"1x', HyperCast::NumFormat::INVARIANT))
+      expect(late.get(0, 0)).to eq(HyperCast.i32("1é2é3x", HyperCast::NumFormat::INVARIANT))
+      expect(priced.get(0, 0)).to eq(HyperCast.i32("€12x4", euros))
     end
 
     it "gives back the raw text of any cell, whatever its door and verdict" do
       reader = described_class.new("a,b\n\" 7 \",\"x\"\"y\"\n,\"\"\n", csv, [column.i32(0), column.text(1)])
-      reader.read
-      expect([reader.raw(0, 0), reader.raw(1, 0), reader.raw(0, 1), reader.raw(1, 1)]).to eq([" 7 ", 'x"y', "", ""])
-      expect(reader.raw(0, 0)).to be_a(String).and have_attributes(encoding: Encoding::UTF_8)
-      expect(reader.verdicts(1)).to eq([success('x"y'), fault(:empty)])
+      batch = reader.read
+      expect([batch.raw(0, 0), batch.raw(1, 0), batch.raw(0, 1), batch.raw(1, 1)]).to eq([" 7 ", 'x"y', "", ""])
+      expect(batch.raw(0, 0)).to be_a(String).and have_attributes(encoding: Encoding::UTF_8)
+      expect(batch.verdicts(1)).to eq([success('x"y'), fault(:empty)])
     end
 
-    it "hands out values that outlive the batch they came from" do
+    it "hands out batches that outlive the reader's next read" do
       reader = described_class.new(StringIO.new("a\n\"x\"\"1\"\nplain-one\n\"y\"\"2\"\nplain-two\n"), csv,
                                    [column.text(0)], batch_rows: 2, buffer_bytes: 64)
-      reader.read
-      first = reader.values(0)
-      raw = reader.raw(0, 0)
-      reader.read
-      expect(first).to eq(['x"1', "plain-one"])
-      expect(raw).to eq('x"1')
-      expect(reader.values(0)).to eq(['y"2', "plain-two"])
+      first = reader.read
+      second = reader.read
+      # Asked for only now, after the reader has moved on — and refilled its buffer.
+      expect(first.values(0)).to eq(['x"1', "plain-one"])
+      expect(first.raw(0, 0)).to eq('x"1')
+      expect(second.values(0)).to eq(['y"2', "plain-two"])
     end
 
     it "reads a String in place, immune to what the caller does to it next" do
@@ -339,10 +339,10 @@ RSpec.describe HyperTabular do
       expect(drain(described_class.new("n,v\né,7\n".encode(Encoding::UTF_16LE), csv, plan))).to eq(expected)
       expect(drain(described_class.new("n,v\né,7\n".encode(Encoding::ISO_8859_1), csv, plan))).to eq(expected)
       binary = described_class.new("n,v\né,7\n".b, csv, plan)
-      binary.read
-      expect(binary.values(0)).to eq(["é"])
-      expect(binary.values(0).first.encoding).to eq(Encoding::UTF_8)
       expect(binary.header).to eq(%w[n v])
+      batch = binary.read
+      expect(batch.values(0)).to eq(["é"])
+      expect(batch.values(0).first.encoding).to eq(Encoding::UTF_8)
     end
 
     it "skips a byte-order mark, however the input is cut" do
@@ -363,11 +363,11 @@ RSpec.describe HyperTabular do
         ids = []
         names = []
         total = 0.0
-        while reader.read
-          batches << reader.rows
-          ids.concat(reader.values(0))
-          names.concat(reader.values(1))
-          total += reader.values(2).sum
+        while (batch = reader.read)
+          batches << batch.rows
+          ids.concat(batch.values(0))
+          names.concat(batch.values(1))
+          total += batch.values(2).sum
         end
         expect(batches.sum).to eq(rows)
         expect(batches.max).to be <= described_class::DEFAULT_BATCH_ROWS
@@ -410,15 +410,14 @@ RSpec.describe HyperTabular do
         [text, StringIO.new(text)].each do |source|
           reader = described_class.new(source, csv, [column.i32(0)])
           expect(reader.header).to eq([])
-          expect(reader.read).to be(false)
+          expect(reader.read).to be_nil
         end
       end
     end
 
     it "delivers every intact row, then raises the structural failure — the same one, every time" do
       reader = described_class.new("a,b\n1,2\n3\n4,5\n", csv, [column.i32(0)], batch_rows: 1)
-      expect(reader.read).to be(true)
-      expect(reader.values(0)).to eq([1])
+      expect(reader.read.values(0)).to eq([1])
       error = nil
       expect { reader.read }.to raise_error(HyperTabular::TabularError) { |e| error = e }
       expect([error.kind, error.record, error.line, error.byte, error.expected, error.found])
@@ -431,14 +430,13 @@ RSpec.describe HyperTabular do
         in { kind: :column_count, line:, found: } then [line, found]
         end
       expect(matched).to eq([3, 1])
-      expect(reader.rows).to eq(0)
       expect { reader.read }.to raise_error(HyperTabular::TabularError) { |again| expect(again).to equal(error) }
       expect { reader.each_row.to_a }.to raise_error(HyperTabular::TabularError)
     end
 
     it "raises a quote never closed, from the read that reaches it or from the header" do
       reader = described_class.new("a\n1\n\"2\n", csv, [column.i32(0)])
-      expect(reader.read).to be(true)
+      expect(reader.read.rows).to eq(1)
       expect { reader.read }.to raise_error(HyperTabular::TabularError) { |e|
         expect([e.kind, e.record, e.line, e.byte, e.expected, e.found]).to eq([:unclosed_quote, 2, 3, 4, 0, 0])
         expect(e.message).to eq("The input ended inside a quoted cell in record 2 (line 3, byte 4).")
@@ -452,8 +450,7 @@ RSpec.describe HyperTabular do
       text = "a,b\n1,2\n3,#{'x' * 40}\n"
       [text, StringIO.new(text)].each do |source|
         reader = described_class.new(source, csv, [column.i32(0)], buffer_bytes: 8)
-        expect(reader.read).to be(true)
-        expect(reader.values(0)).to eq([1])
+        expect(reader.read.values(0)).to eq([1])
         error = nil
         expect { reader.read }.to raise_error(HyperTabular::TabularError) { |e| error = e }
         expect([error.kind, error.record, error.line, error.byte]).to eq([:row_too_long, 2, 3, 8])
@@ -490,7 +487,7 @@ RSpec.describe HyperTabular do
 
         reader = described_class.open(Pathname(file.path), HyperTabular::Dialect::TSV, plan, batch_rows: 1)
         handle = reader.instance_variable_get(:@io)
-        expect(reader.read).to be(true)
+        expect(reader.read.rows).to eq(1)
         expect(reader.close).to be_nil
         expect(handle).to be_closed
         expect(reader.close).to be_nil
@@ -516,25 +513,35 @@ RSpec.describe HyperTabular do
       expect(io).not_to be_closed
       expect(reader).to be_closed
       expect { reader.read }.to raise_error(IOError, /closed/)
-      expect(reader.rows).to eq(0)
 
       described_class.new(io, csv, [column.i32(0)], close_source: true).close
       expect(io).to be_closed
     end
 
     it "raises IndexError for a cell outside the batch or the plan" do
-      reader = described_class.new("a\n1\n2\n", csv, [column.i32(0)])
-      expect { reader.verdict(0, 0) }.to raise_error(IndexError, /0 rows/)
-      expect { reader.raw(0, 0) }.to raise_error(IndexError)
-      reader.read
+      batch = described_class.new("a\n1\n2\n", csv, [column.i32(0)]).read
       [2, -1, 1.0, nil].each do |row|
-        expect { reader.verdict(0, row) }.to raise_error(IndexError, /outside the batch/)
-        expect { reader.raw(0, row) }.to raise_error(IndexError, /outside the batch/)
+        expect { batch.get(0, row) }.to raise_error(IndexError, /outside the batch/)
+        expect { batch.raw(0, row) }.to raise_error(IndexError, /outside the batch/)
+        expect { batch.line(row) }.to raise_error(IndexError, /outside the batch/)
       end
-      expect { reader.values(1) }.to raise_error(IndexError)
-      expect { reader.verdicts(1) }.to raise_error(IndexError)
-      expect { reader.raw(1, 0) }.to raise_error(IndexError)
-      expect { reader.column(1) }.to raise_error(IndexError)
+      expect { batch.values(1) }.to raise_error(IndexError)
+      expect { batch.verdicts(1) }.to raise_error(IndexError)
+      expect { batch.raw(1, 0) }.to raise_error(IndexError)
+    end
+
+    it "grows the arena when it cramps a batch, so escaped text is a few batches, not one a row" do
+      row = "\"#{'say ""hi"" ' * 8}\"\n"
+      expected = 'say "hi" ' * 8
+      reader = described_class.new(row * 20_000, csv.with(has_header: false), [column.text(0)])
+      batches = []
+      while (batch = reader.read)
+        batches << batch
+      end
+      expect(batches.sum(&:rows)).to eq(20_000)
+      expect(batches.size).to be < 15
+      expect(batches.map { |each| each.values(0).last }).to all(eq(expected))
+      expect(batches.last.line(batches.last.rows - 1)).to eq(20_000)
     end
 
     it "refuses what cannot be a reader's arguments, as caller bugs" do
@@ -552,10 +559,10 @@ RSpec.describe HyperTabular do
 
     it "describes itself in a line, not by its buffers" do
       reader = described_class.new("a\n#{'1' * 500}\n", csv, [column.text(0)])
-      expect(reader.inspect).to eq("#<HyperTabular::DelimitedReader columns=1 rows=0 records=1>")
+      expect(reader.inspect).to eq("#<HyperTabular::DelimitedReader columns=1 records=1>")
       reader.read
       reader.close
-      expect(reader.inspect).to eq("#<HyperTabular::DelimitedReader columns=1 rows=0 records=2 closed>")
+      expect(reader.inspect).to eq("#<HyperTabular::DelimitedReader columns=1 records=2 closed>")
     end
 
     # The input is a Ruby String the core reads in place, so it must not move while a
@@ -576,14 +583,14 @@ RSpec.describe HyperTabular do
       readers.each_slice(50) do |slice|
         GC.compact
         slice.each do |i, reader|
-          reader.read
-          expect([reader.values(0), reader.values(1), reader.raw(1, 0)]).to eq([[i], ["t#{i}"], "t#{i}"])
+          batch = reader.read
+          expect([batch.values(0), batch.values(1), batch.raw(1, 0)]).to eq([[i], ["t#{i}"], "t#{i}"])
         end
       end
       GC.compact
       readers.each do |i, reader|
-        reader.read
-        expect([reader.values(0), reader.values(1)]).to eq([[i + 1], ["u#{i}"]])
+        batch = reader.read
+        expect([batch.values(0), batch.values(1)]).to eq([[i + 1], ["u#{i}"]])
       end
     end
   end

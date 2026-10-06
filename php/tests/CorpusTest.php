@@ -15,12 +15,17 @@ use HyperCast\Fault;
 use HyperCast\NumFormat;
 use HyperCast\Success;
 use HyperCast\UnixPrecision;
+use HyperTabular\Batch;
 use HyperTabular\Column;
 use HyperTabular\DelimitedReader;
 use HyperTabular\Dialect;
 use HyperTabular\Door;
 use HyperTabular\TabularException;
 use HyperTabular\TabularFailure;
+use HyperTabular\Scratch;
+use HyperTabular\SheetOptions;
+use HyperTabular\Workbook;
+use HyperTabular\WorkbookFormat;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -30,6 +35,10 @@ use PHPUnit\Framework\TestCase;
  * handed over whole, from a string and a stream fed through buffers too small for a
  * record, and from a file, in batches of one row, of two, and of many. How the input is
  * cut up is the binding's business and must not change the answer.
+ *
+ * And corpus/workbook.json, the same way: each package opened from a string and from its
+ * path, each sheet read by index and (where the name finds it) by name, in batches of one
+ * row, of two, and of more than any sheet has.
  *
  * Decoded with JSON_BIGINT_AS_STRING so a u64 beyond PHP's signed int survives as digits.
  */
@@ -44,23 +53,28 @@ final class CorpusTest extends TestCase
         'out_of_range' => CastFailure::OutOfRange,
     ];
 
-    /** @return list<array<string, mixed>> */
-    private static function corpus(): array
+    /** The corpus directory at the repository root. */
+    private static function directory(): string
     {
         $dir = __DIR__;
         // Stop when dirname() stops moving, not at '/': a Windows root is 'C:\\', never '/'.
         for ($parent = \dirname($dir); $parent !== $dir; $dir = $parent, $parent = \dirname($dir)) {
-            $candidate = $dir . '/corpus/delimited.json';
-            if (is_file($candidate)) {
-                return json_decode(
-                    file_get_contents($candidate),
-                    true,
-                    512,
-                    JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING
-                );
+            if (is_file($dir . '/corpus/delimited.json')) {
+                return $dir . '/corpus';
             }
         }
         throw new \RuntimeException('corpus/delimited.json not found above ' . __DIR__);
+    }
+
+    /** @return list<array<string, mixed>> */
+    private static function corpus(string $file = 'delimited.json'): array
+    {
+        return json_decode(
+            file_get_contents(self::directory() . '/' . $file),
+            true,
+            512,
+            JSON_THROW_ON_ERROR | JSON_BIGINT_AS_STRING
+        );
     }
 
     /** @return iterable<string, array{array<string, mixed>}> */
@@ -162,6 +176,127 @@ final class CorpusTest extends TestCase
         }
     }
 
+    /** @return iterable<string, array{array<string, mixed>}> */
+    public static function workbookCases(): iterable
+    {
+        foreach (self::corpus('workbook.json') as $case) {
+            yield $case['name'] => [$case];
+        }
+    }
+
+    public function testTheWorkbookCorpusIsTheWholeContract(): void
+    {
+        $corpus = self::corpus('workbook.json');
+        $this->assertGreaterThanOrEqual(80, \count($corpus));
+        $cells = 0;
+        foreach ($corpus as $case) {
+            if (isset($case['sheet'])) {
+                $cells += \count($case['rows']) * \count($case['plan']);
+            }
+        }
+        $this->assertGreaterThanOrEqual(12_000, $cells);
+    }
+
+    /**
+     * The workbook corpus again with every buffer starting at one element and never asked to
+     * be large up front: each read stops wherever the core runs out of room and resumes in a
+     * grown buffer that has to have kept what the old one held. A grow that dropped it would
+     * read garbage, and the corpus would say so.
+     */
+    public function testEveryWorkbookReadsTheSameWhenItsBuffersStartWithNoRoom(): void
+    {
+        Scratch::$stingy = true;
+        Scratch::$grown = [0, 0, 0];
+        try {
+            foreach (self::corpus('workbook.json') as $case) {
+                $this->testAWorkbook($case);
+            }
+        } finally {
+            Scratch::$stingy = false;
+        }
+        // Not once per call: many times, mid-part, for each of the three.
+        foreach (Scratch::$grown as $times) {
+            $this->assertGreaterThan(1_000, $times, json_encode(Scratch::$grown));
+        }
+    }
+
+    /** @param array<string, mixed> $case */
+    #[DataProvider('workbookCases')]
+    public function testAWorkbook(array $case): void
+    {
+        $path = self::directory() . '/' . $case['file'];
+        $openings = [
+            'string' => static fn (): Workbook => Workbook::fromString(file_get_contents($path)),
+            'path' => static fn (): Workbook => Workbook::open($path),
+        ];
+        // A package the core refuses: every way of opening it gives the one failure.
+        if (!isset($case['sheet'])) {
+            foreach ($openings as $source => $open) {
+                $failure = null;
+                try {
+                    $open();
+                    $this->fail("{$case['name']} ({$source}): opened");
+                } catch (TabularException $thrown) {
+                    $failure = $thrown;
+                }
+                $this->assertFailure("{$case['name']} ({$source})", $case['failure'], $failure);
+            }
+            return;
+        }
+
+        $plan = array_map(self::columnOf(...), $case['plan']);
+        $index = $case['sheet'];
+        $name = $case['sheets'][$index]['name'];
+        foreach ($openings as $source => $open) {
+            $book = $open();
+            $this->assertSame(WorkbookFormat::from($case['format'] === 'xlsx' ? 1 : 2), $book->format());
+            $this->assertSame(ExcelEpoch::from($case['epoch']), $book->dateSystem());
+            $this->assertSame(
+                array_map(static fn (array $sheet): array => [$sheet['name'], $sheet['hidden']], $case['sheets']),
+                array_map(static fn ($sheet): array => [$sheet->name, $sheet->hidden], $book->sheets())
+            );
+            $byName = array_search($name, array_map(static fn ($sheet): string => $sheet->name, $book->sheets()), true)
+                === $index;
+            foreach (self::BATCH_ROWS as $batchRows) {
+                $options = new SheetOptions(
+                    $case['options']['has_header'],
+                    $case['options']['skip_empty_rows'],
+                    $batchRows
+                );
+                foreach ($byName ? [$index, $name] : [$index] as $which) {
+                    $label = "{$case['name']}: {$source}, {$batchRows} rows a batch, sheet "
+                        . var_export($which, true);
+                    $sheet = $book->sheet($which, $options, $plan);
+                    $this->assertSame($case['header'], $sheet->header(), "{$label}: header");
+                    $this->assertSame($plan, $sheet->plan(), $label);
+                    $seen = 0;
+                    $failure = null;
+                    try {
+                        while (($batch = $sheet->read()) !== null) {
+                            $this->assertLessThanOrEqual($batchRows, $batch->rows(), $label);
+                            for ($row = 0; $row < $batch->rows(); $row++) {
+                                $this->assertSame($case['numbers'][$seen + $row], $batch->line($row), "{$label}, row");
+                            }
+                            $this->assertBatch($label, $batch, $plan, $case['rows'], $seen);
+                            $seen += $batch->rows();
+                        }
+                    } catch (TabularException $thrown) {
+                        $failure = $thrown;
+                        // A failed sheet stays failed: the same failure, again.
+                        try {
+                            $sheet->read();
+                            $this->fail("{$label}: a read after a structural failure succeeded");
+                        } catch (TabularException $again) {
+                            $this->assertSame($thrown, $again, $label);
+                        }
+                    }
+                    $this->assertSame(\count($case['rows']), $seen, "{$label}: rows delivered");
+                    $this->assertFailure($label, $case['failure'] ?? null, $failure);
+                }
+            }
+        }
+    }
+
     /**
      * @param array<string, mixed> $entry a plan entry of the corpus
      */
@@ -219,39 +354,15 @@ final class CorpusTest extends TestCase
 
         $reader = $open($dialect, $plan);
         $this->assertSame($case['header'], $reader->header(), "{$label}: header");
-        $this->assertSame(\count($plan), $reader->columnCount(), $label);
+        $this->assertSame($plan, $reader->plan(), $label);
 
         $seen = 0;
         $failure = null;
         try {
-            while ($reader->read()) {
-                $rows = $reader->rows();
-                $this->assertGreaterThan(0, $rows, $label);
-                $this->assertLessThanOrEqual(\count($expected) - $seen, $rows, "{$label}: more rows than expected");
-                foreach ($plan as $column => $declared) {
-                    // The column as a whole, then each cell of it: the same answer both ways.
-                    $values = $reader->values($column);
-                    $faults = $reader->faults($column);
-                    $verdicts = $reader->verdicts($column);
-                    $this->assertCount($rows, $values, $label);
-                    $this->assertCount($rows, $verdicts, $label);
-                    for ($row = 0; $row < $rows; $row++) {
-                        $at = "{$label}, row " . ($seen + $row) . ", column {$column}";
-                        $verdict = $reader->cell($column, $row);
-                        $this->assertEquals($verdict, $verdicts[$row], $at);
-                        if ($verdict instanceof Fault) {
-                            $this->assertNull($values[$row], $at);
-                            $this->assertEquals($verdict, $faults[$row] ?? null, $at);
-                        } else {
-                            $this->assertArrayNotHasKey($row, $faults, $at);
-                            $this->assertEquals($verdict->value, $values[$row], $at);
-                        }
-                        $this->assertCell($at, $reader, $declared->door, $column, $row, $expected[$seen + $row][$column]);
-                    }
-                }
-                $seen += $rows;
+            while (($batch = $reader->read()) !== null) {
+                $this->assertBatch($label, $batch, $plan, $expected, $seen);
+                $seen += $batch->rows();
             }
-            $this->assertSame(0, $reader->rows(), $label);
         } catch (TabularException $thrown) {
             $failure = $thrown;
             // A structural failure is final: the same one, again.
@@ -268,26 +379,61 @@ final class CorpusTest extends TestCase
     }
 
     /**
-     * Holds one cell of the batch in hand to what the corpus says of it.
+     * Holds one batch to the corpus's rows from `$seen` on, column by column: the column as a
+     * whole, then each cell of it, the same answer both ways.
+     *
+     * @param list<Column> $plan the plan the batch was read through
+     * @param list<list<array<string, mixed>>> $expected the corpus's rows
+     */
+    private function assertBatch(string $label, Batch $batch, array $plan, array $expected, int $seen): void
+    {
+        $rows = $batch->rows();
+        $this->assertGreaterThan(0, $rows, $label);
+        $this->assertLessThanOrEqual(\count($expected) - $seen, $rows, "{$label}: more rows than expected");
+        $this->assertSame($plan, $batch->columns(), $label);
+        foreach ($plan as $column => $declared) {
+            $values = $batch->values($column);
+            $faults = $batch->faults($column);
+            $verdicts = $batch->verdicts($column);
+            $this->assertCount($rows, $values, $label);
+            $this->assertCount($rows, $verdicts, $label);
+            for ($row = 0; $row < $rows; $row++) {
+                $at = "{$label}, row " . ($seen + $row) . ", column {$column}";
+                $verdict = $batch->get($column, $row);
+                $this->assertEquals($verdict, $verdicts[$row], $at);
+                if ($verdict instanceof Fault) {
+                    $this->assertNull($values[$row], $at);
+                    $this->assertEquals($verdict, $faults[$row] ?? null, $at);
+                } else {
+                    $this->assertArrayNotHasKey($row, $faults, $at);
+                    $this->assertEquals($verdict->value, $values[$row], $at);
+                }
+                $this->assertCell($at, $batch, $declared->door, $column, $row, $expected[$seen + $row][$column]);
+            }
+        }
+    }
+
+    /**
+     * Holds one cell of a batch to what the corpus says of it.
      *
      * @param array<string, mixed> $expected the corpus's cell
      */
     private function assertCell(
         string $label,
-        DelimitedReader $reader,
+        Batch $batch,
         Door $door,
         int $column,
         int $row,
         array $expected,
     ): void {
-        $verdict = $reader->cell($column, $row);
+        $verdict = $batch->get($column, $row);
         if ($expected['expect'] !== 'ok') {
             $this->assertInstanceOf(Fault::class, $verdict, $label);
             $this->assertSame(self::REASONS[$expected['expect']], $verdict->reason, $label);
             if (isset($expected['fault'])) {
                 $this->assertSame($expected['fault'], [$verdict->offset, $verdict->length], "{$label}: fault span");
                 // The cell's own text is still to hand, for the diagnostic a fault deserves.
-                $this->assertSame($expected['raw'], $reader->raw($column, $row), "{$label}: raw text");
+                $this->assertSame($expected['raw'], $batch->raw($column, $row), "{$label}: raw text");
             } else {
                 $this->assertSame([0, 0], [$verdict->offset, $verdict->length], "{$label}: fault span");
             }
@@ -390,7 +536,7 @@ final class CorpusTest extends TestCase
             case Door::Text:
                 $this->assertSame($expected['text'], $value, $label);
                 // A text cell's raw text is the text.
-                $this->assertSame($expected['text'], $reader->raw($column, $row), "{$label}: raw text");
+                $this->assertSame($expected['text'], $batch->raw($column, $row), "{$label}: raw text");
                 break;
         }
     }
@@ -411,9 +557,9 @@ final class CorpusTest extends TestCase
             return;
         }
         $this->assertNotNull($actual, "{$label}: the structural failure was not raised");
-        $columnCount = $expected['kind'] === 'column_count';
+        // The corpus names a kind as the core does, in snake case: column_count is ColumnCount.
         $this->assertSame(
-            $columnCount ? TabularFailure::ColumnCount : TabularFailure::UnclosedQuote,
+            \constant(TabularFailure::class . '::' . str_replace('_', '', ucwords($expected['kind'], '_'))),
             $actual->kind,
             $label
         );
@@ -422,7 +568,7 @@ final class CorpusTest extends TestCase
             [$actual->record, $actual->recordLine, $actual->byte],
             "{$label}: record, line, byte"
         );
-        if ($columnCount) {
+        if (isset($expected['expected'])) {
             $this->assertSame(
                 [$expected['expected'], $expected['found']],
                 [$actual->expected, $actual->found],

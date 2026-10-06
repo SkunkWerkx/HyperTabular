@@ -261,6 +261,34 @@ impl<'r> Batch<'r> {
     }
 
     /// The column's values as `T`s, the door not asked about.
+    /// Column `column` as the core wrote it, as bytes: `rows` values of its door, then its
+    /// verdicts — what the Python binding copies a batch out of.
+    #[cfg(feature = "python")]
+    pub(crate) fn column_bytes(&self, column: usize) -> (&'r [u8], &'r [CellVerdict]) {
+        let store = self.store(column);
+        let length =
+            (size_of_value(self.store_door(column)) * self.rows).min(store.values.len() * 8);
+        // SAFETY: the first `length` bytes of the store, which holds at least that many;
+        // any bytes are valid `u8`s.
+        let values =
+            unsafe { std::slice::from_raw_parts(store.values.as_ptr().cast::<u8>(), length) };
+        (values, &store.verdicts[..self.rows])
+    }
+
+    /// The batch's cell table — `per_row` entries a row — what its unflagged spans index,
+    /// and what its flagged spans index: what the Python binding copies a batch out of.
+    #[cfg(feature = "python")]
+    pub(crate) fn tables(&self) -> (&'r [Span], usize, &'r [u8], &'r [u8]) {
+        (
+            self.cells
+                .get(..self.rows * self.per_row)
+                .unwrap_or_default(),
+            self.per_row,
+            self.base,
+            self.arena,
+        )
+    }
+
     fn stored<T: Copy>(&self, column: usize) -> &'r [T] {
         let store = self.store(column);
         debug_assert!(size_of::<T>() * self.rows <= store.values.len() * 8);

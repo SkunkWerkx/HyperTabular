@@ -16,7 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * The native core's C ABI: {@code libhypertabular}'s six exports and the sizes and offsets
+ * The native core's C ABI: {@code libhypertabular}'s fourteen exports and the sizes and offsets
  * of the {@code #[repr(C)]} shapes that cross them ({@code rust/src/kernel/abi.rs},
  * {@code rust/src/kernel/exports.rs}). Every pointer handed over is this binding's own
  * memory for the length of the call; the core keeps nothing.
@@ -38,6 +38,8 @@ final class Native {
     static final int ERR_ARENA = -3;
     /** The cell table cannot hold one row; the result says how many entries one takes. */
     static final int ERR_CELLS = -4;
+    /** A workbook part's window cannot hold the token being read; the result says what would. */
+    static final int ERR_WINDOW = -5;
 
     /** {@code Span}: {@code {u32 offset, u32 len}}, the top bit of {@code len} a flag. */
     static final long SPAN_BYTES = 8;
@@ -53,6 +55,7 @@ final class Native {
      * u8[16] currency}}.
      */
     static final long SPEC_BYTES = 44;
+
     static final long SPEC_ORDINAL = 0;
     static final long SPEC_DOOR = 4;
     static final long SPEC_PARAM = 8;
@@ -65,6 +68,7 @@ final class Native {
 
     /** {@code ColumnBuffer}: {@code {void* values, CellVerdict* verdicts}}. */
     static final long BUFFER_BYTES = 2 * ValueLayout.ADDRESS.byteSize();
+
     static final long BUFFER_VERDICTS = ValueLayout.ADDRESS.byteSize();
 
     /** {@code RawDialect}: {@code {u8 separator, u8 quoting, u8 skip_blank_lines, u8 engine}}. */
@@ -76,8 +80,10 @@ final class Native {
      * u32 expected, u32 found}}.
      */
     static final long FILLED_BYTES = 64;
+
     static final long FILLED_ROWS = 0;
     static final long FILLED_CONSUMED = 8;
+    static final long FILLED_ARENA_USED = 16;
     static final long FILLED_NEEDED = 24;
     static final long FAILURE_CODE = 32;
     static final long FAILURE_LINE = 36;
@@ -87,11 +93,44 @@ final class Native {
     static final long FAILURE_FOUND = 60;
 
     /**
+     * {@code Opened}: {@code {u32 format, u32 epoch, u64 strings_bytes, u64 strings_count,
+     * u64 needed, Failure failure}} — the failure at the same offset as in {@code Filled}.
+     */
+    static final long OPENED_BYTES = 64;
+
+    static final long OPENED_FORMAT = 0;
+    static final long OPENED_EPOCH = 4;
+    static final long OPENED_STRINGS_BYTES = 8;
+    static final long OPENED_NEEDED = 24;
+
+    /** {@code Slot}: {@code {u32 tag, u32 aux, u64 bits}}, the row a workbook read assembles. */
+    static final long SLOT_BYTES = 16;
+
+    /**
+     * {@code Buffers}: seven pointer-and-size pairs — {@code window}, {@code arena},
+     * {@code cells}, {@code row}, then the workbook's {@code strings}, {@code table} and
+     * {@code kinds} — each a pointer and a {@code usize}.
+     */
+    static final long BUFFERS_BYTES = 14 * 8;
+
+    static final long BUFFERS_WINDOW = 0;
+    static final long BUFFERS_ARENA = 16;
+    static final long BUFFERS_CELLS = 32;
+    static final long BUFFERS_ROW = 48;
+    static final long BUFFERS_STRINGS = 64;
+    static final long BUFFERS_TABLE = 80;
+    static final long BUFFERS_KINDS = 96;
+
+    /** The window a workbook part is inflated through starts at the size the core requires. */
+    static final long WINDOW_MIN = 64 * 1024;
+
+    /**
      * The fields of the state block this binding reads: {@code line} (u32), {@code records}
      * and {@code offset} (u64). The rest is the core's; the block's size is asked of the
      * library ({@link #stateSize()}), never assumed.
      */
     static final long STATE_LINE = 4;
+
     static final long STATE_RECORDS = 8;
     static final long STATE_OFFSET = 16;
     /** The bytes of the state block the offsets above reach into. */
@@ -127,17 +166,28 @@ final class Native {
         private static final MethodHandle INIT = LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR));
         // hypertabular_delimited_header(state, input, input_len, last, names, names_cap,
         //                               arena, arena_cap, out) -> i32
-        private static final MethodHandle HEADER = LINKER.downcallHandle(
-                FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, USIZE, PTR, USIZE, PTR));
+        private static final MethodHandle HEADER =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, USIZE, PTR, USIZE, PTR));
         // hypertabular_delimited_fill(state, input, input_len, last, specs, columns,
         //                             column_count, max_rows, cells, cells_cap, arena,
         //                             arena_cap, out) -> i32
         private static final MethodHandle FILL = LINKER.downcallHandle(
-                FunctionDescriptor.of(
-                        I32, PTR, PTR, USIZE, I32, PTR, PTR, USIZE, USIZE, PTR, USIZE, PTR, USIZE, PTR));
+                FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, PTR, USIZE, USIZE, PTR, USIZE, PTR, USIZE, PTR));
         // hypertabular_delimited_unescape(cell, len, out, cap) -> usize
         private static final MethodHandle UNESCAPE =
                 LINKER.downcallHandle(FunctionDescriptor.of(USIZE, PTR, USIZE, PTR, USIZE));
+        // hypertabular_workbook_{open,sheets,strings,styles,header}(state, container,
+        //                                                         container_len, buffers, out) -> i32
+        private static final MethodHandle BOOK =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, PTR));
+        // hypertabular_workbook_sheet(state, container, container_len, part, part_len, index,
+        //                             has_header, skip_empty_rows, out) -> i32
+        private static final MethodHandle SHEET =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, USIZE, I32, I32, I32, PTR));
+        // hypertabular_workbook_fill(state, container, container_len, specs, columns,
+        //                            column_count, max_rows, buffers, out) -> i32
+        private static final MethodHandle BOOK_FILL =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, PTR, USIZE, USIZE, PTR, PTR));
 
         // A uuid value read as two big-endian longs. Here for the same reason the handles
         // are: a layout is read through a VarHandle, which Native Image wants constant.
@@ -164,10 +214,18 @@ final class Native {
         private static final MemorySegment HEADER = export("hypertabular_delimited_header");
         private static final MemorySegment FILL = export("hypertabular_delimited_fill");
         private static final MemorySegment UNESCAPE = export("hypertabular_delimited_unescape");
+        private static final MemorySegment BOOK_STATE_SIZE = export("hypertabular_workbook_state_size");
+        private static final MemorySegment BOOK_OPEN = export("hypertabular_workbook_open");
+        private static final MemorySegment BOOK_SHEETS = export("hypertabular_workbook_sheets");
+        private static final MemorySegment BOOK_STRINGS = export("hypertabular_workbook_strings");
+        private static final MemorySegment BOOK_STYLES = export("hypertabular_workbook_styles");
+        private static final MemorySegment BOOK_SHEET = export("hypertabular_workbook_sheet");
+        private static final MemorySegment BOOK_HEADER = export("hypertabular_workbook_header");
+        private static final MemorySegment BOOK_FILL = export("hypertabular_workbook_fill");
 
         private static MemorySegment export(String symbol) {
-            return LOOKUP.find(symbol).orElseThrow(
-                    () -> new IllegalStateException("libhypertabular does not export " + symbol));
+            return LOOKUP.find(symbol)
+                    .orElseThrow(() -> new IllegalStateException("libhypertabular does not export " + symbol));
         }
 
         // The library must outlive every downcall made through it, so it is loaded into the
@@ -233,8 +291,16 @@ final class Native {
         }
     }
 
-    static int header(MemorySegment state, MemorySegment input, long inputLen, boolean last,
-            MemorySegment names, long namesCap, MemorySegment arena, long arenaCap, MemorySegment out) {
+    static int header(
+            MemorySegment state,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment names,
+            long namesCap,
+            MemorySegment arena,
+            long arenaCap,
+            MemorySegment out) {
         try {
             return (int) Downcalls.HEADER.invokeExact(
                     Core.HEADER, state, input, inputLen, last ? 1 : 0, names, namesCap, arena, arenaCap, out);
@@ -245,13 +311,36 @@ final class Native {
         }
     }
 
-    static int fill(MemorySegment state, MemorySegment input, long inputLen, boolean last,
-            MemorySegment specs, MemorySegment columns, long columnCount, long maxRows,
-            MemorySegment cells, long cellsCap, MemorySegment arena, long arenaCap, MemorySegment out) {
+    static int fill(
+            MemorySegment state,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment cells,
+            long cellsCap,
+            MemorySegment arena,
+            long arenaCap,
+            MemorySegment out) {
         try {
             return (int) Downcalls.FILL.invokeExact(
-                    Core.FILL, state, input, inputLen, last ? 1 : 0, specs, columns, columnCount, maxRows,
-                    cells, cellsCap, arena, arenaCap, out);
+                    Core.FILL,
+                    state,
+                    input,
+                    inputLen,
+                    last ? 1 : 0,
+                    specs,
+                    columns,
+                    columnCount,
+                    maxRows,
+                    cells,
+                    cellsCap,
+                    arena,
+                    arenaCap,
+                    out);
         } catch (RuntimeException | Error failure) {
             throw failure;
         } catch (Throwable t) {
@@ -266,6 +355,108 @@ final class Native {
             throw failure;
         } catch (Throwable t) {
             throw unexpected("hypertabular_delimited_unescape", t);
+        }
+    }
+
+    /** The size of a workbook state block, which wants 8-byte alignment. */
+    static long workbookStateSize() {
+        try {
+            return (long) Downcalls.STATE_SIZE.invokeExact(Core.BOOK_STATE_SIZE);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_workbook_state_size", t);
+        }
+    }
+
+    /** The workbook calls that share one shape: which export is the caller's to name. */
+    enum Book {
+        OPEN("hypertabular_workbook_open"),
+        SHEETS("hypertabular_workbook_sheets"),
+        STRINGS("hypertabular_workbook_strings"),
+        STYLES("hypertabular_workbook_styles"),
+        HEADER("hypertabular_workbook_header");
+
+        private final String symbol;
+
+        Book(String symbol) {
+            this.symbol = symbol;
+        }
+
+        private MemorySegment address() {
+            return switch (this) {
+                case OPEN -> Core.BOOK_OPEN;
+                case SHEETS -> Core.BOOK_SHEETS;
+                case STRINGS -> Core.BOOK_STRINGS;
+                case STYLES -> Core.BOOK_STYLES;
+                case HEADER -> Core.BOOK_HEADER;
+            };
+        }
+    }
+
+    static int book(Book call, MemorySegment state, MemorySegment container, MemorySegment buffers, MemorySegment out) {
+        try {
+            return (int)
+                    Downcalls.BOOK.invokeExact(call.address(), state, container, container.byteSize(), buffers, out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected(call.symbol, t);
+        }
+    }
+
+    static int sheet(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment part,
+            int index,
+            boolean hasHeader,
+            boolean skipEmptyRows,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.SHEET.invokeExact(
+                    Core.BOOK_SHEET,
+                    state,
+                    container,
+                    container.byteSize(),
+                    part,
+                    part.byteSize(),
+                    index,
+                    hasHeader ? 1 : 0,
+                    skipEmptyRows ? 1 : 0,
+                    out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_workbook_sheet", t);
+        }
+    }
+
+    static int bookFill(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment buffers,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.BOOK_FILL.invokeExact(
+                    Core.BOOK_FILL,
+                    state,
+                    container,
+                    container.byteSize(),
+                    specs,
+                    columns,
+                    columnCount,
+                    maxRows,
+                    buffers,
+                    out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_workbook_fill", t);
         }
     }
 }

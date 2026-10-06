@@ -25,22 +25,26 @@ def _expected_version() -> str:
     for parent in Path(__file__).resolve().parents:
         manifest = parent / "rust" / "Cargo.toml"
         if manifest.is_file():
-            found = re.search(r'^version\s*=\s*"([^"]+)"', manifest.read_text(encoding="utf-8"), re.MULTILINE)
+            found = re.search(
+                r'^version\s*=\s*"([^"]+)"', manifest.read_text(encoding="utf-8"), re.MULTILINE
+            )
             assert found, f"no version in {manifest}"
             return found.group(1)
     raise FileNotFoundError("rust/Cargo.toml not found")
 
 
 def test_the_native_backend_loaded():
-    # What the forge's wheel workflow asserts of every wheel it builds.
+    """What the forge's wheel workflow asserts of every wheel it builds."""
     assert hypertabular.BACKEND == "native"
 
 
 def test_native_version_names_the_loaded_core():
+    """native_version reports the core this package was built from."""
     assert hypertabular.native_version() == _expected_version()
 
 
 def test_everything_exported_is_there():
+    """Every name in __all__ exists and is presented as the package's own."""
     for name in hypertabular.__all__:
         assert hasattr(hypertabular, name), name
     assert hypertabular.DelimitedReader.__module__ == "hypertabular"
@@ -48,14 +52,20 @@ def test_everything_exported_is_there():
     assert hypertabular.ColumnData.__module__ == "hypertabular"
 
 
-@pytest.mark.parametrize("name", [name for name in hypertabular.__all__ if name not in ("BACKEND", "Verdict")])
+@pytest.mark.parametrize(
+    "name", [name for name in hypertabular.__all__ if name not in ("BACKEND", "Verdict")]
+)
 def test_everything_exported_has_a_docstring(name: str):
+    """Every exported name carries the docstring help() prints."""
     doc = getattr(hypertabular, name).__doc__
     assert doc and doc.strip(), f"help(hypertabular.{name}) is empty"
 
 
 _MEMBERS = [
-    (DelimitedReader, ["open", "read", "close", "header", "dialect", "plan", "batch_rows", "records"]),
+    (
+        DelimitedReader,
+        ["open", "read", "close", "header", "dialect", "plan", "batch_rows", "records"],
+    ),
     (Batch, ["rows", "columns", "column", "raw"]),
     (ColumnData, ["column", "values", "verdicts", "fault_count", "faults", "raw"]),
     (Column, [door.name.lower() for door in hypertabular.Door]),
@@ -66,6 +76,7 @@ _MEMBERS = [
 
 @pytest.mark.parametrize("cls, members", _MEMBERS, ids=[cls.__name__ for cls, _ in _MEMBERS])
 def test_members_have_docstrings(cls: type, members: list[str]):
+    """Every public member of the exported classes carries a docstring."""
     for member in members:
         doc = getattr(cls, member).__doc__
         assert doc and doc.strip(), f"help({cls.__name__}.{member}) is empty"

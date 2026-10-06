@@ -209,7 +209,7 @@ public struct Column: Equatable, Sendable {
 }
 
 /// The closed set of types a column's values can be viewed as in place, a whole batch at a
-/// time (``DelimitedReader/values(_:as:)``): the doors whose value is a primitive the core
+/// time (``Batch/values(_:as:)``): the doors whose value is a primitive the core
 /// writes as Swift lays it out. The conformances are this binding's to declare — one per
 /// such door, below — so conforming anything else is unsupported.
 public protocol ColumnValue {

@@ -4,8 +4,11 @@ source "https://rubygems.org"
 
 gemspec
 
-# The test gems; rake and yard are the gemspec's own development dependencies, since
-# `rake build` and `rake docs:check` are part of packaging the gem.
+# The test, benchmark and formatting gems; rake and yard are the gemspec's own development
+# dependencies, since `rake build` and `rake docs:check` are part of packaging the gem.
 group :development do
+  gem "benchmark-ips", "~> 2.15"
   gem "rspec", "~> 3.13"
+  # The formatter: .rubocop.yml enables the layout cops only, over every Ruby file in the gem.
+  gem "rubocop", "~> 1.91", require: false
 end

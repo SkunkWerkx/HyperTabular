@@ -2,7 +2,7 @@ import HyperTabularCore
 
 /// One cell's verdict as the core writes it into a column's verdict array: HyperCast's
 /// reason code, with none for a cell that cast, and the offending span within the cell's
-/// own text. ``DelimitedReader/verdicts(_:)`` hands a column's verdicts out as a buffer of
+/// own text. ``Batch/verdicts(_:)`` hands a column's verdicts out as a buffer of
 /// these, for code that wants to scan a batch without a ``Verdict`` per cell.
 public struct CellVerdict: Equatable, Sendable {
     // The core's own 12 bytes, so that a verdict array is a buffer of these as it stands.

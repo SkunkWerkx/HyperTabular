@@ -3,16 +3,16 @@
 //!
 //! A text cell goes through the HyperCast door verbatim, and its fault span is HyperCast's
 //! own, into the cell's bytes. A typed cell is converted directly — a workbook's `42.0`
-//! never passes through text to become an `i32` — and a typed cell that fails its door
-//! is said back as text ([`super::number::Text`]) with the fault spanning all of it.
+//! never passes through text to become an `i32` — by HyperCast's typed twin of the same
+//! door (`i32_from_f64`, `decimal_from_f64`, `excel_time`, …), and a typed cell that fails
+//! its door is said back as text ([`super::number::Text`]) with the fault spanning all of it.
 
-use super::number::{self, Text, is_integral, magnitude, round_signed, round_unsigned};
+use super::number::{self, Text};
 use crate::kernel::abi::{CellVerdict, ColumnBuffer, ColumnSpec, Slot, Span};
 use crate::kernel::door::Door;
 use hypercast::{
-    CivilDateTime, Date, Decimal, Duration, ExcelEpoch, Fault, MAX_DURATION_SECONDS,
-    MAX_TIMESTAMP_SECONDS, MIN_TIMESTAMP_SECONDS, NumFormat, Reason, Timestamp, UnixPrecision,
-    excel_serial,
+    CivilDateTime, Date, Decimal, Duration, ExcelEpoch, Fault, NumFormat, Reason, Timestamp,
+    UnixPrecision, excel_duration, excel_serial, excel_time,
 };
 
 /// Nanoseconds in one day.
@@ -188,54 +188,17 @@ fn spanless(reason: Reason) -> Fault {
     }
 }
 
-/// Splits a non-negative serial into whole days and the nanoseconds of the fractional
-/// day, rounding the fraction to the nearest nanosecond (and carrying into the day if
-/// that rounds up to exactly one day).
-pub fn split(value: f64) -> Result<(i64, u64), Reason> {
-    if !value.is_finite() || value < 0.0 {
-        // Excel shows a negative date serial as `####`; NaN and ∞ never come from a file.
-        return Err(Reason::Malformed);
-    }
-    if value >= 9.0e15 {
-        // Past any calendar; also keeps the conversion below exact.
-        return Err(Reason::OutOfRange);
-    }
-    let whole = value as u64;
-    let mut days = whole as i64;
-    let mut nanos = round_unsigned((value - whole as f64) * NANOS_PER_DAY as f64);
-    if nanos >= NANOS_PER_DAY {
-        days += 1;
-        nanos -= NANOS_PER_DAY;
-    }
-    Ok((days, nanos))
-}
-
-/// `value` days as a duration, nanos signed as the seconds are, within HyperCast's
-/// ±10,000-year window.
-pub fn days_to_duration(value: f64) -> Result<Duration, Reason> {
-    if !value.is_finite() {
-        return Err(Reason::Malformed);
-    }
-    let seconds = value * 86_400.0;
-    if magnitude(seconds) > MAX_DURATION_SECONDS as f64 {
-        return Err(Reason::OutOfRange);
-    }
-    let total = round_signed(seconds * 1e9);
-    Ok(Duration {
-        seconds: (total / 1_000_000_000) as i64,
-        nanos: (total % 1_000_000_000) as i32,
-    })
-}
-
 /// A serial read the way its number format declared: a date/time serial is a wall clock,
 /// or a time of day when it is under one day and so carries no date; an elapsed serial is
 /// a span of that many days, sign and all. `None` where the rules refuse the serial.
 pub fn serial(value: f64, system: ExcelEpoch, elapsed: bool) -> Option<Cell<'static>> {
     if elapsed {
-        return days_to_duration(value).ok().map(Cell::Span);
+        return excel_duration(value).ok().map(Cell::Span);
     }
-    let (days, nanos) = split(value).ok()?;
-    if days == 0 {
+    let nanos = excel_time(value).ok()?;
+    // Under one day once rounded to the nanosecond, as `excel_time` rounds: what is left
+    // short of half a nanosecond under a day carries into the next one, and has a date.
+    if value * (NANOS_PER_DAY as f64) < NANOS_PER_DAY as f64 - 0.5 {
         return Some(Cell::Clock(nanos));
     }
     let wall = excel_serial(value, system).ok()?;
@@ -297,27 +260,17 @@ pub fn wall_from_iso(text: &[u8]) -> Option<Cell<'static>> {
     })
 }
 
-/// A finite, integral double as any integer type: non-integral is `Malformed`, integral
-/// but unrepresentable is `OutOfRange`.
-fn number_to_int<T: TryFrom<i128>>(value: f64) -> Result<T, Fault> {
-    if !is_integral(value) {
-        return Err(MALFORMED);
-    }
-    // Every integral double below 2^127 in magnitude converts to i128 exactly.
-    if magnitude(value) >= 1.701_411_834_604_692_3e38 {
-        return Err(OUT_OF_RANGE);
-    }
-    T::try_from(number::integral(value)).map_err(|_| OUT_OF_RANGE)
-}
-
-fn integer<T: TryFrom<i128>>(
+/// A cell through one of the numeric doors: the text door for text, its typed twin for a
+/// number, and nothing else.
+fn numeric<T>(
     cell: &Cell<'_>,
     door: impl FnOnce(&[u8]) -> Result<T, Fault>,
+    typed: impl FnOnce(f64) -> Result<T, Reason>,
 ) -> Result<T, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => door(text),
-        Cell::Number(value) => number_to_int(value),
+        Cell::Number(value) => typed(value).map_err(spanless),
         _ => Err(MALFORMED),
     }
 }
@@ -346,38 +299,9 @@ fn unix(cell: &Cell<'_>, precision: UnixPrecision) -> Result<Timestamp, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => hypercast::cast_unix(text, precision),
-        Cell::Number(value) => {
-            let ticks: i128 = number_to_int(value)?;
-            // Nanos count forward from `seconds`, even before the epoch (protobuf).
-            let ((seconds, nanos), nanos_per_tick) = match precision {
-                UnixPrecision::Seconds => ((ticks, 0), 1),
-                UnixPrecision::Millis => (floor_div::<1_000>(ticks), 1_000_000),
-                UnixPrecision::Micros => (floor_div::<1_000_000>(ticks), 1_000),
-                UnixPrecision::Nanos => (floor_div::<1_000_000_000>(ticks), 1),
-            };
-            if seconds < i128::from(MIN_TIMESTAMP_SECONDS)
-                || seconds > i128::from(MAX_TIMESTAMP_SECONDS)
-            {
-                return Err(OUT_OF_RANGE);
-            }
-            Ok(Timestamp {
-                seconds: seconds as i64,
-                nanos: (nanos * nanos_per_tick) as i32,
-            })
-        }
+        Cell::Number(value) => hypercast::unix_from_f64(value, precision).map_err(spanless),
         Cell::Wall { date, nanos } => Ok(wall_to_timestamp(date, nanos)),
         _ => Err(MALFORMED),
-    }
-}
-
-/// Floored quotient and non-negative remainder by a positive constant.
-#[inline(always)]
-fn floor_div<const BY: i128>(value: i128) -> (i128, i128) {
-    let (quotient, remainder) = (value / BY, value % BY);
-    if remainder < 0 {
-        (quotient - 1, remainder + BY)
-    } else {
-        (quotient, remainder)
     }
 }
 
@@ -397,7 +321,7 @@ fn time(cell: &Cell<'_>) -> Result<u64, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => hypercast::cast_time(text),
-        Cell::Number(value) => split(value).map(|(_, nanos)| nanos).map_err(spanless),
+        Cell::Number(value) => excel_time(value).map_err(spanless),
         Cell::Wall { nanos, .. } | Cell::Clock(nanos) => Ok(nanos),
         Cell::Span(span) => {
             if span.seconds < 0 || span.nanos < 0 {
@@ -420,7 +344,7 @@ fn duration(cell: &Cell<'_>) -> Result<Duration, Fault> {
     match *cell {
         Cell::Empty => Err(EMPTY),
         Cell::Text(text) => hypercast::cast_duration(text),
-        Cell::Number(value) => days_to_duration(value).map_err(spanless),
+        Cell::Number(value) => excel_duration(value).map_err(spanless),
         Cell::Clock(nanos) => Ok(Duration {
             seconds: (nanos / 1_000_000_000) as i64,
             nanos: (nanos % 1_000_000_000) as i32,
@@ -532,70 +456,85 @@ pub unsafe fn cast(
         match door {
             Door::Bool => {
                 let result = match *cell {
-                    Cell::Empty => Err(EMPTY),
-                    Cell::Text(text) => hypercast::cast_bool(text),
                     Cell::Bool(value) => Ok(value),
-                    // A workbook number is accepted only as exactly `0` or `1`.
-                    Cell::Number(value) => {
-                        if value == 1.0 {
-                            Ok(true)
-                        } else if value == 0.0 {
-                            Ok(false)
-                        } else {
-                            Err(MALFORMED)
-                        }
-                    }
-                    _ => Err(MALFORMED),
+                    _ => numeric(
+                        cell,
+                        |text| hypercast::cast_bool(text),
+                        hypercast::bool_from_f64,
+                    ),
                 };
                 put(buffer, row, result.map(u8::from), 0u8)
             }
             Door::I8 => {
-                let result = integer(cell, |text| hypercast::cast_i8(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_i8(text, &format()),
+                    hypercast::i8_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::I16 => {
-                let result = integer(cell, |text| hypercast::cast_i16(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_i16(text, &format()),
+                    hypercast::i16_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::I32 => {
-                let result = integer(cell, |text| hypercast::cast_i32(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_i32(text, &format()),
+                    hypercast::i32_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::I64 => {
-                let result = integer(cell, |text| hypercast::cast_i64(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_i64(text, &format()),
+                    hypercast::i64_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::U8 => {
-                let result = integer(cell, |text| hypercast::cast_u8(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_u8(text, &format()),
+                    hypercast::u8_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::U16 => {
-                let result = integer(cell, |text| hypercast::cast_u16(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_u16(text, &format()),
+                    hypercast::u16_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::U32 => {
-                let result = integer(cell, |text| hypercast::cast_u32(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_u32(text, &format()),
+                    hypercast::u32_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::U64 => {
-                let result = integer(cell, |text| hypercast::cast_u64(text, &format()));
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_u64(text, &format()),
+                    hypercast::u64_from_f64,
+                );
                 put(buffer, row, result, 0)
             }
             Door::F32 => {
-                let result = match *cell {
-                    Cell::Empty => Err(EMPTY),
-                    Cell::Text(text) => hypercast::cast_f32(text, &format()),
-                    Cell::Number(value) if value.is_nan() => Err(MALFORMED),
-                    Cell::Number(value) => {
-                        let narrowed = value as f32;
-                        if narrowed.is_infinite() {
-                            Err(OUT_OF_RANGE)
-                        } else {
-                            Ok(narrowed)
-                        }
-                    }
-                    _ => Err(MALFORMED),
-                };
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_f32(text, &format()),
+                    hypercast::f32_from_f64,
+                );
                 put(buffer, row, result, 0.0)
             }
             Door::F64 => {
@@ -610,13 +549,13 @@ pub unsafe fn cast(
                 put(buffer, row, result, 0.0)
             }
             Door::Decimal => {
-                // Only text can be one: a workbook number is a binary double, and which
-                // decimal it "meant" is not something the file says.
-                let result = match *cell {
-                    Cell::Empty => Err(EMPTY),
-                    Cell::Text(text) => hypercast::cast_decimal(text, &format()),
-                    _ => Err(MALFORMED),
-                };
+                // A workbook number is the shortest decimal that names its double: the
+                // digits the writer put in the file, whichever writer it was.
+                let result = numeric(
+                    cell,
+                    |text| hypercast::cast_decimal(text, &format()),
+                    hypercast::decimal_from_f64,
+                );
                 let zero = Decimal {
                     lo: 0,
                     hi: 0,

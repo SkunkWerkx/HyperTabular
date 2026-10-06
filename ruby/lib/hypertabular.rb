@@ -2,22 +2,30 @@ require "date"
 require "hypercast"
 require_relative "hypertabular/native_platform"
 require_relative "hypertabular/runtime"
+require_relative "hypertabular/runtime/columns"
 require_relative "hypertabular/runtime/delimited"
+require_relative "hypertabular/runtime/workbook"
 
 # Tabular parsing with a HyperCast verdict for every cell: delimited text — CSV, TSV, any
-# single-byte ASCII separator — read a batch at a time into typed columns by one Rust core
-# (libhypertabular), called through Fiddle.
+# single-byte ASCII separator — and workbooks — XLSX and ODS — read a batch at a time into
+# typed columns by one Rust core (libhypertabular), called through Fiddle.
 #
 #   plan = [HyperTabular::Column.i32(0), HyperTabular::Column.text(1)]
 #   reader = HyperTabular::DelimitedReader.new("id,name\n1,alice\nx,bob\n", HyperTabular::Dialect::CSV, plan)
 #   reader.header                 # => ["id", "name"]
-#   reader.read                   # => true
-#   reader.values(1)              # => ["alice", "bob"]
-#   reader.verdict(0, 1)          # => #<data HyperCast::Fault reason=:malformed, offset=0, length=1>
-#   reader.raw(0, 1)              # => "x"
+#   batch = reader.read           # => #<HyperTabular::Batch rows=2 columns=2>
+#   batch.values(1)               # => ["alice", "bob"]
+#   batch.get(0, 1)               # => #<data HyperCast::Fault reason=:malformed, offset=0, length=1>
+#   batch.raw(0, 1)               # => "x"
+#   batch.line(1)                 # => 3
 #
-# Nothing is sniffed: the Dialect states the separator, the quoting and the header, and the
-# plan states each Column's door and, for numbers, its notation. HyperCast is the judge:
+#   book = HyperTabular::Workbook.open("orders.xlsx")
+#   sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT, plan)
+#   sheet.read                    # => the same Batch
+#
+# Nothing is sniffed: the Dialect states the separator, the quoting and the header,
+# SheetOptions a sheet's header and whether empty rows are skipped, and the plan states each
+# Column's door and, for numbers, its notation. HyperCast is the judge:
 # the verdicts (HyperCast::Success, HyperCast::Fault), the notation (HyperCast::NumFormat),
 # the exact decimal (HyperCast::Decimal) and the declared options are that gem's own types,
 # and a cell means exactly what HyperCast's door would say of the same text. A bad value is
@@ -56,7 +64,9 @@ end
 require_relative "hypertabular/dialect"
 require_relative "hypertabular/column"
 require_relative "hypertabular/tabular_error"
+require_relative "hypertabular/batch"
 require_relative "hypertabular/delimited_reader"
+require_relative "hypertabular/workbook"
 
 # --- backend selection. There is one backend today: the native libhypertabular shared
 # library called through Fiddle. Every native call and every byte of native memory is behind

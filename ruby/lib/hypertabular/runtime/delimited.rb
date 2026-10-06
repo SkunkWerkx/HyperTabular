@@ -27,11 +27,8 @@ module HyperTabular
       # A span's length without its flag.
       SPAN_LENGTH = SPAN_FLAG - 1
 
-      # Bytes in one verdict (CellVerdict: offset, len, reason — three u32) and one span.
-      VERDICT_BYTES = 12
+      # Bytes in one span.
       SPAN_BYTES = 8
-      # ColumnSpec: ordinal, door, param, then HyperCast's 32-byte RawNumFormat.
-      SPEC_BYTES = 44
       # Filled: rows, consumed, arena_used, needed, then Failure (code, line, record, byte,
       # expected, found).
       FILLED_BYTES = 64
@@ -47,6 +44,10 @@ module HyperTabular
       # bytes written, and — after ERR_STRUCTURE — the failure as
       # [code, line, record, byte, expected, found].
       attr_reader :rows, :consumed, :arena_used, :failure
+
+      # The plan's arrays (Columns), and the cell-table entries one row takes: the widest
+      # ordinal the plan reads, plus two — or more, if the core asked for more.
+      attr_reader :columns, :per_row
 
       # The loaded core's version word, major << 16 | minor << 8 | patch.
       def self.version
@@ -64,20 +65,11 @@ module HyperTabular
       def initialize(specs, sizes, batch_rows, per_row)
         @header = Runtime.function(:hypertabular_delimited_header)
         @fill = Runtime.function(:hypertabular_delimited_fill)
-        @unescape = Runtime.function(:hypertabular_delimited_unescape)
         @state = Runtime.buffer(Runtime.function(:hypertabular_delimited_state_size).call)
         @batch_rows = batch_rows
-        @sizes = sizes
-        @count = specs.size
-        unless specs.empty?
-          @specs = Runtime.buffer(SPEC_BYTES * @count)
-          @specs[0, SPEC_BYTES * @count] = specs.join
-          @values = sizes.map { |size| Runtime.buffer(size * batch_rows) }
-          @verdicts = sizes.map { Runtime.buffer(VERDICT_BYTES * batch_rows) }
-          addresses = @values.zip(@verdicts).flatten.map(&:to_i).pack("J*")
-          @columns = Runtime.buffer(addresses.bytesize)
-          @columns[0, addresses.bytesize] = addresses
-        end
+        @columns = Columns.new(specs, sizes, batch_rows)
+        @per_row = per_row
+        @cramped = false
         @cells_cap = per_row * batch_rows
         @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
         @arena_cap = ARENA_BYTES
@@ -123,16 +115,26 @@ module HyperTabular
 
       # Fills every column from the attached input, +length+ bytes from +start+ — the one
       # native call a batch makes. OK or ERR_STRUCTURE.
+      #
+      # The core ends a batch early when the arena fills, so a batch that came back short
+      # with the arena half used or more has the next one start with it doubled: escaped
+      # text costs a few batches, not one per row.
       def fill(start, length, last)
+        grow_arena(@arena_cap * 2) if @cramped
+        @cramped = false
         loop do
           code = @fill.call(@state, @base + start, length, last ? 1 : 0,
-                            @specs, @columns, @count, @batch_rows,
+                            @columns.specs, @columns.table, @columns.count, @batch_rows,
                             @cells, @cells_cap, @arena, @arena_cap, @out)
           needed = finished
           case code
-          when OK, ERR_STRUCTURE then return code
+          when OK
+            @cramped = @rows.positive? && @rows < @batch_rows && @arena_used * 2 >= @arena_cap
+            return code
+          when ERR_STRUCTURE then return code
           when ERR_CELLS
-            @cells_cap = needed * @batch_rows
+            @per_row = [@per_row, needed].max
+            @cells_cap = @per_row * @batch_rows
             @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
           when ERR_ARENA then grow_arena(needed)
           else raise CONTRACT
@@ -140,35 +142,14 @@ module HyperTabular
         end
       end
 
-      # A column's value array for the batch in hand, as the core wrote it.
-      def values(column)
-        @values[column][0, @sizes[column] * @rows]
-      end
-
-      # A column's verdict array for the batch in hand: offset, len, reason per row.
-      def verdicts(column)
-        @verdicts[column][0, VERDICT_BYTES * @rows]
-      end
-
-      # The cell table for the batch in hand: +per_row+ spans a row.
-      def cells(per_row)
-        @cells[0, SPAN_BYTES * per_row * @rows]
+      # The cell table for the batch in hand — #per_row spans a row — copied out.
+      def cells
+        @cells[0, SPAN_BYTES * @per_row * @rows]
       end
 
       # The arena as the last call left it: the unescaped text of every flagged span.
       def arena
         @arena[0, @arena_used]
-      end
-
-      # One quoted cell of the attached input — a flagged cell-table entry names one —
-      # with its quotes resolved.
-      def unescape(offset, length)
-        if @scratch.nil? || @scratch_cap < length
-          @scratch_cap = [length, 256].max
-          @scratch = Runtime.buffer(@scratch_cap)
-        end
-        written = @unescape.call(@base + offset, length, @scratch, @scratch_cap)
-        @scratch[0, written]
       end
 
       # Records finished so far — the header and skipped blank lines included.

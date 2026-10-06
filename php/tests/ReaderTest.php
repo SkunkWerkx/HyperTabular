@@ -36,37 +36,37 @@ final class ReaderTest extends TestCase
             [Column::i32(0), Column::text(1), Column::f64(2)]
         );
         $this->assertSame(['id', 'name', 'score'], $reader->header());
-        $this->assertSame(0, $reader->rows());
-        $this->assertTrue($reader->read());
-        $this->assertSame(3, $reader->rows());
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertSame([2, 3, 4], [$batch->line(0), $batch->line(1), $batch->line(2)]);
+        $this->assertSame(3, $batch->rows());
 
-        $this->assertSame([1, 2, 3], $reader->values(0));
-        $this->assertSame([2.5, null, 7.0], $reader->values(2));
-        $this->assertSame([], $reader->faults(0));
-        $this->assertSame([1], array_keys($reader->faults(2)));
-        $this->assertSame(CastFailure::Malformed, $reader->faults(2)[1]->reason);
+        $this->assertSame([1, 2, 3], $batch->values(0));
+        $this->assertSame([2.5, null, 7.0], $batch->values(2));
+        $this->assertSame([], $batch->faults(0));
+        $this->assertSame([1], array_keys($batch->faults(2)));
+        $this->assertSame(CastFailure::Malformed, $batch->faults(2)[1]->reason);
 
         // The union, consumed the way HyperCast's own verdicts are.
-        $verdict = $reader->cell(2, 1);
+        $verdict = $batch->get(2, 1);
         $described = match (true) {
             $verdict instanceof Success => (string) $verdict->value,
-            $verdict instanceof Fault => "{$verdict->reason->name} in \"{$reader->raw(2, 1)}\"",
+            $verdict instanceof Fault => "{$verdict->reason->name} in \"{$batch->raw(2, 1)}\"",
         };
         $this->assertSame('Malformed in "x"', $described);
 
-        $this->assertEquals(new Success('bob, jr'), $reader->cell(1, 1));
-        $this->assertSame('bob, jr', $reader->raw(1, 1));
+        $this->assertEquals(new Success('bob, jr'), $batch->get(1, 1));
+        $this->assertSame('bob, jr', $batch->raw(1, 1));
         // An empty cell is an Empty fault, which HyperCast's own optional() presents as null.
-        $this->assertNull(Cast::optional($reader->cell(1, 2)));
-        $this->assertSame(['alice', 'bob, jr', null], $reader->values(1));
+        $this->assertNull(Cast::optional($batch->get(1, 2)));
+        $this->assertSame(['alice', 'bob, jr', null], $batch->values(1));
         $this->assertEquals(
             [new Success(1), new Success(2), new Success(3)],
-            $reader->verdicts(0)
+            $batch->verdicts(0)
         );
 
-        $this->assertFalse($reader->read());
-        $this->assertSame(0, $reader->rows());
-        $this->assertSame([], $reader->values(0));
+        $this->assertNull($reader->read());
+        // The batch owns what it shows: the reader having moved on changes none of it.
+        $this->assertSame([1, 2, 3], $batch->values(0));
         $this->assertSame(4, $reader->records());
     }
 
@@ -136,12 +136,12 @@ final class ReaderTest extends TestCase
 
         $row = 0;
         $cast = [];
-        while ($reader->read()) {
-            for ($index = 0; $index < $reader->rows(); $index++, $row++) {
+        while (($batch = $reader->read()) !== null) {
+            for ($index = 0; $index < $batch->rows(); $index++, $row++) {
                 $text = $cells[$row];
                 foreach ($doors as $column => [, $judge]) {
                     $expected = $judge($text);
-                    $actual = $reader->cell($column, $index);
+                    $actual = $batch->get($column, $index);
                     $label = "'{$text}' through {$plan[$column]->door->name}";
                     $this->assertEquals($expected, $actual, $label);
                     if ($expected instanceof Success) {
@@ -156,12 +156,12 @@ final class ReaderTest extends TestCase
                             );
                         }
                     }
-                    $this->assertSame($text, $reader->raw($column, $index), $label);
+                    $this->assertSame($text, $batch->raw($column, $index), $label);
                 }
                 // The text door: the bytes as they are, and Empty only for no bytes at all.
                 $this->assertEquals(
                     $text === '' ? new Fault(CastFailure::Empty, 0, 0) : new Success($text),
-                    $reader->cell(\count($doors), $index)
+                    $batch->get(\count($doors), $index)
                 );
             }
         }
@@ -180,23 +180,23 @@ final class ReaderTest extends TestCase
             bufferBytes: 16
         );
         // A batch is the whole rows the buffer holds, and this buffer holds one at a time.
-        $this->assertTrue($reader->read());
-        $this->assertSame(1, $reader->rows());
-        $this->assertSame('say "hi"', $reader->values(0)[0]);
-        $this->assertSame('say "hi"', $reader->raw(0, 0));
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertSame(1, $batch->rows());
+        $this->assertSame('say "hi"', $batch->values(0)[0]);
+        $this->assertSame('say "hi"', $batch->raw(0, 0));
         // The fault's span indexes the unescaped text, which raw() gives back.
-        $fault = $reader->cell(1, 0);
+        $fault = $batch->get(1, 0);
         $this->assertInstanceOf(Fault::class, $fault);
-        $this->assertSame('12"3', $reader->raw(1, 0));
-        $this->assertSame('"', substr($reader->raw(1, 0), $fault->offset, $fault->length));
+        $this->assertSame('12"3', $batch->raw(1, 0));
+        $this->assertSame('"', substr($batch->raw(1, 0), $fault->offset, $fault->length));
         // Larger than the arena and the scratch started out: both grew.
-        $this->assertTrue($reader->read());
-        $this->assertSame(1, $reader->rows());
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertSame(1, $batch->rows());
         $unescaped = str_replace('""', '"', $long);
-        $this->assertSame($unescaped, $reader->values(0)[0]);
-        $this->assertSame($unescaped, $reader->raw(0, 0));
-        $this->assertEquals(new Success(7), $reader->cell(1, 0));
-        $this->assertFalse($reader->read());
+        $this->assertSame($unescaped, $batch->values(0)[0]);
+        $this->assertSame($unescaped, $batch->raw(0, 0));
+        $this->assertEquals(new Success(7), $batch->get(1, 0));
+        $this->assertNull($reader->read());
     }
 
     public function testAColumnPastTheRecordsEndReadsAsEmpty(): void
@@ -206,20 +206,20 @@ final class ReaderTest extends TestCase
             Dialect::csv(),
             [Column::i32(5), Column::text(1), Column::text(5)]
         );
-        $this->assertTrue($reader->read());
-        $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $reader->cell(0, 0));
-        $this->assertSame('', $reader->raw(0, 0));
-        $this->assertSame(['2'], $reader->values(1));
-        $this->assertSame([null], $reader->values(2));
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $batch->get(0, 0));
+        $this->assertSame('', $batch->raw(0, 0));
+        $this->assertSame(['2'], $batch->values(1));
+        $this->assertSame([null], $batch->values(2));
     }
 
     public function testAnEmptyPlanStillCountsRows(): void
     {
         $reader = DelimitedReader::fromString("a,b\n1,2\n3,4\n5,6\n", Dialect::csv(), [], batchRows: 2);
-        $this->assertSame(0, $reader->columnCount());
+        $this->assertSame([], $reader->plan());
         $rows = 0;
-        while ($reader->read()) {
-            $rows += $reader->rows();
+        while (($batch = $reader->read()) !== null) {
+            $rows += $batch->rows();
         }
         $this->assertSame(3, $rows);
         $this->assertSame(4, $reader->records());
@@ -229,17 +229,17 @@ final class ReaderTest extends TestCase
     {
         $reader = DelimitedReader::fromString("1,x\n", new Dialect(',', hasHeader: false), [Column::i32(0)]);
         $this->assertNull($reader->header());
-        $this->assertTrue($reader->read());
+        $this->assertNotNull($batch = $reader->read());
         foreach (
             [
-                static fn () => $reader->cell(0, 1),
-                static fn () => $reader->cell(0, -1),
-                static fn () => $reader->cell(1, 0),
-                static fn () => $reader->values(1),
-                static fn () => $reader->faults(-1),
-                static fn () => $reader->verdicts(1),
-                static fn () => $reader->raw(1, 0),
-                static fn () => $reader->raw(0, 1),
+                static fn () => $batch->get(0, 1),
+                static fn () => $batch->get(0, -1),
+                static fn () => $batch->get(1, 0),
+                static fn () => $batch->values(1),
+                static fn () => $batch->faults(-1),
+                static fn () => $batch->verdicts(1),
+                static fn () => $batch->raw(1, 0),
+                static fn () => $batch->raw(0, 1),
             ] as $ask
         ) {
             try {
@@ -249,6 +249,31 @@ final class ReaderTest extends TestCase
                 $this->addToAssertionCount(1);
             }
         }
+    }
+
+    public function testAnArenaThatCrampsABatchIsGrown(): void
+    {
+        // The core ends a batch early when its arena fills; the batch after one that did
+        // starts with the arena doubled, so twenty thousand escaped rows are a handful of
+        // batches, not thousands.
+        $row = '"' . str_repeat('say ""hi"" ', 8) . "\"\n";
+        $expected = str_repeat('say "hi" ', 8);
+        $reader = DelimitedReader::fromString(
+            str_repeat($row, 20_000),
+            new Dialect(',', true, false),
+            [Column::text(0)],
+            DelimitedReader::DEFAULT_BATCH_ROWS,
+            1 << 20
+        );
+        $batches = 0;
+        $rows = 0;
+        while (($batch = $reader->read()) !== null) {
+            $batches++;
+            $rows += $batch->rows();
+            $this->assertSame($expected, $batch->values(0)[$batch->rows() - 1]);
+        }
+        $this->assertSame(20_000, $rows);
+        $this->assertLessThan(15, $batches);
     }
 
     public function testAPlanOrADialectTheCoreCannotHonourIsRefusedUpFront(): void
@@ -287,8 +312,8 @@ final class ReaderTest extends TestCase
     public function testAStructuralFailureComesAfterTheIntactRowsAndIsFinal(): void
     {
         $reader = DelimitedReader::fromString("a,b\n1,2\n3,4\n5\n6,7\n", Dialect::csv(), [Column::i32(0)]);
-        $this->assertTrue($reader->read());
-        $this->assertSame([1, 3], $reader->values(0));
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertSame([1, 3], $batch->values(0));
         try {
             $reader->read();
             $this->fail('the short record was read');
@@ -298,8 +323,10 @@ final class ReaderTest extends TestCase
                 [3, 4, 12, 2, 1],
                 [$failure->record, $failure->recordLine, $failure->byte, $failure->expected, $failure->found]
             );
-            $this->assertSame('Record 3 (line 4, byte 12) has 1 cells; the first record had 2.', $failure->getMessage());
-            $this->assertSame(0, $reader->rows());
+            $this->assertSame(
+                'Record 3 (line 4, byte 12) has 1 cells; the first record had 2.',
+                $failure->getMessage()
+            );
             try {
                 $reader->read();
                 $this->fail('a read after a structural failure succeeded');
@@ -336,9 +363,9 @@ final class ReaderTest extends TestCase
             $sum = 0;
             $rows = 0;
             $batches = 0;
-            while ($reader->read()) {
-                $sum += array_sum($reader->values(0));
-                $rows += $reader->rows();
+            while (($batch = $reader->read()) !== null) {
+                $sum += array_sum($batch->values(0));
+                $rows += $batch->rows();
                 $batches++;
             }
             $this->assertSame([100_000, 4_999_950_000], [$rows, $sum]);
@@ -368,8 +395,8 @@ final class ReaderTest extends TestCase
         rewind($stream);
         $reader = DelimitedReader::fromStream($stream, Dialect::csv(), [Column::i32(0)], bufferBytes: 8);
         $ids = [];
-        while ($reader->read()) {
-            array_push($ids, ...$reader->values(0));
+        while (($batch = $reader->read()) !== null) {
+            array_push($ids, ...$batch->values(0));
         }
         $this->assertSame([1, 2, 3], $ids);
         $reader->close();
@@ -391,11 +418,11 @@ final class ReaderTest extends TestCase
         $this->assertSame(['a', 'b'], $reader->header());
         $lengths = [];
         $numbers = [];
-        while ($reader->read()) {
-            foreach ($reader->values(0) as $text) {
+        while (($batch = $reader->read()) !== null) {
+            foreach ($batch->values(0) as $text) {
                 $lengths[] = \strlen($text);
             }
-            array_push($numbers, ...$reader->values(1));
+            array_push($numbers, ...$batch->values(1));
         }
         $this->assertSame([100_000, 200_000], $lengths);
         $this->assertSame([1, 2], $numbers);

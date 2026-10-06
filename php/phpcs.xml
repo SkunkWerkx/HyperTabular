@@ -1,20 +1,24 @@
 <?xml version="1.0"?>
-<ruleset name="HyperTabular-docs">
-    <description>Doc-comment enforcement for HyperTabular's real public API surface — not a
-        general style linter. NativePlatform.php and Native.php are internal FFI plumbing
-        (PHP has no package-private visibility, so they are excluded by path here instead),
-        the same public/internal boundary HyperCast's PHP binding draws.</description>
+<ruleset name="HyperTabular">
+    <description>Two things. Formatting — PSR-12 — over all of this package's code: src,
+        tests and the benchmark (`vendor/bin/phpcbf` applies it). And doc-comment enforcement
+        for HyperTabular's real public API surface only: NativePlatform.php and Native.php are
+        internal FFI plumbing (PHP has no package-private visibility, so they are excluded by
+        path instead), the same public/internal boundary HyperCast's PHP binding draws.</description>
 
-    <file>src/DelimitedReader.php</file>
-    <file>src/Column.php</file>
-    <file>src/Dialect.php</file>
-    <file>src/Door.php</file>
-    <file>src/Tabular.php</file>
-    <file>src/TabularException.php</file>
-    <file>src/TabularFailure.php</file>
+    <file>src</file>
+    <file>tests</file>
+    <file>bench</file>
+    <exclude-pattern>tests/fixtures/*</exclude-pattern>
+    <arg name="extensions" value="php"/>
 
-    <rule ref="Squiz.Commenting.ClassComment"/>
+    <rule ref="PSR12"/>
+
+    <rule ref="Squiz.Commenting.ClassComment">
+        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
+    </rule>
     <rule ref="Squiz.Commenting.FunctionComment">
+        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
         <!-- Doc-comment presence and @param/@return/@throws accuracy only — not full Squiz
              formatting (alignment, blank-line placement, etc.), which isn't this project's
              comment style and isn't what "force documentation" is asking for. -->

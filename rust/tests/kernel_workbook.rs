@@ -87,21 +87,31 @@ fn the_corpus_packages_read_the_same_however_little_room_they_have() {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
-        if !matches!(extension, "xlsx" | "ods") {
+        if !matches!(extension, "xlsx" | "xlsm" | "ods") {
             continue;
         }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        // A package the core refuses to open has no rows, however much room it is given.
+        let refused = name.contains("encrypted");
         let bytes = std::fs::read(&path).unwrap();
+        // Across the ways of reading it: a sheet of one row has none once that row is its
+        // header.
+        let mut total = 0;
         for options in options() {
             // A real ODS sheet ends in a million empty rows written as one element. Read
             // with empty rows delivered, the comparison would hold every one of them twice,
             // in ten columns: gigabytes. `a_million_trailing_rows` covers that reading with
-            // one column.
-            if path.ends_with("basic.ods") && !options.skip_empty_rows {
+            // one column. Only the generated packages are known not to end that way.
+            if extension == "ods" && !name.starts_with("generated") && !options.skip_empty_rows {
                 continue;
             }
             let (_, rows) = compare(&bytes, options, 10, 3);
-            assert!(rows > 0, "{} has rows", path.display());
+            total += rows;
         }
+        assert_eq!(total > 0, !refused, "{} has rows", path.display());
         seen += 1;
     }
     assert!(seen >= 3, "{seen} fixtures read");
