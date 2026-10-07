@@ -29,6 +29,8 @@
 /php/tests        export-ignore
 /php/phpcs.xml    export-ignore
 /php/phpunit.xml  export-ignore
+/php/bench        export-ignore
+/php/phpbench.json export-ignore
 
 # The one exception: cmd.exe reads a batch file's labels reliably only with CRLF, so the
 # Gradle wrapper's gradlew.bat keeps the line endings Gradle wrote it with.

@@ -11,6 +11,11 @@ read a batch at a time into typed columns, with a
 .product(name: "HyperTabular", package: "HyperTabular"),
 ```
 
+HyperCast comes along as HyperTabular's dependency, so `import HyperCast` works without
+listing it. To name its product in your own target as well, add HyperCast to your package's
+`dependencies` too; SwiftPM only resolves a `.product(name:package:)` for a package listed
+there.
+
 ```swift
 import HyperCast
 import HyperTabular

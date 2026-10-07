@@ -71,7 +71,8 @@ Python call per cell.
 
 One abi3 wheel per platform serves every CPython from 3.11 up, so nothing is compiled on
 install: Linux (glibc and musl) on x86-64 and arm64, macOS on Apple silicon and Intel, and
-Windows on x86-64 and arm64.
+Windows on x86-64 and arm64. The free-threaded build (`python3.14t`) is not one of them: an
+abi3 wheel serves only the GIL build, and there is no source distribution to compile.
 
 ## In the browser (Pyodide)
 
