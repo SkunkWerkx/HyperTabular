@@ -15,6 +15,10 @@
 # The files stay out of the tree (corpus/generate/out/, sha256 in the README's table);
 # HYPERTABULAR_BENCH_DIR names another directory holding them. A file that is not there is
 # skipped.
+#
+# It measures whichever backend loads — the Magnus extension when one is staged (`rake
+# native:dev`), Fiddle otherwise — and says which; run it again under HYPERTABULAR_PURE=1 for
+# the other one.
 # Run: ruby benchmark/workbook_benchmark.rb
 
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
@@ -29,6 +33,8 @@ PLAN = [
 ].freeze
 OPTIONS = HyperTabular::SheetOptions.new
 DIRECTORY = ENV.fetch("HYPERTABULAR_BENCH_DIR") { File.expand_path("../../corpus/generate/out", __dir__) }
+
+puts "backend: #{HyperTabular::BACKEND} (core #{HyperTabular.native_version}) — #{RUBY_DESCRIPTION}"
 
 # Reads the first sheet whole, counting what cast from its values or from its verdicts.
 def read(container, verdicts:)

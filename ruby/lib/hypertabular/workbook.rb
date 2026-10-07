@@ -7,6 +7,7 @@ module HyperTabular
   # and never delivered as a row), whether a row with no cells is skipped, and the most rows
   # a batch holds.
   SheetOptions = Data.define(:has_header, :skip_empty_rows, :batch_rows) do
+    # Every option has a default; ArgumentError unless +batch_rows+ is a positive Integer.
     def initialize(has_header: true, skip_empty_rows: true, batch_rows: DelimitedReader::DEFAULT_BATCH_ROWS)
       raise ArgumentError, "batch_rows must be a positive Integer; got #{batch_rows.inspect}" unless
         batch_rows.is_a?(Integer) && batch_rows.positive?

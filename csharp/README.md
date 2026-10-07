@@ -63,6 +63,29 @@ rows, not once per cell.
   cell said as text, is written to an arena.
 - **Native AOT.** Source-generated `LibraryImport` only. An AOT publish links the core in
   from the package's static archive: one executable, nothing loaded at start.
+- **iOS and Mac Catalyst.** A `net11.0-ios` or `net11.0-maccatalyst` app (MAUI included)
+  needs nothing but the package reference: its `buildTransitive` targets link the core in
+  from static archives for `ios-arm64`, `iossimulator-arm64`, `maccatalyst-arm64` and
+  `maccatalyst-x64`, since neither platform loads a library.
 
 `Tabular.IsAvailable` and `Tabular.NativeVersion` answer whether the native library
 resolved, without the first read being what finds out.
+
+## WebAssembly (Blazor)
+
+One compiled assembly covers browser-wasm too: every native entry point is declared three
+times — `"hypertabular"` for platforms that load a library, `"*"` for the statically linked
+wasm module and `"__Internal"` for iOS and Mac Catalyst — picked at the call site by
+`OperatingSystem.IsBrowser()` and `OperatingSystem.IsIOS()`. CI builds the
+`wasm32-unknown-emscripten` archive on every pull request, the release pack stages it under
+`runtimes/browser-wasm/nativeassets/`, and the package's `build/net11.0/HyperTabular.targets`
+wires it into a Blazor WebAssembly project with no configuration: a `NativeFileReference`
+hands the archive to the linker beside HyperCast's (the two share no symbols), an
+`EmccExportedFunction` per export makes each resolvable through `"*"`, and the
+exception-handling translation .NET 11 needs is applied.
+
+No export takes more than twelve integer arguments, because Mono's interpreter, which runs
+.NET in the browser, passes no more to a native function; the work buffers travel in one
+struct instead. `HyperTabular.WasmSmokeTest` proves the chain in headless Chrome on every
+pull request: a Blazor app that reads delimited text and a workbook through the public API
+and renders `PASS` or `FAIL` into the page.

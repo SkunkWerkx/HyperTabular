@@ -32,7 +32,7 @@ require_relative "hypertabular/runtime/workbook"
 module HyperTabular
   # This gem's own version — kept in lockstep with hypertabular.gemspec and the core's
   # rust/Cargo.toml.
-  VERSION = "0.1.0"
+  VERSION = "0.7.0"
 
   class << self
     # Whether the native core loaded and exports the ABI this binding was built against.
@@ -66,11 +66,38 @@ require_relative "hypertabular/batch"
 require_relative "hypertabular/delimited_reader"
 require_relative "hypertabular/workbook"
 
-# --- backend selection. There is one backend today: the native libhypertabular shared
-# library called through Fiddle. Every native call and every byte of native memory is behind
-# HyperTabular::Runtime::Delimited, so a compiled extension, when there is one, replaces that
-# class and is chosen here, the way hypercast chooses its own.
+# --- backend selection, as hypercast makes its own: the Magnus extension, when present,
+# replaces the Fiddle crossing in place. Every native call and every byte of native memory is
+# behind HyperTabular::Runtime (Runtime::Delimited, Runtime::Book::Opened and ::Reading, and
+# Runtime.unescape), so that is all the extension redefines (rust/src/ruby_ext.rs): the
+# constructors hand back objects of its own that answer the same methods with the same bytes,
+# and everything above them — the readers, the workbook, Batch and every value and verdict it
+# builds — is the same Ruby on either backend. It is how the precompiled platform gems ship,
+# carrying no Fiddle library at all, and how the hypertabular-wasm gem runs in ruby.wasm,
+# where there is no Fiddle to call. The Fiddle definitions stay the universal zero-compile
+# fallback, for a Ruby or a platform no platform gem covers.
 #
-# HYPERTABULAR_PURE forces Fiddle, as HYPERCAST_PURE does for hypercast: CI runs the whole
-# suite through it. With nothing else to choose from it is accepted and changes nothing.
-HyperTabular::BACKEND = :fiddle
+# HYPERTABULAR_PURE forces Fiddle, as HYPERCAST_PURE does for hypercast. It is a testing and
+# diagnostic switch — CI runs the whole suite through it — read for presence, not value.
+# Inside a platform gem there is no library for it to load: BACKEND still reads :fiddle,
+# HyperTabular.available? answers false, and the first reader raises the LoadError naming the
+# missing library.
+HyperTabular::BACKEND =
+  if ENV["HYPERTABULAR_PURE"]
+    :fiddle
+  else
+    # A platform gem carries one extension per Ruby ABI under lib/hypertabular/<minor>/, and
+    # `rake native:dev` stages its own build there too; CI's in-job staging drops a single
+    # one flat at lib/. A miss on both is not an error: it is what the Fiddle backend is for.
+    begin
+      require "hypertabular/#{RUBY_VERSION[/\d+\.\d+/]}/hypertabular_native"
+      :native
+    rescue LoadError
+      begin
+        require "hypertabular_native"
+        :native
+      rescue LoadError
+        :fiddle
+      end
+    end
+  end

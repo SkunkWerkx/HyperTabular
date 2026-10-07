@@ -130,10 +130,19 @@ a boolean and `i32`: about 575 MB/s through the core into the caller's buffers, 
 900 MB/s for the `csv` crate splitting records without casting anything.
 
 `cargo bench --bench delimited_benchmarks` measures three scopes on a generated
-200 000 × 10 file: `structure` (the core with an empty plan, on every engine), `cells`
-(every cell through the text door, against the `csv` crate) and `batch` (ten typed
-columns). It has not been re-run since the reader was rebuilt on the core; the figures
-this file used to carry were of the first, row-at-a-time reader, which is gone.
+200 000 × 10 file (26 MB): `structure` (the core with an empty plan, on every engine),
+`cells` (every cell through the text door, against the `csv` crate) and `batch` (ten typed
+columns). Linux x64 (WSL 2), i9-11900H, Rust 1.99, 2026-10-07, Criterion's median:
+
+| Scope | Time | Throughput |
+| --- | ---: | ---: |
+| `structure`, AVX2 + PCLMULQDQ | 11.1 ms | 2.18 GiB/s |
+| `structure`, SSE2 + PCLMULQDQ | 12.1 ms | 1.99 GiB/s |
+| `structure`, SSE2 | 13.0 ms | 1.85 GiB/s |
+| `structure`, SWAR (portable) | 20.7 ms | 1.16 GiB/s |
+| `cells`, HyperTabular (text door) | 23.0 ms | 1.05 GiB/s |
+| `cells`, the `csv` crate (no cast) | 25.3 ms | 978 MiB/s |
+| `batch`, ten typed columns | 37.8 ms | 654 MiB/s |
 
 ## Parked
 

@@ -33,7 +33,7 @@ on:
     paths:
       - "rust/**"
   workflow_run:
-    workflows: ["CI — build native, test every binding"]
+    workflows: ["CI — build native, build wasm, test every binding"]
     types: [completed]
     branches: [master]
   workflow_dispatch:
@@ -159,21 +159,24 @@ jobs:
           # Windows on two architectures each, and wasm32-wasip1 — the two Windows ones named
           # hypertabular.lib, as MSVC's linker convention has it), six for Go (Linux, macOS
           # and Windows on two architectures each; the Windows ones are the MSVC archives,
-          # which MinGW's linker reads). The artifact also holds go/staticlib/wasm, which the
-          # forge builds for any Go tree; this binding has no TinyGo backend to link it, so
-          # it is left out. All of a tree's or none: a Swift bundle whose info.json names an
+          # which MinGW's linker reads), plus the wasm32-wasip1 archive TinyGo links for
+          # WebAssembly. All of a tree's or none: a Swift bundle whose info.json names an
           # archive that is not there fails every consumer's build, and a Go build with no
           # archive for its platform does not link. info.json is generated text naming those
           # nine paths and the crate version; it rides along unattested, readable in the diff.
+          # And three for Swift's XCFramework (iOS, the simulator, Mac Catalyst; arm64 each),
+          # committed whole: its Info.plist and each slice's header and module map are
+          # generated text, unattested and readable in the diff like info.json. Go's tree takes
+          # the four Apple mobile archives beside its seven.
           declare -A STATIC_TREES=(
             [swift/HyperTabularCore.artifactbundle]=9
-            [go/staticlib]=6
+            [swift/HyperTabularCoreApple.xcframework]=3
+            [go/staticlib]=11
           )
           for tree in "${!STATIC_TREES[@]}"; do
             archives=()
             for archive in artifacts/static-libs/"$tree"/*/libhypertabular.a artifacts/static-libs/"$tree"/*/hypertabular.lib; do
               [ -e "$archive" ] || continue
-              [ "$archive" = "artifacts/static-libs/go/staticlib/wasm/libhypertabular.a" ] && continue
               archives+=("$archive")
             done
             if [ "${#archives[@]}" != "${STATIC_TREES[$tree]}" ]; then
@@ -196,6 +199,19 @@ jobs:
           done
           install -m 644 "artifacts/static-libs/swift/HyperTabularCore.artifactbundle/info.json" \
             "swift/HyperTabularCore.artifactbundle/info.json"
+          xcframework=swift/HyperTabularCoreApple.xcframework
+          install -m 644 "artifacts/static-libs/$xcframework/Info.plist" "$xcframework/Info.plist"
+          for header in artifacts/static-libs/"$xcframework"/*/Headers/HyperTabularCore/*; do
+            dest="${header#artifacts/static-libs/}"
+            mkdir -p "$(dirname "$dest")"
+            install -m 644 "$header" "$dest"
+          done
+          for slice in "$xcframework"/*/; do
+            for file in hypertabular.h module.modulemap; do
+              [ -f "$slice/Headers/HyperTabularCore/$file" ] \
+                || { echo "::error::$slice has no Headers/HyperTabularCore/$file in the static-libs artifact."; exit 1; }
+            done
+          done
 
           echo "### Staged native binaries (attestations verified)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -210,7 +226,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add php/src/native swift/HyperTabularCore.artifactbundle
+          git add php/src/native swift/HyperTabularCore.artifactbundle swift/HyperTabularCoreApple.xcframework
           # -f: go/staticlib's archives are in .gitignore, so that this workflow is the only
           # thing that ever adds one — a developer's own build of them stays out of a commit.
           git add -f go/staticlib

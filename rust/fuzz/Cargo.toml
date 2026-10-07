@@ -1,0 +1,51 @@
+# The core under libFuzzer (`cargo +nightly fuzz run <target>`, from rust/). Every input a
+# binding hands the core is untrusted bytes — a file off the network, an upload — so a
+# panic, a hang or an out-of-bounds span here is a crash anyone can trigger in eight
+# languages. Each target drives the core the way the C ABI does: caller-owned buffers that
+# start small and grow only when a call asks, so the resume paths are fuzzed as hard as the
+# parsers. Not published, and not part of the crate's package: cargo leaves a nested
+# package out of `cargo package`.
+[package]
+name = "hypertabular-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hypertabular = { path = ".." }
+# The reference the inflate target holds the core's inflater to, and what the workbook
+# targets' package builder (rust/tests/support/packages.rs) deflates parts with: the same
+# zlib-rs backend the crate's own tests use.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+[[bin]]
+name = "delimited"
+path = "fuzz_targets/delimited.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "workbook"
+path = "fuzz_targets/workbook.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sheet"
+path = "fuzz_targets/sheet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inflate"
+path = "fuzz_targets/inflate.rs"
+test = false
+doc = false
+bench = false

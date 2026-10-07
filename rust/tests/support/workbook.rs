@@ -42,6 +42,8 @@ pub struct Read {
     pub header: Option<Vec<Vec<u8>>>,
     pub rows: Vec<(u32, Vec<String>)>,
     pub failed: bool,
+    /// The reading stopped at the harness's `row_limit` rather than at the sheet's end.
+    pub truncated: bool,
 }
 
 pub struct Harness<'c> {
@@ -58,6 +60,9 @@ pub struct Harness<'c> {
     pub refusals: usize,
     /// The largest window a refusal may ask for before the harness gives up.
     pub window_limit: usize,
+    /// The most rows `read` takes from one sheet before it stops: the fuzz targets' bound,
+    /// since a few bytes of ODS can repeat a row a million times.
+    pub row_limit: usize,
     pub last_failure: Failure,
 }
 
@@ -90,6 +95,7 @@ impl<'c> Harness<'c> {
             kinds: Vec::new(),
             refusals: 0,
             window_limit: 1 << 28,
+            row_limit: usize::MAX,
             last_failure: Failure::default(),
         }
     }
@@ -234,6 +240,7 @@ impl<'c> Harness<'c> {
             header: None,
             rows: Vec::new(),
             failed: false,
+            truncated: false,
         };
         let mut out = Filled::default();
         let code = rows::sheet(
@@ -327,6 +334,10 @@ impl<'c> Harness<'c> {
                 return read;
             }
             if (out.rows as usize) < max_rows {
+                return read;
+            }
+            if read.rows.len() >= self.row_limit {
+                read.truncated = true;
                 return read;
             }
         }

@@ -539,6 +539,7 @@ def test_a_batch_owns_what_it_shows(source: str, tmp_path: Path):
     assert ids.tolist() == before
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide cannot start a thread")
 def test_readers_on_several_threads_do_not_disturb_each_other():
     """The core runs with the interpreter released, so readers on other threads run beside it; each
     one's arrays are its own.

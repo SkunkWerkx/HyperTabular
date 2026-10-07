@@ -10,6 +10,8 @@ name = "hypertabular"
 # version source of truth, no second literal to drift.
 dynamic = ["version"]
 description = "Delimited text — CSV, TSV, any single-byte separator — and XLSX/ODS workbooks read a batch at a time into typed columns, with a HyperCast verdict for every cell. A PyO3 native extension linking a Rust core directly into CPython: the boundary is crossed once per batch, columns arrive as typed memoryviews rather than a call per cell, and no compiler is needed to install."
+# The package page on PyPI: this binding's own README, not the repo root's.
+readme = "README.md"
 license = "MIT"
 # A local copy, not a path up to the repo root: PEP 639 globs forbid `..` outright.
 license-files = ["LICENSE"]
@@ -20,9 +22,9 @@ authors = [{ name = "Brian Buvinghausen" }]
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
-# column's notation is its `NumFormat`. 0.6.1 is the first release this was built against;
-# below 0.7 because a 0.x minor is where its surface is allowed to move.
-dependencies = ["hypercast>=0.6.2,<0.7"]
+# column's notation is its `NumFormat`. 0.7.0 is the first release with the interop surface
+# this package reads cells through; below 0.8 because a 0.x minor is where its surface is allowed to move.
+dependencies = ["hypercast>=0.7.0,<0.8"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.

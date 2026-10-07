@@ -59,6 +59,13 @@ final class Native
             uint8_t started; uint8_t reserved[3];
             ht_failure failure;
         } ht_state;
+        typedef struct { uint32_t tag; uint32_t aux; uint64_t bits; } ht_slot;
+        typedef struct {
+            uint8_t *window; size_t window_cap; uint8_t *arena; size_t arena_cap;
+            ht_span *cells; size_t cells_cap; ht_slot *row; size_t row_cap;
+            const uint8_t *strings; size_t strings_len; const ht_span *table; size_t table_len;
+            const uint8_t *kinds; size_t kinds_len;
+        } ht_buffers;
         uint32_t hypertabular_version(void);
         size_t hypertabular_delimited_state_size(void);
         int32_t hypertabular_delimited_init(ht_state *state, const ht_dialect *dialect);
@@ -68,15 +75,8 @@ final class Native
         int32_t hypertabular_delimited_fill(
             ht_state *state, const uint8_t *input, size_t input_len, uint32_t last,
             const ht_column_spec *specs, const ht_column_buffer *columns, size_t column_count, size_t max_rows,
-            ht_span *cells, size_t cells_cap, uint8_t *arena, size_t arena_cap, ht_filled *out);
+            const ht_buffers *buffers, ht_filled *out);
         size_t hypertabular_delimited_unescape(const char *cell, size_t len, uint8_t *out, size_t cap);
-        typedef struct { uint32_t tag; uint32_t aux; uint64_t bits; } ht_slot;
-        typedef struct {
-            uint8_t *window; size_t window_cap; uint8_t *arena; size_t arena_cap;
-            ht_span *cells; size_t cells_cap; ht_slot *row; size_t row_cap;
-            const uint8_t *strings; size_t strings_len; const ht_span *table; size_t table_len;
-            const uint8_t *kinds; size_t kinds_len;
-        } ht_buffers;
         typedef struct {
             uint32_t format; uint32_t epoch; uint64_t strings_bytes; uint64_t strings_count; uint64_t needed;
             ht_failure failure;

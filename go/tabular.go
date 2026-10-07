@@ -29,9 +29,10 @@
 //
 // The core is a static library linked in through cgo (backend_static.go), as HyperCast's is:
 // nothing is embedded, extracted or loaded at run time. It builds on Linux, macOS and
-// Windows, on amd64 and arm64, with a C compiler present. There is no WebAssembly backend —
-// the tabular layer is out of scope there — so a TinyGo build, like a build without cgo,
-// is a compile error that says so (unsupported.go, unsupported_tinygo.go).
+// Windows, on amd64 and arm64, and on iOS and Mac Catalyst, with a C compiler present; and
+// under TinyGo for WebAssembly, browser and WASI, through backend_tinygo.go. Any other build,
+// a build without cgo among them, is a compile error that says so (unsupported.go,
+// unsupported_tinygo.go).
 package hypertabular
 
 import (

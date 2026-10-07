@@ -21,10 +21,11 @@ module HyperTabular
       # (state, input, input_len, last, names, names_cap, arena, arena_cap, out)
       hypertabular_delimited_header:
         [%i[pointer pointer size uint32 pointer size pointer size pointer], :int32],
-      # (state, input, input_len, last, specs, columns, column_count, max_rows, cells,
-      #  cells_cap, arena, arena_cap, out)
+      # (state, input, input_len, last, specs, columns, column_count, max_rows, buffers, out) —
+      # buffers is the Buffers block the workbook calls take, of which a delimited fill reads
+      # only the arena and the cell table.
       hypertabular_delimited_fill:
-        [%i[pointer pointer size uint32 pointer pointer size size pointer size pointer size pointer], :int32],
+        [%i[pointer pointer size uint32 pointer pointer size size pointer pointer], :int32],
       # (cell, len, out, cap)
       hypertabular_delimited_unescape: [%i[pointer size pointer size], :size],
       hypertabular_workbook_state_size: [[], :size],
@@ -85,11 +86,33 @@ module HyperTabular
         HyperCast::Interop.library_path("hypertabular", NATIVE_DIR, File.expand_path("../../..", __dir__))
       end
 
-      # Why there was nothing to load.
-      def missing_library_message
+      # Why Fiddle found nothing to load. A precompiled platform gem is the one install where
+      # that is by design rather than a gap: it carries only its Magnus extensions, and the
+      # Fiddle backend is reached there only by forcing it (HYPERTABULAR_PURE) or because none
+      # of its extensions loaded — a gem RubyGems matched to a Ruby it was not built for. So
+      # that case names its fix, the universal gem, which carries every platform's library,
+      # instead of a missing path that reads like a packaging bug — hypercast's wording for
+      # the same case. Both arguments are parameters only so the specs can ask for every
+      # wording.
+      def missing_library_message(gem_platform = Gem.loaded_specs["hypertabular"]&.platform,
+                                  forced = ENV.key?("HYPERTABULAR_PURE"))
         rid, lib_name = HyperCast::NativePlatform.rid_and_library_name(library: "hypertabular")
-        "hypertabular: #{File.join(NATIVE_DIR, rid, lib_name)} not found (unsupported platform, " \
-          "or this gem was built without a native library for it)"
+        missing = File.join(NATIVE_DIR, rid, lib_name)
+        if gem_platform && gem_platform.to_s != Gem::Platform::RUBY
+          reason =
+            if forced
+              "HYPERTABULAR_PURE forces the Fiddle backend (unset it to use the extension)"
+            else
+              "none of its extensions loads on this Ruby (#{RUBY_VERSION}, #{RUBY_PLATFORM})"
+            end
+          "hypertabular: this #{gem_platform} platform gem carries only Magnus extensions, no " \
+            "Fiddle library, and #{reason}. The universal gem has the Fiddle backend for every " \
+            "platform: `gem install hypertabular --platform ruby`, or Bundler's " \
+            "force_ruby_platform (#{missing} not found)"
+        else
+          "hypertabular: #{missing} not found (unsupported platform, or this gem was built " \
+            "without a native library for it)"
+        end
       end
 
       # Loaded lazily and exactly once; the native library and its function pointers live

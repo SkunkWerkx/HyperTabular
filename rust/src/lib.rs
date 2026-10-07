@@ -113,6 +113,11 @@ pub mod workbook;
 #[cfg(feature = "python")]
 mod python_ext;
 
+// The Ruby binding's Magnus backend, on the same terms: a binding, compiled only into the
+// extension.
+#[cfg(feature = "ruby")]
+mod ruby_ext;
+
 #[cfg(feature = "std")]
 pub use hypercast::{
     CivilDateTime, CurrencySymbol, Date, DateOrder, Decimal, Duration, ExcelEpoch, Fault,

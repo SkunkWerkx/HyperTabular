@@ -130,12 +130,66 @@ JDK 25 is the floor, as it is for HyperCast's jar. The FFM downcalls are restric
 methods: run with `--enable-native-access=ALL-UNNAMED` (or
 `--enable-native-access=io.github.skunkwerkx.hypertabular` on the module path).
 
+## WebAssembly (GraalWasm)
+
+The jar carries the core a second time, as `native/wasm32-wasip1/hypertabular.wasm` — the
+same fourteen exports, compiled for WASI preview 1 instead of an OS — and
+[GraalWasm](https://www.graalvm.org/webassembly/) runs it inside the JVM, as HyperCast's jar
+does with its own core. So a platform this jar has no native build for (riscv64, ppc64le,
+s390x, FreeBSD, …) still reads delimited text and workbooks, with no binary to ship and no
+FFM downcall.
+
+The seam is one level below the readers: every reader, batch and exception is one
+implementation for both paths, and the wasm class mirrors each buffer a call hands the core
+into the guest's memory (allocated with the module's own exported `malloc`) and what the core
+wrote back out. Buffers that last between calls — the state block, a read's window, arena
+and cell table, each column — keep a twin in the guest, so a batch writes only what changed
+and reads back only the rows filled. The full suite, both corpus replays included, runs twice
+on every build (`./gradlew test testWasm`).
+
+**Enabling it.** GraalWasm is not a dependency of this jar — its POM lists nothing for it —
+so add the two artifacts yourself (`wasm` is a POM-type dependency that fans out into the
+Truffle runtime):
+
+```kotlin
+dependencies {
+    implementation("io.github.skunkwerkx:hypertabular:<version>")
+    implementation("org.graalvm.polyglot:polyglot:25.4.4.1.1")
+    runtimeOnly("org.graalvm.polyglot:wasm:25.4.4.1.1")
+}
+```
+
+Then set `-Dhypertabular.backend=wasm` to force it, or do nothing: unset, the native library
+is used when the jar has one for the running platform and it loads, and the module
+otherwise; if the module cannot start either, the native failure is thrown with the wasm
+one suppressed on it. `-Dhypertabular.backend=native` forces FFM. `Tabular.backend()` reports
+`"native"` or `"wasm"`. Selecting wasm without GraalWasm on the classpath makes
+`isAvailable()` `false` and every read throw a message naming the two artifacts. Run with
+`--enable-native-access` either way: the wasm path reads the addresses inside the buffers
+block the readers build.
+
+**What it costs**, the 300 000-row Excel workbook (`corpus/generate/out/excel-win-300k.xlsx`,
+eight columns, the JMH suite's `read` loop, checksum 5285882 on every path), best of five on
+one linux-x64 box:
+
+| Path | GraalVM CE 25.4 | Temurin 25 |
+| --- | ---: | ---: |
+| FFM downcall | 721 ms | 740 ms |
+| GraalWasm | 1.88 s (JIT; the first read 8.0 s, while Truffle compiles the guest) | 148 s (one read; no JIT) |
+
+Under GraalVM's JIT the module costs about 2.6x the native read. On a stock OpenJDK GraalWasm
+has no JIT and interprets the module, which is correct but two hundred times slower: the
+wasm path is for a platform with no native build, run on a GraalVM JDK, not a speed option.
+Keep `org.graalvm.polyglot:polyglot` and `:wasm` at the same release as the GraalVM JDK.
+
 ## Building
 
 ```sh
 cd ../rust; cargo cdylib      # the native library, staged from rust/target/release
 cd ../java
 ./gradlew test javadoc        # the suite — the conformance corpus included — and the doc gate
+cd ../rust; cargo wasm-module # the wasm32-wasip1 module, staged from rust/target/wasm32-wasip1/release
+cd ../java; ./gradlew testWasm  # the same suite through GraalWasm
 ./gradlew :aot-smoke-test:run # every native entry point, crossed once, on a plain JVM
 ```
 

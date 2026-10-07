@@ -17,7 +17,7 @@
     "require": {
         "php": ">=8.2",
         "ext-ffi": "*",
-        "skunkwerkx/hypercast": "^0.6.2"
+        "skunkwerkx/hypercast": "^0.7.0"
     },
     "require-dev": {
         "phpunit/phpunit": "^11.0",

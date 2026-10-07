@@ -33,9 +33,9 @@ module HyperTabular
       # Bytes in one span, and in one slot of the row a read assembles.
       SPAN_BYTES = 8
       SLOT_BYTES = 16
-      # Buffers: seven pointer and size pairs.
-      BUFFERS = "Q<14".freeze
-      BUFFERS_BYTES = 112
+      # Buffers: seven pointer and size pairs — the same block a delimited fill takes.
+      BUFFERS = Delimited::BUFFERS
+      BUFFERS_BYTES = Delimited::BUFFERS_BYTES
       # Opened: format, epoch, strings_bytes, strings_count, needed, then Failure.
       OPENED = "L<2Q<3L<2Q<2L<2".freeze
       OPENED_BYTES = 64

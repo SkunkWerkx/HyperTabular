@@ -42,12 +42,12 @@ php/.phpunit.result.cache
 /composer.lock
 
 # Swift
-# The static libraries under swift/HyperTabularCore.artifactbundle/{triple}/, and the
-# info.json that lists them, are not ignored — as in HyperCast, where they are committed,
-# because SwiftPM has no packing step for a git-URL dependency, and only by
-# stage-native-binaries.yml, after their provenance checks. Until this repository has that
-# workflow none is in the tree: the forge's static-libs/build-static-libs.sh builds them
-# (CI runs it before every Swift step), and a developer's own build of them shows up as
+# The static libraries under swift/HyperTabularCore.artifactbundle/{triple}/ and
+# swift/HyperTabularCoreApple.xcframework/, and the info.json and Info.plist that list them,
+# are not ignored — as in HyperCast, where they are committed, because SwiftPM has no
+# packing step for a git-URL dependency, and only by stage-native-binaries.yml, after their
+# provenance checks. The forge's static-libs/build-static-libs.sh builds them too (CI runs
+# it before every Swift step); a developer's own build of them shows up as modified or
 # untracked and is not to be committed by hand.
 **/.build/
 # A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
@@ -82,6 +82,23 @@ ruby/lib/hypertabular/native/*/
 ruby/Gemfile.lock
 ruby/pkg/
 ruby/.yardoc/
+# The wasm32-wasip1 archives `rake wasm:gem` packs (and their .gz), staged from CI's
+# ruby-wasm-<minor> artifacts by release.yml, or by hand; never committed.
+ruby/ext/hypertabular_native/*/
+# rbwasm's interpreter build and its output, from running ruby/wasm-smoke locally.
+ruby/wasm-smoke/Gemfile.lock
+ruby/wasm-smoke/build/
+ruby/wasm-smoke/rubies/
+ruby/wasm-smoke/*.wasm
+ruby/wasm-smoke/node_modules/
+# The Magnus extension staged for local dev/test (`rake native:dev`, or CI's in-job copy),
+# flat and per Ruby ABI (lib/hypertabular/<minor>/, which release.yml also writes from CI
+# artifacts to pack the platform gems). Build output, never committed; scoped to the
+# extension's filename so it cannot swallow a real lib/hypertabular/*.rb source file.
+ruby/lib/hypertabular_native.so
+ruby/lib/hypertabular_native.bundle
+ruby/lib/hypertabular/*/hypertabular_native.so
+ruby/lib/hypertabular/*/hypertabular_native.bundle
 
 # go/staticlib's archives ARE committed — a Go module is whatever is in the tree — but only
 # by the staging workflow, which adds them with `git add -f` after verifying each one's
@@ -99,3 +116,13 @@ go/staticlib/*/*.a
 
 # What Windows attaches to a downloaded file, when the file is copied into WSL.
 *:Zone.Identifier
+
+# The corpus copy test-apple-mobile stages for the Go suite in the iOS simulator
+# (go_ios_exec carries only the module's testdata), if made by hand.
+go/testdata/corpus/
+
+# cargo-fuzz's working state: the corpora rust/fuzz/seed.py writes and libFuzzer grows, and
+# the inputs it saves when a target fails. A failing input worth keeping becomes a test.
+rust/fuzz/corpus/
+rust/fuzz/artifacts/
+rust/fuzz/coverage/

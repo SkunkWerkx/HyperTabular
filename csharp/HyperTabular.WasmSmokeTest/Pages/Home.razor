@@ -1,0 +1,130 @@
+@page "/"
+@using System.Text
+@using HyperCast
+@using HyperTabular
+
+<PageTitle>@Title</PageTitle>
+
+<h1>HyperTabular WASM smoke test</h1>
+
+<pre id="results">@Results</pre>
+
+@code {
+    private string Title = "RUNNING";
+    private string Results = "running...";
+
+    protected override void OnInitialized()
+    {
+        var lines = new List<string>();
+        var failed = false;
+
+        void Fail(string msg)
+        {
+            failed = true;
+            lines.Add($"FAIL: {msg}");
+        }
+
+        void Check<T>(string name, T actual, T expected)
+        {
+            if (EqualityComparer<T>.Default.Equals(actual, expected))
+                lines.Add($"ok   {name} = {actual}");
+            else
+                Fail($"{name}: {actual} (expected {expected})");
+        }
+
+        void CheckCell<T>(string name, Verdict<T> verdict, T expected) where T : struct
+        {
+            if (verdict.TryGetValue(out Success<T> success) && success.Value.Equals(expected))
+                lines.Add($"ok   {name} = {success.Value}");
+            else
+                Fail($"{name}: {verdict} (expected {expected})");
+        }
+
+        static byte[] Resource(string name)
+        {
+            using var stream = typeof(Home).Assembly.GetManifestResourceStream(name)!;
+            using var copy = new MemoryStream();
+            stream.CopyTo(copy);
+            return copy.ToArray();
+        }
+
+        // Every export the binding imports is reached through its public surface, each landing
+        // in the statically linked wasm module through LibraryImport("*"), so an export missing
+        // from build/net11.0/HyperTabular.targets' EmccExportedFunction list fails here at run
+        // time, not at the link: the version probe, the five delimited exports (unescape by
+        // the doubled quote) and the eight workbook ones (strings and styles by opening an
+        // xlsx that has both).
+        try
+        {
+            if (!Tabular.IsAvailable || Tabular.NativeVersion is null)
+                Fail($"native probe: available={Tabular.IsAvailable} version={Tabular.NativeVersion}");
+            else
+                lines.Add($"ok   native: version={Tabular.NativeVersion}");
+
+            var csv = "id,name,score,day\n1,\"say \"\"hi\"\"\",2.5,2024-02-29\n2,bob,x,2026-02-29\n"u8.ToArray();
+            Column[] plan = [Column.Int64(0), Column.Text(1), Column.Double(2), Column.Date(3)];
+            using (var reader = new DelimitedReader(csv, Dialect.Csv, plan))
+            {
+                Check("csv header", string.Join(",", reader.Header!), "id,name,score,day");
+                var batch = reader.Read() ?? throw new InvalidOperationException("no batch");
+                Check("csv rows", batch.Rows, 2);
+                Check("csv ids", string.Join(",", batch.Values<long>(0).ToArray()), "1,2");
+                Check("csv unescaped text", batch.GetString(1, 0), "say \"hi\"");
+                CheckCell("csv f64", batch.Get<double>(2, 0), 2.5);
+                CheckCell("csv date", batch.Get<DateOnly>(3, 0), new DateOnly(2024, 2, 29));
+                // A fault, not an exception: the verdict names the reason and the span.
+                var disposition = batch.Get<double>(2, 1) switch
+                {
+                    Success<double> s => $"unexpected ok {s.Value}",
+                    Fault f => $"fault {f.Reason} in \"{Encoding.UTF8.GetString(batch.Raw(2, 1))}\"",
+                };
+                Check("csv fault", disposition, "fault Malformed in \"x\"");
+                Check("csv end", reader.Read() is null, true);
+            }
+
+            using (var book = new Workbook(Resource("basic.xlsx")))
+            {
+                Check("xlsx format", book.Format, WorkbookFormat.Xlsx);
+                Check("xlsx first sheet", book.Sheets[0].Name, "Data");
+                Column[] cells = [Column.Int64(0), Column.Text(1), Column.Double(2), Column.Timestamp(3)];
+                var sheet = book.Sheet(0, SheetOptions.Default, cells);
+                Check("xlsx header", sheet.Header![1], "name");
+                var batch = sheet.Read() ?? throw new InvalidOperationException("no batch");
+                CheckCell("xlsx i64", batch.Get<long>(0, 0), 1L);
+                Check("xlsx shared string", batch.GetString(1, 1), "bob, jr");
+                CheckCell("xlsx f64", batch.Get<double>(2, 1), -7.0);
+                CheckCell("xlsx serial as timestamp", batch.Get<DateTimeOffset>(3, 0),
+                    new DateTimeOffset(2024, 1, 31, 10, 30, 0, TimeSpan.Zero));
+            }
+
+            using (var book = new Workbook(Resource("basic.ods")))
+            {
+                Check("ods format", book.Format, WorkbookFormat.Ods);
+                Check("ods sheets", string.Join(",", book.Sheets.Select(s => s.Name)), "Data,Second");
+                var sheet = book.Sheet("Second", SheetOptions.Default, [Column.Text(0)]);
+                var batch = sheet.Read() ?? throw new InvalidOperationException("no batch");
+                Check("ods text", batch.GetString(0, 0), "42");
+            }
+
+            // A file that is not a workbook is an exception, raised by the core's own check.
+            try
+            {
+                using var bogus = new Workbook("PK\u0003\u0004 not a zip at all"u8.ToArray());
+                Fail("a bogus container opened");
+            }
+            catch (TabularException ex)
+            {
+                lines.Add($"ok   not a workbook: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Fail($"exception: {ex}");
+        }
+
+        lines.Add("");
+        lines.Add(failed ? "SOME WASM CHECKS FAILED" : "ALL WASM CHECKS PASSED");
+        Results = string.Join("\n", lines);
+        Title = failed ? "FAIL" : "PASS";
+    }
+}

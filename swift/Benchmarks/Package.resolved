@@ -23,8 +23,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SkunkWerkx/HyperCast",
       "state" : {
-        "revision" : "c355f3591f2086f81da7d79425821b51b2df1270",
-        "version" : "0.6.1"
+        "revision" : "03aec55eb23e1885a3e21718b7f2cf877b1b2016",
+        "version" : "0.7.0"
       }
     },
     {

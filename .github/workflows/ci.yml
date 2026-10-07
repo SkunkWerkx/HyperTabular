@@ -1,12 +1,10 @@
-name: CI — build native, test every binding
+name: CI — build native, build wasm, test every binding
 
 # The forge's pipeline (SkunkWerkx/.github): the core built fresh on five real-hardware
 # legs, both musl RIDs and a cross-built Intel macOS, its own suite run on each, the
 # libraries attested and uploaded as `native-{rid}`, the nine static libraries built, and
-# every binding this repo has run against that leg's library.
-#
-# The bindings it does not have yet are switched off below. Each line goes when the PR
-# that adds the binding turns it on — that is the whole onboarding.
+# every binding run against that leg's library — Ruby twice, on Fiddle and on the Magnus
+# extension. Every binding the forge knows is on.
 #
 # Beside it, as in HyperCast, the checks that are this repo's own: rust/check-core.sh,
 # which proves on the library itself that the core has no standard library, no allocation
@@ -41,8 +39,45 @@ jobs:
       # Gradle dev loop, which would otherwise stage whatever rust/target/release holds
       # by then, stands down.
       java_resources_dir: java/src/main/resources/native
-      # Not written yet. Each comes on with its binding.
-      magnus: false
+      # Four more static libraries in the static-libs artifact: iOS, the iOS simulator and
+      # Mac Catalyst (test-apple-mobile, below, is what links and runs them).
+      apple_mobile: true
+      # The core as a wasm32-wasip1 module too, on every leg: the Java suite runs a second
+      # time through its in-process GraalWasm backend (`./gradlew testWasm`).
+      wasip1_module: true
+      # A second Ruby minor the Magnus extension is built and tested against, so each
+      # platform gem carries two ABIs (3.4 and the forge's 4.0), as HyperCast's do.
+      ruby_compat_version: "3.4"
+
+  # WebAssembly, through the forge: the core as a wasm32 static library for the NuGet
+  # package's browser-wasm asset, the C# binding in a Blazor app, the crate's own
+  # wasm-bindgen tests and the Go binding under TinyGo, each in headless Chrome; and the Ruby
+  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome.
+  build-wasm:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      project: HyperTabular
+      blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
+      rust_browser_test: rust/browser-test
+      go_tinygo_smoke: go/internal/tinygosmoke
+      ruby_wasm_smoke: ruby/wasm-smoke
+
+  # The nine PyPI wheels — eight native, and Pyodide's, whose job runs the whole suite in
+  # Pyodide under Node and in headless Chrome — built, installed and attested here, and
+  # published unchanged by release.yml.
+  build-wheels:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
 
   check-core:
     strategy:
@@ -61,7 +96,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools
-          targets: thumbv7em-none-eabi, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+          targets: thumbv7em-none-eabi, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, wasm32-unknown-unknown
 
       - name: The core is no_std, allocation-free and panic-free
         run: ./check-core.sh
@@ -69,13 +104,42 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      # The crate, its fuzz targets and its browser test crate, as HyperCast's lint-rust has
+      # them. The ruby and php features need their interpreters' headers to compile at all;
+      # the forge builds both on every leg.
       - name: cargo fmt --check
-        run: cargo fmt --check
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+          cargo fmt --check --manifest-path browser-test/Cargo.toml
 
       - name: cargo clippy
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo clippy --no-default-features --features cdylib -- -D warnings
+          cargo clippy --features python -- -D warnings
+          cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path browser-test/Cargo.toml --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+  # rust-version in rust/Cargo.toml is a promise to every crates.io consumer, and nothing
+  # else would notice it going stale: the library and the no_std shared library are built
+  # on exactly that toolchain, read from the manifest so the two cannot drift apart. The
+  # tests are not part of the promise and use newer APIs. HyperCast's job, unchanged.
+  check-msrv:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' rust/Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: cargo check on rust-version
+        working-directory: rust
+        run: |
+          cargo check --lib
+          cargo check --lib --no-default-features --features cdylib
 
   # Each binding's formatter and doc linter, every PR, over all of its code — library,
   # tests, benchmarks and smoke tests — against the config committed beside it. Static analysis only,
@@ -91,6 +155,10 @@ jobs:
       - run: go install github.com/mgechev/revive@v1.16.0
       - working-directory: go
         run: revive -config revive.toml ./...
+      # Which archive each platform's build links, iOS, Mac Catalyst and the two that must
+      # not compile included; the script has why this needs holding to a table.
+      - name: Every Go build selects its own platform's archive
+        run: .github/scripts/check_go_archives.sh
       - name: gofmt
         working-directory: go
         run: |
@@ -182,3 +250,208 @@ jobs:
           StaticSmokeTest/Package.swift StaticSmokeTest/Sources
           Benchmarks/Package.swift Benchmarks/Benchmarks
 
+
+  # iOS and Mac Catalyst, for the three bindings that reach them. Neither platform loads a
+  # library: the core is linked into the app, from the static libraries build-native's
+  # build-static-libs job cross-compiles and attests (the forge's apple_mobile input), which
+  # are the bytes stage-native-binaries.yml commits for Swift and Go and release.yml packs for
+  # C#. This job is the one place they are linked into something and run, and it needs what
+  # no build-native leg carries: Xcode, a simulator, and the .NET ios and maccatalyst
+  # workloads. Ported from HyperUuid's job of the same name.
+  #
+  #  * Swift takes them from swift/HyperTabularCoreApple.xcframework, which swift/Package.swift
+  #    declares only when it is there. The binding's suite runs on an iOS simulator and as a
+  #    Mac Catalyst process, and the package is built for an iOS device. It also runs once
+  #    more for macOS itself, and the root manifest is built: with the XCFramework present
+  #    the manifest declares a second binary target and puts a platform condition on the
+  #    first, which is the package a macOS consumer resolves from a tag and the one shape of
+  #    it build-native's macOS leg, whose tree has no XCFramework yet, never sees.
+  #  * C# takes them from csharp/HyperTabular/staticlibs/{rid}/ through
+  #    build/net11.0/HyperTabular.targets. HyperTabular.AppleSmokeTest is the Native AOT smoke
+  #    test's Program.cs as an app: run as a Mac Catalyst process, installed and launched in
+  #    the simulator, and built for an iOS device with signing off. No runner has a device,
+  #    so that last one is proved as far as a link goes: the app's executable must define
+  #    the core's symbols.
+  #  * Go takes them from go/staticlib/, picked by build tag (lint-go checks the picking
+  #    for every platform). The suite runs in the simulator through Go's own wrapper,
+  #    misc/ios/go_ios_exec.go, which is how the Go project tests its iOS port. The wrapper
+  #    carries the module's files and testdata directories into the simulator and nothing
+  #    above the module, so the corpus is staged as go/testdata/corpus (corpus_test.go looks
+  #    there too) and the test that reads rust/Cargo.toml is skipped. A device build is
+  #    linked and inspected. Mac Catalyst is not linked from Go here: the same archive is
+  #    linked and run by Swift and C# above, and Go's part of it is the selection.
+  #
+  # The simulator hands back neither an exit code nor a console to a launched app, so the C#
+  # app also writes what it prints to a file in its container (SmokeLog.cs) and that file is
+  # what is checked.
+  test-apple-mobile:
+    needs: build-native
+    runs-on: macos-latest
+    env:
+      APP_ID: io.github.skunkwerkx.hypertabular.applesmoketest
+      SMOKE_PROJECT: csharp/HyperTabular.AppleSmokeTest/HyperTabular.AppleSmokeTest.csproj
+      SMOKE_BIN: csharp/HyperTabular.AppleSmokeTest/bin/Release
+    steps:
+      - uses: actions/checkout@v7
+
+      # Over the checkout: the artifact is laid out by repository path, so the XCFramework
+      # lands whole under swift/, the C# archives under csharp/HyperTabular/staticlibs/ and the
+      # Go ones under go/staticlib/.
+      - uses: actions/download-artifact@v8
+        with:
+          name: static-libs
+          path: .
+
+      - name: What is installed, and what was staged
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          (cd swift && xcodebuild -list)
+          find swift/HyperTabularCoreApple.xcframework -type f | sort
+          ls csharp/HyperTabular/staticlibs/{ios-arm64,iossimulator-arm64,maccatalyst-arm64,maccatalyst-x64}/libhypertabular.a
+          ls go/staticlib/{ios_arm64,iossimulator_arm64,maccatalyst_arm64,maccatalyst_amd64}/libhypertabular.a
+
+      - name: Boot an iPhone simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, re, sys
+          devices = json.load(sys.stdin)["devices"]
+          def version(runtime):
+              return [int(n) for n in re.findall(r"\d+", runtime.rsplit("iOS", 1)[-1])]
+          for runtime in sorted((r for r in devices if "SimRuntime.iOS" in r), key=version, reverse=True):
+              for device in devices[runtime]:
+                  if device["name"].startswith("iPhone"):
+                      print(device["udid"])
+                      sys.exit(0)
+          sys.exit("no available iPhone simulator on this image")')
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Swift — macOS, with the XCFramework declared
+        run: |
+          set -euo pipefail
+          described=$(cd swift && swift package describe)
+          grep -q "HyperTabularCoreApple" <<<"$described" \
+            || { echo "::error::swift/Package.swift did not declare the XCFramework target"; exit 1; }
+          (cd swift && swift test)
+          swift build
+
+      - name: Swift — the suite on the iOS simulator
+        if: ${{ !cancelled() }}
+        working-directory: swift
+        run: xcodebuild test -scheme HyperTabular -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}"
+
+      - name: Swift — the suite as a Mac Catalyst process
+        if: ${{ !cancelled() }}
+        working-directory: swift
+        run: xcodebuild test -scheme HyperTabular -destination "platform=macOS,variant=Mac Catalyst"
+
+      - name: Swift — the package builds for an iOS device
+        if: ${{ !cancelled() }}
+        working-directory: swift
+        run: xcodebuild build -scheme HyperTabular -destination "generic/platform=iOS"
+
+      - uses: actions/setup-go@v7
+        if: ${{ !cancelled() }}
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      - name: Go — the suite in the iOS simulator
+        if: ${{ !cancelled() }}
+        working-directory: go
+        run: |
+          set -euo pipefail
+          # `go test` hands a cross-built test binary to go_{GOOS}_{GOARCH}_exec when one is
+          # on PATH; Go's wrapper installs it in the booted simulator and runs it there.
+          # clangwrap.sh is Go's own too, and targets the simulator SDK. The wrapper predates
+          # modules: it copies the package into the app by its path under GOROOT or GOPATH and
+          # stops if it is under neither, so it alone runs with the workspace as its GOPATH
+          # (go test keeps the real one, and its module cache).
+          mkdir -p "$RUNNER_TEMP/go-ios/bin" testdata
+          cp -R ../corpus testdata/corpus
+          go build -o "$RUNNER_TEMP/go-ios/go_ios_exec" "$(go env GOROOT)/misc/ios/go_ios_exec.go"
+          printf '#!/bin/sh\nGOPATH=%q exec %q "$@"\n' "$GITHUB_WORKSPACE" "$RUNNER_TEMP/go-ios/go_ios_exec" \
+            > "$RUNNER_TEMP/go-ios/bin/go_ios_arm64_exec"
+          chmod +x "$RUNNER_TEMP/go-ios/bin/go_ios_arm64_exec"
+          export PATH="$RUNNER_TEMP/go-ios/bin:$PATH"
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$(go env GOROOT)/misc/ios/clangwrap.sh" \
+            go test -tags iossimulator -skip '^TestNativeVersionIsTheCratesVersion$' -v . | tee "$RUNNER_TEMP/go-ios/test.log"
+          grep -q '^ok' "$RUNNER_TEMP/go-ios/test.log"
+
+      - name: Go — an iOS device build links the core in
+        if: ${{ !cancelled() }}
+        working-directory: go
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/go-ios"
+          GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
+            CC="$(xcrun --sdk iphoneos --find clang) -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=12.0" \
+            go test -c -o "$RUNNER_TEMP/go-ios/hypertabular-device.test" .
+          nm "$RUNNER_TEMP/go-ios/hypertabular-device.test" > "$RUNNER_TEMP/go-ios/device-symbols.txt"
+          grep -q " [Tt] _hypertabular_workbook_fill\$" "$RUNNER_TEMP/go-ios/device-symbols.txt" \
+            || { echo "::error::the iOS device test binary does not define hypertabular_workbook_fill; the core was not linked in"; exit 1; }
+          echo "the iOS device test binary defines the core's exports"
+
+      # .NET 11, as build-native's legs take it: HyperTabular's floor, preview until the pinned
+      # SDK in global.json goes GA.
+      - uses: actions/setup-dotnet@v6
+        if: ${{ !cancelled() }}
+        with:
+          dotnet-version: "11.0.x"
+          dotnet-quality: "preview"
+
+      - name: Install the .NET iOS and Mac Catalyst workloads
+        if: ${{ !cancelled() }}
+        run: dotnet workload install ios maccatalyst
+
+      - name: C# — a Mac Catalyst app, built and run
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-maccatalyst -r maccatalyst-arm64
+          app=$(find "$SMOKE_BIN/net11.0-maccatalyst/maccatalyst-arm64" -maxdepth 1 -name '*.app')
+          log="$TMPDIR/hypertabular-smoke.log"
+          rm -f "$log"
+          "$app/Contents/MacOS/HyperTabular.AppleSmokeTest"
+          cat "$log"
+          grep -q "native: available=True version=$want" "$log"
+          grep -q "AOT smoke test passed." "$log"
+
+      - name: C# — an iOS app, installed and launched in the simulator
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          udid="${{ steps.sim.outputs.udid }}"
+          dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-ios -r iossimulator-arm64
+          app=$(find "$SMOKE_BIN/net11.0-ios/iossimulator-arm64" -maxdepth 1 -name '*.app')
+          xcrun simctl install "$udid" "$app"
+          xcrun simctl launch "$udid" "$APP_ID"
+          log="$(xcrun simctl get_app_container "$udid" "$APP_ID" data)/tmp/hypertabular-smoke.log"
+          # The app exits when Program.cs returns; its last line, pass or fail, ends the wait.
+          for _ in $(seq 1 60); do
+            grep -q -E "AOT smoke test (passed|FAILED)" "$log" 2>/dev/null && break
+            sleep 2
+          done
+          cat "$log"
+          grep -q "native: available=True version=$want" "$log"
+          grep -q "AOT smoke test passed." "$log"
+
+      - name: C# — an iOS device app links the core in
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-ios -r ios-arm64 -p:EnableCodeSigning=false
+          app=$(find "$SMOKE_BIN/net11.0-ios/ios-arm64" -maxdepth 1 -name '*.app')
+          nm -g "$app/HyperTabular.AppleSmokeTest" > device-symbols.txt
+          for symbol in hypertabular_version hypertabular_delimited_fill hypertabular_workbook_open hypertabular_workbook_fill; do
+            grep -q " T _$symbol\$" device-symbols.txt \
+              || { echo "::error::the iOS device app does not define $symbol; the core was not linked in"; exit 1; }
+          done
+          echo "the iOS device app defines the core's exports"

@@ -12,6 +12,18 @@ rustflags = ["-C", "target-feature=-crt-static"]
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "target-feature=-crt-static"]
 
+# The module Java's GraalWasm backend runs. A wasm guest sees only its own linear memory, so
+# the host asks the guest for every buffer it hands the core; wasi-libc's malloc and free are
+# already linked in (std's allocator sits on them on this target), and exporting them keeps
+# the C ABI on every other target exactly the core's exports. HyperCast's module does the same.
+[target.wasm32-wasip1]
+rustflags = ["-C", "link-arg=--export=malloc", "-C", "link-arg=--export=free"]
+
+# The Blazor static library is built without std, so it cannot unwind: rustc refuses the
+# build unless panics abort on this target.
+[target.wasm32-unknown-emscripten]
+rustflags = ["-C", "panic=abort"]
+
 [alias]
 # The shared library every binding loads: the core alone, without Rust's standard library.
 cdylib = ["rustc", "--release", "--lib", "--crate-type", "cdylib", "--no-default-features", "--features", "cdylib", "--config", 'profile.release.panic="abort"']
@@ -19,6 +31,17 @@ cdylib = ["rustc", "--release", "--lib", "--crate-type", "cdylib", "--no-default
 # shaped libhypertabular.so at the same path as the one every binding loads from
 # target/release/, so building it there would replace that one. Output: target/php/release/.
 php-ext = "rustc --release --lib --crate-type cdylib --features php --target-dir target/php"
+# The Ruby Magnus extension (the `ruby` feature), in its own target directory for the same
+# reason. `rake native:dev` (ruby/Rakefile) builds it and stages it where the gem looks.
+# Output: target/ruby/release/.
+ruby-ext = "rustc --release --lib --crate-type cdylib --features ruby --target-dir target/ruby"
+# The static library the NuGet package links into a Blazor WebAssembly app, without std, so
+# that it links beside another Hyper* library's. Output:
+# target/wasm32-unknown-emscripten/release/libhypertabular.a.
+wasm-staticlib = "rustc --release --lib --target wasm32-unknown-emscripten --crate-type staticlib --no-default-features --features staticlib"
+# The wasm32-wasip1 module Java's GraalWasm backend runs, with std, which is what links the
+# malloc and free the section above exports. Output: target/wasm32-wasip1/release/hypertabular.wasm.
+wasm-module = "rustc --release --lib --crate-type cdylib --target wasm32-wasip1"
 # The static library the bindings that link the core take.
 staticlib = "rustc --profile staticlib --lib --crate-type staticlib --no-default-features --features staticlib"
 # The proof that no export can panic. With std and unwinding, or it would prove nothing.

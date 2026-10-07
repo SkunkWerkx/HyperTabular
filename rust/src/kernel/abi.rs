@@ -271,8 +271,8 @@ pub struct Slot {
 }
 
 /// The memory a workbook call works in — all of it the caller's, handed over again on
-/// every call. A call uses the buffers its own documentation names and ignores the rest
-/// (null with a zero size is fine for those).
+/// every call — and the delimited fill's `cells` and `arena`. A call uses the buffers its
+/// own documentation names and ignores the rest (null with a zero size is fine for those).
 ///
 /// **Growing a buffer.** A workbook part is a compressed stream, and a read of one cannot
 /// be rolled back to where the call started the way a read of delimited text can. So when

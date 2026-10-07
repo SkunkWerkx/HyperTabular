@@ -1,15 +1,19 @@
 require "bundler/gem_tasks"
 require "yard"
 
-# The public API surface: the module, the dialect, the plan's columns, the reader and its
-# error. native_platform.rb and runtime*.rb are internal FFI plumbing, the same
-# public/internal boundary hypercast's Rakefile draws.
+GEMSPEC = Bundler.load_gemspec("hypertabular.gemspec")
+
+# The public API surface: the module, the dialect, the plan's columns, the reader, the
+# batch it hands out, the workbook and its sheets, and the error. runtime*.rb is internal
+# FFI plumbing, the same public/internal boundary hypercast's Rakefile draws.
 PUBLIC_API = %w[
   lib/hypertabular.rb
   lib/hypertabular/dialect.rb
   lib/hypertabular/column.rb
   lib/hypertabular/tabular_error.rb
   lib/hypertabular/delimited_reader.rb
+  lib/hypertabular/batch.rb
+  lib/hypertabular/workbook.rb
 ].freeze
 
 # Doc-comment enforcement for that surface. `yard stats`/`YARD::CLI::Stats` always
@@ -28,5 +32,172 @@ task :"docs:check" do
     warn "\nUndocumented objects:"
     undocumented.each { |obj| warn "  #{obj.path}" }
     exit 1
+  end
+end
+
+# Builds a platform-tagged precompiled gem for the Magnus native extension — real RubyGems
+# "platform gem" mechanism (`bundle`/`gem install` auto-selects it over the plain "ruby"
+# platform gem when it matches, falling back to that universal Fiddle build otherwise).
+# Deliberately NOT RbSys::ExtensionTask/rake-compiler: those assume ext/{gem}/ lives inside
+# the gem's own directory tree so `cargo metadata`'s plain CWD-based lookup finds it — this
+# repo's rust/ and ruby/ are siblings in a shared monorepo, not that layout, and CI's own
+# `build-native` job already builds the `ruby` feature's cdylib for Magnus testing
+# (hyper-build-native.yml), producing the exact same artifact this needs — so this task just
+# expects those binaries already staged at lib/hypertabular/<minor>/hypertabular_native.{so,bundle},
+# one per entry in ABIS below (by release.yml's packing step, or locally by `rake
+# native:dev` under each Ruby), and packages a real platform gem around them directly via
+# plain RubyGems stdlib (Gem::Platform/Gem::Package), no extra build-tool dependency at all.
+namespace :native do
+  # The Ruby minor ABIs a platform gem ships, and the whole reason it's a "fat" gem: a
+  # Magnus extension is bound to one Ruby ABI, with no `abi3` equivalent to collapse the
+  # version axis the way PyO3 does for the Python binding. Covering two therefore means two
+  # compiled files per platform, under lib/hypertabular/<minor>/, with lib/hypertabular.rb picking
+  # at require time. This list must match what hyper-build-native.yml actually builds — the
+  # forge runs one build/test/upload trio per entry on every platform, inside that Ruby's
+  # Alpine image for the two musl ones — or these gems start lying about what they contain.
+  #
+  # 4.0 is primary: the current release, what every other binding's leg runs against. 3.4 is
+  # the compatibility floor and leaves this list when it goes EOL on 2028-03-31, joining
+  # 3.3 (the gemspec's own floor, EOL 2027-03-31) on the universal Fiddle gem. Dropping an
+  # ABI never strands a consumer — it only costs them the fast path.
+  ABIS = %w[3.4 4.0].freeze
+
+  # Exclusive upper bound for required_ruby_version: the next minor after ABIS.last, whose
+  # ABI these extensions do not cover. RubyGems requirements are AND-only with no OR, so the
+  # constraint has to be a range rather than the exact list above. That range is currently
+  # exact anyway — Ruby went 3.4 straight to 4.0, so there is no 3.5+ for it to over-claim.
+  ABI_CEILING = "4.1"
+
+  task :gem, [:platform] do |_t, args|
+    platform = args[:platform] or abort "usage: rake native:gem[<platform>], e.g. native:gem[aarch64-linux-gnu]"
+    ext = platform.include?("darwin") ? "bundle" : "so"
+
+    libs = ABIS.map { |abi| "lib/hypertabular/#{abi}/hypertabular_native.#{ext}" }
+    missing = libs.reject { |f| File.exist?(f) }
+    missing.empty? or abort "not staged: #{missing.join(', ')} — stage each ABI's compiled Magnus extension there first"
+
+    spec = GEMSPEC.dup
+    spec.platform = Gem::Platform.new(platform)
+    # Its Magnus extensions and nothing else native: none of the native/<rid>/ libraries the
+    # gemspec's glob picks up once release.yml has staged the universal gem's set. The
+    # required_ruby_version below confines this gem to the ABIs it has an extension for, so
+    # its Fiddle backend is never the one that loads — only HYPERTABULAR_PURE forces it, and
+    # runtime.rb's LoadError then names the universal gem, which carries every RID's library
+    # and is the last resort for a Ruby or a platform these gems do not cover.
+    spec.files = spec.files.grep_v(%r{\Alib/hypertabular/native/}) + libs
+    # And so no fiddle either: with no library to dlopen, these gems never load it (runtime.rb
+    # autoloads Fiddle only for the universal gem's backend). Declaring it anyway made Bundler
+    # on Alpine compile fiddle from source — build-base and libffi-dev, or a failed install —
+    # for a gem that would never call it. The universal gem keeps the dependency.
+    spec.dependencies.reject! { |dep| dep.name == "fiddle" }
+    # Narrower than the gemspec's own `>= 3.3`, deliberately: this gem is only correct on the
+    # ABIs actually in the box, and every other Ruby must resolve the universal
+    # "ruby"-platform gem and its Fiddle backend instead — which is exactly what RubyGems
+    # does when required_ruby_version excludes it. Leaving the gemspec's floor here would
+    # advertise these extensions to 3.3 consumers they cannot work on. Relying on
+    # lib/hypertabular.rb's LoadError rescue to catch that is not enough: Windows fails the load
+    # cleanly (the extension imports x64-ucrt-ruby<minor>.dll by name), but Linux extensions
+    # don't link libruby at all — the symbols resolve from the host process, so a wrong-ABI
+    # .so can load successfully and misbehave later. This is the only guard that runs first.
+    spec.required_ruby_version = Gem::Requirement.new(">= #{ABIS.first}", "< #{ABI_CEILING}")
+
+    require "rubygems/package"
+    mkdir_p "pkg"
+    Gem::Package.build(spec, false, false, "pkg/#{spec.full_name}.gem")
+  end
+
+  # The local dev loop for the Magnus backend: builds the extension for the Ruby running
+  # this task and stages it where lib/hypertabular.rb looks first, so a plain `bundle exec rspec`
+  # afterwards runs on BACKEND == :native. `cargo ruby-ext` (rust/.cargo/config.toml) does the
+  # build, into rust/target/ruby/ — never over the plain cdylib in rust/target/release/ that
+  # the Fiddle backend and every other binding's dev loop dlopen. Cargo names its output
+  # libhypertabular.{so,dylib}; `require` needs hypertabular_native.<DLEXT>, because Ruby derives the
+  # Init_ function it calls from the file's name. The copy below is that rename, and it is
+  # the step `cargo ruby-ext` on its own never did.
+  #
+  # RUBY is handed to the build explicitly: rb-sys binds against whichever interpreter it
+  # names and rebuilds when it changes, so running this task again under a second Ruby
+  # stages a second ABI beside the first instead of a wrong-ABI file over it. Linux and
+  # macOS only — the Windows extensions need the gnullvm targets and linker flags in the
+  # forge's build-magnus.sh.
+  task :dev do
+    abort "rake native:dev covers Linux and macOS; Windows builds go through the forge's build-magnus.sh" if
+      Gem.win_platform?
+
+    rust = File.expand_path("../rust", __dir__)
+    sh({ "RUBY" => RbConfig.ruby }, "cargo", "ruby-ext", chdir: rust)
+
+    library = "libhypertabular.#{RUBY_PLATFORM.include?('darwin') ? 'dylib' : 'so'}"
+    built = File.join(rust, "target/ruby/release", library)
+    staged = "lib/hypertabular/#{RUBY_VERSION[/\d+\.\d+/]}/hypertabular_native.#{RbConfig::CONFIG['DLEXT']}"
+    mkdir_p File.dirname(staged)
+    cp built, staged
+    puts "staged #{staged} for Ruby #{RUBY_VERSION} — HyperTabular::BACKEND is now :native under this Ruby"
+  end
+end
+
+# The hypertabular-wasm companion gem: the Magnus extension for ruby.wasm, which links extensions
+# into the interpreter when the consumer runs `rbwasm build` and cannot load one at runtime. It
+# is its own gem because neither of the others can go there: the universal gem's fiddle
+# dependency fails to cross-compile and stops the build, a platform gem is never chosen for a
+# wasm target, and giving either an `extensions` entry would run extconf on every host
+# `gem install`. Same lib/ as the others, no fiddle, and ext/hypertabular_native/extconf.rb, which
+# hands rbwasm the archive for the Ruby it is building.
+namespace :wasm do
+  # One wasm32-wasip1 archive per Ruby minor in native:gem's ABIS, built by the forge's
+  # hyper-build-wasm.yml and staged at ext/hypertabular_native/<minor>/hypertabular_native.a (by
+  # release.yml, or by hand from that job's artifacts). They ship gzipped: rbwasm packs every
+  # file of every gem into the interpreter, so each one rides along into the consumer's .wasm,
+  # and gzip takes it from about 3.5 MB to under 1. The extconf inflates it with Zlib.
+  #
+  # `rake wasm:gem[source]` leaves the archives out. That gem builds the extension from the
+  # crate named by HYPERTABULAR_RUST_DIR, which is how CI makes the archives in the first place;
+  # it is never published. `rake "wasm:gem[4.0]"` packs the named minors only (space-separated),
+  # which is how CI tests one minor's archive the way a consumer gets it.
+  task :gem, [:abis] do |_t, args|
+    require "rubygems/package"
+    require "zlib"
+
+    ext_dir = "ext/hypertabular_native"
+    abis = args[:abis] == "source" ? [] : (args[:abis]&.split || ABIS)
+    archives = []
+    unless abis.empty?
+      staged = abis.map { |abi| "#{ext_dir}/#{abi}/hypertabular_native.a" }
+      missing = staged.reject { |f| File.exist?(f) }
+      missing.empty? or
+        abort "not staged: #{missing.join(', ')} — stage each Ruby minor's wasm32-wasip1 archive there first"
+      archives = staged.map do |archive|
+        # mtime 0 so the same archive always packs to the same bytes.
+        Zlib::GzipWriter.open("#{archive}.gz", Zlib::BEST_COMPRESSION) do |gz|
+          gz.mtime = 0
+          gz.write(File.binread(archive))
+        end
+        "#{archive}.gz"
+      end
+    end
+
+    spec = GEMSPEC.dup
+    spec.name = "hypertabular-wasm"
+    spec.summary = "HyperTabular for ruby.wasm: the Magnus extension, linked in by rbwasm build"
+    spec.description = <<~DESC
+      The hypertabular gem's Magnus extension, prebuilt for wasm32-wasip1, for a ruby.wasm
+      interpreter built with `rbwasm build`: put this gem in that Gemfile instead of
+      hypertabular and the extension is linked into the interpreter, with hypercast-wasm beside
+      it. Same API and the same Rust core as the hypertabular gem. Not for a host Ruby, where
+      the hypertabular gem is the one to install.
+    DESC
+    spec.files = spec.files.grep_v(%r{\Alib/hypertabular/native/}) + ["#{ext_dir}/extconf.rb"] + archives
+    spec.extensions = ["#{ext_dir}/extconf.rb"]
+    # Neither fiddle nor the hypercast gem crosses into ruby.wasm (fiddle fails to
+    # cross-compile and stops the build); HyperCast's own companion gem is the judge there,
+    # at the same requirement.
+    spec.dependencies.reject! { |dep| dep.name == "fiddle" }
+    spec.dependencies.map! do |dep|
+      dep.name == "hypercast" ? Gem::Dependency.new("hypercast-wasm", *dep.requirement.as_list) : dep
+    end
+    spec.metadata["documentation_uri"] = "#{spec.homepage}/tree/master/ruby#ruby-in-the-browser"
+
+    mkdir_p "pkg"
+    Gem::Package.build(spec, false, false, "pkg/#{spec.full_name}.gem")
   end
 end

@@ -87,7 +87,10 @@ type corpusFailure struct {
 
 // repositoryFile finds a file by its path from the repository root, walking up from the
 // test's directory — the corpus and rust/Cargo.toml are the two things outside this
-// directory the tests read.
+// directory the tests read. It also looks under testdata/, where CI stages the corpus for the
+// iOS simulator: Go's go_ios_exec carries the module's files and testdata directories into
+// the app, and nothing above the module, so the repository's corpus/ is not there to walk
+// up to.
 func repositoryFile(t *testing.T, elem ...string) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -95,9 +98,11 @@ func repositoryFile(t *testing.T, elem ...string) string {
 		t.Fatal(err)
 	}
 	for {
-		candidate := filepath.Join(append([]string{dir}, elem...)...)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
+		for _, base := range []string{dir, filepath.Join(dir, "testdata")} {
+			candidate := filepath.Join(append([]string{base}, elem...)...)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
 		}
 		// The root is its own parent on every OS — "/" here, "C:\" on Windows.
 		parent := filepath.Dir(dir)
