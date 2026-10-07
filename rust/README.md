@@ -40,4 +40,9 @@ A cell that does not cast is never an error: it is a `Fault` in the batch — `E
 the text it points into. Structural failures (a torn row, a corrupt zip) are `Error`s,
 returned once every intact row before them has been delivered.
 
+**WebAssembly.** The crate needs nothing from its host — no clock, no entropy, no
+allocator in the core — so it builds for `wasm32-unknown-unknown` as it is, and its whole
+suite passes under wasmtime on `wasm32-wasip1`. CI runs `browser-test/` in headless Chrome
+on every pull request.
+
 The design record is in [`docs/`](https://github.com/SkunkWerkx/HyperTabular/tree/master/docs).

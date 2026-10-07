@@ -85,11 +85,8 @@ impl CellVerdict {
 
     /// The fault, when there is one.
     pub const fn fault(&self) -> Option<Fault> {
-        let reason = match self.reason {
-            1 => Reason::Empty,
-            2 => Reason::Malformed,
-            3 => Reason::OutOfRange,
-            _ => return None,
+        let Some(reason) = Reason::from_code(self.reason) else {
+            return None;
         };
         Some(Fault {
             reason,
@@ -274,8 +271,8 @@ pub struct Slot {
 }
 
 /// The memory a workbook call works in — all of it the caller's, handed over again on
-/// every call. A call uses the buffers its own documentation names and ignores the rest
-/// (null with a zero size is fine for those).
+/// every call — and the delimited fill's `cells` and `arena`. A call uses the buffers its
+/// own documentation names and ignores the rest (null with a zero size is fine for those).
 ///
 /// **Growing a buffer.** A workbook part is a compressed stream, and a read of one cannot
 /// be rolled back to where the call started the way a read of delimited text can. So when

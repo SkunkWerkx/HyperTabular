@@ -45,20 +45,41 @@ RSpec.describe HyperTabular do
       expect(described_class.available?).to be(true) # cached
     end
 
-    it "runs on Fiddle, and accepts HYPERTABULAR_PURE whether or not it is set" do
-      expect(HyperTabular::BACKEND).to eq(:fiddle)
+    it "runs on the extension when one is staged, on Fiddle when HYPERTABULAR_PURE says so" do
+      expect(HyperTabular::BACKEND).to eq(:native).or eq(:fiddle)
       script = 'r = HyperTabular::DelimitedReader.new("a\n7\n", HyperTabular::Dialect::CSV, ' \
                "[HyperTabular::Column.u8(0)]); print HyperTabular::BACKEND, ' ', r.read.values(0).inspect"
       expect(ruby(script, "HYPERTABULAR_PURE" => "1")).to eq("fiddle [7]")
-      expect(ruby(script, "HYPERTABULAR_PURE" => nil)).to eq("fiddle [7]")
+      # Unforced, a fresh process takes the extension whenever one is staged — whatever this
+      # process was forced onto.
+      unforced = ruby(script, "HYPERTABULAR_PURE" => nil)
+      expect(unforced).to match(/\A(native|fiddle) \[7\]\z/)
+      expect(unforced).to eq("native [7]") if HyperTabular::BACKEND == :native
     end
 
     it "answers available? false without raising when no library resolves, while a reader still raises" do
+      # A Fiddle subprocess with the library path stubbed away: the probe answers quietly,
+      # the first reader keeps its precise LoadError.
       script = "HyperTabular::Runtime.singleton_class.define_method(:library_path) { nil }; " \
                "print HyperTabular.available?; print ' '; " \
                'begin; HyperTabular::DelimitedReader.new("a\n", HyperTabular::Dialect::CSV, []); ' \
                "rescue LoadError => e; print e.message[/not found/]; end"
-      expect(ruby(script)).to eq("false not found")
+      expect(ruby(script, "HYPERTABULAR_PURE" => "1")).to eq("false not found")
+    end
+
+    it "names the universal gem when a platform gem, which carries no Fiddle library, falls to Fiddle" do
+      musl = Gem::Platform.new("x86_64-linux-musl")
+      forced = HyperTabular::Runtime.send(:missing_library_message, musl, true)
+      expect(forced).to include("x86_64-linux-musl platform gem", "HYPERTABULAR_PURE forces",
+                                "gem install hypertabular --platform ruby")
+      unloaded = HyperTabular::Runtime.send(:missing_library_message, musl, false)
+      expect(unloaded).to include("none of its extensions loads on this Ruby (#{RUBY_VERSION}",
+                                  "gem install hypertabular --platform ruby")
+      expect(unloaded).not_to include("HYPERTABULAR_PURE")
+      [["ruby", true], [nil, false]].each do |platform, pure|
+        expect(HyperTabular::Runtime.send(:missing_library_message, platform, pure))
+          .to match(/not found \(unsupported platform/)
+      end
     end
 
     it "takes its verdict types from HyperCast's gem rather than carrying copies" do

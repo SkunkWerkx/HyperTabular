@@ -1,16 +1,42 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
+
 /**
- * The native core this jar binds: whether it loaded, and which version answered. The
- * library rides inside the jar under {@code /native/{rid}/} and is picked by platform at
- * runtime; nothing loads until the first reader is built or this class is asked.
+ * The native core this jar binds: whether it loaded, which version answered, and by which
+ * path. The library rides inside the jar under {@code /native/{rid}/} and is picked by
+ * platform at runtime, with the same core as a {@code wasm32-wasip1} module beside it for
+ * a platform it has no build for; nothing loads until the first reader is built or this
+ * class is asked.
  */
 public final class Tabular {
     private Tabular() {}
 
     /**
-     * Whether the native library resolved: this platform's build was found in the jar,
-     * loaded, and every export this binding was built against was found in it. Probed once,
+     * The system property that picks how the core is reached, read once when it first loads:
+     * {@code "native"} for the FFM downcalls into this platform's bundled library, failing
+     * when there is none; {@code "wasm"} for the bundled {@code wasm32-wasip1} module run in
+     * process by GraalWasm, which the consumer adds ({@code org.graalvm.polyglot:polyglot}
+     * and {@code org.graalvm.polyglot:wasm}). Unset, the native library is used when this
+     * platform has one that loads, and the module otherwise.
+     */
+    public static final String BACKEND_PROPERTY = "hypertabular.backend";
+
+    /**
+     * Which path this process reaches the core by: {@code "native"} (FFM downcalls into the
+     * bundled platform library) or {@code "wasm"} (the bundled module, run by GraalWasm).
+     * Decided once, when the core first loads; see {@link #BACKEND_PROPERTY}.
+     *
+     * @return {@code "native"} or {@code "wasm"}
+     */
+    public static String backend() {
+        return Native.backend();
+    }
+
+    /**
+     * Whether the core resolved: this platform's library — or, on the wasm path, the module —
+     * was found in the jar and loaded, and every export this binding was built against was
+     * found in it. Probed once,
      * on first call, and cached; never throws. Gate on this instead of catching the load
      * failure around the first read. {@code true} exactly when {@link #nativeVersion()}
      * succeeds.
@@ -52,7 +78,6 @@ public final class Tabular {
      * @return the loaded core's version as {@code "major.minor.patch"}
      */
     public static String nativeVersion() {
-        int packed = Native.version();
-        return (packed >>> 16) + "." + ((packed >>> 8) & 0xFF) + "." + (packed & 0xFF);
+        return NativeValues.version(Native.version());
     }
 }

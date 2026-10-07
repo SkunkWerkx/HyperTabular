@@ -1,6 +1,6 @@
 {
     "name": "skunkwerkx/hypertabular",
-    "description": "Delimited text (CSV, TSV) read a batch at a time into typed columns, every cell a HyperCast Success/Fault verdict — direct native FFI into a Rust core that owns no memory.",
+    "description": "Delimited text (CSV, TSV) and workbooks (XLSX, ODS) read a batch at a time into typed columns, every cell a HyperCast Success/Fault verdict — direct native FFI into a Rust core that owns no memory.",
     "type": "library",
     "keywords": ["csv", "tsv", "parser", "tabular", "validation", "ffi", "rust"],
     "license": "MIT",
@@ -17,7 +17,7 @@
     "require": {
         "php": ">=8.2",
         "ext-ffi": "*",
-        "skunkwerkx/hypercast": "^0.6.1"
+        "skunkwerkx/hypercast": "^0.7.0"
     },
     "require-dev": {
         "phpunit/phpunit": "^11.0",

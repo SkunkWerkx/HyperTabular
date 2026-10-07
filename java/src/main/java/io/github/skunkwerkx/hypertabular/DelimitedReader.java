@@ -153,6 +153,11 @@ public final class DelimitedReader implements AutoCloseable {
     private final Arena arena;
     private MemorySegment state;
     private MemorySegment filled;
+    // The fill's cells and arena, as the core takes them: in a buffers block, the workbook
+    // calls' own layout, of which the fill reads those two and nothing else (Mono's
+    // interpreter, .NET's in the browser, passes no more than twelve integer arguments to a
+    // native function, and the ABI is the same for every binding). Allocated zeroed.
+    private MemorySegment buffers;
     private Block cells;
     private Block unescaped;
     /** The last batch came up short with the arena mostly used: it wants a larger one. */
@@ -400,6 +405,7 @@ public final class DelimitedReader implements AutoCloseable {
         try {
             state = arena.allocate(stateBytes, 8);
             filled = arena.allocate(Native.FILLED_BYTES, 8);
+            buffers = arena.allocate(Native.BUFFERS_BYTES, 8);
             columns = new Columns(checked, batchRows, arena);
             batch = new Batch(columns, false);
             perRow = columns.width + 1;
@@ -658,6 +664,11 @@ public final class DelimitedReader implements AutoCloseable {
                 continue;
             }
             MemorySegment base = base();
+            // The cells and the arena may have moved since the last call.
+            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_CELLS, cells.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_CELLS + 8, cells.bytes() / Native.SPAN_BYTES);
+            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ARENA, unescaped.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ARENA + 8, unescaped.bytes());
             int code = Native.fill(
                     state,
                     base.asSlice(start, length),
@@ -667,10 +678,7 @@ public final class DelimitedReader implements AutoCloseable {
                     columns.buffers,
                     columns.plan.length,
                     batchRows,
-                    cells.segment,
-                    cells.bytes() / Native.SPAN_BYTES,
-                    unescaped.segment,
-                    unescaped.bytes(),
+                    buffers,
                     filled);
             switch (code) {
                 case Native.OK -> {

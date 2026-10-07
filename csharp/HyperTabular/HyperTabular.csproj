@@ -5,7 +5,7 @@
   <PropertyGroup>
     <PackageId>HyperTabular</PackageId>
     <!-- The committed version prepare-release.yml bumps, in lockstep with rust/Cargo.toml. -->
-    <Version>0.1.0</Version>
+    <Version>0.7.0</Version>
     <!-- HyperTabular.dll and hypertabular.dll differ only by case, and on Windows one would
          overwrite the other in the output directory: HyperCast's rename, for its reason. -->
     <AssemblyName>HyperTabular.Managed</AssemblyName>
@@ -33,9 +33,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- One assembly for every platform, the browser included: Native.cs picks the import
+         by OperatingSystem.IsBrowser(), and build/ links the archive into a Blazor app. -->
+    <SupportedPlatform Include="browser" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
          its types, not copies of them. -->
-    <PackageReference Include="HyperCast" Version="0.6.1" />
+    <PackageReference Include="HyperCast" Version="0.7.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -52,11 +58,14 @@
     <None Include="runtimes/**/native/*"
           Condition="!Exists('runtimes/$(NETCoreSdkRuntimeIdentifier)/native')"
           Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <!-- Auto-imported into every consuming project: the Native AOT static link. -->
+    <!-- Auto-imported into every consuming project: the static links for Blazor
+         WebAssembly, iOS, Mac Catalyst and Native AOT. -->
     <None Include="build/**" Pack="true" PackagePath="build" />
     <None Include="buildTransitive/**" Pack="true" PackagePath="buildTransitive" />
-    <!-- The core as a static library, one per RID, for a Native AOT publish to link in.
-         Staged here before packing, like runtimes/, and not committed. -->
+    <!-- The core as a static library, one per RID: for a Native AOT publish to link in
+         instead of loading the shared library, and for an iOS or Mac Catalyst app, which can
+         only link it. build/net11.0/HyperTabular.targets has the wiring. Staged here before
+         packing, like runtimes/, and not committed. -->
     <None Include="staticlibs/**" Pack="true" PackagePath="staticlibs" />
     <!-- Local dev loop: when the core has been built in-repo (`cargo cdylib` in rust/), copy
          that library to the output so tests run against it with no packaging step — unless

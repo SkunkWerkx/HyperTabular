@@ -1,19 +1,14 @@
 package io.github.skunkwerkx.hypertabular;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
-import java.lang.foreign.Arena;
+import io.github.skunkwerkx.hypercast.interop.NativePlatform;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
-import java.nio.ByteOrder;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
+import java.lang.reflect.InvocationTargetException;
 
 /**
  * The native core's C ABI: {@code libhypertabular}'s fourteen exports and the sizes and offsets
@@ -59,12 +54,8 @@ final class Native {
     static final long SPEC_ORDINAL = 0;
     static final long SPEC_DOOR = 4;
     static final long SPEC_PARAM = 8;
-    static final long SPEC_DECIMAL_SEP = 12;
-    static final long SPEC_GROUP_SEP = 16;
-    static final long SPEC_FLAGS = 20;
-    static final long SPEC_CURRENCY_LEN = 24;
-    static final long SPEC_CURRENCY = 28;
-    static final int CURRENCY_BYTES = 16;
+    /** Where the format sits in a spec: HyperCast's {@link NativeValues#FORMAT_BYTES} of it. */
+    static final long SPEC_FORMAT = 12;
 
     /** {@code ColumnBuffer}: {@code {void* values, CellVerdict* verdicts}}. */
     static final long BUFFER_BYTES = 2 * ValueLayout.ADDRESS.byteSize();
@@ -169,10 +160,9 @@ final class Native {
         private static final MethodHandle HEADER =
                 LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, USIZE, PTR, USIZE, PTR));
         // hypertabular_delimited_fill(state, input, input_len, last, specs, columns,
-        //                             column_count, max_rows, cells, cells_cap, arena,
-        //                             arena_cap, out) -> i32
+        //                             column_count, max_rows, buffers, out) -> i32
         private static final MethodHandle FILL = LINKER.downcallHandle(
-                FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, PTR, USIZE, USIZE, PTR, USIZE, PTR, USIZE, PTR));
+                FunctionDescriptor.of(I32, PTR, PTR, USIZE, I32, PTR, PTR, USIZE, USIZE, PTR, PTR));
         // hypertabular_delimited_unescape(cell, len, out, cap) -> usize
         private static final MethodHandle UNESCAPE =
                 LINKER.downcallHandle(FunctionDescriptor.of(USIZE, PTR, USIZE, PTR, USIZE));
@@ -188,23 +178,73 @@ final class Native {
         //                            column_count, max_rows, buffers, out) -> i32
         private static final MethodHandle BOOK_FILL =
                 LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, PTR, USIZE, USIZE, PTR, PTR));
-
-        // A uuid value read as two big-endian longs. Here for the same reason the handles
-        // are: a layout is read through a VarHandle, which Native Image wants constant.
-        static final ValueLayout.OfLong BIG_ENDIAN_LONG = ValueLayout.JAVA_LONG.withOrder(ByteOrder.BIG_ENDIAN);
     }
 
     /**
-     * The loaded library and the address of every export in it — all {@code static final},
-     * all resolved in this holder's own class init. A holder so that nothing loads until
-     * the first reader (or {@link Tabular#nativeVersion()}) touches it, and so that
-     * {@link Tabular#isAvailable()} can observe a load failure without anything else having
-     * failed to initialize.
+     * The loaded core: which path won, the library it resolved to, and the address of every
+     * export in it — all {@code static final}, all resolved in this holder's own class init.
+     * A holder so that nothing loads until the first reader (or
+     * {@link Tabular#nativeVersion()}) touches it, and so that {@link Tabular#isAvailable()}
+     * can observe a load failure without anything else having failed to initialize.
      */
     private static final class Core {
         private Core() {}
 
-        private static final SymbolLookup LOOKUP = loadLibrary(NativePlatform.current());
+        /** The library's base name: {@code libhypertabular.so}, {@code hypertabular.dll}. */
+        private static final String LIBRARY = "hypertabular";
+
+        /**
+         * Non-null only when the wasm path was selected. Every call checks this one
+         * {@code static final} against {@code null} before its FFM path; the JIT folds the
+         * check away, so the native path costs what it did before a second backend existed.
+         */
+        private static final Backend WASM;
+
+        // Null on the wasm path: there is no library to look symbols up in, and the native
+        // linker is never asked for, so a platform the JDK has no linker for can still run
+        // the module.
+        private static final SymbolLookup LOOKUP;
+
+        /*
+         * Decides the path once, at class init, as HyperCast's Cast does.
+         * Tabular.BACKEND_PROPERTY set to "wasm" forces the GraalWasm backend; "native" forces
+         * FFM, and fails loudly when this platform has no bundled library or it will not load.
+         * Unset takes FFM when this platform's library is bundled and loads, and the wasm
+         * module otherwise — an OS, architecture or C library this jar has no native build for
+         * still reads, through the module, and so does a bundled library that will not open.
+         * When that fallback cannot start either, the failure thrown is the native one, with
+         * the wasm one suppressed on it.
+         */
+        static {
+            String choice = System.getProperty(Tabular.BACKEND_PROPERTY);
+            if (choice != null && !"native".equals(choice) && !"wasm".equals(choice)) {
+                throw new IllegalStateException(
+                        Tabular.BACKEND_PROPERTY + " must be \"native\" or \"wasm\"; got \"" + choice + "\"");
+            }
+            NativePlatform.Target target = NativePlatform.current(LIBRARY);
+            Backend wasm = null;
+            SymbolLookup lookup = null;
+            if ("wasm".equals(choice)) {
+                wasm = startWasm(null);
+            } else if ("native".equals(choice)) {
+                lookup = NativePlatform.load(Native.class, LIBRARY, target);
+            } else if (target == null || Native.class.getResource(target.resourcePath()) == null) {
+                wasm = startWasm(NativePlatform.missing(LIBRARY, target));
+            } else {
+                try {
+                    lookup = NativePlatform.load(Native.class, LIBRARY, target);
+                } catch (RuntimeException | LinkageError nativeFailure) {
+                    try {
+                        wasm = startWasm("the bundled native library would not load (" + nativeFailure + ")");
+                    } catch (RuntimeException wasmFailure) {
+                        nativeFailure.addSuppressed(wasmFailure);
+                        throw nativeFailure;
+                    }
+                }
+            }
+            WASM = wasm;
+            LOOKUP = lookup;
+        }
 
         // Looked up here, once, so an export missing from an older core fails this class's
         // init (and isAvailable() says so) rather than the first read.
@@ -223,33 +263,57 @@ final class Native {
         private static final MemorySegment BOOK_HEADER = export("hypertabular_workbook_header");
         private static final MemorySegment BOOK_FILL = export("hypertabular_workbook_fill");
 
+        // Null on the wasm path, where the addresses above are never used.
         private static MemorySegment export(String symbol) {
-            return LOOKUP.find(symbol)
-                    .orElseThrow(() -> new IllegalStateException("libhypertabular does not export " + symbol));
+            return LOOKUP == null
+                    ? null
+                    : LOOKUP.find(symbol)
+                            .orElseThrow(() -> new IllegalStateException("libhypertabular does not export " + symbol));
         }
 
-        // The library must outlive every downcall made through it, so it is loaded into the
-        // JDK-provided global arena that lives for the process's lifetime.
-        private static SymbolLookup loadLibrary(NativePlatform.Target target) {
-            if (target == null) {
+        /**
+         * Starts the GraalWasm backend. {@code nativeUnavailable} is why the native path was
+         * not taken, or {@code null} when wasm was asked for by name; it only shapes the
+         * message of a failure here. {@link WasmBackend} is instantiated by name so that
+         * {@code org.graalvm.polyglot}, a {@code compileOnly} dependency of this jar, is never
+         * loaded unless it is going to be used.
+         */
+        private static Backend startWasm(String nativeUnavailable) {
+            if (Native.class.getResource(WasmBackend.RESOURCE_PATH) == null) {
                 throw new IllegalStateException(
-                        "hypertabular: this jar carries no native library for " + NativePlatform.describe());
+                        nativeUnavailable == null
+                                ? WasmBackend.RESOURCE_PATH + " classpath resource not found (this jar was built "
+                                        + "without the wasm module)"
+                                : nativeUnavailable + ", and " + WasmBackend.RESOURCE_PATH + " is not bundled either");
             }
-            try (InputStream resource = Native.class.getResourceAsStream(target.resourcePath())) {
-                if (resource == null) {
-                    throw new IllegalStateException(target.resourcePath() + " classpath resource not found "
-                            + "(this jar was built without a native library for this platform)");
+            try {
+                return (Backend) Class.forName(Native.class.getPackageName() + ".WasmBackend")
+                        .getDeclaredConstructor()
+                        .newInstance();
+            } catch (ReflectiveOperationException | LinkageError e) {
+                // The constructor is where GraalWasm is first touched, so its absence arrives
+                // wrapped: newInstance hands back whatever the constructor threw inside an
+                // InvocationTargetException.
+                Throwable cause = e instanceof InvocationTargetException && e.getCause() != null ? e.getCause() : e;
+                if (cause instanceof NoClassDefFoundError) {
+                    throw new IllegalStateException(
+                            WasmBackend.GRAALWASM_MISSING
+                                    + (nativeUnavailable == null
+                                            ? ""
+                                            : "; wasm was selected because " + nativeUnavailable),
+                            cause);
                 }
-                String libraryFileName = target.libraryFileName();
-                String extension = libraryFileName.substring(libraryFileName.lastIndexOf('.'));
-                Path tmp = Files.createTempFile("hypertabular", extension);
-                tmp.toFile().deleteOnExit();
-                Files.copy(resource, tmp, StandardCopyOption.REPLACE_EXISTING);
-                return SymbolLookup.libraryLookup(tmp, Arena.global());
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+                if (cause instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new IllegalStateException("hypertabular: could not start the wasm backend", cause);
             }
         }
+    }
+
+    /** Which path this process uses: {@code "native"} or {@code "wasm"}. Loads the core. */
+    static String backend() {
+        return Core.WASM == null ? "native" : Core.WASM.name();
     }
 
     // A downcall handle declares Throwable and throws nothing checked. What it can throw is
@@ -261,6 +325,9 @@ final class Native {
 
     /** The loaded library's version, packed {@code major << 16 | minor << 8 | patch}. */
     static int version() {
+        if (Core.WASM != null) {
+            return Core.WASM.version();
+        }
         try {
             return (int) Downcalls.VERSION.invokeExact(Core.VERSION);
         } catch (RuntimeException | Error failure) {
@@ -272,6 +339,9 @@ final class Native {
 
     /** The size of a delimited state block, which wants 8-byte alignment. */
     static long stateSize() {
+        if (Core.WASM != null) {
+            return Core.WASM.stateSize();
+        }
         try {
             return (long) Downcalls.STATE_SIZE.invokeExact(Core.STATE_SIZE);
         } catch (RuntimeException | Error failure) {
@@ -282,6 +352,9 @@ final class Native {
     }
 
     static int init(MemorySegment state, MemorySegment dialect) {
+        if (Core.WASM != null) {
+            return Core.WASM.init(state, dialect);
+        }
         try {
             return (int) Downcalls.INIT.invokeExact(Core.INIT, state, dialect);
         } catch (RuntimeException | Error failure) {
@@ -301,6 +374,9 @@ final class Native {
             MemorySegment arena,
             long arenaCap,
             MemorySegment out) {
+        if (Core.WASM != null) {
+            return Core.WASM.header(state, input, inputLen, last, names, namesCap, arena, arenaCap, out);
+        }
         try {
             return (int) Downcalls.HEADER.invokeExact(
                     Core.HEADER, state, input, inputLen, last ? 1 : 0, names, namesCap, arena, arenaCap, out);
@@ -320,11 +396,11 @@ final class Native {
             MemorySegment columns,
             long columnCount,
             long maxRows,
-            MemorySegment cells,
-            long cellsCap,
-            MemorySegment arena,
-            long arenaCap,
+            MemorySegment buffers,
             MemorySegment out) {
+        if (Core.WASM != null) {
+            return Core.WASM.fill(state, input, inputLen, last, specs, columns, columnCount, maxRows, buffers, out);
+        }
         try {
             return (int) Downcalls.FILL.invokeExact(
                     Core.FILL,
@@ -336,10 +412,7 @@ final class Native {
                     columns,
                     columnCount,
                     maxRows,
-                    cells,
-                    cellsCap,
-                    arena,
-                    arenaCap,
+                    buffers,
                     out);
         } catch (RuntimeException | Error failure) {
             throw failure;
@@ -349,6 +422,9 @@ final class Native {
     }
 
     static long unescape(MemorySegment cell, long len, MemorySegment out, long cap) {
+        if (Core.WASM != null) {
+            return Core.WASM.unescape(cell, len, out, cap);
+        }
         try {
             return (long) Downcalls.UNESCAPE.invokeExact(Core.UNESCAPE, cell, len, out, cap);
         } catch (RuntimeException | Error failure) {
@@ -360,6 +436,9 @@ final class Native {
 
     /** The size of a workbook state block, which wants 8-byte alignment. */
     static long workbookStateSize() {
+        if (Core.WASM != null) {
+            return Core.WASM.workbookStateSize();
+        }
         try {
             return (long) Downcalls.STATE_SIZE.invokeExact(Core.BOOK_STATE_SIZE);
         } catch (RuntimeException | Error failure) {
@@ -383,6 +462,11 @@ final class Native {
             this.symbol = symbol;
         }
 
+        /** The export's name, which the wasm backend looks it up by. */
+        String symbol() {
+            return symbol;
+        }
+
         private MemorySegment address() {
             return switch (this) {
                 case OPEN -> Core.BOOK_OPEN;
@@ -395,6 +479,9 @@ final class Native {
     }
 
     static int book(Book call, MemorySegment state, MemorySegment container, MemorySegment buffers, MemorySegment out) {
+        if (Core.WASM != null) {
+            return Core.WASM.book(call, state, container, buffers, out);
+        }
         try {
             return (int)
                     Downcalls.BOOK.invokeExact(call.address(), state, container, container.byteSize(), buffers, out);
@@ -413,6 +500,9 @@ final class Native {
             boolean hasHeader,
             boolean skipEmptyRows,
             MemorySegment out) {
+        if (Core.WASM != null) {
+            return Core.WASM.sheet(state, container, part, index, hasHeader, skipEmptyRows, out);
+        }
         try {
             return (int) Downcalls.SHEET.invokeExact(
                     Core.BOOK_SHEET,
@@ -441,6 +531,9 @@ final class Native {
             long maxRows,
             MemorySegment buffers,
             MemorySegment out) {
+        if (Core.WASM != null) {
+            return Core.WASM.bookFill(state, container, specs, columns, columnCount, maxRows, buffers, out);
+        }
         try {
             return (int) Downcalls.BOOK_FILL.invokeExact(
                     Core.BOOK_FILL,

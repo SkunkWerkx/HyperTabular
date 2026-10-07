@@ -365,9 +365,11 @@ impl Run<'_> {
             T_ERROR => error_code(value).map(|code| Slot::of(&Cell::Error(code))),
             T_DATE => wall_from_iso(value).map(|cell| Slot::of(&cell)),
             _ => parse_f64(value).map(|number| {
-                let read = match self.sheet.kind as u8 {
-                    styles::DATE_TIME => cell::serial(number, self.system, false),
-                    styles::ELAPSED => cell::serial(number, self.system, true),
+                let kind = self.sheet.kind as u8;
+                let read = match kind {
+                    styles::DATE_TIME | styles::TIME | styles::ELAPSED => {
+                        cell::serial(number, self.system, kind)
+                    }
                     _ => None,
                 };
                 // A non-temporal format, or a serial the rules refuse: keep the number
@@ -996,10 +998,9 @@ pub fn header(
         strings: memory.strings,
         table: memory.table,
         kinds: memory.kinds,
-        system: if state.epoch == ExcelEpoch::Y1904 as u32 {
-            ExcelEpoch::Y1904
-        } else {
-            ExcelEpoch::Y1900
+        system: match ExcelEpoch::from_code(state.epoch) {
+            Some(epoch) => epoch,
+            None => ExcelEpoch::Y1900,
         },
         xlsx: state.format == FORMAT_XLSX,
     };

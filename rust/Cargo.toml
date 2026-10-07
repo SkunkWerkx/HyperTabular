@@ -1,7 +1,10 @@
 [package]
 name = "hypertabular"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2024"
+# HyperCast's, the one dependency, whose own floor this cannot go below. CI checks the
+# library on it (check-msrv).
+rust-version = "1.88"
 description = "Forward-only tabular parsing — delimited text and spreadsheets — with a HyperCast verdict for every cell: an allocation-free, panic-free, no_std core that fills caller-owned column buffers, wrapped as a native library (libhypertabular) for direct FFI from every host language."
 license = "MIT"
 # A copy of the root README inside the crate's own directory, not a path up to it: maturin
@@ -11,7 +14,7 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/SkunkWerkx/HyperTabular"
 keywords = ["csv", "xlsx", "parser", "ffi", "allocation-free"]
-categories = ["parsing"]
+categories = ["parsing", "no-std", "no-std::no-alloc"]
 
 # Only the rlib is declared. The shared library every binding loads is built by naming its
 # crate type on the command line (`cargo cdylib`, an alias in .cargo/config.toml), as
@@ -23,10 +26,10 @@ bench = false
 
 [dependencies]
 # The one upstream, and the core's only dependency: every cell verdict is a HyperCast
-# verdict. From the repository's master while HyperCast 0.6.2 is unreleased — Cargo finds
-# the package inside its rust/ directory — and from crates.io at that release. `exports`
-# stays off, so no library built from this crate carries HyperCast's `cast_*` symbols.
-hypercast = { git = "https://github.com/SkunkWerkx/HyperCast", branch = "master", default-features = false }
+# verdict, from 0.7.0, the first release with the interop surface and the typed doors this
+# crate reads workbook cells through. `exports` stays off, so no library built from this
+# crate carries HyperCast's `cast_*` symbols.
+hypercast = { version = "0.7.0", default-features = false }
 # The Zend extension the forge builds beside the shared library (the `php` feature). Never
 # part of the core, and never of the library the shipped PHP package loads.
 ext-php-rs = { version = "0.16", optional = true }
@@ -36,6 +39,11 @@ no-panic = { version = "0.1", optional = true }
 # abi3-py311, as HyperCast's is: one build per platform serves every CPython from the
 # package's floor up.
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"], optional = true }
+# The Ruby binding's Magnus extension (src/ruby_ext.rs), linked into a Ruby native
+# extension (`hypertabular_native`) and, for ruby.wasm, into the interpreter itself. The
+# versions HyperCast's own extension is built with.
+magnus = { version = "0.9", features = ["rb-sys"], optional = true }
+rb-sys = { version = "0.9", optional = true }
 
 [features]
 # On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
@@ -72,7 +80,14 @@ no-panic = ["dep:no-panic", "exports"]
 # shared library. maturin builds it into the wheels (python/pyproject.toml); the forge's
 # suites build it with `cargo rustc --release --crate-type cdylib --features python`.
 # Nothing under src/kernel knows it exists.
-python = ["dep:pyo3", "std"]
+python = ["dep:pyo3", "std", "hypercast/python-values"]
+# The Ruby binding's fast backend: the gem's Fiddle crossing (ruby/lib/hypertabular/
+# runtime) written again in Rust over the core's own functions and linked with the core
+# into one Magnus extension, which replaces that crossing in place on require. The forge
+# builds it on every leg (`cargo rustc --release --crate-type cdylib --features ruby`) and
+# for ruby.wasm (ruby/ext/hypertabular_native/extconf.rb). Nothing under src/kernel knows
+# it exists.
+ruby = ["dep:magnus", "dep:rb-sys", "std"]
 
 [dev-dependencies]
 # The comparison baseline for the delimited conformance suite and bench — never linked.

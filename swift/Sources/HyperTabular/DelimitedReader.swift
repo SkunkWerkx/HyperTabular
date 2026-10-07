@@ -409,10 +409,18 @@ public final class DelimitedReader {
         var filled = hypertabular_filled()
         while true {
             let (base, length, last) = nextWindow()
+            // The cells and the arena travel in a buffers block, the workbook calls' own, of
+            // which the fill reads those two alone: Mono's interpreter passes no more than
+            // twelve integer arguments to a native function, and the C ABI is the same for
+            // every binding.
+            var buffers = hypertabular_buffers()
+            buffers.cells = cells.baseAddress
+            buffers.cells_cap = UInt(cells.count)
+            buffers.arena = arena.baseAddress
+            buffers.arena_cap = UInt(arena.count)
             let code = hypertabular_delimited_fill(
                 state, base, UInt(length), last ? 1 : 0, columnSet.specs, columnSet.buffers,
-                UInt(columnSet.plan.count), UInt(columnSet.batchRows), cells.baseAddress, UInt(cells.count),
-                arena.baseAddress, UInt(arena.count), &filled)
+                UInt(columnSet.plan.count), UInt(columnSet.batchRows), &buffers, &filled)
             switch code {
             case HYPERTABULAR_OK:
                 let consumed = Int(filled.consumed)

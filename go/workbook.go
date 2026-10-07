@@ -229,10 +229,11 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 	if opened.format == 2 {
 		w.format = ODS
 	}
-	w.epoch = hypercast.Excel1900
-	if opened.epoch == 2 {
-		w.epoch = hypercast.Excel1904
+	epoch, ok := hypercast.ExcelEpochFromCode(opened.epoch)
+	if !ok {
+		panic(contractViolation)
 	}
+	w.epoch = epoch
 
 	if err := settled(s.drive(bookSheets, w, w.state, nil), s.filled); err != nil {
 		return nil, err
@@ -346,7 +347,9 @@ func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Colu
 		return nil, err
 	}
 	perRow := len(plan) + 1
-	if perRow > (1<<31)/options.BatchRows {
+	// In int64: the bound is 1<<31, which overflows int where int is 32 bits (TinyGo on
+	// WebAssembly).
+	if int64(perRow) > (1<<31)/int64(options.BatchRows) {
 		return nil, fmt.Errorf("hypertabular: a plan of %d columns at %d rows a batch needs too large a cell table",
 			len(plan), options.BatchRows)
 	}

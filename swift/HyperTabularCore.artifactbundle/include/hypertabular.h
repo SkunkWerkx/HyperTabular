@@ -164,8 +164,9 @@ typedef struct hypertabular_slot {
     uint64_t bits;
 } hypertabular_slot;
 
-// The memory a workbook call works in, all the caller's; a call uses the buffers its own
-// comment names and ignores the rest (NULL with a zero size is fine for those).
+// The memory a workbook call works in, all the caller's, and the delimited fill's `arena` and
+// `cells`; a call uses the buffers its own comment names and ignores the rest (NULL with a
+// zero size is fine for those).
 typedef struct hypertabular_buffers {
     uint8_t *window;            // where a part is inflated: at least 64 KiB; ERR_WINDOW grows it
     uintptr_t window_cap;
@@ -215,14 +216,15 @@ int32_t hypertabular_delimited_header(hypertabular_delimited_state *state,
 
 // Reads up to `max_rows` whole rows of `input` through `specs` into `columns`. `cells` is
 // the cell table: row r's entry for source column c is at r * (width + 1) + c, where width
-// is the widest ordinal the plan reads plus one.
+// is the widest ordinal the plan reads plus one. Uses `buffers->cells` and `buffers->arena`
+// only: they travel in the struct because Mono's interpreter (.NET in the browser, an iOS
+// debug build) passes no more than twelve integer arguments to a native function.
 int32_t hypertabular_delimited_fill(hypertabular_delimited_state *state,
                                     const uint8_t *input, uintptr_t input_len, uint32_t last,
                                     const hypertabular_column_spec *specs,
                                     const hypertabular_column_buffer *columns,
                                     uintptr_t column_count, uintptr_t max_rows,
-                                    hypertabular_span *cells, uintptr_t cells_cap,
-                                    uint8_t *arena, uintptr_t arena_cap,
+                                    const hypertabular_buffers *buffers,
                                     hypertabular_filled *out);
 
 // Unescapes one quoted cell — a flagged cell-table entry names one — into `out`, and

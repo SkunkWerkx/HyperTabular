@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace HyperTabular;
 
-use DateTimeImmutable;
 use FFI;
-use HyperCast\CastFailure;
 use HyperCast\Decimal;
 use HyperCast\Duration;
 use HyperCast\Fault;
+use HyperCast\Interop\NativeValues;
 use HyperCast\Success;
 
 /**
@@ -34,8 +33,6 @@ use HyperCast\Success;
  */
 final class Batch
 {
-    private static ?bool $fastInstants = null;
-
     /** @var array<int, list<mixed>> each decoded column's values, null where the cell did not cast */
     private array $values = [];
     /** @var array<int, array<int, Fault>> each decoded column's faults, by row */
@@ -69,8 +66,6 @@ final class Batch
         private readonly string $arena,
         private readonly bool $workbook,
     ) {
-        self::$fastInstants ??= method_exists(DateTimeImmutable::class, 'createFromTimestamp')
-            && method_exists(DateTimeImmutable::class, 'setMicrosecond');
     }
 
     /**
@@ -277,11 +272,7 @@ final class Batch
             $verdicts = unpack('V*', $verdictBytes);
             for ($row = 0, $at = 3; $row < $rows; $row++, $at += 3) {
                 if ($verdicts[$at] !== 0) {
-                    $faults[$row] = new Fault(
-                        CastFailure::from($verdicts[$at]),
-                        $verdicts[$at - 2],
-                        $verdicts[$at - 1]
-                    );
+                    $faults[$row] = NativeValues::fault($verdicts[$at], $verdicts[$at - 2], $verdicts[$at - 1]);
                 }
             }
         }
@@ -364,10 +355,9 @@ final class Batch
             case Door::DateOrdered:
                 // Year (u16), month, day: one 32-bit word.
                 foreach (unpack('V*', $bytes) as $index => $word) {
-                    $values[] = isset($faults[$index - 1]) ? null : self::instant(
-                        self::epochSeconds($word & 0xFFFF, ($word >> 16) & 0xFF, $word >> 24),
-                        0
-                    );
+                    $values[] = isset($faults[$index - 1])
+                        ? null
+                        : NativeValues::date($word & 0xFFFF, ($word >> 16) & 0xFF, $word >> 24);
                 }
                 return $values;
             case Door::Timestamp:
@@ -379,7 +369,7 @@ final class Batch
                 for ($row = 0, $at = 1; $row < $rows; $row++, $at += 2) {
                     $values[] = isset($faults[$row])
                         ? null
-                        : self::instant($words[$at], intdiv($words[$at + 1] & 0xFFFFFFFF, 1000));
+                        : NativeValues::instant($words[$at], $words[$at + 1] & 0xFFFFFFFF);
                 }
                 return $values;
             case Door::DateTime:
@@ -392,11 +382,11 @@ final class Batch
                         continue;
                     }
                     $date = $words[$at];
-                    $nanos = $words[$at + 1];
-                    $values[] = self::instant(
-                        self::epochSeconds($date & 0xFFFF, ($date >> 16) & 0xFF, ($date >> 24) & 0xFF)
-                            + intdiv($nanos, 1_000_000_000),
-                        intdiv($nanos % 1_000_000_000, 1000)
+                    $values[] = NativeValues::civil(
+                        $date & 0xFFFF,
+                        ($date >> 16) & 0xFF,
+                        ($date >> 24) & 0xFF,
+                        $words[$at + 1]
                     );
                 }
                 return $values;
@@ -431,52 +421,12 @@ final class Batch
                 }
                 return $values;
             case Door::Uuid:
-                $hex = bin2hex($bytes);
-                for ($row = 0, $at = 0; $row < $rows; $row++, $at += 32) {
-                    $values[] = isset($faults[$row]) ? null : substr($hex, $at, 8) . '-' . substr($hex, $at + 8, 4)
-                        . '-' . substr($hex, $at + 12, 4) . '-' . substr($hex, $at + 16, 4) . '-'
-                        . substr($hex, $at + 20, 12);
+                for ($row = 0; $row < $rows; $row++) {
+                    $values[] = isset($faults[$row]) ? null : NativeValues::uuid(substr($bytes, $row * 16, 16));
                 }
                 return $values;
             default:
                 throw new \LogicException("No carrier for door {$door->name}");
         }
-    }
-
-    /**
-     * A UTC instant, built as HyperCast's `Cast` builds one: createFromTimestamp and
-     * setMicrosecond on PHP 8.4+, the date-string fallback below it.
-     *
-     * @param int $seconds seconds since the epoch
-     * @param int $micros microseconds within the second
-     * @return DateTimeImmutable the instant
-     */
-    private static function instant(int $seconds, int $micros): DateTimeImmutable
-    {
-        if (self::$fastInstants) {
-            $instant = DateTimeImmutable::createFromTimestamp($seconds);
-            return $micros === 0 ? $instant : $instant->setMicrosecond($micros);
-        }
-        $instant = new DateTimeImmutable("@{$seconds}");
-        return $micros === 0 ? $instant : $instant->modify("+{$micros} microseconds");
-    }
-
-    /**
-     * Epoch seconds at midnight of a civil date — Hinnant's days_from_civil, the same math
-     * the core and HyperCast's `Cast` use.
-     *
-     * @param int $year the civil year
-     * @param int $month the civil month
-     * @param int $day the civil day
-     * @return int seconds since the epoch at that date's midnight
-     */
-    private static function epochSeconds(int $year, int $month, int $day): int
-    {
-        $shifted = $month <= 2 ? $year - 1 : $year;
-        $era = intdiv($shifted >= 0 ? $shifted : $shifted - 399, 400);
-        $yearOfEra = $shifted - $era * 400;
-        $dayOfYear = intdiv(153 * ($month + ($month > 2 ? -3 : 9)) + 2, 5) + $day - 1;
-        $dayOfEra = $yearOfEra * 365 + intdiv($yearOfEra, 4) - intdiv($yearOfEra, 100) + $dayOfYear;
-        return ($era * 146_097 + $dayOfEra - 719_468) * 86_400;
     }
 }

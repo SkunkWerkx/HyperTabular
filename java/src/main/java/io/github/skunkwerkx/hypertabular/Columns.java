@@ -1,10 +1,9 @@
 package io.github.skunkwerkx.hypertabular;
 
-import io.github.skunkwerkx.hypercast.NumFormat;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Objects;
 
@@ -58,14 +57,7 @@ final class Columns {
             specs.set(
                     ValueLayout.JAVA_INT, spec + Native.SPEC_DOOR, column.door().code());
             specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_PARAM, column.declared());
-            NumFormat format = column.format();
-            byte[] symbol = format.currencySymbol().getBytes(StandardCharsets.UTF_8);
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_DECIMAL_SEP, format.decimalSeparator());
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_GROUP_SEP, format.groupSeparator());
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_FLAGS, format.styles());
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_CURRENCY_LEN, symbol.length);
-            // NumFormat's own constructor holds the symbol to the 16 bytes there are.
-            MemorySegment.copy(symbol, 0, specs, ValueLayout.JAVA_BYTE, spec + Native.SPEC_CURRENCY, symbol.length);
+            NativeValues.writeFormat(column.format(), specs, spec + Native.SPEC_FORMAT);
 
             // 8-aligned whatever the door, so every value reads through an aligned layout.
             values[index] = arena.allocate((long) batchRows * column.door().valueBytes(), 8);

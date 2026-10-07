@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
 using HyperCast;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -67,31 +67,16 @@ sealed unsafe class Columns
 		return larger;
 	}
 
-	/// <summary>HyperCast's <see cref="NumFormat"/> in the core's 32-byte layout, validated as HyperCast validates it.</summary>
-	static Native.RawNumFormat ToRaw(NumFormat format, int column)
+	/// <summary>HyperCast's <see cref="NumFormat"/> in the core's 32-byte layout, validated by HyperCast as its own doors validate it.</summary>
+	static RawNumFormat ToRaw(NumFormat format, int column)
 	{
-		if (format.DecimalSeparator == format.GroupSeparator)
-			throw new ArgumentException(
-				$"Plan column {column}: decimal and group separators must differ; both are '{format.DecimalSeparator}'.", "plan");
-		if (char.IsSurrogate(format.DecimalSeparator) || char.IsSurrogate(format.GroupSeparator))
-			throw new ArgumentException($"Plan column {column}: separators must be whole code points.", "plan");
-		var raw = new Native.RawNumFormat
+		try
 		{
-			DecimalSep = format.DecimalSeparator,
-			GroupSep = format.GroupSeparator,
-			Flags = (uint)format.Styles,
-		};
-		var symbol = format.CurrencySymbol;
-		if (symbol.Length == 0)
-			return raw;
-		foreach (var c in symbol)
-			if (char.IsAsciiDigit(c) || char.IsWhiteSpace(c))
-				throw new ArgumentException(
-					$"Plan column {column}: currency symbol '{symbol}' must not contain a digit or whitespace.", "plan");
-		if (!Encoding.UTF8.TryGetBytes(symbol, raw.Currency, out var written))
-			throw new ArgumentException(
-				$"Plan column {column}: currency symbol '{symbol}' exceeds {NumFormat.MaxCurrencyBytes} UTF-8 bytes.", "plan");
-		raw.CurrencyLen = (uint)written;
-		return raw;
+			return format.ToRaw();
+		}
+		catch (ArgumentException invalid)
+		{
+			throw new ArgumentException($"Plan column {column} declares a NumFormat no door accepts; the inner exception says why.", "plan", invalid);
+		}
 	}
 }

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Text;
 using HyperCast;
+using HyperCast.Interop;
 
 namespace HyperTabular;
 
@@ -120,7 +121,7 @@ public sealed unsafe class Workbook : IDisposable
 			var scratch = Stingy ? new Scratch(1, 1, 1) : new Scratch(WindowMin, 1024, 64);
 			var opened = Open(scratch);
 			Format = opened.Format == 1 ? WorkbookFormat.Xlsx : WorkbookFormat.Ods;
-			DateSystem = opened.Epoch == 2 ? ExcelEpoch.Y1904 : ExcelEpoch.Y1900;
+			DateSystem = Abi.ExcelEpochFrom(opened.Epoch) ?? throw new InvalidOperationException(ContractViolation);
 
 			var filled = Settle(scratch.Drive(this, _state, null, Call.Sheets));
 			_sheets = new SheetInfo[(int)filled.Rows];

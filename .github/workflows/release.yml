@@ -1,0 +1,733 @@
+name: Release — publish to real, public registries
+
+# PR -> ci (see ci.yml), tag -> release: this file is the only place a real, permanent,
+# public publish can happen. HyperCast's release.yml, which every leg of has published
+# cleanly since its v0.0.2, ported with this repo's names; its header keeps the account of
+# how each leg was proven and how a failed leg is recovered (gate the legs that published
+# with `if: false`, fix the one that failed, retag — a version is only ever burned on the
+# registries that accepted it, and none of these five permits reusing one).
+#
+# Propagation is not failure: nuget.org's index and Central's mirror to repo1.maven.org both
+# lag their publish by tens of minutes. A 404 shortly after a green run means waiting.
+#
+# The repo-side setup each leg needs. The org-level pieces are already in place at
+# SkunkWerkx (proven by HyperCast and HyperUuid); the per-package ones are not, because
+# 0.7.0 is the first time any of these names is published:
+#   - nuget-org-publish: a nuget.org Trusted Publishing policy for this repo's release.yml
+#     (a policy names the repository and workflow, not the package, so a first publish
+#     works through it), and the account name in vars.NUGET_TRUSTED_PUBLISHER_USER.
+#   - rubygems-publish: a rubygems.org trusted publisher for hypertabular and this
+#     workflow — registered as a pending one before the first release, since the gem does
+#     not exist yet.
+#   - pypi-publish: a PyPI pending publisher for hypertabular and this workflow.
+#   - pack-crates: crates.io Trusted Publishing for hypertabular. A crates.io trusted
+#     publisher can only be registered after the crate exists (the forge README's
+#     "Trusted Publishing bootstrap" row), so the crate needs one manual token publish
+#     before this leg can run.
+#   - maven-publish: the Central Portal token + GPG key in the four MAVEN_* secrets; the
+#     io.github.skunkwerkx namespace is already approved.
+#
+# workflow_dispatch stays for one reason: its ci_run_id input is the recovery path for a fix
+# confined to this file, which reuses an already-green ci.yml run instead of rebuilding the
+# matrix. A dispatch publishes the version in the manifests at the commit it runs on,
+# exactly as the tag would; it is never the way a release starts.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: >-
+          Skip the ci.yml lookup and use this already-green run's artifacts directly. For a
+          workflow_dispatch-only fix that never touches anything ci.yml itself builds/tests
+          (a publish-job YAML typo, an action version pin, etc.) — re-running the full ~80min
+          matrix to re-prove code that didn't change is real waste, not real verification.
+          Never used for an actual tag push (tags always go through the real lookup below).
+        required: false
+        type: string
+
+jobs:
+  # ci.yml builds and tests every native leg and uploads the reusable outputs: the plain FFI
+  # libs, the Magnus extension, and the PyPI wheels, already built and install-tested. This
+  # job locates that ci.yml run so every publish job below can pull those artifacts from
+  # it. The .nupkg and the gems are still packed fresh, later in this same file, around the
+  # libraries that run built; the wheels are published as they are.
+  #
+  # The run it finds has to be one that built the native libraries AT THIS VERSION. Each
+  # library embeds its own version (`hypertabular_version()`, which every binding's native-version
+  # probe reports), so a native library stopped being version-agnostic the day that export
+  # landed, and a release now runs in this order:
+  #
+  #   1. prepare-release.yml bumps every manifest and dispatches ci.yml against that bump
+  #      commit — the first commit whose libraries will say the new version.
+  #   2. When that run goes green, stage-native-binaries.yml commits its libraries for the
+  #      Go, Swift and PHP consumers, one commit on top of the bump.
+  #   3. A human tags that staging commit.
+  #
+  # So the tagged commit is normally the staging commit, its parent is the bump commit
+  # ci.yml ran against, and walking back a bounded number of ancestors finds that run. What
+  # this job refuses to do is what it did through v0.3.0: walk past the bump to a run from
+  # before it. That is how HyperCast 0.3.0 shipped a NuGet package, a jar, gems and
+  # committed libraries that all report 0.2.0, with every run green — the libraries were
+  # built a minute before the version changed. The checks below are that failure, named.
+  find-ci-run:
+    runs-on: ubuntu-26.04
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 10
+
+      - name: Find ci.yml's run for this commit or a recent ancestor
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID_OVERRIDE: ${{ inputs.ci_run_id }}
+        run: |
+          set -euo pipefail
+          version_at() { git show "$1:rust/Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1; }
+
+          want=$(version_at "$GITHUB_SHA")
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$want" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match rust/Cargo.toml's version ($want) at the tagged commit — every registry leg would publish $want. Run prepare-release.yml for the version you mean to tag." >&2
+            exit 1
+          fi
+
+          # $1: a ci.yml run id, $2: the commit it built.
+          accept() {
+            git cat-file -e "$2^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$2"
+            built=$(version_at "$2")
+            if [ "$built" != "$want" ]; then
+              echo "::error::ci.yml run $1 built the native libraries at $2, where the crate version was $built; this release is $want. The libraries embed their version, so they would report $built from inside a $want package. Dispatch ci.yml against the version-bump commit (prepare-release.yml does), let stage-native-binaries.yml commit its output, and tag that commit." >&2
+              exit 1
+            fi
+            echo "run_id=$1" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ -n "$CI_RUN_ID_OVERRIDE" ]; then
+            sha=$(gh run view "$CI_RUN_ID_OVERRIDE" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)
+            echo "::notice::Using explicit ci_run_id override ($CI_RUN_ID_OVERRIDE, built at $sha) — skipping the ci.yml lookup for this commit." >&2
+            accept "$CI_RUN_ID_OVERRIDE" "$sha"
+            exit 0
+          fi
+          for sha in $(git log --format=%H -n 10 "$GITHUB_SHA"); do
+            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+              --commit "$sha" --status success --json databaseId --jq '.[0].databaseId')
+            if [ -n "$run_id" ]; then
+              if [ "$sha" = "$GITHUB_SHA" ]; then
+                echo "::notice::Using ci.yml run $run_id from the tagged commit itself." >&2
+              else
+                echo "::notice::Using ci.yml run $run_id from $sha, an ancestor of the tagged commit." >&2
+              fi
+              accept "$run_id" "$sha"
+              exit 0
+            fi
+          done
+          echo "::error::No successful ci.yml run found for $GITHUB_SHA or its last 10 ancestors — dispatch ci.yml by hand against the ref you're tagging (gh workflow run ci.yml --ref <branch-or-sha>) and let it go green before tagging." >&2
+          exit 1
+
+      # Go, Swift and PHP have no packing step: what is committed at the tag is what a
+      # consumer loads or links. Each tree holds one set of bytes per RID, staged from one
+      # ci.yml run, so asking this runner's own RID from each tree is the whole check.
+      - name: Committed native libraries report this version
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          python3 - "$want" <<'PY'
+          import ctypes, sys
+          want, failed = sys.argv[1], False
+          for path in ("php/src/native/linux-x64/libhypertabular.so",):
+              try:
+                  packed = ctypes.CDLL("./" + path).hypertabular_version()
+                  got = f"{packed >> 16}.{(packed >> 8) & 0xFF}.{packed & 0xFF}"
+              except (OSError, AttributeError) as error:
+                  got = f"nothing ({error})"
+              print(f"{path}: {got}")
+              if got != want:
+                  print(f"::error::{path} reports {got}; this release is {want}. "
+                        "stage-native-binaries.yml has not staged the version-bump commit's ci.yml run.")
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
+
+          # Swift and Go link the core in rather than loading it, so a
+          # committed archive has to be linked into something before it can be asked. Each
+          # tree's archives come from one build, so this runner's own platform answers for
+          # the tree.
+          printf '#include <stdio.h>\n#include "hypertabular.h"\nint main(void) { unsigned v = hypertabular_version(); printf("%%u.%%u.%%u", v >> 16, (v >> 8) & 255, v & 255); return 0; }\n' > static-version.c
+          for archive in swift/HyperTabularCore.artifactbundle/x86_64-unknown-linux-gnu/libhypertabular.a \
+                         go/staticlib/linux_amd64/libhypertabular.a; do
+            cc -I swift/HyperTabularCore.artifactbundle/include static-version.c "$archive" -o static-version
+            got=$(./static-version)
+            echo "$archive: $got"
+            if [ "$got" != "$want" ]; then
+              echo "::error::$archive reports $got; this release is $want. stage-native-binaries.yml has not staged the version-bump commit's ci.yml run."
+              exit 1
+            fi
+          done
+
+  # Packs the .nupkg fresh, right now — deliberately not in ci.yml. A .nupkg bakes its
+  # version into its own filename/metadata at pack time, and ci.yml runs before any tag
+  # exists, so packing there would always mean a wrong version. This reuses find-ci-run's
+  # located run purely for the version-agnostic native binaries + wasm staticlib; the
+  # HyperTabular.csproj version it actually packs comes from this tagged checkout directly.
+  # (The staticlib lands under runtimes/browser-wasm/nativeassets/net10.0/ — the forge's
+  # spelling; NuGet's TFM-compatible asset selection serves net10.0 assets to this
+  # package's net11.0 consumers, so no forge change needed.)
+  #
+  # NuGet rejects a duplicate-version republish outright, so this only actually works once
+  # HyperTabular.csproj's <Version> is bumped past whatever's already published — a real
+  # prerequisite "prepare release" is responsible for, not automatic just because this job
+  # runs.
+  nuget-org-pack:
+    needs: find-ci-run
+    uses: SkunkWerkx/.github/.github/workflows/hyper-pack-nuget.yml@master
+    # attest-build-provenance signs with an OIDC token and records the result; a reusable
+    # workflow can never escalate beyond what its caller granted, so these scopes come from here.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      csproj_path: csharp/HyperTabular/HyperTabular.csproj
+      runtimes_dir: csharp/HyperTabular/runtimes
+      dotnet_version: "11.0.x"
+      source_run_id: ${{ needs.find-ci-run.outputs.run_id }}
+
+  # No pack step here — nuget-org-pack (above) already produced the .nupkg, in this same
+  # release.yml run. This job is purely auth -> download that artifact -> push. The split
+  # exists because nuget.org Trusted Publishing validates job_workflow_ref against wherever
+  # the executing workflow file physically lives — so the OIDC login must run from THIS
+  # repo's own workflow, never from the shared forge (see hyper-pack-nuget.yml's header for
+  # the confirmed 401s behind that).
+  nuget-org-publish:
+    needs: nuget-org-pack
+    runs-on: ubuntu-26.04
+    permissions:
+      # id-token covers both OIDC exchanges this job makes: nuget.org Trusted Publishing for
+      # the push, and attest-build-provenance's signing identity for the post-publish
+      # attestation below. attestations lets that attestation actually be recorded.
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "11.0.x"
+          dotnet-quality: "preview"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: nuget-org-package
+          path: nupkg-org
+
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ vars.NUGET_TRUSTED_PUBLISHER_USER }}
+
+      - name: Publish to nuget.org
+        run: >
+          dotnet nuget push "nupkg-org/*.nupkg"
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+
+      # ---- Layer 2: attest the finalized package, after nuget.org has rewritten it ----
+      #
+      # This cannot happen at pack time. nuget.org applies its own repository signature during
+      # validation, which changes the .nupkg's bytes — so an attestation over the pre-push file
+      # would never match the copy a consumer downloads, and their `gh attestation verify` would
+      # fail in a way indistinguishable from tampering. The only package attestation worth
+      # publishing is one taken over the exact artifact the feed serves. (Layer 1 is each native
+      # library, attested unmodified as it is built, in hyper-build-native.yml.)
+      - name: Resolve package id and version from the pushed .nupkg
+        id: pkg
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          nupkg=$(ls nupkg-org/*.nupkg | head -1)
+          nuspec=$(unzip -Z1 "$nupkg" | grep -m1 '\.nuspec$')
+          unzip -p "$nupkg" "$nuspec" > pkg.nuspec
+          id=$(sed -n 's:.*<id>\(.*\)</id>.*:\1:p' pkg.nuspec | head -1)
+          ver=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' pkg.nuspec | head -1)
+          if [ -z "$id" ] || [ -z "$ver" ]; then
+            echo "::error::Could not read <id>/<version> out of $nuspec"
+            exit 1
+          fi
+          echo "id=$id"                                                   >> "$GITHUB_OUTPUT"
+          echo "version=$ver"                                             >> "$GITHUB_OUTPUT"
+          echo "lower_id=$(echo "$id" | tr '[:upper:]' '[:lower:]')"       >> "$GITHUB_OUTPUT"
+          echo "lower_version=$(echo "$ver" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "pre_push_sha256=$(sha256sum "$nupkg" | cut -d" " -f1)"     >> "$GITHUB_OUTPUT"
+
+      # Validation (including the repository signing that mutates the file) completes before
+      # the flat container will serve the package, so a 200 here means the finalized artifact.
+      # Non-fatal, all three: the push above is irreversible, and the pre-push attestation
+      # from hyper-pack-nuget.yml already gives consumers a working verification route. A slow
+      # nuget.org validation must not turn a successful publish into a red release.
+      - name: Download the finalized package back from nuget.org
+        continue-on-error: true
+        env:
+          LOWER_ID: ${{ steps.pkg.outputs.lower_id }}
+          LOWER_VERSION: ${{ steps.pkg.outputs.lower_version }}
+          FINAL_NAME: ${{ steps.pkg.outputs.id }}.${{ steps.pkg.outputs.version }}.nupkg
+        run: |
+          set -uo pipefail
+          url="https://api.nuget.org/v3-flatcontainer/$LOWER_ID/$LOWER_VERSION/$LOWER_ID.$LOWER_VERSION.nupkg"
+          echo "Polling $url"
+          for attempt in $(seq 1 60); do
+            code=$(curl -sS -o "$FINAL_NAME" -w '%{http_code}' -L "$url" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "Finalized package available after $attempt attempt(s)."
+              exit 0
+            fi
+            echo "attempt $attempt: HTTP $code — nuget.org validation still running, retrying in 20s"
+            sleep 20
+          done
+          echo "::error::$url never became available within 20 minutes; validation may still be in progress."
+          exit 1
+
+      # Prints both digests so the run itself records *why* layer 2 exists: these two values
+      # are expected to differ, and that difference is the repository signature.
+      - name: Show the pre-push vs published digests
+        continue-on-error: true
+        env:
+          FINAL_NAME: ${{ steps.pkg.outputs.id }}.${{ steps.pkg.outputs.version }}.nupkg
+          PRE_PUSH: ${{ steps.pkg.outputs.pre_push_sha256 }}
+        run: |
+          set -uo pipefail
+          published=$(sha256sum "$FINAL_NAME" | cut -d' ' -f1)
+
+          # nuget.org's repository signature is a single added zip entry (.signature.p7s).
+          # Stripping it should reproduce the pre-push digest exactly — which is what makes the
+          # pre-push attestation verifiable by a consumer. Prove that here rather than asserting
+          # it in a README, so a change in nuget.org's behaviour shows up as a failed claim.
+          cp "$FINAL_NAME" stripped.nupkg
+          zip -d stripped.nupkg .signature.p7s >/dev/null 2>&1 || true
+          stripped=$(sha256sum stripped.nupkg | cut -d' ' -f1)
+
+          {
+            echo "### NuGet package attestation"
+            echo ""
+            echo "| artifact | sha256 | attested by |"
+            echo "| --- | --- | --- |"
+            echo "| packed, pre-push | \`$PRE_PUSH\` | hyper-pack-nuget.yml |"
+            echo "| published (repository-signed) | \`$published\` | this job |"
+            echo "| published, .signature.p7s removed | \`$stripped\` | — |"
+            echo ""
+            if [ "$PRE_PUSH" = "$published" ]; then
+              echo "Published bytes are unchanged — nuget.org did not rewrite this package."
+            elif [ "$PRE_PUSH" = "$stripped" ]; then
+              echo "Confirmed: the only difference is nuget.org's added \`.signature.p7s\` entry."
+              echo "Both attestations are therefore usable —"
+              echo "verify the downloaded package directly, or \`zip -d <pkg> .signature.p7s\` first"
+              echo "to check it against the pre-push attestation."
+            else
+              echo "::warning::Stripping .signature.p7s did NOT reproduce the pre-push digest."
+              echo "nuget.org may have changed how it finalizes packages; the pre-push attestation"
+              echo "can no longer be recovered by removing that entry. The published-bytes"
+              echo "attestation from this job is unaffected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest the published package
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.pkg.outputs.id }}.${{ steps.pkg.outputs.version }}.nupkg
+
+  # Ruby leg: builds the gems fresh, right here — deliberately not in ci.yml. A .gem bakes
+  # its version into its own filename/metadata at build time. Reuses find-ci-run's located
+  # run purely for the native libraries the Fiddle backend loads; the gemspec version it
+  # builds against comes from this tagged checkout directly. configure-rubygems-credentials
+  # rather than rubygems/release-gem, as in HyperCast, whose leg pushes several gems: the
+  # same OIDC exchange, and a plain `gem push` per file, so platform gems join here
+  # unchanged when a Magnus extension arrives.
+  rubygems-publish:
+    needs: find-ci-run
+    runs-on: ubuntu-26.04
+    permissions:
+      # Explicit, so checkout keeps working if this repo ever stops being public — a
+      # permissions block sets every unlisted scope to none.
+      contents: read
+      id-token: write
+      # read: gh attestation verify checks every downloaded binary before it is packed.
+      # write: the gems built from them are themselves attested below.
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          path: artifacts/native
+          merge-multiple: false
+          run-id: ${{ needs.find-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ruby-native-*
+          path: artifacts/ruby-native
+          merge-multiple: false
+          run-id: ${{ needs.find-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ruby-wasm-*
+          path: artifacts/ruby-wasm
+          merge-multiple: false
+          run-id: ${{ needs.find-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # Nothing downloaded above is inspectable, and nothing here gets rebuilt — the
+      # eight plain FFI libs go verbatim into the universal "ruby" platform gem and each
+      # Magnus extension goes verbatim into its own precompiled platform gem, the two
+      # wasm32-wasip1 archives into the -wasm gem — so `gem push` is the last moment
+      # these bytes can still be rejected, and it is irreversible (RubyGems has no
+      # unpublish and no duplicate-version overwrite). ci.yml attested all twenty-two
+      # (eight libraries, fourteen extensions) at build time via hyper-build-native.yml,
+      # and the two archives via hyper-build-wasm.yml; this is the gate that actually
+      # spends those attestations instead of just producing them.
+      #
+      # --signer-repo is not optional. `--repo X` alone asserts BOTH that the artifact's
+      # source repo is X and that the workflow which signed it lives in X. Only the first
+      # is true — the attest step is in hyper-build-native.yml, which physically lives in
+      # the shared SkunkWerkx/.github forge, and that job_workflow_ref is what Fulcio
+      # records as the build signer. Omit it and every one fails with a bare `verifying with
+      # issuer "sigstore.dev"` that reads like a bad signature but is only an identity
+      # mismatch. Same flag, same reason as stage-native-binaries.yml's gate.
+      - name: Verify build provenance of every binary about to be packed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for f in artifacts/native/native-*/* artifacts/ruby-native/ruby-native-*/* \
+                   artifacts/ruby-wasm/ruby-wasm-*/*; do
+            echo "::group::verify $f"
+            if ! gh attestation verify "$f" \
+                 --repo "$GITHUB_REPOSITORY" --signer-repo SkunkWerkx/.github; then
+              echo "::error::No valid build provenance for $f — refusing to publish a gem containing it."
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: ruby
+
+      - name: Build the universal "ruby" platform gem (pure Fiddle, all 8 native libraries bundled)
+        working-directory: ruby
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A LIB_NAMES=(
+            [linux-x64]=libhypertabular.so
+            [linux-arm64]=libhypertabular.so
+            [linux-musl-x64]=libhypertabular.so
+            [linux-musl-arm64]=libhypertabular.so
+            [osx-x64]=libhypertabular.dylib
+            [osx-arm64]=libhypertabular.dylib
+            [win-x64]=hypertabular.dll
+            [win-arm64]=hypertabular.dll
+          )
+          for rid in "${!LIB_NAMES[@]}"; do
+            dest="lib/hypertabular/native/$rid"
+            mkdir -p "$dest"
+            cp "../artifacts/native/native-$rid/${LIB_NAMES[$rid]}" "$dest/"
+          done
+          bundle exec rake build
+
+      - name: Build precompiled platform gems (Magnus)
+        working-directory: ruby
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both Windows RIDs map to RubyInstaller's own platform strings, and the `ext=so`
+          # default below is already right for both — mingw Ruby's DLEXT is `so`, not `dll`,
+          # on either architecture. Every RID named here must have a matching ruby-native-*
+          # artifact from the forge or this loop fails at the `cp`, which is the intended
+          # failure: a missing extension should stop the release, not silently ship a gem
+          # that claims a platform it has no code for.
+          #
+          # Seven RIDs, one gem each: every one but osx-x64, which has no platform gem — an
+          # Intel Mac installs the universal gem and runs on Fiddle, the price of not keeping
+          # an Intel runner job for a platform Apple is retiring. The musl extensions come from
+          # the forge's musl job (built in each Ruby's Alpine image), under the same
+          # ruby-native-{rid}-{abi} names as every other leg.
+          #
+          # The glibc gems are `-linux-gnu`, not plain `-linux`. RubyGems before 4.0 (Ruby 3.4's
+          # 3.6) matches a plain `x86_64-linux` gem on Alpine ahead of `x86_64-linux-musl` —
+          # even under `gem install --platform x86_64-linux-musl` — which now that platform
+          # gems carry no Fiddle library would be a gem that cannot load. Naming the libc on
+          # both sides is what makes every supported RubyGems and Bundler pick right; Nokogiri
+          # names its gems the same way for the same reason.
+          #
+          # All eight libraries the universal gem's step staged are still under
+          # lib/hypertabular/native/ here; native:gem leaves every one of them out of a platform
+          # gem, which carries its Magnus extensions and nothing else native. The check after
+          # the loop holds it to that.
+          declare -A PLATFORMS=(
+            [linux-x64]=x86_64-linux-gnu
+            [linux-arm64]=aarch64-linux-gnu
+            [linux-musl-x64]=x86_64-linux-musl
+            [linux-musl-arm64]=aarch64-linux-musl
+            [osx-arm64]=arm64-darwin
+            [win-x64]=x64-mingw-ucrt
+            [win-arm64]=aarch64-mingw-ucrt
+          )
+          # One extension per Ruby ABI per platform — a Magnus extension is bound to a single
+          # Ruby minor, so a platform gem has to be "fat" to cover more than one. Keep this
+          # list in step with ruby/Rakefile's ABIS and the forge's per-ABI Ruby trios; the
+          # rake task aborts naming the missing file if they drift apart.
+          ABIS=(3.4 4.0)
+          for rid in "${!PLATFORMS[@]}"; do
+            ext=so
+            [[ "$rid" == osx-* ]] && ext=bundle
+            for abi in "${ABIS[@]}"; do
+              mkdir -p "lib/hypertabular/$abi"
+              cp "../artifacts/ruby-native/ruby-native-$rid-$abi/hypertabular_native.$ext" \
+                 "lib/hypertabular/$abi/hypertabular_native.$ext"
+            done
+            bundle exec rake "native:gem[${PLATFORMS[$rid]}]"
+            for abi in "${ABIS[@]}"; do rm -rf "lib/hypertabular/$abi"; done
+          done
+
+          # Seven platform gems, each with its two extensions and no Fiddle library — and the
+          # universal gem with all eight libraries. A drift in the Rakefile or the gemspec
+          # glob fails the release here instead of shipping the wrong contents.
+          platform_gems=(pkg/*-*-*.gem)
+          [ "${#platform_gems[@]}" -eq "${#PLATFORMS[@]}" ] \
+            || { echo "::error::expected ${#PLATFORMS[@]} platform gems in pkg/, found: $(ls pkg)"; exit 1; }
+          for gem in pkg/*.gem; do
+            files=$(tar -xOf "$gem" data.tar.gz | tar -tzf -)
+            natives=$(grep -c '^lib/hypertabular/native/' <<<"$files" || true)
+            exts=$(grep -c '/hypertabular_native\.' <<<"$files" || true)
+            echo "$gem: $natives Fiddle libraries, $exts Magnus extensions"
+            # hypertabular-X.Y.Z.gem is the universal one; a platform gem's name adds -<platform>.
+            want="0 ${#ABIS[@]}"
+            [[ "$(basename "$gem" .gem)" == *-*-* ]] || want="8 0"
+            [ "$natives $exts" = "$want" ] \
+              || { echo "::error::$gem carries $natives Fiddle libraries and $exts extensions; expected $want"; exit 1; }
+          done
+
+      # @main per configure-rubygems-credentials' own README — no v2 floating tag exists.
+
+      # The ruby.wasm companion gem: the same lib/ with no fiddle, the extconf rbwasm runs, and
+      # one wasm32-wasip1 archive per Ruby minor, gzipped. Packed last so the platform gems'
+      # count above never sees it. Keep ABIS in step with the forge's ruby_wasm_abis default
+      # and ruby/Rakefile's ABIS; the rake task aborts naming the missing file otherwise.
+      - name: Build the ruby.wasm companion gem (hypertabular-wasm)
+        working-directory: ruby
+        shell: bash
+        run: |
+          set -euo pipefail
+          ABIS=(3.4 4.0)
+          for abi in "${ABIS[@]}"; do
+            mkdir -p "ext/hypertabular_native/$abi"
+            cp "../artifacts/ruby-wasm/ruby-wasm-$abi/hypertabular_native.a" "ext/hypertabular_native/$abi/"
+          done
+          bundle exec rake wasm:gem
+          gem=(pkg/hypertabular-wasm-*.gem)
+          files=$(tar -xOf "${gem[0]}" data.tar.gz | tar -tzf -)
+          echo "$files"
+          archives=$(grep -c '^ext/hypertabular_native/[0-9.]*/hypertabular_native\.a\.gz$' <<<"$files" || true)
+          natives=$(grep -c '^lib/hypertabular/native/' <<<"$files" || true)
+          [ "$archives $natives" = "${#ABIS[@]} 0" ] && grep -qx 'ext/hypertabular_native/extconf.rb' <<<"$files" \
+            || { echo "::error::${gem[0]} carries $archives archives and $natives Fiddle libraries; expected ${#ABIS[@]} and 0, plus the extconf"; exit 1; }
+
+      # Attested BEFORE the push, over ruby/pkg/*.gem — these exact files are what `gem
+      # push` uploads, with no repack in between, so the attested digest is the published
+      # digest. Ordering it first is the whole point: a failure here stops the release
+      # while it is still reversible, unlike NuGet, where nuget.org rewrites the package
+      # and forces a second attestation after an irreversible push.
+      #
+      # No --signer-repo when verifying: this signing step lives in this repo's own
+      # release.yml, so Fulcio records one identity for source and signer alike.
+      #
+      #     gh attestation verify <gem>-<version>[-<platform>].gem --repo <owner>/<repo>
+      - name: Attest the built gems
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ruby/pkg/*.gem
+
+      - uses: rubygems/configure-rubygems-credentials@main
+
+      - name: Publish to rubygems.org
+        working-directory: ruby
+        run: |
+          set -euo pipefail
+          for gem in pkg/*.gem; do
+            gem push "$gem"
+          done
+
+      # Turns "rubygems.org stores an uploaded .gem verbatim" from a reasonable belief into
+      # a per-release measurement: re-fetch each gem from the CDN and compare it to the
+      # bytes just attested. Non-fatal — the push above is irreversible, and a CDN that has
+      # not caught up yet must not turn a good release red — but a genuine mismatch would
+      # mean the attestation no longer describes what a consumer downloads, which is worth
+      # a loud warning rather than silence.
+      - name: Confirm rubygems.org serves the attested bytes
+        continue-on-error: true
+        working-directory: ruby
+        run: |
+          set -uo pipefail
+          {
+            echo "### RubyGems package attestations"
+            echo ""
+            echo "| gem | attested sha256 | served by rubygems.org |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for gem in pkg/*.gem; do
+            name=$(basename "$gem")
+            attested=$(sha256sum "$gem" | cut -d' ' -f1)
+            served="(not available within 150s)"
+            for attempt in $(seq 1 10); do
+              if curl -fsSL -o served.gem "https://rubygems.org/downloads/$name"; then
+                served=$(sha256sum served.gem | cut -d' ' -f1)
+                break
+              fi
+              sleep 15
+            done
+            if [ "$attested" = "$served" ]; then
+              echo "| \`$name\` | \`$attested\` | identical |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| \`$name\` | \`$attested\` | \`$served\` |" >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::rubygems.org is not serving the attested bytes for $name."
+            fi
+          done
+          rm -f served.gem
+
+  # PyPI leg: the nine wheels ci.yml built (hyper-build-wheels.yml in the forge — six
+  # desktop platforms, the two musl ones and Pyodide's pyemscripten one, one abi3 wheel
+  # each — ci.yml's build-wheels job), downloaded from find-ci-run's run and published unchanged. Nothing is compiled
+  # here. Each wheel was installed and called into on its own platform in that run (the
+  # Pyodide one under Node and in headless Chrome, its whole suite run in both), so a wheel that cannot be
+  # installed fails a pull request rather than a release with other registries already out,
+  # which is what happened to HyperCast 0.4.0's osx-x64 wheel while wheels were still built
+  # at the tag.
+  #
+  # The wheels carry the version in their file names and metadata, and that is the version
+  # find-ci-run already required of the run: the crate version at the commit it built.
+  #
+  # PyPI has no --skip-duplicate — a duplicate-version push is a guaranteed hard rejection —
+  # so this only works once the version (dynamic in python/pyproject.toml, sourced from
+  # rust/Cargo.toml) is past whatever is already published.
+  pypi-publish:
+    needs: find-ci-run
+    runs-on: ubuntu-26.04
+    permissions:
+      # A permissions block sets every unlisted scope to none, so contents is spelled out
+      # for checkout. id-token is PyPI Trusted Publishing; attestations: read is what
+      # `gh attestation verify` below needs.
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pypi-wheels-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ needs.find-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # The last moment these files can still be rejected: a PyPI upload is permanent, and
+      # nothing below rebuilds what was downloaded. Three things are held, each a way a
+      # release could otherwise go out wrong with every job green: all nine wheels are
+      # here (a missing artifact would publish a release with a platform silently absent),
+      # every one is named for the version being released, and every one carries build
+      # provenance from that ci.yml run.
+      #
+      # --signer-repo is not optional, for the same reason as the gem gate above: the
+      # attest step is in hyper-build-wheels.yml, which lives in the SkunkWerkx/.github
+      # forge, and that is what Fulcio records as the build signer.
+      - name: Verify the wheels about to be published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          ls -l dist
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ "${#wheels[@]}" -ne 9 ]; then
+            echo "::error::Expected 9 wheels from ci.yml run ${{ needs.find-ci-run.outputs.run_id }}, found ${#wheels[@]}."
+            exit 1
+          fi
+          for wheel in "${wheels[@]}"; do
+            case "$(basename "$wheel")" in
+              hypertabular-"$want"-*) ;;
+              *) echo "::error::$wheel is not a hypertabular $want wheel — refusing to publish it."; exit 1 ;;
+            esac
+            echo "::group::verify $wheel"
+            if ! gh attestation verify "$wheel" \
+                 --repo "$GITHUB_REPOSITORY" --signer-repo SkunkWerkx/.github; then
+              echo "::error::No valid build provenance for $wheel — refusing to publish it."
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  # Publishes the rust/ core crate to crates.io — source only, no native artifact needed,
+  # so it takes nothing from find-ci-run's located run. It still waits on that job, as
+  # PyPI's does, because that job is where a tag that disagrees with the manifests is
+  # refused — and crates.io is the registry where a wrong version can never be reused. cargo publish has no
+  # duplicate-version skip either — a hard failure — so a version bump (with Cargo.lock
+  # regenerated: cargo publish --locked fails on a stale self-referential entry) is a real
+  # prerequisite.
+  #
+  # Tokenless: the forge packages, attests, then exchanges this job's OIDC identity for a
+  # short-lived crates.io token scoped to the crate and revoked when the job ends. No secret
+  # is handed down — id-token: write is the whole credential, the same scope the
+  # attestation already needed.
+  pack-crates:
+    needs: find-ci-run
+    uses: SkunkWerkx/.github/.github/workflows/hyper-publish-crate.yml@master
+    # Handed down to the reusable workflow, which attests what it publishes and cannot
+    # escalate past what this job was granted.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  # Java leg: gradle-maven-publish's publishAndReleaseToMavenCentral does pack, sign,
+  # upload, and auto-release in one un-splittable task, so unlike NuGet there's no
+  # pack-here/push-there split — the whole leg runs in the forge with this repo's secrets.
+  maven-publish:
+    needs: find-ci-run
+    uses: SkunkWerkx/.github/.github/workflows/hyper-publish-maven.yml@master
+    # Handed down to the reusable workflow, which attests what it publishes and cannot
+    # escalate past what this job was granted.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      java_resources_dir: java/src/main/resources/native
+      # The jar carries the core as a wasm32-wasip1 module beside the native libraries, for
+      # the GraalWasm backend: ci.yml's wasip1_module builds and attests it.
+      wasip1_module: true
+      source_run_id: ${{ needs.find-ci-run.outputs.run_id }}
+    secrets:
+      MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+      MAVEN_SIGNING_KEY_PASSWORD: ${{ secrets.MAVEN_SIGNING_KEY_PASSWORD }}

@@ -969,6 +969,11 @@ fn custom_format<'a>(tag: &Tag<'a>) -> Option<(u32, &'a [u8])> {
     ))
 }
 
+/// A custom number format's record packs its position and its kind (a `styles` constant,
+/// up to `TIME` = 4) into one `u32`: the kind in the low `KIND_BITS`.
+const KIND_BITS: u32 = 3;
+const KIND_MASK: u32 = (1 << KIND_BITS) - 1;
+
 fn styles_inner(
     state: &mut State,
     container: &[u8],
@@ -1004,7 +1009,7 @@ fn styles_inner(
                 && let Some((id, code)) = custom_format(&Tag::of(reader.buf(), &token))
             {
                 let count = state.extra;
-                if count >= 1 << 30 {
+                if count >= 1 << (32 - KIND_BITS) {
                     return Err(Stop::Fail(reader.part.failure(Failure::TOO_LARGE, 0)));
                 }
                 let Some(slot) = cells.get_mut(count as usize) else {
@@ -1015,7 +1020,7 @@ fn styles_inner(
                 let kind = styles::classify(slice(arena, 0, written));
                 *slot = Span {
                     offset: id,
-                    len: (count as u32) << 2 | u32::from(kind),
+                    len: (count as u32) << KIND_BITS | u32::from(kind),
                 };
                 state.extra += 1;
             }
@@ -1070,7 +1075,10 @@ fn styles_inner(
                         return Err(Stop::Arena((state.count + 1).max(arena.len() as u64 * 2)));
                     };
                     // The last record for this id declared before here.
-                    let before = (id, (state.mark.min(1 << 30) as u32) << 2);
+                    let before = (
+                        id,
+                        (state.mark.min(1 << (32 - KIND_BITS)) as u32) << KIND_BITS,
+                    );
                     let at = partition_point(formats, |index| {
                         let span = cells.get(index).copied().unwrap_or_default();
                         (span.offset, span.len) < before
@@ -1080,7 +1088,7 @@ fn styles_inner(
                         .and_then(|index| cells.get(index))
                         .filter(|span| span.offset == id);
                     *slot = match custom {
-                        Some(span) => (span.len & 3) as u8,
+                        Some(span) => (span.len & KIND_MASK) as u8,
                         None => styles::builtin(id),
                     };
                     state.count += 1;

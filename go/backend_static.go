@@ -1,4 +1,4 @@
-//go:build cgo && !tinygo && (darwin || linux || windows) && (amd64 || arm64)
+//go:build cgo && !tinygo && !android && (darwin || linux || windows) && (amd64 || arm64) && !(ios && amd64 && !maccatalyst)
 
 // The native backend: libhypertabular linked into the binary, as HyperCast's Go module links
 // libhypercast. The core is a static library under staticlib/{goos}_{goarch}/, named on the
@@ -17,18 +17,21 @@
 // why): the two Linux ones are the musl builds, linked on glibc and musl alike, and the two
 // Windows ones are the MSVC builds, which MinGW's linker reads.
 //
-// Windows on amd64 carries one flag more, -Wl,--allow-multiple-definition, and it is there
-// for GNU ld alone. Both MSVC archives keep Rust's own 128-bit division helpers (MSVC has
-// none), which LLVM emits for that target as COFF weak externals: __divti3, defaulting to a
-// global named .weak.__divti3.default. GNU ld does not take such a default as the
-// definition — the calls resolve to libgcc's __divti3, last on gcc's link line, exactly as
-// they do when HyperCast's archive is linked alone — but it does keep searching later
-// archives for one, pulls the same helper out of the second archive, and then refuses the
-// two identical .weak.*.default globals as a multiple definition. The flag lets the first
-// stand; neither is called. It applies to the whole link, which is the cost: a duplicate
-// symbol elsewhere in a program that imports this module is no longer an error there. lld —
-// llvm-mingw's linker, the one arm64 builds with — resolves a weak external to its default,
-// never loads the second helper, and needs no flag.
+// The Windows archives Go links leave out Rust's own 128-bit division helpers (__divti3,
+// __udivti3), which the C# and Swift copies of the same MSVC build keep because MSVC has
+// none: MinGW supplies them — libgcc on amd64, compiler-rt on arm64 — and Rust emits them
+// as COFF weak externals that GNU ld, finding them in both cores' archives, refused as a
+// multiple definition. The forge's build-static-libs.sh says the rest.
+//
+// iOS and Mac Catalyst link an archive of their own, as HyperCast's module does, since Go
+// builds for both as GOOS=ios and every Mach-O object says which platform it was built for.
+// GOOS=ios also satisfies the darwin constraint (as android satisfies linux), so the macOS
+// lines below say !ios, and the constraint above turns Android away rather than hand it the
+// Linux archive. The three that share ios/arm64 are told apart by build tag: `maccatalyst`,
+// which gomobile sets for that target; `iossimulator`, which nothing sets, so a simulator
+// build passes it by hand; and neither, for a device. There is no archive for the simulator
+// on amd64. The hypertabular_local tag has no iOS lines: local-core.sh builds for the
+// machine it runs on, which is never an iPhone.
 //
 // # What crosses, and the cgo pointer rules
 //
@@ -86,15 +89,19 @@ package hypertabular
 /*
 #cgo linux,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/linux_amd64/libhypertabular.a
 #cgo linux,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/linux_arm64/libhypertabular.a
-#cgo darwin,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_amd64/libhypertabular.a
-#cgo darwin,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_arm64/libhypertabular.a
-#cgo windows,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_amd64/libhypertabular.a -Wl,--allow-multiple-definition
+#cgo darwin,!ios,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_amd64/libhypertabular.a
+#cgo darwin,!ios,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/darwin_arm64/libhypertabular.a
+#cgo ios,arm64,!iossimulator,!maccatalyst LDFLAGS: ${SRCDIR}/staticlib/ios_arm64/libhypertabular.a
+#cgo ios,arm64,iossimulator,!maccatalyst LDFLAGS: ${SRCDIR}/staticlib/iossimulator_arm64/libhypertabular.a
+#cgo ios,arm64,maccatalyst LDFLAGS: ${SRCDIR}/staticlib/maccatalyst_arm64/libhypertabular.a
+#cgo ios,amd64,maccatalyst LDFLAGS: ${SRCDIR}/staticlib/maccatalyst_amd64/libhypertabular.a
+#cgo windows,amd64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_amd64/libhypertabular.a
 #cgo windows,arm64,!hypertabular_local LDFLAGS: ${SRCDIR}/staticlib/windows_arm64/libhypertabular.a
 #cgo linux,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/linux_amd64/libhypertabular.a
 #cgo linux,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/linux_arm64/libhypertabular.a
-#cgo darwin,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_amd64/libhypertabular.a
-#cgo darwin,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_arm64/libhypertabular.a
-#cgo windows,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_amd64/libhypertabular.a -Wl,--allow-multiple-definition
+#cgo darwin,!ios,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_amd64/libhypertabular.a
+#cgo darwin,!ios,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/darwin_arm64/libhypertabular.a
+#cgo windows,amd64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_amd64/libhypertabular.a
 #cgo windows,arm64,hypertabular_local LDFLAGS: ${SRCDIR}/../rust/target/local-core/go/staticlib/windows_arm64/libhypertabular.a
 #include <stddef.h>
 #include <stdint.h>
@@ -148,7 +155,7 @@ int32_t hypertabular_delimited_header(ht_state *state, const uint8_t *input, siz
                                       ht_span *names, size_t names_cap, uint8_t *arena, size_t arena_cap, ht_filled *out);
 int32_t hypertabular_delimited_fill(ht_state *state, const uint8_t *input, size_t input_len, uint32_t last,
                                     const ht_spec *specs, const ht_buffer *columns, size_t column_count, size_t max_rows,
-                                    ht_span *cells, size_t cells_cap, uint8_t *arena, size_t arena_cap, ht_filled *out);
+                                    const ht_buffers *buffers, ht_filled *out);
 size_t hypertabular_delimited_unescape(const uint8_t *cell, size_t len, uint8_t *out, size_t cap);
 size_t hypertabular_workbook_state_size(void);
 int32_t hypertabular_workbook_open(uint64_t *state, const uint8_t *container, size_t container_len,
@@ -214,8 +221,16 @@ static int32_t ht_fill(ht_state *state, const uint8_t *input, size_t input_len, 
 	if (columns == NULL) {
 		return HT_ERR_SHIM_MEMORY;
 	}
+	// The cells and the arena travel in a Buffers block, as the workbook calls' do, of which
+	// the fill reads those two alone: Mono's interpreter passes no more than twelve integer
+	// arguments to a native function, and the C ABI is the same for every binding.
+	ht_buffers buffers = {0};
+	buffers.cells = cells;
+	buffers.cells_cap = cells_cap;
+	buffers.arena = arena;
+	buffers.arena_cap = arena_cap;
 	int32_t code = hypertabular_delimited_fill(state, input, input_len, last, specs, columns, column_count, max_rows,
-	                                           cells, cells_cap, arena, arena_cap, out);
+	                                           &buffers, out);
 	if (columns != on_stack) {
 		free(columns);
 	}

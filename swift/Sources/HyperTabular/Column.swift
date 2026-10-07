@@ -185,24 +185,18 @@ public struct Column: Equatable, Sendable {
         }
     }
 
-    /// The column as the core reads it. HyperCast's `NumFormat` has already refused what the
-    /// native format cannot carry — equal separators, a symbol over 16 UTF-8 bytes or with
-    /// a digit or whitespace in it — so nothing here can fail.
+    /// The column as the core reads it, the format laid out by HyperCast as its own doors lay
+    /// it out. `NumFormat` has already refused what the native format cannot carry — equal
+    /// separators, a symbol over 16 UTF-8 bytes or with a digit or whitespace in it — so
+    /// nothing here can fail.
     var spec: hypertabular_column_spec {
         var spec = hypertabular_column_spec()
         spec.ordinal = UInt32(ordinal)
         spec.door = door.rawValue
         spec.param = declared
-        spec.format.decimal_sep = format.decimalSeparator.value
-        spec.format.group_sep = format.groupSeparator.value
-        spec.format.flags = format.styles.rawValue
-        withUnsafeMutableBytes(of: &spec.format.currency) { currency in
-            var length = 0
-            for byte in format.currencySymbol.utf8.prefix(currency.count) {
-                currency[length] = byte
-                length += 1
-            }
-            spec.format.currency_len = UInt32(length)
+        var format = Interop.rawFormat(self.format)
+        withUnsafeBytes(of: &format) { source in
+            withUnsafeMutableBytes(of: &spec.format) { $0.copyMemory(from: source) }
         }
         return spec
     }

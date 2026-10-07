@@ -10,11 +10,11 @@ plugins {
 // io.github.skunkwerkx — the SkunkWerkx org's Central Portal namespace, the one HyperCast
 // and HyperUuid publish under.
 group = "io.github.skunkwerkx"
-// CI may override this (0.1.0-ci.<run_number>) via HYPERTABULAR_VERSION so repeated manual
+// CI may override this (0.7.0-ci.<run_number>) via HYPERTABULAR_VERSION so repeated manual
 // runs do not collide with a published version; a real publish never sets it and uses the
 // committed version as-is. It moves with rust/Cargo.toml: the suite pins the loaded
 // library's own version to it.
-version = System.getenv("HYPERTABULAR_VERSION") ?: "0.1.0"
+version = System.getenv("HYPERTABULAR_VERSION") ?: "0.7.0"
 
 repositories {
     mavenCentral()
@@ -31,13 +31,24 @@ spotless {
     }
 }
 
+// GraalWasm, the wasm backend's runtime, is compileOnly, as in HyperCast: this jar's POM
+// carries no dependency on it, so a consumer on the default FFM path downloads nothing extra.
+// Opting into the wasm path means adding both artifacts (polyglot for the API, wasm for the
+// engine — a POM-type dependency that fans out into Truffle) to their own build; see
+// README.md's WebAssembly section. Tests get both on the runtime classpath so the whole suite
+// can run a second time through the module (the testWasm task below). HyperCast's version.
+val graalPolyglotVersion = "25.4.4.1.1"
+
 dependencies {
+    compileOnly("org.graalvm.polyglot:polyglot:$graalPolyglotVersion")
+    testRuntimeOnly("org.graalvm.polyglot:polyglot:$graalPolyglotVersion")
+    testRuntimeOnly("org.graalvm.polyglot:wasm:$graalPolyglotVersion")
     // HyperCast is the judge: Verdict, Success, Fault, CastFailure, NumFormat,
     // UnixPrecision, DateOrder and ExcelEpoch are its own types, from its own published
     // jar, and they are this binding's public API — hence `api`, so a consumer gets them
     // transitively. Nothing here calls HyperCast's doors: the core this binding loads has
     // HyperCast compiled in, and casts every cell itself.
-    api("io.github.skunkwerkx:hypercast:0.6.1")
+    api("io.github.skunkwerkx:hypercast:0.7.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("com.google.code.gson:gson:2.11.0")
@@ -93,12 +104,28 @@ val stageNativeLibrary = tasks.register<Sync>("stageNativeLibrary") {
     into(layout.buildDirectory.dir("generated-resources/native/$nativeRid"))
 }
 
+// The same dev loop for the wasm32-wasip1 module the GraalWasm backend runs: a
+// `cargo wasm-module` in ../rust (from inside rust/, so its .cargo/config.toml export flags
+// apply) lands at /native/wasm32-wasip1/hypertabular.wasm on the classpath, beside the
+// platform library. Same explicit-placement yield as above: the forge places the module it
+// built under src/main/resources/native/wasm32-wasip1/.
+val wasmPlaced = file("src/main/resources/native/wasm32-wasip1").exists()
+val stageWasmModule = tasks.register<Sync>("stageWasmModule") {
+    from("../rust/target/wasm32-wasip1/release") {
+        include("hypertabular.wasm")
+        if (wasmPlaced) {
+            exclude("**")
+        }
+    }
+    into(layout.buildDirectory.dir("generated-resources/native/wasm32-wasip1"))
+}
+
 sourceSets.main {
     resources.srcDir(layout.buildDirectory.dir("generated-resources"))
 }
 
 tasks.processResources {
-    dependsOn(stageNativeLibrary)
+    dependsOn(stageNativeLibrary, stageWasmModule)
 }
 
 // sourcesJar packages the main source set, and `generated-resources` is one of its resource
@@ -107,7 +134,7 @@ tasks.processResources {
 // tasks.named("sourcesJar"): the sources and javadoc jars are registered by the publish
 // plugin, so they do not exist yet at this point in configuration.
 tasks.withType<Jar>().configureEach {
-    dependsOn(stageNativeLibrary)
+    dependsOn(stageNativeLibrary, stageWasmModule)
 }
 
 // Ships the license text and this binding's README inside the jar, under META-INF/.
@@ -131,6 +158,28 @@ tasks.test {
     // This binding's own version, so the suite can pin Tabular.nativeVersion() to it: the
     // core and the jar move together, and the probe exists to prove exactly that.
     systemProperty("hypertabular.version", version)
+}
+
+// The identical suite, forced through the GraalWasm backend (-Dhypertabular.backend=wasm),
+// so both paths are held to the same assertions — both corpus replays included — on every
+// build; the forge runs it on every leg when wasip1_module is set. --enable-native-access is
+// for Truffle's own System.load and for the backend's reading of the addresses inside the
+// buffers block; WarnInterpreterOnly=false silences the engine's fallback-runtime notice on
+// a non-GraalVM JDK, which is what CI and most dev boxes run.
+val testWasm = tasks.register<Test>("testWasm") {
+    description = "Runs the test suite against the bundled wasm32-wasip1 module via GraalWasm."
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    useJUnitPlatform()
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Dpolyglot.engine.WarnInterpreterOnly=false")
+    systemProperty("hypertabular.backend", "wasm")
+    systemProperty("hypertabular.version", version)
+    shouldRunAfter(tasks.test)
+}
+
+tasks.check {
+    dependsOn(testWasm)
 }
 
 java {

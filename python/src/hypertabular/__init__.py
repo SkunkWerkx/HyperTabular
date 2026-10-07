@@ -326,10 +326,7 @@ class Column:
         if self.declared is not None:
             said.append(f"{type(self.declared).__name__}.{self.declared.name}")
         if self.format is not NumFormat.INVARIANT:
-            fmt = self.format
-            said.append(
-                f"NumFormat({fmt.decimal_sep!r}, {fmt.group_sep!r}, {fmt.flags}, {fmt.currency!r})"
-            )
+            said.append(repr(self.format))
         return f"Column.{self.door.name.lower()}({', '.join(said)})"
 
     @classmethod

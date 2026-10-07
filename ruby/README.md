@@ -97,19 +97,83 @@ One factory per door, named as HyperCast names them.
 | `Column.duration(n)` | `Rational` seconds |
 | `Column.text(n)` | UTF-8 `String`, untrimmed |
 
-## The backend
+## Backends
 
-`HyperTabular::BACKEND` is `:fiddle`: the native library, bundled per platform under
-`lib/hypertabular/native/{rid}/`, called through Ruby's own Fiddle — nothing compiles on
-install. `HYPERTABULAR_PURE=1` forces that backend, as `HYPERCAST_PURE` does for hypercast;
-it is the only one today. `HyperTabular.available?` and `HyperTabular.native_version`
-answer whether the native library resolved, without the first read being what finds out.
+| `HyperTabular::BACKEND` | What runs | Chosen when |
+|---|---|---|
+| `:native` | the core linked into a Magnus extension | a precompiled platform gem is installed — each carries an extension for Ruby 3.4 and 4.0 — or the `hypertabular-wasm` gem is linked into a ruby.wasm interpreter; see [Ruby in the browser](#ruby-in-the-browser) |
+| `:fiddle` | `libhypertabular` for this platform, `dlopen`ed through Fiddle | no extension loads: the universal gem, on a Ruby or platform no platform gem covers (Intel macOS, Ruby 3.3) |
+
+Selection happens once, at `require`, in that order. Both backends read a batch in one native
+call and hand back the same bytes; everything above that crossing — the readers, the
+workbook, `Batch` and every value and verdict it builds — is the same Ruby on either, and
+`spec/native_backend_spec.rb` holds the two to the same answer over every cell of both corpora.
+So the extension is not where a read gets faster (the crossing was already once per batch);
+what it buys is a platform gem with no shared library for Fiddle to find, and Ruby in the
+browser, where there is no Fiddle at all.
+
+`HYPERTABULAR_PURE` forces `:fiddle`, as `HYPERCAST_PURE` does for hypercast. It is a testing
+and diagnostic switch — CI runs the whole suite through it — read for presence, not value. A
+forced backend with nothing to load does not fall through: the first reader raises, and
+`HyperTabular.available?` answers `false`. Inside a platform gem, which carries no Fiddle
+library, that `LoadError` names the universal gem (`gem install hypertabular --platform ruby`,
+or Bundler's `force_ruby_platform`). `HyperTabular.available?` and `HyperTabular.native_version`
+answer whether the core resolved, without the first read being what finds out.
+
+**Threads.** A reader or a sheet is one thread's at a time, on either backend. The extension
+runs under the GVL; Fiddle releases it for each call.
+
+## Ruby in the browser
+
+ruby.wasm cannot load an extension at runtime: `rbwasm build` links the extension of every gem
+in a Gemfile into the one interpreter it builds. So the browser gets a gem of its own,
+`hypertabular-wasm` — the same library and the same Magnus extension, prebuilt for
+`wasm32-wasip1` — which brings `hypercast-wasm`, HyperCast's own, with it. List it **instead
+of** `hypertabular` in the Gemfile you build the interpreter from:
+
+```ruby
+source "https://rubygems.org"
+
+gem "hypertabular-wasm"
+gem "js" # JavaScript interop, which a browser app almost always wants
+
+group :development do
+  gem "ruby_wasm"
+end
+```
+
+```sh
+bundle install
+bundle exec rbwasm build --ruby-version 4.0 -o ruby.wasm
+```
+
+Load `ruby.wasm` with [`@ruby/wasm-wasi`](https://www.npmjs.com/package/@ruby/wasm-wasi), then
+`require "/bundle/setup"` and `require "hypertabular"` as anywhere else. A workbook is read
+from its bytes (`HyperTabular::Workbook.new(bytes)`) — a `fetch`ed file, an upload — and
+delimited text from a String or any IO.
+
+- **Ruby 3.4 and 4.0**, one archive each, picked by `--ruby-version`; any other minor stops the
+  build naming the ones the gem carries. Built and tested against ruby_wasm 2.10.
+- **No Rust toolchain.** The gem's `extconf.rb` only hands rbwasm the prebuilt archive. The
+  first `rbwasm build` compiles Ruby itself and takes 15–20 minutes; later builds reuse it.
+- **Static linking only,** into ruby.wasm's default `wasm32-unknown-wasip1` interpreter.
+- **Beside HyperCast.** Every Rust extension that carries std defines a few of the same
+  symbols (`rust_eh_personality`, rb-sys's `ruby_abi_version`, one of std's); this gem and
+  `hypercast-wasm` each rename them to names of their own when CI builds the archive, and the
+  build fails if a newer Rust starts exporting another.
+
+What stands behind it: CI builds each minor's archive from the commit, packs the gem the way
+it ships, links it into a fresh interpreter and runs [`wasm-smoke/test.rb`](wasm-smoke/test.rb)
+under Node and in headless Chrome (the forge's `hyper-build-wasm.yml`). The published gem is
+packed around those attested archives.
 
 ## Development
 
 ```sh
 cd rust && cargo cdylib                 # builds rust/target/release/libhypertabular.*
 cd ../ruby && bundle install
-HYPERTABULAR_PURE=1 bundle exec rspec   # replays corpus/delimited.json and workbook.json
+HYPERTABULAR_PURE=1 bundle exec rspec   # the Fiddle backend: replays both corpora
+bundle exec rake native:dev             # builds the Magnus extension for this Ruby, staged
+bundle exec rspec                       # the extension, and its agreement with Fiddle
 bundle exec rake docs:check
 ```

@@ -2,6 +2,17 @@
   "resources": [
     { "glob": "native/*/*" }
   ],
+  "reflection": [
+    {
+      "type": "io.github.skunkwerkx.hypertabular.WasmBackend",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    }
+  ],
   "foreign": {
     "downcalls": [
       { "returnType": "jint", "parameterTypes": [] },
@@ -11,7 +22,7 @@
         "parameterTypes": ["void*", "void*", "jlong", "jint", "void*", "jlong", "void*", "jlong", "void*"] },
       { "returnType": "jint",
         "parameterTypes": ["void*", "void*", "jlong", "jint", "void*", "void*", "jlong", "jlong",
-                           "void*", "jlong", "void*", "jlong", "void*"] },
+                           "void*", "void*"] },
       { "returnType": "jlong", "parameterTypes": ["void*", "jlong", "void*", "jlong"] },
       { "returnType": "jint", "parameterTypes": ["void*", "void*", "jlong", "void*", "void*"] },
       { "returnType": "jint",

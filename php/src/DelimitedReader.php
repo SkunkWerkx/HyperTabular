@@ -58,6 +58,12 @@ final class DelimitedReader
     private CData $statePtr;
     private CData $filled;
     private CData $filledPtr;
+    // The cells and the arena travel to the core in a buffers block, the workbook calls'
+    // own, of which the fill reads those two alone: Mono's interpreter (.NET in the browser)
+    // passes no more than twelve integer arguments to a native function, and the C ABI is
+    // the same for every binding.
+    private CData $buffers;
+    private CData $buffersPtr;
     private CData $cells;
     private int $cellsCap;
     private CData $arena;
@@ -212,6 +218,8 @@ final class DelimitedReader
         $this->bufferPtr = $ffi->cast('uint8_t *', FFI::addr($this->buffer));
         $this->filled = $ffi->new('ht_filled');
         $this->filledPtr = FFI::addr($this->filled);
+        $this->buffers = $ffi->new('ht_buffers');
+        $this->buffersPtr = FFI::addr($this->buffers);
 
         $this->state = $ffi->new('ht_state');
         $this->statePtr = FFI::addr($this->state);
@@ -304,6 +312,11 @@ final class DelimitedReader
         while (true) {
             $length = $this->end - $this->start;
             $last = $this->eof;
+            $buffers = $this->buffers;
+            $buffers->cells = $ffi->cast('ht_span *', FFI::addr($this->cells));
+            $buffers->cells_cap = $this->cellsCap;
+            $buffers->arena = $ffi->cast('uint8_t *', FFI::addr($this->arena));
+            $buffers->arena_cap = $this->arenaCap;
             $code = $ffi->hypertabular_delimited_fill(
                 $this->statePtr,
                 $this->bufferPtr + $this->start,
@@ -313,10 +326,7 @@ final class DelimitedReader
                 $columns->buffers,
                 $columns->count,
                 $columns->batchRows,
-                $this->cells,
-                $this->cellsCap,
-                $this->arena,
-                $this->arenaCap,
+                $this->buffersPtr,
                 $this->filledPtr
             );
             switch ($code) {

@@ -127,15 +127,21 @@ fn system_pmull() -> bool {
 /// `(avx2, pclmulqdq)` from `CPUID`, with `XGETBV` confirming the operating system saves
 /// the wide registers — the same questions the standard library asks, without it.
 #[cfg(target_arch = "x86_64")]
+// `__cpuid` and `__cpuid_count` are safe functions from Rust 1.94 and unsafe ones before it;
+// the blocks keep the crate building on its rust-version, and newer compilers call them
+// unused.
+#[allow(unused_unsafe)]
 pub fn x86_features() -> (bool, bool) {
     use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
-    let leaf1 = __cpuid(1);
+    // SAFETY: CPUID exists on every x86_64 processor.
+    let leaf1 = unsafe { __cpuid(1) };
     let clmul = leaf1.ecx & (1 << 1) != 0;
     let os_xsave = leaf1.ecx & (1 << 27) != 0;
     let avx = leaf1.ecx & (1 << 28) != 0;
     // SAFETY: `XGETBV` exists when CPUID reports OSXSAVE.
     let wide_saved = os_xsave && unsafe { _xgetbv(0) } & 0b110 == 0b110;
-    let avx2 = avx && wide_saved && __cpuid_count(7, 0).ebx & (1 << 5) != 0;
+    // SAFETY: as above; leaf 7 answers zeros on a processor that lacks it.
+    let avx2 = avx && wide_saved && unsafe { __cpuid_count(7, 0) }.ebx & (1 << 5) != 0;
     (avx2, clmul)
 }
 

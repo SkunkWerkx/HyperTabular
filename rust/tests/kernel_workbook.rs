@@ -392,7 +392,14 @@ fn a_bomb_is_bounded_by_the_window() {
     assert!(harness.arena.len() < 4096);
 
     // One token of 64 MiB: the core asks for a window it would fit, and the caller is the
-    // one who decides whether to give it.
+    // one who decides whether to give it. The harness says no by panicking, which only a
+    // target that unwinds can catch; under wasm32-wasip1 panics abort.
+    #[cfg(panic = "unwind")]
+    a_token_larger_than_the_caller_allows();
+}
+
+#[cfg(panic = "unwind")]
+fn a_token_larger_than_the_caller_allows() {
     let mut strings = String::from("<sst><si><t>");
     strings.push_str(&"a".repeat(64 << 20));
     strings.push_str("</t></si></sst>");

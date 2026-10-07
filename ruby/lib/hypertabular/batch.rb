@@ -21,42 +21,13 @@ module HyperTabular
     # The verdict of every cell that had no bytes at all: one shared, frozen Fault.
     EMPTY = HyperCast::Fault.new(reason: :empty, offset: 0, length: 0)
 
-    # The doors whose column is one String#unpack directive away from its values.
-    SCALARS = {
-      bool: "C*", i8: "c*", i16: "s<*", i32: "l<*", i64: "q<*", u8: "C*", u16: "S<*", u32: "L<*",
-      u64: "Q<*", f32: "e*", f64: "E*", time: "Q<*"
-    }.freeze
+    # The doors whose column is one String#unpack directive away from its values: HyperCast's
+    # directive for one value, repeated down the column.
+    SCALARS = HyperCast::Interop::SCALARS.transform_values { |directive| "#{directive}*" }.freeze
 
-    # HyperCast's Timestamp — seconds and nanoseconds, protobuf-shaped — as a UTC Time: the
-    # one `Time.at(seconds, nanos, :nanosecond, in: "UTC")` makes, at half the cost a row of
-    # having the zone's name read each time.
-    INSTANT = ["q<l<x4", 2, ->(fields, at) { Time.at(fields[at], fields[at + 1], :nanosecond).utc }].freeze
-
-    # HyperCast's Date — year, month, day — as a Date.
-    DAY = ["S<CC", 3, ->(fields, at) { Date.new(fields[at], fields[at + 1], fields[at + 2]) }].freeze
-
-    # The doors whose value is a record: the directive that unpacks one, how many fields
-    # that yields, and what builds the Ruby value from them — each the type HyperCast's gem
-    # returns from the same door.
-    RECORDS = {
-      decimal: ["Q<L<CCx2", 4, lambda { |fields, at|
-        HyperCast::Decimal.new(magnitude: (fields[at + 1] << 64) | fields[at], scale: fields[at + 2],
-                               negative: fields[at + 3] != 0)
-      }],
-      uuid: ["H8H4H4H4H12", 5, ->(fields, at) { fields[at, 5].join("-") }],
-      timestamp: INSTANT, unix: INSTANT, excel_serial: INSTANT,
-      date: DAY, date_ordered: DAY,
-      datetime: ["S<CCx4Q<", 4, lambda { |fields, at|
-        second_of_day, nanos = fields[at + 3].divmod(1_000_000_000)
-        hour, rest = second_of_day.divmod(3600)
-        minute, second = rest.divmod(60)
-        DateTime.new(fields[at], fields[at + 1], fields[at + 2], hour, minute,
-                     second + Rational(nanos, 1_000_000_000))
-      }],
-      duration: ["q<l<x4", 2, lambda { |fields, at|
-        Rational(fields[at] * 1_000_000_000 + fields[at + 1], 1_000_000_000)
-      }]
-    }.freeze
+    # The doors whose value is a record: HyperCast's directive for one, how many fields it
+    # yields, and what builds the Ruby value HyperCast's own door returns from them.
+    RECORDS = HyperCast::Interop::RECORDS
 
     # How many rows the batch holds — never zero.
     attr_reader :rows
@@ -225,13 +196,9 @@ module HyperTabular
       return EMPTY if reason == 1 && offset.zero? && length.zero?
 
       unless offset.zero? && length.zero?
-        text = raw(column, row)
-        unless text.ascii_only?
-          length = text.byteslice(offset, length).length
-          offset = text.byteslice(0, offset).length
-        end
+        offset, length = HyperCast::Interop.characters(raw(column, row), offset, length)
       end
-      HyperCast::Fault.new(reason: HyperCast::REASONS.fetch(reason), offset: offset, length: length)
+      HyperCast::Interop.fault(reason, offset, length)
     end
   end
 end

@@ -162,7 +162,10 @@ public final class Workbook {
                 }
             }
             format = opened.format == 2 ? .ods : .xlsx
-            dateSystem = opened.epoch == 2 ? .y1904 : .y1900
+            guard let epoch = ExcelEpoch(rawValue: opened.epoch) else {
+                preconditionFailure(Self.contractViolation)
+            }
+            dateSystem = epoch
 
             var filled = try Self.settled(scratch.drive(.sheets, state, container, tables: nil))
             sheets = (0..<Int(filled.rows)).map { index in

@@ -30,11 +30,11 @@
 //! HyperCast is the judge of every cell, and its Python package is the judge of how a
 //! verdict looks in Python: a cell is `hypercast.Success` or `hypercast.Fault` — that
 //! package's own classes, called here, not copies of them — carrying its own `CastFailure`
-//! members, and a plan column's notation is its own `NumFormat`. What this file has to
-//! restate is how a cast value becomes a Python value (`decimal.Decimal`, `uuid.UUID`,
-//! the `datetime` types, microsecond truncation), because HyperCast's extension keeps
-//! those conversions to itself; the suite holds each one to what `hypercast.cast_*` makes
-//! of the same text.
+//! members, and a plan column's notation is its own `NumFormat`, crossing as the bytes it
+//! packs itself into. A cast value becomes a Python value (`decimal.Decimal`, `uuid.UUID`,
+//! the `datetime` types, microsecond truncation) through HyperCast's own conversions
+//! (`hypercast::python::Values`), so it is the object `hypercast.cast_*` makes of the same
+//! text.
 
 use std::fs::File;
 use std::io::{ErrorKind, Read};
@@ -55,7 +55,8 @@ use crate::kernel::abi::{
 use crate::kernel::delimited::fill::{self, RawDialect, State};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
-use hypercast::{CivilDateTime, Date, Decimal, Duration, RawNumFormat, Timestamp};
+use hypercast::python::Values;
+use hypercast::{CivilDateTime, Date, Decimal, Duration, RawNumFormat, Reason, Timestamp};
 
 /// Rows per batch unless told otherwise.
 const DEFAULT_BATCH_ROWS: usize = 4096;
@@ -90,13 +91,8 @@ struct Companions {
     workbook_format: Py<PyAny>,
     /// HyperCast's `ExcelEpoch`, likewise.
     excel_epoch: Py<PyAny>,
-    uuid: Py<PyAny>,
-    decimal: Py<PyAny>,
-    datetime: Py<PyAny>,
-    date: Py<PyAny>,
-    time: Py<PyAny>,
-    timedelta: Py<PyAny>,
-    utc: Py<PyAny>,
+    /// What every cast value is built with: HyperCast's own conversions.
+    values: Values,
 }
 
 static COMPANIONS: PyOnceLock<Companions> = PyOnceLock::new();
@@ -186,25 +182,6 @@ fn view(
     Ok(typed.unbind())
 }
 
-/// Hinnant's `civil_from_days`: the calendar date of a day number counted from the Unix
-/// epoch — the inverse of what HyperCast's temporal doors do to produce one.
-fn civil_from_days(days: i64) -> (i64, u8, u8) {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_shifted = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * month_shifted + 2) / 5 + 1) as u8;
-    let month = if month_shifted < 10 {
-        month_shifted + 3
-    } else {
-        month_shifted - 9
-    } as u8;
-    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
-}
-
 /// A cell's text as a `str`. The input is UTF-8 by contract; bytes that are not are
 /// replaced (U+FFFD), as the C# binding's `GetString` does, and `raw` still has them.
 fn text<'py>(py: Python<'py>, bytes: &[u8]) -> Bound<'py, PyString> {
@@ -216,14 +193,18 @@ fn fault<'py>(
     companions: &Companions,
     verdict: CellVerdict,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let reason = (verdict.reason as usize)
-        .checked_sub(1)
-        .and_then(|index| companions.reasons.get(index))
+    let fault = verdict
+        .fault()
         .ok_or_else(|| PyRuntimeError::new_err(CONTRACT))?;
+    let reason = match fault.reason {
+        Reason::Empty => &companions.reasons[0],
+        Reason::Malformed => &companions.reasons[1],
+        Reason::OutOfRange => &companions.reasons[2],
+    };
     companions
         .fault
         .bind(py)
-        .call1((reason.bind(py), verdict.offset, verdict.len))
+        .call1((reason.bind(py), fault.offset, fault.len))
 }
 
 /// One plan column of a batch: the batch's copies of the two arrays the core filled, and
@@ -417,75 +398,27 @@ impl Batch {
             Door::F64 => unsafe { slot.value::<f64>(py, row)? }
                 .into_pyobject(py)?
                 .into_any(),
-            // The core's canonical text through `decimal.Decimal`'s own constructor:
-            // exact, with the scale the core produced.
-            Door::Decimal => {
-                let value = unsafe { slot.value::<Decimal>(py, row)? };
-                companions.decimal.bind(py).call1((value.to_string(),))?
-            }
-            Door::Uuid => {
-                let value = unsafe { slot.value::<[u8; 16]>(py, row)? };
-                companions
-                    .uuid
-                    .bind(py)
-                    .call1((py.None(), PyBytes::new(py, &value)))?
-            }
-            // An aware UTC datetime; sub-microsecond digits truncate (datetime's ceiling).
-            Door::Timestamp | Door::Unix(_) | Door::ExcelSerial(_) => {
-                let value = unsafe { slot.value::<Timestamp>(py, row)? };
-                let (year, month, day) = civil_from_days(value.seconds.div_euclid(86_400));
-                let second = value.seconds.rem_euclid(86_400);
-                companions.datetime.bind(py).call1((
-                    year,
-                    month,
-                    day,
-                    second / 3_600,
-                    second % 3_600 / 60,
-                    second % 60,
-                    value.nanos / 1_000,
-                    companions.utc.bind(py),
-                ))?
-            }
-            Door::Date | Door::DateOrdered(_) => {
-                let value = unsafe { slot.value::<Date>(py, row)? };
-                companions
-                    .date
-                    .bind(py)
-                    .call1((value.year, value.month, value.day))?
-            }
-            // A naive datetime: the text named no zone and none is invented.
-            Door::DateTime(_) => {
-                let value = unsafe { slot.value::<CivilDateTime>(py, row)? };
-                let second = value.nanos_of_day / 1_000_000_000;
-                companions.datetime.bind(py).call1((
-                    value.date.year,
-                    value.date.month,
-                    value.date.day,
-                    second / 3_600,
-                    second % 3_600 / 60,
-                    second % 60,
-                    value.nanos_of_day % 1_000_000_000 / 1_000,
-                ))?
-            }
-            Door::Time => {
-                let value = unsafe { slot.value::<u64>(py, row)? };
-                let second = value / 1_000_000_000;
-                companions.time.bind(py).call1((
-                    second / 3_600,
-                    second % 3_600 / 60,
-                    second % 60,
-                    value % 1_000_000_000 / 1_000,
-                ))?
-            }
-            // Sub-microsecond digits truncate toward zero; timedelta normalizes the sign.
-            Door::Duration => {
-                let value = unsafe { slot.value::<Duration>(py, row)? };
-                companions.timedelta.bind(py).call1((
-                    value.seconds.div_euclid(86_400),
-                    value.seconds.rem_euclid(86_400),
-                    value.nanos / 1_000,
-                ))?
-            }
+            Door::Decimal => companions
+                .values
+                .decimal(py, unsafe { slot.value::<Decimal>(py, row)? })?,
+            Door::Uuid => companions
+                .values
+                .uuid(py, unsafe { slot.value::<[u8; 16]>(py, row)? })?,
+            Door::Timestamp | Door::Unix(_) | Door::ExcelSerial(_) => companions
+                .values
+                .instant(py, unsafe { slot.value::<Timestamp>(py, row)? })?,
+            Door::Date | Door::DateOrdered(_) => companions
+                .values
+                .date(py, unsafe { slot.value::<Date>(py, row)? })?,
+            Door::DateTime(_) => companions
+                .values
+                .civil(py, unsafe { slot.value::<CivilDateTime>(py, row)? })?,
+            Door::Time => companions
+                .values
+                .time(py, unsafe { slot.value::<u64>(py, row)? })?,
+            Door::Duration => companions
+                .values
+                .duration(py, unsafe { slot.value::<Duration>(py, row)? })?,
             Door::Text => {
                 let value = unsafe { slot.value::<Span>(py, row)? };
                 let from: &[u8] = if value.flagged() {
@@ -1238,26 +1171,9 @@ fn planned(
             format.get_type().name()?
         )));
     }
-    let separator = |name: &str| -> PyResult<u32> {
-        let text: String = format.getattr(name)?.extract()?;
-        let mut chars = text.chars();
-        match (chars.next(), chars.next()) {
-            (Some(only), None) => Ok(u32::from(only)),
-            _ => Err(PyValueError::new_err(format!(
-                "plan[{index}].format.{name} must be a single character"
-            ))),
-        }
-    };
-    let symbol: String = format.getattr("currency")?.extract()?;
-    let mut currency = [0u8; 16];
-    currency
-        .get_mut(..symbol.len())
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "plan[{index}].format.currency exceeds 16 UTF-8 bytes"
-            ))
-        })?
-        .copy_from_slice(symbol.as_bytes());
+    // HyperCast's NumFormat validated itself when it was built; its packed bytes are the
+    // core's layout, which `resolve` below reads back.
+    let packed: [u8; 32] = format.getattr("packed")?.extract()?;
     let spec = ColumnSpec {
         ordinal: column.getattr("ordinal")?.extract()?,
         door: column.getattr("door")?.extract()?,
@@ -1266,13 +1182,7 @@ fn planned(
         } else {
             declared.extract()?
         },
-        format: RawNumFormat {
-            decimal_sep: separator("decimal_sep")?,
-            group_sep: separator("group_sep")?,
-            flags: format.getattr("flags")?.extract()?,
-            currency_len: symbol.len() as u32,
-            currency,
-        },
+        format: RawNumFormat::from_le_bytes(packed),
     };
     let door = Door::from_code(spec.door, spec.param).ok_or_else(|| {
         PyValueError::new_err(format!(
@@ -1806,7 +1716,6 @@ fn _bind(
 ) -> PyResult<()> {
     let hypercast = py.import("hypercast")?;
     let reason = hypercast.getattr("CastFailure")?;
-    let datetime = py.import("datetime")?;
     let companions = Companions {
         success: hypercast.getattr("Success")?.unbind(),
         fault: hypercast.getattr("Fault")?.unbind(),
@@ -1822,13 +1731,7 @@ fn _bind(
         failure: failure.unbind(),
         workbook_format: workbook_format.unbind(),
         excel_epoch: hypercast.getattr("ExcelEpoch")?.unbind(),
-        uuid: py.import("uuid")?.getattr("UUID")?.unbind(),
-        decimal: py.import("decimal")?.getattr("Decimal")?.unbind(),
-        datetime: datetime.getattr("datetime")?.unbind(),
-        date: datetime.getattr("date")?.unbind(),
-        time: datetime.getattr("time")?.unbind(),
-        timedelta: datetime.getattr("timedelta")?.unbind(),
-        utc: datetime.getattr("timezone")?.getattr("utc")?.unbind(),
+        values: Values::import(py)?,
     };
     let _ = COMPANIONS.set(py, companions);
     Ok(())

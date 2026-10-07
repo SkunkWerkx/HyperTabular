@@ -33,6 +33,11 @@ module HyperTabular
       # expected, found).
       FILLED_BYTES = 64
       FILLED = "Q<4L<2Q<2L<2".freeze
+      # Buffers: seven pointer and size pairs (window, arena, cells, row, strings, table,
+      # kinds), as every workbook call takes them. A delimited fill reads the arena and the
+      # cell table from it and nothing else.
+      BUFFERS = "Q<14".freeze
+      BUFFERS_BYTES = 112
 
       ARENA_BYTES = 4096
       NAMES = 64
@@ -75,6 +80,7 @@ module HyperTabular
         @arena_cap = ARENA_BYTES
         @arena = Runtime.buffer(@arena_cap)
         @out = Runtime.buffer(FILLED_BYTES)
+        @buffers = Runtime.buffer(BUFFERS_BYTES)
         @rows = @consumed = @arena_used = 0
       end
 
@@ -125,7 +131,7 @@ module HyperTabular
         loop do
           code = @fill.call(@state, @base + start, length, last ? 1 : 0,
                             @columns.specs, @columns.table, @columns.count, @batch_rows,
-                            @cells, @cells_cap, @arena, @arena_cap, @out)
+                            buffers, @out)
           needed = finished
           case code
           when OK
@@ -173,6 +179,14 @@ module HyperTabular
         raw = Runtime.buffer(4)
         raw[0, 4] = dialect
         Runtime.function(:hypertabular_delimited_init).call(@state, raw) == OK
+      end
+
+      # The arena and the cell table as the Buffers block a fill takes them — packed again
+      # for every call, since either may have been grown since the last.
+      def buffers
+        @buffers[0, BUFFERS_BYTES] = [0, 0, @arena.to_i, @arena_cap, @cells.to_i, @cells_cap, 0, 0, 0, 0, 0, 0, 0, 0]
+                                     .pack(BUFFERS)
+        @buffers
       end
 
       # Reads what the call wrote to its Filled block; returns `needed`.

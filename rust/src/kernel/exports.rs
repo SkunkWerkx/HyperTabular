@@ -150,8 +150,14 @@ export! {
     /// # Safety
     /// `state` was initialized by `hypertabular_delimited_init`; `input` is `input_len`
     /// bytes; `specs` and `columns` are `column_count` entries each, and each column's
-    /// two arrays have room for `max_rows` elements; `cells` has room for `cells_cap`
-    /// spans; `arena` for `arena_cap` bytes; `out` is writable.
+    /// two arrays have room for `max_rows` elements; `buffers` is readable, and its
+    /// `cells` and `arena` hold `cells_cap` spans and `arena_cap` bytes (the rest of it is
+    /// not read); `out` is writable.
+    ///
+    /// The two buffers come in a [`Buffers`] rather than as four arguments of their own,
+    /// as the workbook fill takes them: Mono's interpreter, which runs .NET in the browser
+    /// and in an iOS debug build, passes no more than twelve integer arguments to a native
+    /// function, and this one had thirteen.
     fn hypertabular_delimited_fill(
         state: *mut State,
         input: *const u8,
@@ -161,10 +167,7 @@ export! {
         columns: *const ColumnBuffer,
         column_count: usize,
         max_rows: usize,
-        cells: *mut Span,
-        cells_cap: usize,
-        arena: *mut u8,
-        arena_cap: usize,
+        buffers: *const Buffers,
         out: *mut Filled,
     ) -> i32 {
         if state.is_null()
@@ -175,6 +178,13 @@ export! {
         }
         // SAFETY: per the function contract.
         unsafe {
+            if buffers.is_null() {
+                return ERR_CONTRACT;
+            }
+            let buffers = buffers.read_unaligned();
+            if !buffers.cells.is_aligned() {
+                return ERR_CONTRACT;
+            }
             let specs = if column_count == 0 { &[] } else { slice::from_raw_parts(specs, column_count) };
             let columns =
                 if column_count == 0 { &[] } else { slice::from_raw_parts(columns, column_count) };
@@ -185,8 +195,8 @@ export! {
                 specs,
                 columns,
                 max_rows,
-                buffer(cells, cells_cap),
-                buffer(arena, arena_cap),
+                buffer(buffers.cells, buffers.cells_cap),
+                buffer(buffers.arena, buffers.arena_cap),
                 &mut *out,
             )
         }

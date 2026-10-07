@@ -17,7 +17,6 @@ public enum Tabular {
     /// `major.minor.patch` — the library's own answer (`hypertabular_version`), not this
     /// package's tag — so a caller can prove the two agree before the first read.
     public static func nativeVersion() -> String {
-        let packed = hypertabular_version()
-        return "\(packed >> 16).\(packed >> 8 & 0xFF).\(packed & 0xFF)"
+        Interop.version(hypertabular_version())
     }
 }

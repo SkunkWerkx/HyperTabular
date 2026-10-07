@@ -323,10 +323,18 @@ public sealed unsafe class DelimitedReader : IDisposable
 		while (true)
 		{
 			var window = Window(out var length, out var last);
+			// Only the cells and the arena are the fill's; the rest stays empty.
+			var buffers = new Native.RawBuffers
+			{
+				Arena = Address(_arena),
+				ArenaCap = (nuint)_arena.Length,
+				Cells = Address(_cells),
+				CellsCap = (nuint)_cells.Length,
+			};
 			var code = Native.hypertabular_delimited_fill(
 				(Native.State*)Address(_state), window, (nuint)length, last ? 1u : 0u,
 				Address(_columns.Specs), Address(_columns.Buffers), (nuint)_columns.Plan.Length, (nuint)batchRows,
-				Address(_cells), (nuint)_cells.Length, Address(_arena), (nuint)_arena.Length, &filled);
+				&buffers, &filled);
 			switch (code)
 			{
 				case Native.Ok:

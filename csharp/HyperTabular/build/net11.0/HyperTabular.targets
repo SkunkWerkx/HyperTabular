@@ -1,9 +1,87 @@
 <Project>
   <!-- Auto-imported into every consuming project via NuGet's build/{tfm}/{PackageId}.targets
        convention (and, through buildTransitive/, into projects that reach the package through
-       another project).
+       another project). -->
 
-       Native AOT: link the core in. DirectPInvoke binds every import from "hypertabular" as
+  <!-- Blazor WebAssembly: link the core in. Two pieces, both required, as in HyperCast's
+       package, whose copy of this file has the full account:
+
+       1. NativeFileReference. Restore never hands a plain PackageReference's
+          runtimes/browser-wasm/nativeassets/ archive to the linker, so the reference names
+          it by path. net10.0 is only the forge's folder name for it.
+
+       2. EmccExportedFunction, one per export Native.cs imports. Linking the archive in does
+          not make its functions resolvable through LibraryImport("*"); the SDK's emcc call
+          exports only what it is told to, and with this list missing the build succeeds and
+          the app throws at its first read.
+
+       The archive is built without Rust's standard library and carries none of HyperCast's
+       cast_* symbols, so it links beside HyperCast's own browser-wasm archive. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
+    <NativeFileReference Include="$(MSBuildThisFileDirectory)../../runtimes/browser-wasm/nativeassets/net10.0/libhypertabular.a" />
+    <EmccExportedFunction Include="_hypertabular_version" />
+    <EmccExportedFunction Include="_hypertabular_delimited_fill" />
+    <EmccExportedFunction Include="_hypertabular_delimited_header" />
+    <EmccExportedFunction Include="_hypertabular_delimited_init" />
+    <EmccExportedFunction Include="_hypertabular_delimited_state_size" />
+    <EmccExportedFunction Include="_hypertabular_delimited_unescape" />
+    <EmccExportedFunction Include="_hypertabular_workbook_fill" />
+    <EmccExportedFunction Include="_hypertabular_workbook_header" />
+    <EmccExportedFunction Include="_hypertabular_workbook_open" />
+    <EmccExportedFunction Include="_hypertabular_workbook_sheet" />
+    <EmccExportedFunction Include="_hypertabular_workbook_sheets" />
+    <EmccExportedFunction Include="_hypertabular_workbook_state_size" />
+    <EmccExportedFunction Include="_hypertabular_workbook_strings" />
+    <EmccExportedFunction Include="_hypertabular_workbook_styles" />
+  </ItemGroup>
+
+  <!-- .NET 11 links browser-wasm with the new (exnref) exception-handling encoding, and
+       Rust's precompiled core inside the archive uses the legacy one; the browser refuses a
+       module that mixes them. Binaryen's translate-to-exnref pass makes it uniform. Exclude
+       names the item list itself, so an app that also references HyperCast or HyperUuid
+       hands wasm-opt the pass once. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
+    <WasmOptConfigurationFlags Include="--translate-to-exnref" Exclude="@(WasmOptConfigurationFlags)" />
+  </ItemGroup>
+
+  <!-- Restore resolves the archive as a copy-local native asset too, which would put it in
+       bin/ and the publish root of every Blazor consumer, never served and never read. -->
+  <Target Name="_HyperTabularDropWasmArchiveFromCopyLocal"
+          AfterTargets="ResolvePackageAssets"
+          Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
+    <ItemGroup>
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
+                            Condition="'%(NativeCopyLocalItems.NuGetPackageId)' == 'HyperTabular' And '%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'libhypertabular.a'" />
+    </ItemGroup>
+  </Target>
+
+  <!-- iOS and Mac Catalyst: link the core in, always.
+
+       An app on these platforms has no runtimes/{rid}/native/ to load a library from: the
+       .NET SDK for them links native code into the app's own executable, and a P/Invoke
+       reaches it under the library name "__Internal" (Native.cs declares every export a
+       third time against that name, picked by OperatingSystem.IsIOS(), which is true on Mac
+       Catalyst too). NativeReference with Kind=Static is the item that SDK links, and it is
+       the SDK's own native link that consumes it whether the app is compiled by Mono's AOT
+       compiler, runs interpreted, or is published with Native AOT, so the Native AOT block
+       below stands aside for these RIDs. HyperCast's package adds its own archive the same
+       way; both are built without Rust's standard library and HyperTabular's carries none of
+       HyperCast's cast_* symbols, so the two link into one executable side by side.
+
+       The archives are in staticlibs/{rid}/ for ios-arm64, iossimulator-arm64,
+       maccatalyst-arm64 and maccatalyst-x64. An RID with no archive here (iossimulator-x64,
+       tvOS) gets nothing, and the app fails at its native link on the undefined
+       hypertabular_* symbols: at build time, not at run time. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <_HyperTabularAppleMobile Condition="$(RuntimeIdentifier.StartsWith('ios-')) Or $(RuntimeIdentifier.StartsWith('iossimulator-')) Or $(RuntimeIdentifier.StartsWith('maccatalyst-'))">true</_HyperTabularAppleMobile>
+    <_HyperTabularAppleMobileLibrary Condition="'$(_HyperTabularAppleMobile)' == 'true'">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/libhypertabular.a</_HyperTabularAppleMobileLibrary>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_HyperTabularAppleMobile)' == 'true' And Exists('$(_HyperTabularAppleMobileLibrary)')">
+    <NativeReference Include="$(_HyperTabularAppleMobileLibrary)" Kind="Static" />
+  </ItemGroup>
+
+  <!-- Native AOT: link the core in. DirectPInvoke binds every import from "hypertabular" as
        a direct call the linker must resolve, and NativeLibrary hands the linker the archive
        that defines them: one executable, nothing opened at start. The archives are in
        staticlibs/{rid}/, built without Rust's standard library, so this package, HyperCast's
@@ -12,8 +90,10 @@
        Presence decides: where the package has no archive for the RID being published,
        nothing here applies and the publish loads the shared library as it always did.
        Setting HyperTabularStaticLink to false asks for that on purpose. HyperCast's copy of
-       this file has the full account; the tabular layer has no browser-wasm half. -->
-  <PropertyGroup Condition="'$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(HyperTabularStaticLink)' != 'false'">
+       this file has the full account. Not for browser-wasm or for iOS and Mac Catalyst, which
+       have their own wiring above, and not for anything but an AOT publish: a JIT process cannot link an
+       archive, so it still loads the shared library. -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(RuntimeIdentifier)' != 'browser-wasm' And '$(_HyperTabularAppleMobile)' != 'true' And '$(HyperTabularStaticLink)' != 'false'">
     <_HyperTabularStaticLibrary Condition="$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/hypertabular.lib</_HyperTabularStaticLibrary>
     <_HyperTabularStaticLibrary Condition="!$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/libhypertabular.a</_HyperTabularStaticLibrary>
     <_HyperTabularStaticLibrary Condition="!Exists('$(_HyperTabularStaticLibrary)')"></_HyperTabularStaticLibrary>

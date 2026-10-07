@@ -26,11 +26,15 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   `design.md` has the matrix.
 - **Formulas are never evaluated.** `<f>` is skipped; the cached value is the value. A
   formula with no cached value is an empty cell.
-- **Date-kind classification** (`kernel/workbook/styles.rs`): built-in ids 14–22, 27–36,
-  45, 47, 50–58, 71–81 → date/time; 46 → elapsed; 49 → text. Custom codes: first `;`
-  section, `"…"` and `\`/`_`/`*` escapes skipped, `[h]`/`[m]`/`[s]` ⇒ elapsed, any other
-  `[…]` ignored, `AM/PM` skipped, then any of `y m d h s` ⇒ date/time. A custom id
-  declared twice means what the latest declaration before the cell format says.
+- **Date-kind classification** (`kernel/workbook/styles.rs`): built-in ids per ISO 29500
+  §18.8.30 → date, time, elapsed (46, and Thai 79) or text (49); the ids that are times in
+  Chinese and dates in Japanese or Korean (34, 35, 52, 53, 55, 56) → time. Custom codes:
+  first `;` section, `"…"` and `\`/`_`/`*` escapes skipped, `[h]`/`[m]`/`[s]` ⇒ elapsed,
+  any other `[…]` ignored, `AM/PM` skipped, then `y`, `d` or a month `m` ⇒ date, `h`, `s`
+  or a minutes `m` ⇒ time (`m` is minutes after `h` or before `s`). A date format in the
+  1904 system has a date from serial `0` (1904-01-01) up; under one day anything else is a
+  time of day. A custom id declared twice means what the latest declaration before the
+  cell format says.
 - **Rows.** `<row r>` gaps and empty `<row>`s are empty rows: skipped by default
   (`skip_empty_rows`), delivered with their sheet row numbers otherwise. Missing `r` on a
   row or cell means "the next one", per ISO 29500. `dimension` is not consulted (it is
@@ -163,37 +167,41 @@ own benchmark harness through one plan: `i64`, `f64`, text, date, time, bool, du
 opened and nothing read; **read** is opened, then the first sheet read in batches of 4096,
 every column's verdicts looked at and every text cell's bytes. Every harness prints the
 same checksum (5 285 882: the cells that cast, plus the text column's bytes), which is what
-says they did the same work. Linux x64, i9-11900H, 2026-10-05.
+says they did the same work. Linux x64 (WSL 2), i9-11900H, 2026-10-07: the 0.7.0 core and
+HyperCast 0.7.0; Rust 1.99, .NET 11 RC 1, JDK 25.0.4 (Temurin), Go 1.27.1, Swift 6.3.3,
+CPython 3.14.8, Ruby 4.0.7, PHP 8.5.10 with no `php.ini`. Best of the harness's own runs
+where it reports them (Go, Ruby), its mean or median otherwise.
 
 | Binding (harness) | xlsx open | xlsx read | ods open | ods read |
 | --- | ---: | ---: | ---: | ---: |
-| Rust (Criterion) | 37 ms | 750 ms | 550 ms | 1.94 s |
-| C# (BenchmarkDotNet) | 35 ms | 709 ms | 505 ms | 1.79 s |
-| Java (JMH) | 43 ms | 742 ms | 508 ms | 1.78 s |
-| Go (`go test -bench`) | 33 ms | 698 ms | 461 ms | 1.71 s |
-| Swift (package-benchmark) | 43 ms | 763 ms | 533 ms | 1.94 s |
-| Python (pyperf) | 42 ms | 748 ms | 466 ms | 1.74 s |
-| Ruby (benchmark-ips) | 38 ms | 1.12 s | 502 ms | 2.25 s |
-| PHP (phpbench) | 44 ms | 872 ms | 584 ms | 1.91 s |
+| Rust (Criterion) | 34 ms | 601 ms | 337 ms | 1.20 s |
+| C# (BenchmarkDotNet) | 32 ms | 591 ms | 334 ms | 1.21 s |
+| Java (JMH) | 41 ms | 600 ms | 346 ms | 1.23 s |
+| Go (`go test -bench`) | 30 ms | 590 ms | 328 ms | 1.20 s |
+| Swift (package-benchmark) | 37 ms | 617 ms | 336 ms | 1.20 s |
+| Python (pyperf) | 39 ms | 630 ms | 344 ms | 1.24 s |
+| Ruby (benchmark-ips), Magnus | 30 ms | 1.01 s | 330 ms | 1.61 s |
+| Ruby (benchmark-ips), Fiddle | 36 ms | 1.04 s | 343 ms | 1.65 s |
+| PHP (phpbench) | 44 ms | 776 ms | 346 ms | 1.34 s |
 
 C#, Java, Go and Swift hand out views of the reader's buffers, so their read is the core's.
-Rust's row is Criterion's, and Criterion's binary is an unlucky one: the same read in a
-plain release program runs 1.69–1.77 s on the ODS file, alternated run for run with C#'s
-1.77–1.82 s, and inside the benchmark binary a hand-timed loop of it ran 2.0–2.17 s while
-adding those four lines moved Criterion's own number from 1.95 s to 1.84 s. Code layout,
-not work: compiling with every function and branch target aligned
-(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) brings
-both binaries to within 2% of each other. A difference of under about 10% between two
-rows of this table is not a finding until it survives runs alternated in one sitting.
+The build is layout-sensitive: when this table was first taken, Criterion's binary read the
+ODS file about 10% slower than the same read in a plain release program, and compiling with
+every function and branch target aligned
+(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) brought
+the two within 2% of each other. A difference of under about 10% between two rows of this
+table is not a finding until it survives runs alternated in one sitting.
 Python's read makes the text column's `str`s and counts faults from
 `fault_count`; its **values** scope, which makes every column's Python objects — `date`,
-`time` and `timedelta` included — is 981 ms and 1.98 s. Ruby and PHP have no way to ask
+`time` and `timedelta` included — is 717 ms and 1.34 s. Ruby and PHP have no way to ask
 whether a cell cast short of decoding its column, so their row is the **values** scope:
 every column made into the gem's or package's carriers (Date, Rational, DateTimeImmutable,
 HyperCast's Duration), the cells that cast counted from them. Their **verdicts** scope —
 a HyperCast `Success` or `Fault` built for every cell, what a caller who matches each cell
-pays — is 2.01 s and 3.36 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to make,
-however it is made) and 1.05 s and 2.11 s in PHP.
+pays — is 1.92 s and 2.48 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to make,
+however it is made) and 929 ms and 1.50 s in PHP. Ruby's two backends are within a few
+percent of each other: the crossing was already once per batch, so the Magnus extension
+buys platform gems with no shared library to find, and ruby.wasm, not speed.
 
 ODS's **open** is most of a second because a package has no listing of its sheets outside
 `content.xml`, so opening one reads the whole part; the sheet's read then reads it again.
@@ -216,8 +224,8 @@ three (`r`, `s`, `t`) for XLSX; each cell's are now gathered in one pass, each t
 its name as the lookups found it. A third, smaller: the nine-byte `<![CDATA[` comparison,
 a `memcmp` call, ran for every ordinary tag until `<!` was asked first. Best of several
 runs, Rust, before and after the three: XLSX read 710 → 580 ms, ODS read 1.88 → 1.19 s, ODS
-open 530 → 320 ms. The table above was taken before them; every binding reads through the
-same core, so each row moves with it once its library is rebuilt. What is left is spread
+open 530 → 320 ms. The table above was taken after them, every binding on a library rebuilt
+from the same core. What is left is spread
 thin: inflate is about a sixth of a read, and no other line is more than a few percent.
 
 What these numbers changed when they were first taken: Ruby and PHP each ran a scan over
