@@ -88,14 +88,15 @@ cells through. *(every package)*
   written by real applications — Excel for Windows (data, strict, 1904, encrypted,
   protected, macro-enabled, ZIP64), Excel for the web, LibreOffice and Google Sheets, in
   both formats — replayed byte for byte by the Rust suite and by every binding's own.
+  *(every package)*
 - **Benchmarks in every ecosystem's own harness** — Criterion, BenchmarkDotNet, JMH,
   `testing.B`, package-benchmark, pyperf, benchmark-ips and phpbench — over the same two
-  300 000-row workbooks and the same checksum; `docs/workbook.md` has the table.
+  300 000-row workbooks and the same checksum; `docs/workbook.md` has the table. *(every
+  package)*
 - **Every platform the forge builds.** linux-x64, linux-arm64, linux-musl-x64,
   linux-musl-arm64, osx-arm64, win-x64 and win-arm64 tested on real hardware, osx-x64
   built and tested at the core; every native library carries a build-provenance
-  attestation, verified again before it is staged or packed.
-
+  attestation, verified again before it is staged or packed. *(every package)*
 - **iOS and Mac Catalyst for C#, Swift and Go**, as HyperCast 0.7.0 and HyperUuid 0.7.0
   have them. Neither platform loads a library, so the core is linked into the app from
   static archives the forge cross-compiles beside the rest (`apple_mobile`). *(C#, Swift,
@@ -113,11 +114,11 @@ cells through. *(every package)*
     symbols. CI's `test-apple-mobile` job runs C# and Swift in an iOS simulator and as a
     Mac Catalyst process, Go's suite in the simulator, and links an iOS device build of
     each.
-
 - **WebAssembly, for every binding whose toolchain can link the core into a wasm build.**
   The core imports nothing — no clock, no entropy, no allocator — so each is the same
-  archive linked in, and each runs in headless Chrome in CI on every pull request.
-  *(crate, C#, Go, Swift, Python, Ruby)*
+  archive linked in, and CI runs each on every pull request — in headless Chrome for the
+  browser builds, under wasmtime, Node or the JVM for the rest. *(crate, C#, Java, Go,
+  Swift, Python, Ruby)*
   - Rust: the whole suite passes under wasmtime on `wasm32-wasip1`, and
     `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in the browser; a
     `cargo wasm-staticlib` alias builds the archive the bindings link.
@@ -145,6 +146,14 @@ cells through. *(every package)*
   does, with buffers that start empty and grow only when asked, and checks that it reads
   the same as with plenty of room. About four million executions before this release found
   nothing in the core; CI holds the fuzz crate to fmt and clippy. *(crate)*
+- **One release pipeline for all eight packages.** `prepare-release.yml` bumps every
+  manifest and dispatches CI on the bump; `stage-native-binaries.yml` verifies the
+  attestation of each library that run built and commits them for the packages that
+  resolve from git — PHP, Swift and Go; a `v*` tag runs `release.yml`, which refuses a tag
+  whose CI run or committed libraries report another version, then publishes to
+  crates.io, NuGet, Maven Central, PyPI and RubyGems, attesting what it publishes and
+  using trusted publishing (OIDC) wherever the registry offers it. Packagist, SwiftPM and
+  the Go module (`go/v0.7.0`) resolve from the tags. *(every package)*
 
 [Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/SkunkWerkx/HyperTabular/releases/tag/v0.7.0

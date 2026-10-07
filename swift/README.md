@@ -6,7 +6,7 @@ read a batch at a time into typed columns, with a
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/SkunkWerkx/HyperTabular", from: "0.7.0"),
+.package(url: "https://github.com/SkunkWerkx/HyperTabular", from: "<version>"),
 // and in the target:
 .product(name: "HyperTabular", package: "HyperTabular"),
 ```

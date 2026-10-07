@@ -5,7 +5,7 @@ read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell.
 
 ```
-go get github.com/SkunkWerkx/HyperTabular/go@v0.7.0
+go get github.com/SkunkWerkx/HyperTabular/go@latest
 ```
 
 The module lives in a subdirectory of the repository, so its tags are prefixed

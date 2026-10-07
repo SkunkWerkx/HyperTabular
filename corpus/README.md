@@ -46,8 +46,9 @@ a binding should replay each case more than one way.
 
 ## `workbook.json` and `workbook/` — the contract for workbooks
 
-`workbook/` holds ten small packages: five fixtures (`basic.xlsx`, `basic-1904.xlsx`,
-`multisheet.xlsx`, `rich.xlsx` from openpyxl and `basic.ods` from the ODF schema by hand —
+`workbook/` holds ten small packages, and beside them the thirteen files real applications
+wrote (the table at the bottom lists them). The ten: five fixtures (`basic.xlsx`,
+`basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and `basic.ods` from the ODF schema by hand —
 `make_fixtures.py` writes them) and five generated ones — two XLSX and two ODS, one of
 each deflated and one stored, the XLSX pair one in each date system, and `broken.xlsx`,
 whose sheet names a shared string that is not there. Between them the generated packages
@@ -56,8 +57,8 @@ date, time and elapsed formats, booleans, errors, ISO dates, CDATA, prefixed ele
 sparse rows, empty rows in both spellings, gaps in the row numbers, and ODS's repeated
 rows and columns, nested tables, annotations and paragraphs.
 
-`workbook.json` is 84 cases — every sheet of every package, read four ways — 482 rows and
-12,344 cells. A case:
+`workbook.json` is 198 cases over those 23 packages — every sheet of every package, read
+several ways, and the two encrypted files refused — 765 rows and 39,548 cells. A case:
 
 ```json
 {

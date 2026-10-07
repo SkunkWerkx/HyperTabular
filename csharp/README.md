@@ -5,6 +5,7 @@ read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell.
 
 ```csharp
+using System.Text;
 using HyperCast;
 using HyperTabular;
 

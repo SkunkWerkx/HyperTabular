@@ -102,7 +102,7 @@ One factory per door, named as HyperCast names them.
 | `HyperTabular::BACKEND` | What runs | Chosen when |
 |---|---|---|
 | `:native` | the core linked into a Magnus extension | a precompiled platform gem is installed — each carries an extension for Ruby 3.4 and 4.0 — or the `hypertabular-wasm` gem is linked into a ruby.wasm interpreter; see [Ruby in the browser](#ruby-in-the-browser) |
-| `:fiddle` | `libhypertabular` for this platform, `dlopen`ed through Fiddle | no extension loads: the universal gem, on a Ruby or platform no platform gem covers (Intel macOS, Ruby 3.3) |
+| `:fiddle` | `libhypertabular` for this platform, `dlopen`ed through Fiddle | no extension loads: the universal gem, on a Ruby or platform no platform gem covers (Intel macOS, Ruby 3.3, Ruby 4.1 and later) |
 
 Selection happens once, at `require`, in that order. Both backends read a batch in one native
 call and hand back the same bytes; everything above that crossing — the readers, the

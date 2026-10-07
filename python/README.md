@@ -99,7 +99,7 @@ Pyodide cannot. The wheel is for **Pyodide 314.x** (Python 3.14, platform
 Every wheel is built and attested by the SkunkWerkx forge's reusable workflow:
 
 ```
-gh attestation verify hypertabular-0.7.0-*.whl --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+gh attestation verify hypertabular-<version>-*.whl --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
 ```
 
 ## License

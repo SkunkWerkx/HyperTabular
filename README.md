@@ -54,9 +54,9 @@ while let Some(batch) = reader.read()? {
 | --- | --- |
 | [Rust](rust/) | `cargo add hypertabular` |
 | [C#](csharp/) | `dotnet add package HyperTabular` |
-| [Java](java/) | `implementation("io.github.skunkwerkx:hypertabular:0.7.0")` |
-| [Go](go/) | `go get github.com/SkunkWerkx/HyperTabular/go@v0.7.0` |
-| [Swift](swift/) | `.package(url: "https://github.com/SkunkWerkx/HyperTabular", from: "0.7.0")` |
+| [Java](java/) | `implementation("io.github.skunkwerkx:hypertabular:<version>")` |
+| [Go](go/) | `go get github.com/SkunkWerkx/HyperTabular/go@latest` |
+| [Swift](swift/) | `.package(url: "https://github.com/SkunkWerkx/HyperTabular", from: "<version>")` |
 | [Python](python/) | `pip install hypertabular` |
 | [Ruby](ruby/) | `gem install hypertabular` |
 | [PHP](php/) | `composer require skunkwerkx/hypertabular` |
@@ -79,7 +79,7 @@ The crate is two layers. **The core** (`rust/src/kernel`) is what the native lib
 | Property | What makes it impossible to break quietly |
 | --- | --- |
 | No standard library | The library is the core built with `std` off, and is checked again for a target that has no standard library at all (`thumbv7em-none-eabi`). |
-| No allocation | The crate never declares `alloc`, so `Vec`, `Box` and `String` cannot be named. The shared library's imports are held to an allow-list (`memcpy`, `memset`, `memcmp`/`bcmp`, `memmove`, `abort`), and a counting allocator watches whole inputs go through the core in the test suite: the count is zero. |
+| No allocation | The crate never declares `alloc`, so `Vec`, `Box` and `String` cannot be named. The shared library's imports are held to an allow-list (`memcpy`, `memset`, `memcmp`/`bcmp`, `memmove`, `abort`, and `getauxval` on arm64 Linux to ask which CPU it is), and a counting allocator watches whole inputs go through the core in the test suite: the count is zero. |
 | No panic | Every export is declared through one macro that puts it under dtolnay's `no-panic`: the link fails, naming the export, if any panic path survives optimization. The proof is shown a canary export that can panic and has to reject it. That is why the core inflates with its own code — neither `miniz_oxide` nor `zlib-rs` passes the proof. |
 | Nothing else linked in | The dependency closure is HyperCast and nothing else, taken with its own exports off, so `libhypertabular` carries none of HyperCast's symbols and links beside `libhypercast` in one program. |
 
@@ -162,13 +162,13 @@ Every native library carries a GitHub build-provenance attestation from the forg
 
 ```
 corpus/     the shared conformance cases and the workbooks they read — the cross-language contract
-rust/       the core (no_std, allocation-free, panic-free; 14 exports plus hypertabular_version) and the Rust API over it
+rust/       the core (no_std, allocation-free, panic-free; 14 exports, hypertabular_version among them) and the Rust API over it
 csharp/     the .NET 11 binding: LibraryImport, HyperCast's Verdict<T>, corpus replay, AOT smoke test
 java/       the JDK 25+ binding: FFM, HyperCast's sealed Verdict, corpus replay, Native Image smoke test
 go/         the Go binding: the core linked in through cgo, typed slices and Get[T]
 swift/      the SwiftPM binding: the core linked in as a static library on every platform
 python/     the 3.11+ binding: a PyO3 extension, columns as memoryviews, abi3 wheels
-ruby/       the 3.3+ binding: Fiddle, pattern-matched Data verdicts
+ruby/       the 3.3+ binding: a Magnus extension with a Fiddle fallback, pattern-matched Data verdicts
 php/        the 8.2+ binding: ext-ffi, Success|Fault per cell
 docs/       the design record: the core, delimited text, workbooks, prior art
 ```

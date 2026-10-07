@@ -125,12 +125,14 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
 
 ## What holds it to the truth
 
-- `corpus/workbook.json` — 84 cases over the ten packages in `corpus/workbook/`: every
+- `corpus/workbook.json` — 198 cases over the 23 packages in `corpus/workbook/`: every
   sheet, with and without a header, empty rows skipped and delivered, every door over
-  every column. It was written by the std workbook reader this crate had before the core
-  could read a workbook — a reader that owed the core nothing — with the core required to
-  agree; that reader has since been deleted. **Nothing independent of the core reads a
-  workbook here any more**: the corpus is the oracle's frozen word, and
+  every column. The cases for the ten synthetic packages were written by the std workbook
+  reader this crate had before the core could read a workbook — a reader that owed the
+  core nothing — with the core required to agree; that reader has since been deleted. The
+  cases for the thirteen files Excel, LibreOffice and Google Sheets wrote were written by
+  the core and read against the application that wrote each file, by eye. **Nothing
+  independent of the core reads a workbook here any more**: the corpus is the oracle's frozen word, and
   `tests/corpus_workbook.rs` holds the core to it. Every binding replays the same file.
 - The core against itself (`tests/kernel_workbook.rs`): generated packages that reach for
   every shape a cell, a row and a part can take, read with buffers that start empty and
@@ -139,7 +141,7 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   deflate bomb. Each comes back as a code.
 - Numbers: the core says and reads a double exactly as Rust's own formatter and parser do,
   checked over hundreds of thousands of values.
-- What is still owed: files real applications wrote. `corpus/README.md` has the list.
+- What is still owed: a file Apple Numbers wrote. `corpus/README.md` has the list.
 
 ## Exports
 
@@ -207,7 +209,8 @@ ODS's **open** is most of a second because a package has no listing of its sheet
 `content.xml`, so opening one reads the whole part; the sheet's read then reads it again.
 XLSX lists its sheets in a small part of their own.
 
-Where a read's time goes (Rust, best of three): the core's inflate alone takes 117 ms over
+Where a read's time went (Rust, best of three, measured before the tokenizer fixes that
+brought the table above to its numbers): the core's inflate alone takes 117 ms over
 the xlsx sheet's 111 MB and 93 ms over the ODS part's 360 MB — it is not the cost. Casting
 is not either: with an empty plan the xlsx read is 689 ms and with the full plan 705 ms,
 the ODS read 1.66 s and 1.72 s. The rest is the XML — tokenizing the parts and assembling
