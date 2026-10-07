@@ -277,7 +277,8 @@ jobs:
   #    misc/ios/go_ios_exec.go, which is how the Go project tests its iOS port. The wrapper
   #    carries the module's files and testdata directories into the simulator and nothing
   #    above the module, so the corpus is staged as go/testdata/corpus (corpus_test.go looks
-  #    there too) and the test that reads rust/Cargo.toml is skipped. A device build is
+  #    there too). Two are skipped: the test that reads rust/Cargo.toml, and ExampleWorkbook,
+  #    which opens ../corpus by its path as the documentation shows it. A device build is
   #    linked and inspected. Mac Catalyst is not linked from Go here: the same archive is
   #    linked and run by Swift and C# above, and Go's part of it is the selection.
   #
@@ -380,7 +381,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/go-ios/bin/go_ios_arm64_exec"
           export PATH="$RUNNER_TEMP/go-ios/bin:$PATH"
           GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$(go env GOROOT)/misc/ios/clangwrap.sh" \
-            go test -tags iossimulator -skip '^TestNativeVersionIsTheCratesVersion$' -v . | tee "$RUNNER_TEMP/go-ios/test.log"
+            go test -tags iossimulator -skip '^(TestNativeVersionIsTheCratesVersion|ExampleWorkbook)$' -v . | tee "$RUNNER_TEMP/go-ios/test.log"
           grep -q '^ok' "$RUNNER_TEMP/go-ios/test.log"
 
       - name: Go — an iOS device build links the core in
@@ -420,8 +421,8 @@ jobs:
           rm -f "$log"
           "$app/Contents/MacOS/HyperTabular.AppleSmokeTest"
           cat "$log"
-          grep -q "native: available=True version=$want" "$log"
-          grep -q "AOT smoke test passed." "$log"
+          grep -q "ok   native library $want" "$log"
+          grep -q "^all ok" "$log"
 
       - name: C# — an iOS app, installed and launched in the simulator
         if: ${{ !cancelled() }}
@@ -436,12 +437,12 @@ jobs:
           log="$(xcrun simctl get_app_container "$udid" "$APP_ID" data)/tmp/hypertabular-smoke.log"
           # The app exits when Program.cs returns; its last line, pass or fail, ends the wait.
           for _ in $(seq 1 60); do
-            grep -q -E "AOT smoke test (passed|FAILED)" "$log" 2>/dev/null && break
+            grep -q -E "^(all ok|[0-9]+ failure\(s\))" "$log" 2>/dev/null && break
             sleep 2
           done
           cat "$log"
-          grep -q "native: available=True version=$want" "$log"
-          grep -q "AOT smoke test passed." "$log"
+          grep -q "ok   native library $want" "$log"
+          grep -q "^all ok" "$log"
 
       - name: C# — an iOS device app links the core in
         if: ${{ !cancelled() }}
