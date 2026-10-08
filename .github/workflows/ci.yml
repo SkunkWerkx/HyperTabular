@@ -14,6 +14,15 @@ name: CI — build native, build wasm, test every binding
 on:
   pull_request:
   workflow_dispatch:
+  # The whole release-mode board once a week, so arm64, musl, iOS, the wheels and the second
+  # Ruby ABI are exercised between releases instead of first on release day.
+  schedule:
+    - cron: "0 6 * * 1"
+
+# A new push to a PR supersedes its running board; anything else runs to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -26,6 +35,8 @@ jobs:
       id-token: write
       attestations: write
     with:
+      # pr: every leg and suite, nothing only a release needs (see the forge's README).
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       project: HyperTabular
       crate: hypertabular
       pure_env: HYPERTABULAR_PURE
@@ -52,7 +63,8 @@ jobs:
   # WebAssembly, through the forge: the core as a wasm32 static library for the NuGet
   # package's browser-wasm asset, the C# binding in a Blazor app, the crate's own
   # wasm-bindgen tests and the Go binding under TinyGo, each in headless Chrome; and the Ruby
-  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome.
+  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
+  # (release mode only: weekly and at release, not on PRs).
   build-wasm:
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
     permissions:
@@ -60,6 +72,8 @@ jobs:
       id-token: write
       attestations: write
     with:
+      # pr: every leg and suite, nothing only a release needs (see the forge's README).
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
       blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
@@ -77,6 +91,8 @@ jobs:
       id-token: write
       attestations: write
     with:
+      # pr: the Pyodide wheel and its in-browser suite only; the native wheels are packaging.
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
 
   check-core:
@@ -287,6 +303,8 @@ jobs:
   # what is checked.
   test-apple-mobile:
     needs: build-native
+    # 28 minutes of simulators, behind the slowest build-native leg: release mode only.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     env:
       APP_ID: io.github.skunkwerkx.hypertabular.applesmoketest

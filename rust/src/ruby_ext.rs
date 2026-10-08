@@ -998,8 +998,16 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let fiddle_delimited: RClass = runtime.const_get("Delimited")?;
     let book_module: RModule = runtime.const_get("Book")?;
     let contract_message: RString = fiddle_delimited.const_get("CONTRACT")?;
+    let structure_error: RClass = book_module.const_get("StructureError")?;
+    // A constant keeps these from being collected but not from being moved: a compacting GC
+    // (the reader spec runs GC.compact) relocates classes and modules and rewrites every
+    // reference it can see, which a Rust static is not. Registering them pins them, so
+    // the VALUEs below stay theirs. Unpinned, `Book` once moved under a Book.stingy call
+    // and the call landed on an Array (HyperTabular run 37718484155, osx-arm64).
+    ruby.gc_register_mark_object(structure_error);
+    ruby.gc_register_mark_object(book_module);
     let _ = COMPANIONS.set(Companions {
-        structure_error: Opaque::from(book_module.const_get::<_, RClass>("StructureError")?),
+        structure_error: Opaque::from(structure_error),
         book: Opaque::from(book_module),
         contract: contract_message.to_string()?,
     });

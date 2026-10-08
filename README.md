@@ -136,8 +136,7 @@ The binding is compiled to WebAssembly and the core is linked into that build by
 ecosystem's own toolchain — the same archive as everywhere else, built for `wasm32`. The
 core imports nothing (no clock, no entropy, no allocator: the caller's buffers are all the
 memory it touches), so a page loads one module and needs no shim beyond what the language
-already brings. Every browser row below runs in headless Chrome in CI on every pull
-request. Java goes the other way: the core runs as wasm inside the JVM.
+already brings. Every browser row below runs in headless Chrome in CI: on every pull request, except Ruby's, whose ruby.wasm interpreter build per Ruby minor runs in the weekly and release builds instead. Java goes the other way: the core runs as wasm inside the JVM.
 
 | Binding | WebAssembly |
 | --- | --- |
