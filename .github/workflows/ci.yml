@@ -63,7 +63,8 @@ jobs:
   # WebAssembly, through the forge: the core as a wasm32 static library for the NuGet
   # package's browser-wasm asset, the C# binding in a Blazor app, the crate's own
   # wasm-bindgen tests and the Go binding under TinyGo, each in headless Chrome; and the Ruby
-  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome.
+  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
+  # (release mode only: weekly and at release, not on PRs).
   build-wasm:
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
     permissions:
@@ -84,14 +85,14 @@ jobs:
   # Pyodide under Node and in headless Chrome — built, installed and attested here, and
   # published unchanged by release.yml.
   build-wheels:
-    # Packaging (and the Pyodide suite) for the release to publish; nothing a PR ships.
-    if: github.event_name != 'pull_request'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
     permissions:
       contents: read
       id-token: write
       attestations: write
     with:
+      # pr: the Pyodide wheel and its in-browser suite only; the native wheels are packaging.
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
 
   check-core:
