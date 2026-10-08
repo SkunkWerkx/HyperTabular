@@ -14,6 +14,15 @@ name: CI — build native, build wasm, test every binding
 on:
   pull_request:
   workflow_dispatch:
+  # The whole release-mode board once a week, so arm64, musl, iOS, the wheels and the second
+  # Ruby ABI are exercised between releases instead of first on release day.
+  schedule:
+    - cron: "0 6 * * 1"
+
+# A new push to a PR supersedes its running board; anything else runs to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -26,6 +35,8 @@ jobs:
       id-token: write
       attestations: write
     with:
+      # pr: every leg and suite, nothing only a release needs (see the forge's README).
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       project: HyperTabular
       crate: hypertabular
       pure_env: HYPERTABULAR_PURE
@@ -60,6 +71,8 @@ jobs:
       id-token: write
       attestations: write
     with:
+      # pr: every leg and suite, nothing only a release needs (see the forge's README).
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
       blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
@@ -71,6 +84,8 @@ jobs:
   # Pyodide under Node and in headless Chrome — built, installed and attested here, and
   # published unchanged by release.yml.
   build-wheels:
+    # Packaging (and the Pyodide suite) for the release to publish; nothing a PR ships.
+    if: github.event_name != 'pull_request'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
     permissions:
       contents: read
@@ -287,6 +302,8 @@ jobs:
   # what is checked.
   test-apple-mobile:
     needs: build-native
+    # 28 minutes of simulators, behind the slowest build-native leg: release mode only.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     env:
       APP_ID: io.github.skunkwerkx.hypertabular.applesmoketest
