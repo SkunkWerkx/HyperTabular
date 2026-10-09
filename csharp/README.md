@@ -5,6 +5,7 @@ read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell.
 
 ```csharp
+using System.Diagnostics;
 using System.Text;
 using HyperCast;
 using HyperTabular;
@@ -31,6 +32,9 @@ while (reader.Read() is { } batch)
         {
             Success<double> score => $"{row.GetString(1)}: {score.Value}",
             Fault fault => $"line {row.Line}: {fault.Reason} in \"{Encoding.UTF8.GetString(row.Raw(2))}\"",
+            // Only default(Verdict<T>) is null, and no read returns one; the arm is for the
+            // compiler's null analysis (CS8655), and the two above stay exhaustive (CS8509).
+            null => throw new UnreachableException(),
         };
     }
 }

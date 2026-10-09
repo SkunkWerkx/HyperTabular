@@ -33,6 +33,7 @@ while (reader.Read() is { } batch)
         {
             Success<double> score => $"{row.GetString(1)}: {score.Value}",
             Fault fault => $"line {row.Line}: {fault.Reason}",
+            null => throw new UnreachableException(),      // default(Verdict<T>) only; no read returns it
         };
     }
 }
