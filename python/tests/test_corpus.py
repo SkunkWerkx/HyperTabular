@@ -18,10 +18,12 @@ import datetime as dt
 import io
 import json
 import struct
+import sys
 import uuid as uuidlib
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from collections.abc import Coroutine
+from typing import Any, Awaitable, Callable, TypeVar
 
 import hypercast
 import pytest
@@ -497,6 +499,26 @@ def test_corpus_header_first_from_a_path(
     )
 
 
+T = TypeVar("T")
+
+
+def _run(coroutine: Coroutine[Any, Any, T]) -> T:
+    """``asyncio.run``, except under Pyodide, whose event loop is the browser's: a synchronous
+    test cannot block on it (``asyncio.run`` there raises "Cannot stack switch"), so the
+    coroutine is driven by hand. That is enough for every stream it is used with here, which
+    only ever yields to the loop through ``asyncio.sleep(0)``; a test that needs a real loop —
+    an ``asyncio.StreamReader``, a task to cancel — is skipped under Pyodide instead."""
+    if sys.platform != "emscripten":
+        return asyncio.run(coroutine)
+    try:
+        while True:
+            if coroutine.send(None) is not None:
+                coroutine.close()
+                raise RuntimeError("this coroutine needs an event loop; skip it under Pyodide")
+    except StopIteration as done:
+        return done.value  # type: ignore[no-any-return]
+
+
 class _AsyncDribble:
     """An asynchronous stream, shaped as ``asyncio.StreamReader``'s ``read``, that hands back
     one to five bytes a read, and lets the event loop run before each."""
@@ -568,7 +590,7 @@ def test_corpus_asynchronously(
             _AsyncDribble(data), dialect, plan, batch_rows=batch_rows, buffer_bytes=buffer_bytes
         )
 
-    asyncio.run(
+    _run(
         _replay_async(
             f"{case['name']} (async, {buffer_bytes} bytes, {batch_rows} rows a batch)",
             case,

@@ -9,10 +9,11 @@ import asyncio
 import copy
 import io
 import pickle
+import sys
 from pathlib import Path
 
 import pytest
-from test_corpus import _AsyncDribble, _corpus_dir
+from test_corpus import _AsyncDribble, _corpus_dir, _run
 
 from hypertabular import (
     Column,
@@ -252,6 +253,7 @@ def _stream(data: bytes) -> asyncio.StreamReader:
     return stream
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
 def test_an_asyncio_stream_reader_is_read():
     """asyncio.StreamReader is the stream the async surface is shaped for."""
     data = b"id,name\n" + b"".join(b"%d,n%d\n" % (index, index) for index in range(50))
@@ -268,7 +270,7 @@ def test_an_asyncio_stream_reader_is_read():
         assert await reader.read_async() is None
         return ids
 
-    assert asyncio.run(main()) == list(range(50))
+    assert _run(main()) == list(range(50))
 
 
 def test_a_reader_over_an_async_stream_is_not_read_synchronously():
@@ -284,7 +286,7 @@ def test_a_reader_over_an_async_stream_is_not_read_synchronously():
         batch = await reader.read_async()
         assert batch is not None and batch.column(0).values.tolist() == [1]
 
-    asyncio.run(main())
+    _run(main())
 
 
 def test_an_in_memory_reader_reads_asynchronously_without_waiting():
@@ -297,9 +299,10 @@ def test_an_in_memory_reader_reads_asynchronously_without_waiting():
         opened = await DelimitedReader.open_async(b"a\n1\n", Dialect.CSV, [Column.i32(0)])
         assert opened.header == ("a",)
 
-    asyncio.run(main())
+    _run(main())
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
 def test_a_cancelled_read_leaves_the_reader_resumable():
     """A read cancelled while it awaits the stream fed the reader nothing; the next goes on."""
     data = b"n\n" + b"".join(b"%d\n" % index for index in range(20))
@@ -325,7 +328,7 @@ def test_a_cancelled_read_leaves_the_reader_resumable():
             values.extend(batch.column(0).values.tolist())
         return values
 
-    assert asyncio.run(main()) == list(range(20))
+    assert _run(main()) == list(range(20))
 
 
 def test_a_structural_failure_is_raised_asynchronously_and_again():
@@ -344,7 +347,7 @@ def test_a_structural_failure_is_raised_asynchronously_and_again():
         assert first.value is again.value
         assert first.value.kind is TabularFailure.COLUMN_COUNT
 
-    asyncio.run(main())
+    _run(main())
 
 
 def test_what_an_async_stream_returns_is_checked():
@@ -369,16 +372,19 @@ def test_what_an_async_stream_returns_is_checked():
         with pytest.raises(RuntimeError, match="asynchronous stream"):
             reader._feed(b"")
 
-    asyncio.run(main())
+    _run(main())
 
 
 def test_a_workbook_from_an_async_stream():
     """Workbook.open_async reads the stream to its end, a few bytes a read."""
     path = _corpus_dir() / "workbook" / "basic.xlsx"
-    book = asyncio.run(Workbook.open_async(_AsyncDribble(path.read_bytes())))
+    book = _run(Workbook.open_async(_AsyncDribble(path.read_bytes())))
     assert book.sheets == Workbook.open(path).sheets
+
+    if sys.platform == "emscripten":
+        return  # an asyncio.StreamReader needs a running loop, which Pyodide's test cannot start
 
     async def from_a_stream_reader() -> Workbook:
         return await Workbook.open_async(_stream(path.read_bytes()))
 
-    assert asyncio.run(from_a_stream_reader()).format is book.format
+    assert _run(from_a_stream_reader()).format is book.format

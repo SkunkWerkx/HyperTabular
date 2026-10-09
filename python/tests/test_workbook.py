@@ -7,7 +7,6 @@ is read. And the workbook's own surface around that."""
 
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 from pathlib import Path
@@ -23,6 +22,7 @@ from test_corpus import (
     _column_of,
     _corpus_dir,
     _Dribble,
+    _run,
 )
 
 from hypertabular import (
@@ -56,7 +56,7 @@ def _openings(case: dict[str, Any]) -> list[tuple[str, Any]]:
         ("path", lambda: Workbook.open(path)),
         ("file object", lambda: Workbook(io.BytesIO(path.read_bytes()))),
         ("short reads", lambda: Workbook(_Dribble(path.read_bytes()))),
-        ("asyncio", lambda: asyncio.run(Workbook.open_async(_AsyncDribble(path.read_bytes())))),
+        ("asyncio", lambda: _run(Workbook.open_async(_AsyncDribble(path.read_bytes())))),
     ]
 
 
