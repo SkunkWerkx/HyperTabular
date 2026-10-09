@@ -210,8 +210,7 @@ public sealed class HeaderFirstTests
 		var text = new StringBuilder("id,name\n");
 		for (var row = 0; row < 100_000; row++)
 			text.Append($"{row % 100_000:D6},name {row % 100_000:D6}\n");
-		using var reader = new DelimitedReader(Encoding.UTF8.GetBytes(text.ToString()).AsMemory(), Dialect.Csv);
-		reader.Bind([Column.Int32(reader.Header!.Ordinal("id")), Column.Text(reader.Header.Ordinal("name"))]);
+		var utf8 = Encoding.UTF8.GetBytes(text.ToString()).AsMemory();
 
 		long Consume(Batch batch)
 		{
@@ -226,16 +225,30 @@ public sealed class HeaderFirstTests
 			return sum;
 		}
 
-		Consume(reader.Read()!);
-		var before = GC.GetAllocatedBytesForCurrentThread();
-		var rows = 0;
-		long total = 0;
-		while (reader.Read() is { } batch)
+		// What one pass allocates once its reader has read a batch: the reader's own buffers
+		// are made and grown by then, so the rest of the file has nothing left to ask for.
+		(long Allocated, int Rows, long Total) Pass()
 		{
-			total += Consume(batch);
-			rows += batch.Rows;
+			using var reader = new DelimitedReader(utf8, Dialect.Csv);
+			reader.Bind([Column.Int32(reader.Header!.Ordinal("id")), Column.Text(reader.Header.Ordinal("name"))]);
+			Consume(reader.Read()!);
+			var before = GC.GetAllocatedBytesForCurrentThread();
+			var rows = 0;
+			long total = 0;
+			while (reader.Read() is { } batch)
+			{
+				total += Consume(batch);
+				rows += batch.Rows;
+			}
+			return (GC.GetAllocatedBytesForCurrentThread() - before, rows, total);
 		}
-		var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+		// The first passes run every path once — the short last batch, the end of the input —
+		// so that what the runtime does the first time it meets code (loading a type, tiering
+		// a hot loop up, which arm64 does on its own schedule) is behind the pass measured.
+		Pass();
+		Pass();
+		var (allocated, rows, total) = Pass();
 		rows.ShouldBe(100_000 - DelimitedReader.DefaultBatchRows);
 		total.ShouldBeGreaterThan(0);
 		allocated.ShouldBe(0L);
