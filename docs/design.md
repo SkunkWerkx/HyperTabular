@@ -389,6 +389,38 @@ span is bytes, as the core wrote it. Ruby's `raw` is a String, so its span is in
 characters `String#[]` slices by, as HyperCast's own gem reports it. A helper that turns
 `raw` into a string for display (Java's `rawString`) does not move the span.
 
+**Header first, plan after.** Every binding opens a delimited source and a sheet without a
+plan, reads the header, and takes the plan once through `bind` — the native calls were
+always two-phase (`_init` → `_header` → `_fill`, `_sheet` → `_header` → `_fill`), so this
+moved only where a binding allocates its column buffers and cell table, from opening to
+binding. One thing has to be kept for it: the workbook core holds the header row's cells
+in the caller's row slots as well as naming them, and a row an ODS sheet repeats is
+delivered again from those slots. A sheet opened with a plan sizes the slots to the plan;
+one opened without has a slot for every name — the slots grow with the cell table while
+the header is read, and binding only ever grows them. The corpus replays every case header
+first in every binding, and `generated-a.ods` is the case that fails without it.
+
+**Where the language's grain differs.** The five features of 0.8.0, mapped:
+
+| | Header lookup | Plan-less open | Row view | Native text, no copy | Async |
+|---|---|---|---|---|---|
+| Rust | `require` / `ordinal` | `*_unbound` | `for row in batch`, `for_each_row` | `text_str` (borrowed) | `async` feature |
+| C# | `Ordinal` / `TryOrdinal` | overloads | `foreach`, `Rows()` (`ref struct`) | `GetChars` (UTF-16 arena) | `ReadAsync`, `OpenAsync` |
+| Java | `ordinal` / `findOrdinal` | overloads | `Iterable<Row>`, `forEachRow` | `chars` (UTF-16 arena) | — |
+| Go | `Ordinal` / `Find` | `*Unbound` | `iter.Seq` (`All`) | `TextString` (`unsafe.String`) | — |
+| Swift | `ordinal(of:)` / `firstIndex(of:)` | overloads | `Collection` of `Row`, `forEachRow` | — | `readAsync`, async `init` |
+| Python | `ordinal` / `get` | `plan=None` | `iter(batch)`, `rows()` | — | asyncio |
+| Ruby | `ordinal` / `find_ordinal` | `plan = nil` | `Enumerable` | — | — |
+| PHP | `ordinal` / `find` | `?array $plan = null` | `IteratorAggregate`, `rows()` | — | — |
+
+A dash is a decision, not a gap. Swift, Python, Ruby and PHP strings are their own
+allocations, and their text accessors already hand out the native string or a zero-copy
+byte view. Go has no async: cancellation is the `io.Reader`'s (a request's context, a
+deadline). A Java reader is confined to its thread, and on virtual threads a blocking read
+is the idiom. Ruby's IO reads yield under a Fiber scheduler already, and PHP has no event
+loop. Where there is async, the core still never waits: only the binding's refill is
+awaited, and each one counts its bytes as they land, so a cancelled read loses nothing.
+
 Each binding also replays `corpus/workbook.json` with every buffer a workbook call works in
 starting at one element (C#, Java, Go, Swift, Ruby and PHP behind a test-only switch;
 Python reads through the Rust `Sheet`, whose buffers are `Vec`s grown by `resize`), so the

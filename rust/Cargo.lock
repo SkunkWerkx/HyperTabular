@@ -632,6 +632,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
 
 [[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
 name = "futures-task"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -736,12 +742,13 @@ dependencies = [
 
 [[package]]
 name = "hypertabular"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "csv",
  "ext-php-rs",
  "flate2",
+ "futures-io",
  "hypercast",
  "magnus",
  "no-panic",

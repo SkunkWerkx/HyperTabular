@@ -3,8 +3,9 @@ package hypertabular
 // Replays the shared conformance corpus (corpus/delimited.json at the repository root) — the
 // same file the Rust and C# bindings replay — through this binding: from memory, from an
 // io.Reader read through buffers too small for a record, from a source that hands over one
-// byte at a time, and from a file, in batches of one row, of two and of many. How the input
-// is cut up is the binding's business and must not change the answer.
+// byte at a time, and from a file, in batches of one row, of two and of many — each of the
+// three also opened header first, its plan bound after. How the input is cut up, and when
+// the plan is given, is the binding's business and must not change the answer.
 
 import (
 	"bytes"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -90,7 +92,8 @@ type corpusFailure struct {
 // directory the tests read. It also looks under testdata/, where CI stages the corpus for the
 // iOS simulator: Go's go_ios_exec carries the module's files and testdata directories into
 // the app, and nothing above the module, so the repository's corpus/ is not there to walk
-// up to.
+// up to. On Android (.github/scripts/android_device_test.sh) the corpus is pushed beside the
+// test binary, in the directory it runs in, which is the first place looked.
 func repositoryFile(t *testing.T, elem ...string) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -465,6 +468,7 @@ func assertCell(t *testing.T, label string, b *Batch, column, row int, expected 
 		t.Errorf("%s: %v (%T), want %v (%T)", label, value, value, expectation, expectation)
 	}
 	// Get says what the column accessor and the verdict say together.
+	assertRowView(t, label, b, column, row)
 	if value, getFault := viaGet(b, column, row); !reflect.DeepEqual(getFault, fault) {
 		t.Errorf("%s: Get's fault %v, want %v", label, getFault, fault)
 	} else if expectation := want(t, label, door, expected); !reflect.DeepEqual(value, expectation) {
@@ -475,6 +479,36 @@ func assertCell(t *testing.T, label string, b *Batch, column, row int, expected 
 		if raw := string(b.Raw(column, row)); raw != *expected.Text {
 			t.Errorf("%s: raw text %q, want %q", label, raw, *expected.Text)
 		}
+	}
+}
+
+// assertRowView holds the row view of a cell to the batch's own word on it: each Row member
+// is the Batch call it stands for.
+func assertRowView(t *testing.T, label string, b *Batch, column, row int) {
+	t.Helper()
+	view := b.Row(row)
+	if view.Index() != row || view.Batch() != b || view.Line() != b.Line(row) {
+		t.Errorf("%s: row %d of line %d, want row %d of line %d", label, view.Index(), view.Line(), row, b.Line(row))
+	}
+	if view.Verdict(column) != b.Verdicts(column)[row] || !reflect.DeepEqual(view.Fault(column), b.Fault(column, row)) {
+		t.Errorf("%s: the row's verdict %v, the batch's %v", label, view.Verdict(column), b.Verdicts(column)[row])
+	}
+	if raw := string(view.Raw(column)); raw != string(b.Raw(column, row)) {
+		t.Errorf("%s: the row's raw text %q, the batch's %q", label, raw, b.Raw(column, row))
+	}
+	if b.Columns()[column].Door() != DoorText {
+		return
+	}
+	text := b.Text(column)[row]
+	if !bytes.Equal(view.Text(column), text) || (text == nil) != (view.Text(column) == nil) {
+		t.Errorf("%s: the row's text %q, the batch's %q", label, view.Text(column), text)
+	}
+	if got, viewed := b.TextString(column, row), view.TextString(column); got != string(text) || viewed != got {
+		t.Errorf("%s: text as a string %q and %q, want %q", label, got, viewed, text)
+	}
+	value, fault := Cell[[]byte](view, column)
+	if want, wantFault := Get[[]byte](b, column, row); !bytes.Equal(value, want) || !reflect.DeepEqual(fault, wantFault) {
+		t.Errorf("%s: Cell %q, %v; Get %q, %v", label, value, fault, want, wantFault)
 	}
 }
 
@@ -537,8 +571,10 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 		if header != nil {
 			t.Errorf("%s: header %q, want none", label, header)
 		}
-	case header == nil || !reflect.DeepEqual(header, *c.Header):
+	case header == nil || !reflect.DeepEqual([]string(header), *c.Header):
 		t.Errorf("%s: header %q, want %q", label, header, *c.Header)
+	default:
+		assertLookups(t, label, header)
 	}
 	if !reflect.DeepEqual(r.Plan(), plan) {
 		t.Errorf("%s: plan %v, want %v", label, r.Plan(), plan)
@@ -575,6 +611,51 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 	if _, again := r.Read(); again != ended {
 		t.Errorf("%s: a second Read after the end returned %v, want the same %v", label, again, ended)
 	}
+}
+
+// assertLookups holds a header's lookups to its names: every name is found where it first
+// is, as a string and as bytes, and a name that is not there is an error that names it.
+func assertLookups(t *testing.T, label string, header Header) {
+	t.Helper()
+	for ordinal, name := range header {
+		first := slices.Index(header, name)
+		if found, err := header.Ordinal(name); found != first || err != nil || first > ordinal {
+			t.Errorf("%s: Ordinal(%q) = %d, %v; want %d", label, name, found, err, first)
+		}
+		if found, ok := header.FindBytes([]byte(name)); found != first || !ok {
+			t.Errorf("%s: FindBytes(%q) = %d, %v; want %d", label, name, found, ok, first)
+		}
+	}
+	missing := strings.Join(header, "|") + "?"
+	var noColumn *NoColumnError
+	if _, err := header.Ordinal(missing); !errors.Is(err, ErrNoColumn) || !errors.As(err, &noColumn) || noColumn.Name != missing {
+		t.Errorf("%s: Ordinal of a missing name: %v", label, err)
+	}
+}
+
+// bound is a reader opened header first, its plan bound after.
+func bound(r *DelimitedReader, err error, plan []Column) (_ *DelimitedReader, failed error) {
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if failed != nil {
+			_ = r.Close()
+		}
+	}()
+	if r.IsBound() || r.Plan() != nil {
+		return nil, errors.New("a reader opened without a plan says it has one")
+	}
+	if _, err := r.Read(); err != ErrUnbound {
+		return nil, fmt.Errorf("Read before Bind: %v", err)
+	}
+	if err := r.Bind(plan); err != nil {
+		return nil, err
+	}
+	if err := r.Bind(plan); err != ErrAlreadyBound {
+		return nil, fmt.Errorf("a second Bind: %v", err)
+	}
+	return r, nil
 }
 
 func TestDelimitedCorpus(t *testing.T) {
@@ -631,6 +712,22 @@ func TestDelimitedCorpus(t *testing.T) {
 			replay(t, fmt.Sprintf("%s (file, %d rows a batch)", c.Name, batchRows), c,
 				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
 					return OpenDelimited(path, dialect, plan, BatchRows(batchRows), BufferBytes(32))
+				})
+			// Header first, the plan bound after: the same reads, whatever the source.
+			replay(t, fmt.Sprintf("%s (memory, bound after the header, %d rows a batch)", c.Name, batchRows), c,
+				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+					r, err := NewDelimitedReaderBytesUnbound(input, dialect, BatchRows(batchRows))
+					return bound(r, err, plan)
+				})
+			replay(t, fmt.Sprintf("%s (stream through 5 bytes, bound after the header, %d rows a batch)", c.Name, batchRows), c,
+				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+					r, err := NewDelimitedReaderUnbound(bytes.NewReader(input), dialect, BatchRows(batchRows), BufferBytes(5))
+					return bound(r, err, plan)
+				})
+			replay(t, fmt.Sprintf("%s (file, bound after the header, %d rows a batch)", c.Name, batchRows), c,
+				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+					r, err := OpenDelimitedUnbound(path, dialect, BatchRows(batchRows), BufferBytes(7))
+					return bound(r, err, plan)
 				})
 		}
 	}

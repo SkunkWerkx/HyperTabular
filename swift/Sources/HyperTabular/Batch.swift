@@ -6,6 +6,8 @@ import HyperTabularCore
 ///
 /// A column is handed out whole — ``values(_:as:)``, with ``verdicts(_:)`` beside it — or a
 /// cell at a time through ``get(_:row:as:)``, which answers with HyperCast's own `Verdict`.
+/// A batch is also the collection of its rows: each a ``Row``, the same accessors read
+/// across.
 ///
 /// ```swift
 /// while let batch = try reader.read() {
@@ -69,7 +71,7 @@ public final class Batch {
     /// The plan the batch was read through: column `i` of the batch is `columns[i]`.
     public var columns: [Column] { columnSet.plan }
 
-    private func checkRow(_ row: Int) {
+    func checkRow(_ row: Int) {
         precondition(row >= 0 && row < rows, "Row \(row) is outside the batch in hand (\(rows) rows)")
     }
 
@@ -196,12 +198,85 @@ public final class Batch {
         // A quoted cell with an escaped quote in it: unescaped, as the core cast it.
         if scratch.count < length {
             scratch.deallocate()
-            scratch = .allocate(capacity: max(length, 256))
+            scratch = .allocate(capacity: Swift.max(length, 256))
         }
         let unescaped = hypertabular_delimited_unescape(
             written.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(length),
             scratch.baseAddress, UInt(scratch.count))
         return UnsafeRawBufferPointer(start: scratch.baseAddress, count: Int(unescaped))
+    }
+}
+
+extension Batch: RandomAccessCollection {
+    /// The first row: `0`.
+    public var startIndex: Int { 0 }
+
+    /// One past the last row: ``rows``.
+    public var endIndex: Int { rows }
+
+    /// Row `index` of the batch, read across: valid while the batch is.
+    ///
+    /// - Precondition: the row is in the batch.
+    public subscript(index: Int) -> Row {
+        checkRow(index)
+        return Row(batch: self, index: index)
+    }
+}
+
+/// One row of a ``Batch``, read across its columns: the batch's own accessors with the row
+/// fixed. A row is a value with no storage of its own — reading a batch a row at a time
+/// allocates nothing — and is valid exactly as long as its batch: until the reader's next
+/// read.
+///
+/// ```swift
+/// for row in batch {
+///     print(row.line, row.string(1) ?? "", row.get(2, as: Double.self))
+/// }
+/// ```
+public struct Row {
+    private let batch: Batch
+
+    /// The row's place in its batch.
+    public let index: Int
+
+    init(batch: Batch, index: Int) {
+        self.batch = batch
+        self.index = index
+    }
+
+    /// Where the row came from: ``Batch/line(_:)``.
+    public var line: Int { batch.line(index) }
+
+    /// The verdict of the row's cell in `column`: ``Batch/verdict(_:row:)``.
+    public func verdict(_ column: Int) -> CellVerdict {
+        batch.verdict(column, row: index)
+    }
+
+    /// The row's cell in `column` as HyperCast judged it: ``Batch/get(_:row:as:)``.
+    ///
+    /// - Precondition: the column's door is presented as `T`.
+    public func get<T: CellValue>(_ column: Int, as type: T.Type = T.self) -> Verdict<T> {
+        batch.get(column, row: index, as: type)
+    }
+
+    /// The row's cell in a ``Door/text`` column, zero-copy: ``Batch/text(_:row:)``.
+    ///
+    /// - Precondition: the column is cast through ``Door/text``.
+    public func text(_ column: Int) -> UnsafeRawBufferPointer? {
+        batch.text(column, row: index)
+    }
+
+    /// The row's cell in a ``Door/text`` column as a `String`: ``Batch/string(_:row:)``.
+    ///
+    /// - Precondition: the column is cast through ``Door/text``.
+    public func string(_ column: Int) -> String? {
+        batch.string(column, row: index)
+    }
+
+    /// The text the row's cell in `column` was cast from: ``Batch/raw(_:row:)``, valid until
+    /// the next call to it.
+    public func raw(_ column: Int) -> UnsafeRawBufferPointer {
+        batch.raw(column, row: index)
     }
 }
 

@@ -20,9 +20,11 @@ use HyperTabular\Column;
 use HyperTabular\DelimitedReader;
 use HyperTabular\Dialect;
 use HyperTabular\Door;
+use HyperTabular\Header;
 use HyperTabular\TabularException;
 use HyperTabular\TabularFailure;
 use HyperTabular\Scratch;
+use HyperTabular\Sheet;
 use HyperTabular\SheetOptions;
 use HyperTabular\Workbook;
 use HyperTabular\WorkbookFormat;
@@ -34,11 +36,14 @@ use PHPUnit\Framework\TestCase;
  * the same file the Rust and C# bindings replay — through this binding: from a string
  * handed over whole, from a string and a stream fed through buffers too small for a
  * record, and from a file, in batches of one row, of two, and of many. How the input is
- * cut up is the binding's business and must not change the answer.
+ * cut up is the binding's business and must not change the answer. Each of those twice:
+ * with the plan handed to the factory, and header first — opened without one, the plan
+ * bound once the header has been read.
  *
- * And corpus/workbook.json, the same way: each package opened from a string and from its
- * path, each sheet read by index and (where the name finds it) by name, in batches of one
- * row, of two, and of more than any sheet has.
+ * And corpus/workbook.json, the same way: each package opened from a string, from a stream
+ * and from its path, each sheet read by index and (where the name finds it) by name, in
+ * batches of one row, of two, and of more than any sheet has — with the plan, and header
+ * first.
  *
  * Decoded with JSON_BIGINT_AS_STRING so a u64 beyond PHP's signed int survives as digits.
  */
@@ -104,12 +109,15 @@ final class CorpusTest extends TestCase
     public function testAStringHandedOverWhole(array $case): void
     {
         foreach (self::BATCH_ROWS as $batchRows) {
-            $this->replay(
-                "{$case['name']} (string, {$batchRows} rows a batch)",
-                $case,
-                static fn (Dialect $dialect, array $plan): DelimitedReader =>
-                    DelimitedReader::fromString($case['input'], $dialect, $plan, $batchRows)
-            );
+            foreach ([false, true] as $headerFirst) {
+                $this->replay(
+                    "{$case['name']} (string, {$batchRows} rows a batch)",
+                    $case,
+                    static fn (Dialect $dialect, ?array $plan): DelimitedReader =>
+                        DelimitedReader::fromString($case['input'], $dialect, $plan, $batchRows),
+                    $headerFirst
+                );
+            }
         }
     }
 
@@ -119,12 +127,15 @@ final class CorpusTest extends TestCase
     {
         foreach (self::BATCH_ROWS as $batchRows) {
             foreach ([1, 5, 64] as $bufferBytes) {
-                $this->replay(
-                    "{$case['name']} (string through {$bufferBytes} bytes, {$batchRows} rows a batch)",
-                    $case,
-                    static fn (Dialect $dialect, array $plan): DelimitedReader =>
-                        DelimitedReader::fromString($case['input'], $dialect, $plan, $batchRows, $bufferBytes)
-                );
+                foreach ([false, true] as $headerFirst) {
+                    $this->replay(
+                        "{$case['name']} (string through {$bufferBytes} bytes, {$batchRows} rows a batch)",
+                        $case,
+                        static fn (Dialect $dialect, ?array $plan): DelimitedReader =>
+                            DelimitedReader::fromString($case['input'], $dialect, $plan, $batchRows, $bufferBytes),
+                        $headerFirst
+                    );
+                }
             }
         }
     }
@@ -135,20 +146,23 @@ final class CorpusTest extends TestCase
     {
         foreach (self::BATCH_ROWS as $batchRows) {
             foreach (self::BUFFER_BYTES as $bufferBytes) {
-                $stream = fopen('php://memory', 'w+b');
-                fwrite($stream, $case['input']);
-                rewind($stream);
-                try {
-                    $this->replay(
-                        "{$case['name']} (stream through {$bufferBytes} bytes, {$batchRows} rows a batch)",
-                        $case,
-                        static fn (Dialect $dialect, array $plan): DelimitedReader =>
-                            DelimitedReader::fromStream($stream, $dialect, $plan, $batchRows, $bufferBytes)
-                    );
-                    // The stream is the caller's: the reader read it to its end and left it open.
-                    $this->assertIsResource($stream);
-                } finally {
-                    fclose($stream);
+                foreach ([false, true] as $headerFirst) {
+                    $stream = fopen('php://memory', 'w+b');
+                    fwrite($stream, $case['input']);
+                    rewind($stream);
+                    try {
+                        $this->replay(
+                            "{$case['name']} (stream through {$bufferBytes} bytes, {$batchRows} rows a batch)",
+                            $case,
+                            static fn (Dialect $dialect, ?array $plan): DelimitedReader =>
+                                DelimitedReader::fromStream($stream, $dialect, $plan, $batchRows, $bufferBytes),
+                            $headerFirst
+                        );
+                        // The stream is the caller's: the reader read it to its end and left it open.
+                        $this->assertIsResource($stream);
+                    } finally {
+                        fclose($stream);
+                    }
                 }
             }
         }
@@ -163,12 +177,15 @@ final class CorpusTest extends TestCase
         try {
             foreach ([2, 1024] as $batchRows) {
                 foreach ([7, DelimitedReader::DEFAULT_BUFFER_BYTES] as $bufferBytes) {
-                    $this->replay(
-                        "{$case['name']} (file through {$bufferBytes} bytes, {$batchRows} rows a batch)",
-                        $case,
-                        static fn (Dialect $dialect, array $plan): DelimitedReader =>
-                            DelimitedReader::open($path, $dialect, $plan, $batchRows, $bufferBytes)
-                    );
+                    foreach ([false, true] as $headerFirst) {
+                        $this->replay(
+                            "{$case['name']} (file through {$bufferBytes} bytes, {$batchRows} rows a batch)",
+                            $case,
+                            static fn (Dialect $dialect, ?array $plan): DelimitedReader =>
+                                DelimitedReader::open($path, $dialect, $plan, $batchRows, $bufferBytes),
+                            $headerFirst
+                        );
+                    }
                 }
             }
         } finally {
@@ -227,6 +244,17 @@ final class CorpusTest extends TestCase
         $path = self::directory() . '/' . $case['file'];
         $openings = [
             'string' => static fn (): Workbook => Workbook::fromString(file_get_contents($path)),
+            'stream' => function () use ($path): Workbook {
+                $stream = fopen($path, 'rb');
+                try {
+                    return Workbook::fromStream($stream);
+                } finally {
+                    // The stream is the caller's: the workbook read it to its end and left it open.
+                    $this->assertIsResource($stream);
+                    $this->assertTrue(feof($stream));
+                    fclose($stream);
+                }
+            },
             'path' => static fn (): Workbook => Workbook::open($path),
         ];
         // A package the core refuses: every way of opening it gives the one failure.
@@ -264,37 +292,67 @@ final class CorpusTest extends TestCase
                     $batchRows
                 );
                 foreach ($byName ? [$index, $name] : [$index] as $which) {
-                    $label = "{$case['name']}: {$source}, {$batchRows} rows a batch, sheet "
-                        . var_export($which, true);
-                    $sheet = $book->sheet($which, $options, $plan);
-                    $this->assertSame($case['header'], $sheet->header(), "{$label}: header");
-                    $this->assertSame($plan, $sheet->plan(), $label);
-                    $seen = 0;
-                    $failure = null;
-                    try {
-                        while (($batch = $sheet->read()) !== null) {
-                            $this->assertLessThanOrEqual($batchRows, $batch->rows(), $label);
-                            for ($row = 0; $row < $batch->rows(); $row++) {
-                                $this->assertSame($case['numbers'][$seen + $row], $batch->line($row), "{$label}, row");
-                            }
-                            $this->assertBatch($label, $batch, $plan, $case['rows'], $seen);
-                            $seen += $batch->rows();
-                        }
-                    } catch (TabularException $thrown) {
-                        $failure = $thrown;
-                        // A failed sheet stays failed: the same failure, again.
-                        try {
-                            $sheet->read();
-                            $this->fail("{$label}: a read after a structural failure succeeded");
-                        } catch (TabularException $again) {
-                            $this->assertSame($thrown, $again, $label);
-                        }
+                    foreach ([false, true] as $headerFirst) {
+                        $this->replaySheet(
+                            "{$case['name']}: {$source}, {$batchRows} rows a batch, sheet " . var_export($which, true),
+                            $case,
+                            $plan,
+                            $headerFirst
+                                ? static fn (): Sheet => $book->sheet($which, $options)
+                                : static fn (): Sheet => $book->sheet($which, $options, $plan),
+                            $headerFirst
+                        );
                     }
-                    $this->assertSame(\count($case['rows']), $seen, "{$label}: rows delivered");
-                    $this->assertFailure($label, $case['failure'] ?? null, $failure);
                 }
             }
         }
+    }
+
+    /**
+     * The sheet `$open` opens, held to the case. Header first, it is opened without a plan,
+     * which is bound once the header has been read and checked.
+     *
+     * @param array<string, mixed> $case
+     * @param list<Column> $plan the case's plan
+     * @param callable(): Sheet $open
+     */
+    private function replaySheet(string $label, array $case, array $plan, callable $open, bool $headerFirst): void
+    {
+        $sheet = $open();
+        if ($headerFirst) {
+            $label .= ', header first';
+            $this->assertFalse($sheet->isBound(), $label);
+            $this->assertSame([], $sheet->plan(), $label);
+            $this->assertHeader($label, $case['header'], $sheet->header(), $sheet->headerIndex());
+            $sheet->bind($plan);
+            $this->assertTrue($sheet->isBound(), $label);
+        }
+        $batchRows = $sheet->options()->batchRows;
+        $this->assertSame($case['header'], $sheet->header(), "{$label}: header");
+        $this->assertSame($plan, $sheet->plan(), $label);
+        $seen = 0;
+        $failure = null;
+        try {
+            while (($batch = $sheet->read()) !== null) {
+                $this->assertLessThanOrEqual($batchRows, $batch->rows(), $label);
+                for ($row = 0; $row < $batch->rows(); $row++) {
+                    $this->assertSame($case['numbers'][$seen + $row], $batch->line($row), "{$label}, row");
+                }
+                $this->assertBatch($label, $batch, $plan, $case['rows'], $seen);
+                $seen += $batch->rows();
+            }
+        } catch (TabularException $thrown) {
+            $failure = $thrown;
+            // A failed sheet stays failed: the same failure, again.
+            try {
+                $sheet->read();
+                $this->fail("{$label}: a read after a structural failure succeeded");
+            } catch (TabularException $again) {
+                $this->assertSame($thrown, $again, $label);
+            }
+        }
+        $this->assertSame(\count($case['rows']), $seen, "{$label}: rows delivered");
+        $this->assertFailure($label, $case['failure'] ?? null, $failure);
     }
 
     /**
@@ -338,10 +396,13 @@ final class CorpusTest extends TestCase
     }
 
     /**
+     * The reader `$open` builds, held to the case. Header first, it is built without a plan,
+     * which is bound once the header has been read and checked.
+     *
      * @param array<string, mixed> $case
-     * @param callable(Dialect, list<Column>): DelimitedReader $open
+     * @param callable(Dialect, list<Column>|null): DelimitedReader $open
      */
-    private function replay(string $label, array $case, callable $open): void
+    private function replay(string $label, array $case, callable $open, bool $headerFirst = false): void
     {
         $dialect = new Dialect(
             $case['dialect']['separator'],
@@ -352,7 +413,20 @@ final class CorpusTest extends TestCase
         $plan = array_map(self::columnOf(...), $case['plan']);
         $expected = $case['rows'];
 
-        $reader = $open($dialect, $plan);
+        if ($headerFirst) {
+            $label .= ', header first';
+            $reader = $open($dialect, null);
+            $this->assertFalse($reader->isBound(), $label);
+            $this->assertSame([], $reader->plan(), $label);
+            $this->assertHeader($label, $case['header'], $reader->header(), $reader->headerIndex());
+            if ($case['header'] !== null && $case['header'] !== []) {
+                $this->assertSame(\count($case['header']), $reader->columnCount(), "{$label}: column count");
+            }
+            $reader->bind($plan);
+            $this->assertTrue($reader->isBound(), $label);
+        } else {
+            $reader = $open($dialect, $plan);
+        }
         $this->assertSame($case['header'], $reader->header(), "{$label}: header");
         $this->assertSame($plan, $reader->plan(), $label);
 
@@ -538,6 +612,29 @@ final class CorpusTest extends TestCase
                 // A text cell's raw text is the text.
                 $this->assertSame($expected['text'], $batch->raw($column, $row), "{$label}: raw text");
                 break;
+        }
+    }
+
+    /**
+     * A header as the case states it, and its {@see Header} the same names: every name
+     * found at its first column.
+     *
+     * @param list<string>|null $expected the case's header
+     * @param list<string>|null $names the reader's
+     */
+    private function assertHeader(string $label, ?array $expected, ?array $names, ?Header $header): void
+    {
+        $this->assertSame($expected, $names, "{$label}: header");
+        if ($expected === null) {
+            $this->assertNull($header, "{$label}: header index");
+            return;
+        }
+        $this->assertNotNull($header, "{$label}: header index");
+        $this->assertSame($expected, $header->names(), "{$label}: header index");
+        $this->assertCount(\count($expected), $header, "{$label}: header index");
+        foreach ($expected as $ordinal => $name) {
+            $this->assertSame(array_search($name, $expected, true), $header->ordinal($name), "{$label}: {$name}");
+            $this->assertSame($name, $header[$ordinal], "{$label}: {$name}");
         }
     }
 

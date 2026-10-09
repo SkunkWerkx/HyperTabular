@@ -1,6 +1,6 @@
 [package]
 name = "hypertabular"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 # HyperCast's, the one dependency, whose own floor this cannot go below. CI checks the
 # library on it (check-msrv).
@@ -26,10 +26,14 @@ bench = false
 
 [dependencies]
 # The one upstream, and the core's only dependency: every cell verdict is a HyperCast
-# verdict, from 0.7.0, the first release with the interop surface and the typed doors this
-# crate reads workbook cells through. `exports` stays off, so no library built from this
+# verdict. 0.7.0 brought the interop surface and the typed doors this crate reads workbook
+# cells through; 0.8.0 is the floor because it is the first with Android, which this
+# release's bindings ship for. `exports` stays off, so no library built from this
 # crate carries HyperCast's `cast_*` symbols.
-hypercast = { version = "0.7.0", default-features = false }
+hypercast = { version = "0.8.0", default-features = false }
+# The asynchronous reads (the `async` feature): the runtime-neutral `AsyncRead` trait alone,
+# which Tokio's readers meet through `tokio_util::compat` and every other runtime's directly.
+futures-io = { version = "0.3", default-features = false, features = ["std"], optional = true }
 # The Zend extension the forge builds beside the shared library (the `php` feature). Never
 # part of the core, and never of the library the shipped PHP package loads.
 ext-php-rs = { version = "0.16", optional = true }
@@ -52,6 +56,10 @@ rb-sys = { version = "0.9", optional = true }
 # code with or without it, and compiles with it off, where `std` cannot be named.
 default = ["std", "exports"]
 std = ["hypercast/std"]
+# `DelimitedReader::from_async_reader` / `read_async` and `Workbook::from_async_reader`: the
+# Rust API's reads from an asynchronous source. The core is synchronous and never waits —
+# only the binding's refills are awaited — so nothing under src/kernel changes with it.
+async = ["dep:futures-io", "std"]
 # The C ABI symbols. On by default and implied by every feature that builds a library of
 # this crate's own; off for a crate that links this one as an rlib and exports a C ABI of
 # its own, so that its library does not carry these (HyperCast's `exports`, same reason).

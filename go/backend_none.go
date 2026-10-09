@@ -1,4 +1,4 @@
-//go:build !(cgo && !tinygo && !android && (darwin || linux || windows) && (amd64 || arm64) && !(ios && amd64 && !maccatalyst)) && !tinygo.wasm
+//go:build !(cgo && !tinygo && (darwin || linux || windows) && (amd64 || arm64) && !(ios && amd64 && !maccatalyst)) && !tinygo.wasm
 
 // Stand-ins for the backend's functions on every build that has none (backend_static.go
 // under cgo, backend_tinygo.go under TinyGo for WebAssembly), doing nothing, so that the one

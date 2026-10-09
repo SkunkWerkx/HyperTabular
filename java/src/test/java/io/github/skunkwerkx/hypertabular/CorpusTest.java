@@ -29,6 +29,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -134,7 +135,7 @@ final class CorpusTest {
     }
 
     /** The Java type a door's value is presented as: what {@link Batch#get} is asked for. */
-    private static Class<?> typeOf(Door door) {
+    static Class<?> typeOf(Door door) {
         return switch (door) {
             case BOOL -> Boolean.class;
             case I8 -> Byte.class;
@@ -202,7 +203,7 @@ final class CorpusTest {
         };
     }
 
-    private static String utf8(MemorySegment bytes) {
+    static String utf8(MemorySegment bytes) {
         return new String(bytes.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
     }
 
@@ -245,6 +246,9 @@ final class CorpusTest {
             if (door == Door.TEXT) {
                 assertNull(batch.text(column, row), label);
                 assertNull(batch.string(column, row), label);
+                // An empty cell has no chars either, and writes none.
+                assertNull(batch.chars(column, row), label);
+                assertEquals(0, batch.getChars(column, row, new char[0], 0), label);
             }
             // The typed getter's own fault, as HyperCast's union.
             switch (batch.get(column, row, typeOf(door))) {
@@ -265,6 +269,7 @@ final class CorpusTest {
             // A text cell's raw text is its text: unescaped, as the core cast it.
             assertEquals(value, batch.rawString(column, row), label);
             assertEquals(new Success<>(value), batch.get(column, row, String.class), label);
+            assertChars(label, batch, column, row, (String) value);
             return;
         }
         switch (batch.get(column, row, typeOf(door))) {
@@ -276,6 +281,85 @@ final class CorpusTest {
             BigDecimal spelled = new BigDecimal(expected.get("value").getAsString());
             assertEquals(0, spelled.compareTo((BigDecimal) value), label);
         }
+    }
+
+    /**
+     * Holds a text cell's chars — into the batch's own arena, and into the caller's array, at
+     * an offset, too small by one, and exactly large enough — to its string.
+     */
+    static void assertChars(String label, Batch batch, int column, int row, String text) {
+        assertEquals(text, batch.chars(column, row).toString(), label);
+        char[] into = new char[text.length() + 3];
+        assertEquals(text.length(), batch.getChars(column, row, into, 2), label);
+        assertEquals(text, new String(into, 2, text.length()), label);
+        if (!text.isEmpty()) {
+            assertEquals(-1, batch.getChars(column, row, new char[text.length() + 1], 2), label);
+        }
+        assertEquals(text.length(), batch.getChars(column, row, new char[text.length()], 0), label);
+    }
+
+    /** Holds every {@link Row} of a batch, met by {@code for}, to the batch's own accessors. */
+    static void assertRows(String label, Batch batch) {
+        int index = 0;
+        for (Row row : batch) {
+            assertEquals(index, row.index(), label);
+            assertEquals(batch.line(index), row.line(), label);
+            assertEquals(batch.row(index).index(), index, label);
+            for (int column = 0; column < batch.columns().size(); column++) {
+                Door door = batch.columns().get(column).door();
+                assertEquals(batch.verdict(column, index), row.verdict(column), label);
+                assertEquals(batch.isOk(column, index), row.isOk(column), label);
+                assertEquals(batch.rawString(column, index), utf8(row.raw(column)), label);
+                assertEquals(batch.rawString(column, index), row.rawString(column), label);
+                assertEquals(batch.get(column, index, typeOf(door)), row.get(column, typeOf(door)), label);
+                if (door == Door.TEXT) {
+                    MemorySegment text = row.text(column);
+                    assertEquals(batch.string(column, index), text == null ? null : utf8(text), label);
+                    assertEquals(batch.string(column, index), row.string(column), label);
+                    CharBuffer chars = row.chars(column);
+                    assertEquals(batch.string(column, index), chars == null ? null : chars.toString(), label);
+                }
+            }
+            index++;
+        }
+        assertEquals(batch.rows(), index, label);
+    }
+
+    /**
+     * Holds a reader opened header-first to what a reader with no plan promises — the header's
+     * names resolved first-match, by string and by bytes; no plan; no read, and not for good
+     * — and binds {@code plan}, which binds once.
+     */
+    static void bindHeaderFirst(
+            String label,
+            Header header,
+            List<Column> unbound,
+            boolean isBound,
+            Runnable read,
+            java.util.function.Consumer<List<Column>> bind,
+            List<Column> plan) {
+        assertFalse(isBound, label);
+        assertTrue(unbound.isEmpty(), label);
+        assertThrows(IllegalStateException.class, read::run, label);
+        assertThrows(IllegalStateException.class, read::run, label);
+        if (header != null) {
+            for (int ordinal = 0; ordinal < header.size(); ordinal++) {
+                int found = header.ordinal(header.get(ordinal));
+                assertTrue(found <= ordinal, label);
+                assertEquals(header.get(found), header.get(ordinal), label);
+                assertEquals(found, header.findOrdinal(header.get(ordinal)).getAsInt(), label);
+                int byBytes = header.ordinal(header.utf8(ordinal));
+                assertTrue(byBytes <= ordinal, label);
+                assertEquals(utf8(header.utf8(byBytes)), utf8(header.utf8(ordinal)), label);
+                assertEquals(
+                        byBytes,
+                        header.findOrdinal(header.utf8(ordinal).toArray(ValueLayout.JAVA_BYTE))
+                                .getAsInt(),
+                        label);
+            }
+        }
+        bind.accept(plan);
+        assertThrows(IllegalStateException.class, () -> bind.accept(plan), label);
     }
 
     private static void assertFailure(String label, TabularException actual, JsonObject vector) {
@@ -299,7 +383,7 @@ final class CorpusTest {
         }
     }
 
-    private static void replay(String label, JsonObject vector, Opening opening) {
+    private static void replay(String label, JsonObject vector, Opening opening, int batchRows) {
         JsonObject settings = vector.getAsJsonObject("dialect");
         Dialect dialect = new Dialect(
                 settings.get("separator").getAsString().charAt(0),
@@ -320,12 +404,28 @@ final class CorpusTest {
                 List<String> names = new ArrayList<>();
                 header.getAsJsonArray().forEach(name -> names.add(name.getAsString()));
                 assertEquals(names, reader.header(), label);
+                if (!names.isEmpty()) {
+                    assertEquals(names.size(), reader.columnCount().getAsInt(), label);
+                }
             }
+            if (!reader.isBound()) {
+                bindHeaderFirst(
+                        label,
+                        reader.header(),
+                        reader.plan(),
+                        reader.isBound(),
+                        reader::read,
+                        resolved -> reader.bind(resolved, batchRows),
+                        plan);
+            }
+            assertEquals(plan, reader.plan(), label);
 
             int seen = 0;
             TabularException failure = null;
             try {
                 for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+                    assertTrue(batch.rows() >= 1 && batch.rows() <= batchRows, label);
+                    assertRows(label, batch);
                     for (int row = 0; row < batch.rows(); row++, seen++) {
                         assertTrue(seen < rows.size(), label + ": more rows than the corpus lists");
                         JsonArray cells = rows.get(seen).getAsJsonArray();
@@ -367,10 +467,18 @@ final class CorpusTest {
 
     @Test
     void fromAByteArray() {
-        everyCase((name, vector, input, batchRows) -> replay(
-                name + " (byte[], " + batchRows + " rows a batch)",
-                vector,
-                (dialect, plan) -> DelimitedReader.of(input, dialect, plan, batchRows)));
+        everyCase((name, vector, input, batchRows) -> {
+            replay(
+                    name + " (byte[], " + batchRows + " rows a batch)",
+                    vector,
+                    (dialect, plan) -> DelimitedReader.of(input, dialect, plan, batchRows),
+                    batchRows);
+            replay(
+                    name + " (byte[], header first, " + batchRows + " rows a batch)",
+                    vector,
+                    (dialect, plan) -> DelimitedReader.of(input, dialect),
+                    batchRows);
+        });
     }
 
     @Test
@@ -381,12 +489,24 @@ final class CorpusTest {
                 replay(
                         name + " (native segment, " + batchRows + " rows a batch)",
                         vector,
-                        (dialect, plan) -> DelimitedReader.of(text, dialect, plan, batchRows));
+                        (dialect, plan) -> DelimitedReader.of(text, dialect, plan, batchRows),
+                        batchRows);
+                replay(
+                        name + " (native segment, header first, " + batchRows + " rows a batch)",
+                        vector,
+                        (dialect, plan) -> DelimitedReader.of(text, dialect),
+                        batchRows);
                 // And a heap segment, which is copied in as a byte array is.
                 replay(
                         name + " (heap segment, " + batchRows + " rows a batch)",
                         vector,
-                        (dialect, plan) -> DelimitedReader.of(MemorySegment.ofArray(input), dialect, plan, batchRows));
+                        (dialect, plan) -> DelimitedReader.of(MemorySegment.ofArray(input), dialect, plan, batchRows),
+                        batchRows);
+                replay(
+                        name + " (heap segment, header first, " + batchRows + " rows a batch)",
+                        vector,
+                        (dialect, plan) -> DelimitedReader.of(MemorySegment.ofArray(input), dialect),
+                        batchRows);
             }
         });
     }
@@ -422,7 +542,14 @@ final class CorpusTest {
                     replay(
                             name + " (windows of " + windowBytes + " bytes, " + batchRows + " rows a batch)",
                             vector,
-                            (dialect, plan) -> DelimitedReader.windowed(text, dialect, plan, batchRows, windowBytes));
+                            (dialect, plan) -> DelimitedReader.windowed(text, dialect, plan, batchRows, windowBytes),
+                            batchRows);
+                    replay(
+                            name + " (windows of " + windowBytes + " bytes, header first, " + batchRows
+                                    + " rows a batch)",
+                            vector,
+                            (dialect, plan) -> DelimitedReader.windowed(text, dialect, null, 0, windowBytes),
+                            batchRows);
                 }
             }
         });
@@ -436,7 +563,14 @@ final class CorpusTest {
                         name + " (stream through " + bufferBytes + " bytes, " + batchRows + " rows a batch)",
                         vector,
                         (dialect, plan) -> DelimitedReader.of(
-                                new ByteArrayInputStream(input), dialect, plan, batchRows, bufferBytes));
+                                new ByteArrayInputStream(input), dialect, plan, batchRows, bufferBytes),
+                        batchRows);
+                replay(
+                        name + " (stream through " + bufferBytes + " bytes, header first, " + batchRows
+                                + " rows a batch)",
+                        vector,
+                        (dialect, plan) -> DelimitedReader.of(new ByteArrayInputStream(input), dialect, bufferBytes),
+                        batchRows);
             }
         });
     }
@@ -455,7 +589,14 @@ final class CorpusTest {
                     replay(
                             name + " (file through " + bufferBytes + " bytes, " + batchRows + " rows a batch)",
                             vector,
-                            (dialect, plan) -> DelimitedReader.open(file, dialect, plan, batchRows, bufferBytes));
+                            (dialect, plan) -> DelimitedReader.open(file, dialect, plan, batchRows, bufferBytes),
+                            batchRows);
+                    replay(
+                            name + " (file through " + bufferBytes + " bytes, header first, " + batchRows
+                                    + " rows a batch)",
+                            vector,
+                            (dialect, plan) -> DelimitedReader.open(file, dialect, bufferBytes),
+                            batchRows);
                 }
             }
         }

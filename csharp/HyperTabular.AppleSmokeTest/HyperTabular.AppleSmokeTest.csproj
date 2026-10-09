@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-	<!-- The package on iOS and Mac Catalyst, as an app: the same Program.cs the Native AOT smoke
-	     test runs, crossing every native entry point, built for the two platforms where the
+	<!-- The package on iOS and Mac Catalyst, as an app: the same SmokeTest.Run() the Native AOT
+	     smoke test runs, crossing every native entry point, built for the two platforms where the
 	     core is linked into the app's executable and reached as "__Internal". It needs a Mac
 	     with Xcode and the ios and maccatalyst workloads, so it is not in HyperTabular.slnx,
 	     which every other leg builds; CI's test-apple-mobile job builds it three ways (Mac
@@ -35,10 +35,11 @@
 
 	<ItemGroup>
 		<Compile Include="../HyperTabular.AotSmokeTest/Program.cs" Link="Program.cs" />
+		<Compile Include="../HyperTabular.AotSmokeTest/SmokeTest.cs" Link="SmokeTest.cs" />
 		<ProjectReference Include="../HyperTabular/HyperTabular.csproj" />
 	</ItemGroup>
 
-	<!-- The workbook Program.cs reads, compiled in as the Native AOT smoke test compiles it:
+	<!-- The workbook SmokeTest.cs reads, compiled in as the Native AOT smoke test compiles it:
 	     an app in the simulator has no corpus/ beside it. -->
 	<ItemGroup>
 		<EmbeddedResource Include="../../corpus/workbook/basic.xlsx" LogicalName="basic.xlsx" />

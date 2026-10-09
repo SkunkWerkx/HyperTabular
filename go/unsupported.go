@@ -1,9 +1,9 @@
-//go:build !tinygo && !(cgo && !android && (darwin || linux || windows) && (amd64 || arm64) && !(ios && amd64 && !maccatalyst))
+//go:build !tinygo && !(cgo && (darwin || linux || windows) && (amd64 || arm64) && !(ios && amd64 && !maccatalyst))
 
 // Every stock-Go build the backend does not cover lands here, and stops: CGO_ENABLED=0
 // (Go's default for a cross-compile, and whenever no C compiler is found), GOOS=wasip1 and
-// js, and any platform there is no archive for (Android and the iOS simulator on amd64 among
-// them, which the linux and darwin constraints would otherwise let through). Go has no #error, so the stop is a reference
+// js, and any platform there is no archive for (the iOS simulator on amd64 among them, which
+// the darwin constraint would otherwise let through). Go has no #error, so the stop is a reference
 // to an identifier that does not exist, named to read as the explanation in the compiler's
 // "undefined:" message — the way HyperCast's Go module stops the same builds, and it stops
 // them first: the hypercast package this one imports is compiled before this one is.

@@ -1,7 +1,8 @@
 # Replays corpus/workbook.json — the contract every binding replays, and the one the Rust
-# binding replays — through this binding: each package opened from a String and from its
-# path, each sheet read by index and (where the name finds it) by name, in batches of one
-# row, of two, and of more than any sheet has. And the workbook's own surface around that.
+# binding replays — through this binding: each package opened from a String, from its path
+# and from an IO, each sheet read by index and (where the name finds it) by name, in batches
+# of one row, of two, and of more than any sheet has, with its plan up front and header
+# first. And the workbook's own surface around that.
 
 require "spec_helper"
 require_relative "corpus_helpers"
@@ -12,8 +13,50 @@ RSpec.describe HyperTabular::Workbook do
   CASES = CorpusHelpers.corpus("workbook.json")
   WORKBOOK_BATCH_ROWS = [1, 2, 1024].freeze
 
+  # An IO with nothing but #read, handing over a few bytes at a time however much is asked
+  # for — the shape of a pipe or a socket — and that knows whether it was closed.
+  class Trickle
+    def initialize(bytes)
+      @bytes = bytes
+      @at = 0
+      @closed = false
+    end
+
+    def read(length = nil, buffer = nil)
+      raise IOError, "closed stream" if @closed
+      return nil if length && @at >= @bytes.bytesize
+
+      taken = @bytes.byteslice(@at, length ? [length, 7].min : @bytes.bytesize - @at)
+      @at += taken.bytesize
+      length.nil? || buffer.nil? ? taken : buffer.replace(taken)
+    end
+
+    def close
+      @closed = true
+    end
+
+    def closed? = @closed
+  end
+
   def openings(path)
-    { "string" => -> { described_class.new(File.binread(path)) }, "path" => -> { described_class.open(path) } }
+    {
+      "string" => -> { described_class.new(File.binread(path)) }, "path" => -> { described_class.open(path) },
+      "file IO" => lambda {
+        file = File.open(path, "rb")
+        described_class.new(file, close_source: true).tap { expect(file).to be_closed }
+      },
+      "#read-only IO" => -> { described_class.new(Trickle.new(File.binread(path))) }
+    }
+  end
+
+  # A sheet opened without a plan, held to what it is before its plan comes — unbound, with
+  # an empty plan and its header read — and then bound to +plan+.
+  def header_first(vector, plan)
+    sheet = yield
+    expect(sheet).not_to be_bound
+    expect(sheet.plan).to eq([])
+    expect(sheet.header).to eq(vector["header"])
+    sheet.bind(plan)
   end
 
   def replay_sheet(label, vector, plan, sheet, batch_rows)
@@ -83,6 +126,8 @@ RSpec.describe HyperTabular::Workbook do
           (by_name ? [index, sheet_name] : [index]).each do |which|
             label = "#{name}: #{source}, #{batch_rows} rows a batch, sheet #{which.inspect}"
             replay_sheet(label, vector, plan, book.sheet(which, options, plan), batch_rows)
+            sheet = header_first(vector, plan) { book.sheet(which, options) }
+            replay_sheet("#{label}, header first", vector, plan, sheet, batch_rows)
           end
         end
       end
@@ -102,8 +147,10 @@ RSpec.describe HyperTabular::Workbook do
       settings = vector["options"]
       options = HyperTabular::SheetOptions.new(has_header: settings["has_header"],
                                                skip_empty_rows: settings["skip_empty_rows"], batch_rows: 2)
-      sheet = described_class.open(path).sheet(vector["sheet"], options, plan)
-      replay_sheet("#{vector['name']} (stingy)", vector, plan, sheet, 2)
+      book = described_class.open(path)
+      replay_sheet("#{vector['name']} (stingy)", vector, plan, book.sheet(vector["sheet"], options, plan), 2)
+      sheet = header_first(vector, plan) { book.sheet(vector["sheet"], options) }
+      replay_sheet("#{vector['name']} (stingy, header first)", vector, plan, sheet, 2)
     end
     # Not once per call: many times, mid-part, for each of the three.
     expect(HyperTabular::Runtime::Book.grown).to all(be > 100)

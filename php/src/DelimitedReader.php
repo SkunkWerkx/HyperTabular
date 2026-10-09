@@ -28,6 +28,17 @@ use FFI\CData;
  * reason its `CastFailure`, and a value the same PHP carrier HyperCast's `Cast` returns
  * for that door ({@see Door} lists them).
  *
+ * The plan can wait for the header. Opened without one, a reader reads the header and
+ * stops: {@see headerIndex()} looks each name up, and {@see bind()} declares the plan the
+ * names resolved to, before the first read.
+ *
+ * ```php
+ * $reader = DelimitedReader::open('orders.csv', Dialect::csv());
+ * $header = $reader->headerIndex();
+ * $reader->bind([Column::i32($header->ordinal('id')), Column::f64($header->ordinal('score'))]);
+ * foreach ($reader->rows() as $row) { ... }
+ * ```
+ *
  * A batch owns what it shows, and stays good after the next {@see read()}. Not safe to
  * share between threads or fibers that read concurrently.
  */
@@ -48,9 +59,11 @@ final class DelimitedReader
     private FFI $ffi;
 
     private Dialect $dialect;
-    private Columns $columns;
+    /** The plan, as the core takes it: null until one is bound. */
+    private ?Columns $columns = null;
+    private int $batchRows;
     /** Cell-table entries one row takes: the widest ordinal the plan reads, plus two — or more, if the core asked. */
-    private int $perRow;
+    private int $perRow = 0;
 
     // Everything the core is handed, allocated once. A CData that owns memory is kept
     // beside every pointer into it: the pointer does not keep the memory alive.
@@ -88,6 +101,7 @@ final class DelimitedReader
 
     /** @var list<string>|null */
     private ?array $header = null;
+    private ?Header $headerIndex = null;
     private ?TabularException $failure = null;
     private bool $closed = false;
 
@@ -98,7 +112,8 @@ final class DelimitedReader
      *
      * @param string $utf8 the text
      * @param Dialect $dialect the declared dialect
-     * @param list<Column> $plan the output columns, in output order
+     * @param list<Column>|null $plan the output columns, in output order — or null to read
+     *     the header first and {@see bind()} a plan after
      * @param int $batchRows rows per batch
      * @param int $bufferBytes the initial input buffer; it doubles when a record does not fit
      * @return self the reader, its header (if the dialect declares one) already read
@@ -108,7 +123,7 @@ final class DelimitedReader
     public static function fromString(
         string $utf8,
         Dialect $dialect,
-        array $plan,
+        ?array $plan = null,
         int $batchRows = self::DEFAULT_BATCH_ROWS,
         int $bufferBytes = self::DEFAULT_BUFFER_BYTES,
     ): self {
@@ -131,7 +146,8 @@ final class DelimitedReader
      *
      * @param resource $stream a readable stream
      * @param Dialect $dialect the declared dialect
-     * @param list<Column> $plan the output columns, in output order
+     * @param list<Column>|null $plan the output columns, in output order — or null to read
+     *     the header first and {@see bind()} a plan after
      * @param int $batchRows rows per batch
      * @param int $bufferBytes the initial input buffer; it doubles when a record does not fit
      * @return self the reader, its header (if the dialect declares one) already read
@@ -142,7 +158,7 @@ final class DelimitedReader
     public static function fromStream(
         $stream,
         Dialect $dialect,
-        array $plan,
+        ?array $plan = null,
         int $batchRows = self::DEFAULT_BATCH_ROWS,
         int $bufferBytes = self::DEFAULT_BUFFER_BYTES,
     ): self {
@@ -164,7 +180,8 @@ final class DelimitedReader
      *
      * @param string $path the file
      * @param Dialect $dialect the declared dialect
-     * @param list<Column> $plan the output columns, in output order
+     * @param list<Column>|null $plan the output columns, in output order — or null to read
+     *     the header first and {@see bind()} a plan after
      * @param int $batchRows rows per batch
      * @param int $bufferBytes the initial input buffer; it doubles when a record does not fit
      * @return self the reader, its header (if the dialect declares one) already read
@@ -175,7 +192,7 @@ final class DelimitedReader
     public static function open(
         string $path,
         Dialect $dialect,
-        array $plan,
+        ?array $plan = null,
         int $batchRows = self::DEFAULT_BATCH_ROWS,
         int $bufferBytes = self::DEFAULT_BUFFER_BYTES,
     ): self {
@@ -195,22 +212,28 @@ final class DelimitedReader
     }
 
     /**
-     * Allocates everything the core will be handed, and starts its state for the dialect.
+     * Allocates what the header is read with, starts the core's state for the dialect, and
+     * binds the plan when there is one — before the header is read, so a plan that cannot
+     * be honoured is refused first.
      *
      * @param Dialect $dialect the declared dialect
-     * @param array<mixed> $plan the output columns, in output order
+     * @param array<mixed>|null $plan the output columns, in output order, or null for none yet
      * @param int $batchRows rows per batch
      * @param int $bufferBytes the initial input buffer
-     * @throws \InvalidArgumentException when the dialect's separator or the plan cannot be honoured
+     * @throws \InvalidArgumentException when the batch size, the dialect's separator or the
+     *     plan cannot be honoured
      */
-    private function __construct(Dialect $dialect, array $plan, int $batchRows, int $bufferBytes)
+    private function __construct(Dialect $dialect, ?array $plan, int $batchRows, int $bufferBytes)
     {
-        $this->columns = new Columns($plan, $batchRows);
+        if ($batchRows < 1) {
+            throw new \InvalidArgumentException("A batch must hold at least one row; got {$batchRows}");
+        }
+        $this->batchRows = $batchRows;
+        if ($plan !== null) {
+            $this->bind($plan);
+        }
         $ffi = $this->ffi = Native::ffi();
         $this->dialect = $dialect;
-        $this->perRow = $this->columns->width + 1;
-        $this->cellsCap = $this->perRow * $batchRows;
-        $this->cells = $ffi->new("ht_span[{$this->cellsCap}]");
         $this->arenaCap = 4096;
         $this->arena = $ffi->new("uint8_t[{$this->arenaCap}]");
         $this->capacity = $bufferBytes;
@@ -255,13 +278,72 @@ final class DelimitedReader
     }
 
     /**
-     * The plan the reader was built with: column `i` of every batch is `plan()[i]`.
+     * The header as a {@see Header}: the same names, and the lookup by name a plan is built
+     * with. Null when the dialect declares no header.
+     *
+     * @return Header|null the header
+     */
+    public function headerIndex(): ?Header
+    {
+        if ($this->header === null) {
+            return null;
+        }
+        return $this->headerIndex ??= new Header($this->header);
+    }
+
+    /**
+     * Declares the plan a reader opened without one reads through — once, before the first
+     * read. Every column array and the cell table are sized here, by the plan and the
+     * reader's batch size. A plan that is refused leaves the reader as it was, unbound.
+     *
+     * @param list<Column> $plan the output columns, in output order
+     * @return void
+     * @throws \LogicException when the reader already has a plan
+     * @throws \InvalidArgumentException when the plan cannot be honoured
+     */
+    public function bind(array $plan): void
+    {
+        if ($this->columns !== null) {
+            throw new \LogicException('The reader already has a plan; a plan is bound once');
+        }
+        $columns = new Columns($plan, $this->batchRows);
+        $this->perRow = $columns->width + 1;
+        $this->cellsCap = $this->perRow * $this->batchRows;
+        $this->cells = Native::ffi()->new("ht_span[{$this->cellsCap}]");
+        $this->columns = $columns;
+    }
+
+    /**
+     * Whether a plan has been bound: always, for a reader opened with one.
+     *
+     * @return bool whether {@see read()} can be called
+     */
+    public function isBound(): bool
+    {
+        return $this->columns !== null;
+    }
+
+    /**
+     * The plan the reader reads through: column `i` of every batch is `plan()[i]`. Empty
+     * until one is bound.
      *
      * @return list<Column> the output columns, in output order
      */
     public function plan(): array
     {
-        return $this->columns->plan;
+        return $this->columns?->plan ?? [];
+    }
+
+    /**
+     * How many cells a record has: the header's count once it has been read, otherwise the
+     * first record's once it has been — null until then.
+     *
+     * @return int|null the count, or null while it is not known
+     */
+    public function columnCount(): ?int
+    {
+        $expected = $this->state->expected;
+        return $expected !== 0 ? $expected : null;
     }
 
     /**
@@ -291,7 +373,8 @@ final class DelimitedReader
      * @return Batch|null the rows, or null at the end
      * @throws TabularException when the input is structurally broken — thrown after every
      *     intact row before the break has been delivered, and again on every later call
-     * @throws \LogicException when the reader has been closed
+     * @throws \LogicException when the reader has been closed, or has no plan yet
+     *     ({@see bind()}) — which a later call, once one is bound, does not repeat
      * @throws \RuntimeException when the stream cannot be read
      */
     public function read(): ?Batch
@@ -299,6 +382,9 @@ final class DelimitedReader
         if ($this->closed) {
             throw new \LogicException('The reader is closed');
         }
+        $columns = $this->columns ?? throw new \LogicException(
+            'The reader has no plan to read through; bind() one first'
+        );
         if ($this->failure !== null) {
             throw $this->failure;
         }
@@ -308,7 +394,6 @@ final class DelimitedReader
         }
         $ffi = $this->ffi;
         $filled = $this->filled;
-        $columns = $this->columns;
         while (true) {
             $length = $this->end - $this->start;
             $last = $this->eof;
@@ -369,6 +454,32 @@ final class DelimitedReader
                     throw $this->structural();
                 default:
                     throw new \RuntimeException(self::CONTRACT_VIOLATION);
+            }
+        }
+    }
+
+    /**
+     * Every row left, batch by batch: {@see read()} is called as each batch runs out, and
+     * stops at the end of the input. A row owns what it shows, as its batch does, so it
+     * stays good after the generator has moved on.
+     *
+     * ```php
+     * foreach ($reader->rows() as $row) {
+     *     $orders[] = new Order($row->value(0), $row->value(1));
+     * }
+     * ```
+     *
+     * @return \Generator<int, Row> the rows, keyed from zero across the whole read
+     * @throws TabularException when the input is structurally broken, after every intact row
+     *     before the break
+     * @throws \LogicException when the reader has been closed, or has no plan yet
+     * @throws \RuntimeException when the stream cannot be read
+     */
+    public function rows(): \Generator
+    {
+        while (($batch = $this->read()) !== null) {
+            foreach ($batch as $row) {
+                yield $row;
             }
         }
     }

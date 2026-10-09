@@ -16,6 +16,12 @@ use HyperCast\ExcelEpoch;
  * $book = Workbook::open('orders.xlsx');
  * $sheet = $book->sheet('Orders', new SheetOptions(), $plan);
  * while (($batch = $sheet->read()) !== null) { ... }
+ *
+ * // Or the header first, and the plan by name.
+ * $sheet = $book->sheet('Orders', new SheetOptions());
+ * $header = $sheet->headerIndex();
+ * $sheet->bind([Column::i32($header->ordinal('id')), Column::text($header->ordinal('name'))]);
+ * foreach ($sheet->rows() as $row) { ... }
  * ```
  *
  * A workbook that cannot be read — not a zip, encrypted, a part missing or broken — is a
@@ -53,6 +59,36 @@ final class Workbook
      */
     public static function fromString(string $bytes): self
     {
+        return new self($bytes);
+    }
+
+    /**
+     * Reads a stream to its end and opens what it held. The workbook keeps its own copy; the
+     * stream stays the caller's, as it does for {@see DelimitedReader::fromStream()} — read
+     * from where it stands to its end, never sought, and not closed. Which kind of workbook
+     * it is, is told from the bytes.
+     *
+     * @param resource $stream a readable stream
+     * @return self the workbook
+     * @throws \InvalidArgumentException when `$stream` is not a stream
+     * @throws \RuntimeException when the stream cannot be read to its end
+     * @throws TabularException when the bytes are not a workbook this reader can read
+     */
+    public static function fromStream($stream): self
+    {
+        if (!\is_resource($stream) || get_resource_type($stream) !== 'stream') {
+            throw new \InvalidArgumentException('The stream must be an open stream resource');
+        }
+        $bytes = stream_get_contents($stream);
+        if ($bytes === false) {
+            throw new \RuntimeException('hypertabular: reading the stream failed');
+        }
+        if (!feof($stream)) {
+            throw new \RuntimeException(
+                'hypertabular: the stream stopped before its end (a non-blocking stream, or a read that '
+                . 'timed out); the workbook needs one that blocks'
+            );
+        }
         return new self($bytes);
     }
 
@@ -224,18 +260,20 @@ final class Workbook
 
     /**
      * Starts a read of one sheet — `$which` is its index in {@see sheets()} or its name —
-     * through `$plan`. With a header declared the header row is read here.
+     * through `$plan`. With a header declared the header row is read here. Without a plan
+     * the sheet reads its header and waits for one: {@see Sheet::bind()}.
      *
      * @param int|string $which the sheet's index, or its name
      * @param SheetOptions $options how the sheet is read
-     * @param list<Column> $plan the output columns, in output order
+     * @param list<Column>|null $plan the output columns, in output order — or null to read
+     *     the header first and bind a plan after
      * @return Sheet the sheet
      * @throws \OutOfRangeException when the workbook has no sheet at that index
      * @throws \OutOfBoundsException when the workbook has no sheet by that name
      * @throws \InvalidArgumentException when the plan cannot be honoured
      * @throws TabularException when the sheet, or its header row, is structurally broken
      */
-    public function sheet(int|string $which, SheetOptions $options, array $plan): Sheet
+    public function sheet(int|string $which, SheetOptions $options, ?array $plan = null): Sheet
     {
         if (\is_int($which)) {
             $info = $this->sheets[$which] ?? throw new \OutOfRangeException(

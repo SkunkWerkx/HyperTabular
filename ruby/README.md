@@ -7,14 +7,14 @@ read a batch at a time into typed columns, with a
 ```ruby
 require "hypertabular"
 
-plan = [
-  HyperTabular::Column.i32(0),
-  HyperTabular::Column.text(1),
-  HyperTabular::Column.f64(2)
-]
-
-HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV, plan) do |reader|
-  reader.header                       # => ["id", "name", "score"]
+HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV) do |reader|
+  # The header is read first; the plan is built from where its names are.
+  header = reader.header              # => ["id", "name", "score"]
+  reader.bind([
+    HyperTabular::Column.i32(header.ordinal("id")),
+    HyperTabular::Column.text(header.ordinal("name")),
+    HyperTabular::Column.f64(header.ordinal("score"))
+  ])
 
   while (batch = reader.read)
     # A column at a time, decoded in one pass — nil where a cell did not cast…
@@ -32,17 +32,44 @@ HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV, pla
   end
 end
 
-# A workbook reads into the same batch.
+# Or a row at a time: a reader, a sheet and a batch are Enumerable over Rows.
+reader = HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV)
+reader.bind([HyperTabular::Column.i32(reader.header.ordinal("id"))])
+reader.each { |row| puts "line #{row.line}: #{row.value(0).inspect}" }
+
+# A workbook reads into the same batch — from a path, a String or an IO.
 book = HyperTabular::Workbook.open("orders.xlsx")
 book.sheets                           # => [#<data HyperTabular::SheetInfo name="Orders", hidden=false>]
-sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT, plan)
+sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT)
+sheet.bind([HyperTabular::Column.decimal(sheet.header.ordinal("Total"))])
 while (batch = sheet.read)
   # …
 end
 ```
 
-`reader.each_row` walks every remaining row as an Array of verdicts, for when a row at a
-time is what the caller wants; `sheet.each_batch` walks a sheet's batches.
+A plan known up front can be handed over at once —
+`DelimitedReader.open(path, dialect, plan)`, `book.sheet(which, options, plan)` — which binds it
+before the header is read.
+
+- **The header** (`reader.header`, `sheet.header`) is a `HyperTabular::Header`: the frozen
+  Array of frozen names it always was, which also says where a name is. `header.ordinal(name)`
+  is the first column with exactly that name — case and spaces included — and a `KeyError`
+  naming it when there is none (or, with a block, the block's value, as `Hash#fetch` does);
+  `header.find_ordinal(name)` answers `nil` instead.
+- **Binding** happens once, before the first read: `bind` again raises `RuntimeError`, and so
+  does a `read` before `bind` — which `bind` then cures. A plan that is not Columns is an
+  `ArgumentError` and leaves the reader unbound. `bound?` says which it is. A `nil` plan
+  means "bind later"; `[]` is an empty plan, bound at once.
+  `reader.column_count` is the header's count, or the first record's once it has been read.
+- **Rows.** `batch.each`, `reader.each` and `sheet.each` yield a `HyperTabular::Row` —
+  `index`, `line`, `get(column)` (also `[]` and `verdict`), `value(column)`, `raw(column)`,
+  `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
+  so a row stays good after the read has moved on. A Row deconstructs as its verdicts, for
+  `case row in [HyperCast::Success(value: id), *]`. `reader.each_row` still yields each row as
+  a frozen Array of verdicts, and `sheet.each_batch` walks a sheet's batches.
+- **A workbook from an IO.** `Workbook.new(io)` reads anything with `#read` to its end into a
+  String the workbook owns, as soon as it is opened; `close_source: true` closes the IO once it
+  has been read. The kind of workbook is read from its bytes, never from a name.
 
 ## The shape
 
@@ -53,11 +80,13 @@ native call per batch, and a column comes out of its buffer in one `String#unpac
 boundary is crossed once per few thousand rows, not once per cell.
 
 - **One batch class.** `read` returns a `HyperTabular::Batch` — `rows`, `columns`,
-  `line(row)`, `values(column)`, `verdicts(column)`, `get(column, row)` and `raw(column,
-  row)` — or `nil` once there are no more rows, for delimited text and a sheet alike. A
-  batch owns what it shows: it stays good after the reader has moved on.
+  `line(row)`, `values(column)`, `verdicts(column)`, `get(column, row)`, `raw(column,
+  row)`, and a `Row` for each row through `each` — or `nil` once there are no more rows,
+  for delimited text and a sheet alike. A batch owns what it shows: it stays good after the
+  reader has moved on.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header and whether empty rows are skipped; the plan
+  `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
+  the plan
   states each column's door and, for numbers, its `HyperCast::NumFormat`.
 - **HyperCast is the judge.** `HyperCast::Success`, `HyperCast::Fault`,
   `HyperCast::NumFormat`, `HyperCast::Decimal` and the declared options (`:milliseconds`,
@@ -75,6 +104,9 @@ boundary is crossed once per few thousand rows, not once per cell.
   offending text.
 - **A String is read in place.** An IO is read forward only, through a buffer that grows
   when a record does not fit it.
+- **No async API, and none needed.** An IO is read with `#readpartial` or `#read`, which yield
+  to the Fiber scheduler (the `async` gem's, or any other) instead of blocking, and a task
+  cancelled in one is interrupted there; the core's work between reads is on memory.
 
 ## The doors
 

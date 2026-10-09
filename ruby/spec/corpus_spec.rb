@@ -1,8 +1,9 @@
 # Replays the shared conformance corpus (corpus/delimited.json at the repository root) —
 # the same file the Rust and .NET bindings replay — through this binding: from a String in
 # memory, from an IO read through buffers too small for a record, and from a file, in
-# batches of one row, two rows and many. How the input is cut up is the binding's business
-# and must not change the answer.
+# batches of one row, two rows and many — each with its plan up front and header first,
+# the plan bound once the header has been read. How the input is cut up, and when the plan
+# is given, is the binding's business and must not change the answer.
 #
 # The corpus pins fault spans as byte offsets into the cell's text; this binding presents
 # them in the units String#[] slices by, as HyperCast's gem does, so each pinned span is
@@ -30,6 +31,19 @@ RSpec.describe "delimited conformance corpus" do
   BUFFER_BYTES = [1, 5, 64, HyperTabular::DelimitedReader::DEFAULT_BUFFER_BYTES].freeze
 
   include CorpusHelpers
+
+  # A reader opened without a plan, held to what it is before its plan comes — unbound, an
+  # empty plan, its header already read and counted — and then bound to +plan+.
+  def header_first(vector, plan)
+    reader = yield
+    expect(reader).not_to be_bound
+    expect(reader.plan).to eq([])
+    expect(reader.header).to eq(vector["header"])
+    expect(reader.column_count).to eq(reader.header&.size&.nonzero?)
+    reader.bind(plan)
+    expect(reader).to be_bound
+    reader
+  end
 
   def replay(label, vector, batch_rows)
     settings = vector["dialect"]
@@ -99,6 +113,15 @@ RSpec.describe "delimited conformance corpus" do
           HyperTabular::DelimitedReader.new(ReadOnly.new(input), dialect, plan,
                                             batch_rows: batch_rows, buffer_bytes: 3)
         end
+        replay("#{name} (memory, header first, #{batch_rows} rows a batch)", vector, batch_rows) do |dialect, plan|
+          header_first(vector, plan) { HyperTabular::DelimitedReader.new(input, dialect, batch_rows: batch_rows) }
+        end
+        label = "#{name} (stream through 5 bytes, header first, #{batch_rows} rows a batch)"
+        replay(label, vector, batch_rows) do |dialect, plan|
+          header_first(vector, plan) do
+            HyperTabular::DelimitedReader.new(StringIO.new(input), dialect, batch_rows: batch_rows, buffer_bytes: 5)
+          end
+        end
       end
 
       Tempfile.create(["corpus", ".csv"]) do |file|
@@ -107,6 +130,11 @@ RSpec.describe "delimited conformance corpus" do
         file.close
         replay("#{name} (file, 7 bytes, 2 rows a batch)", vector, 2) do |dialect, plan|
           HyperTabular::DelimitedReader.open(file.path, dialect, plan, batch_rows: 2, buffer_bytes: 7)
+        end
+        replay("#{name} (file, header first, 7 bytes, 2 rows a batch)", vector, 2) do |dialect, plan|
+          header_first(vector, plan) do
+            HyperTabular::DelimitedReader.open(file.path, dialect, batch_rows: 2, buffer_bytes: 7)
+          end
         end
       end
     end

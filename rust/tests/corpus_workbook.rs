@@ -77,6 +77,7 @@ fn every_case_reads_as_the_corpus_says() {
             ("a slice", Workbook::from_slice(&bytes)),
             ("its own bytes", Workbook::from_vec(bytes.clone())),
             ("a path", Workbook::open(&path)),
+            ("a stream", Workbook::from_reader(&bytes[..])),
         ];
         for (source, book) in books {
             let book = book.unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -109,16 +110,25 @@ fn every_case_reads_as_the_corpus_says() {
                     .iter()
                     .position(|sheet| sheet.name == sheet_name)
                     == Some(sheet_index);
-                for named in [false, true] {
+                // Each of those with the plan given, and with it bound after the header.
+                for (named, unbound) in [(false, false), (true, false), (false, true), (true, true)]
+                {
                     if named && !by_name {
                         continue;
                     }
-                    let mut sheet = if named {
-                        book.sheet(sheet_name, options, &plan)
-                    } else {
-                        book.sheet(sheet_index, options, &plan)
+                    let mut sheet = match (named, unbound) {
+                        (true, false) => book.sheet(sheet_name, options, &plan),
+                        (false, false) => book.sheet(sheet_index, options, &plan),
+                        (true, true) => book.sheet_unbound(sheet_name, options),
+                        (false, true) => book.sheet_unbound(sheet_index, options),
                     }
                     .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    if unbound {
+                        assert!(!sheet.is_bound());
+                        sheet
+                            .bind(&plan)
+                            .unwrap_or_else(|error| panic!("{name}: {error}"));
+                    }
                     let header = header_json(sheet.header());
                     let (mut numbers, mut rows) = (Vec::new(), Vec::new());
                     let failure = loop {
@@ -139,7 +149,7 @@ fn every_case_reads_as_the_corpus_says() {
                     assert_eq!(
                         (header, json!(numbers), rows, failure),
                         expected,
-                        "{name}: {source}, {batch_rows} rows a batch"
+                        "{name}: {source}, {batch_rows} rows a batch, named {named}, unbound {unbound}"
                     );
                 }
             }

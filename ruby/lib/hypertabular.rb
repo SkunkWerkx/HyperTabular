@@ -22,6 +22,12 @@ require_relative "hypertabular/runtime/workbook"
 #   sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT, plan)
 #   sheet.read                    # => the same Batch
 #
+# Or header first, the plan built from the names the header says are there:
+#
+#   reader = HyperTabular::DelimitedReader.new("id,name\n1,alice\n", HyperTabular::Dialect::CSV)
+#   reader.bind([HyperTabular::Column.text(reader.header.ordinal("name"))])
+#   reader.map { |row| row.value(0) }  # => ["alice"]
+#
 # Nothing is sniffed: the Dialect states the separator, the quoting and the header,
 # SheetOptions a sheet's header and whether empty rows are skipped, and the plan states each
 # Column's door and, for numbers, its notation. HyperCast is the judge:
@@ -32,7 +38,7 @@ require_relative "hypertabular/runtime/workbook"
 module HyperTabular
   # This gem's own version — kept in lockstep with hypertabular.gemspec and the core's
   # rust/Cargo.toml.
-  VERSION = "0.7.0"
+  VERSION = "0.8.0"
 
   class << self
     # Whether the native core loaded and exports the ABI this binding was built against.
@@ -62,6 +68,8 @@ end
 require_relative "hypertabular/dialect"
 require_relative "hypertabular/column"
 require_relative "hypertabular/tabular_error"
+require_relative "hypertabular/header"
+require_relative "hypertabular/row"
 require_relative "hypertabular/batch"
 require_relative "hypertabular/delimited_reader"
 require_relative "hypertabular/workbook"

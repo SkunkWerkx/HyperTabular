@@ -27,9 +27,21 @@ module HyperTabular
   # not rows of cells at all — a record of the wrong width, a quote never closed — is a
   # TabularError, raised after every intact row before it has been delivered.
   #
+  # The plan may also wait for the header. Opened without one, the reader reads the header
+  # and stops: its names say where each column is, and #bind declares the plan built from
+  # them, once, before the first read:
+  #
+  #   reader = HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV)
+  #   header = reader.header                           # => ["id", "name", "score"]
+  #   reader.bind([HyperTabular::Column.i32(header.ordinal("id")),
+  #                HyperTabular::Column.f64(header.ordinal("score"))])
+  #   reader.each { |row| total += row.value(1) || 0 } # a Row at a time, batch after batch
+  #
   # Each #read returns a Batch, which owns what it shows: it stays good after the next
   # #read. Not thread-safe.
   class DelimitedReader
+    include Enumerable
+
     # The row ceiling: a single record larger than this is a :row_too_long TabularError.
     MAX_ROW_BYTES = 1 << 30
 
@@ -42,10 +54,11 @@ module HyperTabular
     # Encodings whose bytes already are the UTF-8 (or byte-identical) form the core reads.
     BYTE_COMPATIBLE = HyperCast::Interop::BYTE_COMPATIBLE
 
-    # Opens a file of UTF-8 delimited text. With a block, yields the reader, closes it —
-    # and the file — when the block ends, and returns the block's value; without one,
-    # returns the reader, whose #close closes the file.
-    def self.open(path, dialect, plan, batch_rows: DEFAULT_BATCH_ROWS, buffer_bytes: DEFAULT_BUFFER_BYTES)
+    # Opens a file of UTF-8 delimited text, through +plan+ — or, with none, header first,
+    # for #bind. With a block, yields the reader, closes it — and the file — when the block
+    # ends, and returns the block's value; without one, returns the reader, whose #close
+    # closes the file.
+    def self.open(path, dialect, plan = nil, batch_rows: DEFAULT_BATCH_ROWS, buffer_bytes: DEFAULT_BUFFER_BYTES)
       file = File.open(path, "rb")
       begin
         reader = new(file, dialect, plan, batch_rows: batch_rows, buffer_bytes: buffer_bytes, close_source: true)
@@ -67,14 +80,15 @@ module HyperTabular
     # of +buffer_bytes+ that grows when a record does not fit it. An IO is read as bytes;
     # one opened in text mode on Windows should be in binmode first.
     #
-    # +dialect+ is the declared Dialect and +plan+ the output Columns, in output order.
+    # +dialect+ is the declared Dialect and +plan+ the output Columns, in output order — or
+    # nil, for a reader that reads its header first and is given its plan by #bind.
     # +batch_rows+ is the most rows one #read delivers. +close_source+ says whether #close
     # also closes the IO.
     #
     # A dialect the scanner cannot honour, or a plan that is not Columns, is an
     # ArgumentError. With a header declared the header record is read here, so a header
     # that is structurally broken is a TabularError here.
-    def initialize(source, dialect, plan, batch_rows: DEFAULT_BATCH_ROWS, buffer_bytes: DEFAULT_BUFFER_BYTES,
+    def initialize(source, dialect, plan = nil, batch_rows: DEFAULT_BATCH_ROWS, buffer_bytes: DEFAULT_BUFFER_BYTES,
                    close_source: false)
       raise ArgumentError, "dialect must be a HyperTabular::Dialect; got #{dialect.inspect}" unless
         dialect.is_a?(Dialect)
@@ -83,22 +97,18 @@ module HyperTabular
       raise ArgumentError, "buffer_bytes must be a positive Integer; got #{buffer_bytes.inspect}" unless
         buffer_bytes.is_a?(Integer) && buffer_bytes.positive?
 
-      @plan = Array(plan).dup.freeze
-      @plan.each_with_index do |column, index|
-        raise ArgumentError, "plan column #{index} must be a HyperTabular::Column; got #{column.inspect}" unless
-          column.is_a?(Column)
-      end
+      planned = Column.plan(plan) unless plan.nil?
       @dialect = dialect
       @batch_rows = batch_rows
       @buffer_bytes = buffer_bytes
       @close_source = close_source
-      # Cell-table entries one row takes: the widest ordinal the plan reads, plus two.
-      per_row = (@plan.map(&:ordinal).max || -1) + 2
-      @kernel = Runtime::Delimited.start(dialect.packed, @plan.map(&:packed), @plan.map(&:value_bytes),
-                                         batch_rows, per_row)
+      @kernel = Runtime::Delimited.start(dialect.packed)
       raise ArgumentError, "separator #{dialect.separator.inspect} is not tab or printable ASCII other than '\"'" if
         @kernel.nil?
 
+      @plan = UNBOUND
+      # A plan handed over here is bound before the header is read, as #bind would bind it.
+      bind_kernel(planned) if planned
       @start = 0
       @closed = false
       @failure = nil
@@ -106,13 +116,41 @@ module HyperTabular
       @header = dialect.has_header ? read_header : nil
     end
 
-    # The header's names, when the dialect declares a header: frozen UTF-8 Strings, quotes
-    # resolved. Empty for an input with no record at all; nil when the dialect declares no
-    # header.
+    # The header's names, when the dialect declares a header: a Header — the frozen Array of
+    # frozen UTF-8 Strings, quotes resolved, that also says where a name is
+    # (Header#ordinal). Empty for an input with no record at all; nil when the dialect
+    # declares no header.
     attr_reader :header
 
     # The plan: the output Columns, in output order. Column +i+ of every batch is +plan[i]+.
+    # Empty until one is bound.
     attr_reader :plan
+
+    # Declares the plan a reader opened without one reads through — +plan+, the output
+    # Columns, in output order, typically built from the #header's ordinals — once, before
+    # the first read. Returns the reader.
+    #
+    # ArgumentError for a plan that is not Columns, which leaves the reader unbound;
+    # RuntimeError if the reader already has a plan; IOError on a closed reader.
+    def bind(plan)
+      raise IOError, "closed reader" if @closed
+      raise "the reader already has a plan: a plan is bound once" if bound?
+
+      bind_kernel(Column.plan(plan))
+      self
+    end
+
+    # Whether a plan has been bound: always, for a reader opened with one.
+    def bound?
+      !@plan.equal?(UNBOUND)
+    end
+
+    # How many cells a record has: the header's count once it has been read, otherwise the
+    # first record's once it has been; nil before either.
+    def column_count
+      expected = @kernel.expected
+      expected.zero? ? nil : expected
+    end
 
     # The declared Dialect.
     attr_reader :dialect
@@ -128,10 +166,12 @@ module HyperTabular
     # Reads the next batch: a Batch of up to #batch_rows rows, or nil once the input is
     # exhausted. A TabularError when the input is structurally broken — raised after every
     # intact row before the break has been delivered, and the same error again on every
-    # later call. IOError on a closed reader.
+    # later call. IOError on a closed reader; RuntimeError before a plan is bound, which
+    # #bind then cures.
     def read
       raise IOError, "closed reader" if @closed
       raise @failure if @failure
+      raise UNBOUND_MESSAGE unless bound?
 
       loop do
         length, last = window
@@ -162,6 +202,18 @@ module HyperTabular
       self
     end
 
+    # Every remaining row, batch after batch, as a Row — which, its batch being a copy,
+    # stays good after the read has moved on. Returns the reader; without a block, an
+    # Enumerator, and the reader is Enumerable through it. Raises what #read raises.
+    def each(&block)
+      return to_enum(:each) unless block
+
+      while (batch = read)
+        batch.each(&block)
+      end
+      self
+    end
+
     # Closes the IO if this reader was told to (+close_source+, or DelimitedReader.open).
     # Batches already read stay good. Safe to call twice.
     def close
@@ -179,10 +231,25 @@ module HyperTabular
 
     # The reader in a line — not its buffers.
     def inspect
-      "#<#{self.class.name} columns=#{@plan.size} records=#{records}#{' closed' if @closed}>"
+      "#<#{self.class.name} columns=#{@plan.size} records=#{records}#{' unbound' unless bound?}" \
+        "#{' closed' if @closed}>"
     end
 
     private
+
+    # The plan of a reader that has none yet.
+    UNBOUND = [].freeze
+    # What a read before a plan is bound says.
+    UNBOUND_MESSAGE = "the reader has no plan yet: bind one before reading".freeze
+    private_constant :UNBOUND, :UNBOUND_MESSAGE
+
+    # Sizes the kernel's arrays for +plan+ (already checked to be Columns) and takes it.
+    def bind_kernel(plan)
+      # Cell-table entries one row takes: the widest ordinal the plan reads, plus two.
+      per_row = (plan.map(&:ordinal).max || -1) + 2
+      @kernel.bind(plan.map(&:packed), plan.map(&:value_bytes), @batch_rows, per_row)
+      @plan = plan
+    end
 
     # Takes the source: a String becomes the whole input, an IO the thing to refill from.
     def take(source)
@@ -271,7 +338,7 @@ module HyperTabular
         end
         @start += consumed
         # An empty input has no header and no rows; the width is unknown.
-        return [].freeze if last && (consumed == length || consumed.zero?)
+        return Header.new.freeze if last && (consumed == length || consumed.zero?)
 
         refill if consumed.zero?
       end
@@ -282,7 +349,7 @@ module HyperTabular
     def header_names
       spans = @kernel.names
       arena = nil
-      Array.new(@kernel.rows) do |index|
+      names = Header.new(@kernel.rows) do |index|
         offset = spans[index * 2]
         length = spans[index * 2 + 1]
         name =
@@ -293,7 +360,8 @@ module HyperTabular
             arena.byteslice(offset, length & Runtime::Delimited::SPAN_LENGTH)
           end
         name.freeze
-      end.freeze
+      end
+      names.freeze
     end
 
     # The structural failure the core just reported, kept: it is final.

@@ -11,8 +11,15 @@ which anything that takes a buffer takes — with no Python call per cell::
 
     from hypertabular import Column, DelimitedReader, Dialect, Fault, Success
 
-    plan = [Column.i32(0), Column.text(1), Column.f64(2)]
-    with DelimitedReader.open("orders.csv", Dialect.CSV, plan) as reader:
+    # The header first, then a plan that names the columns it reads.
+    with DelimitedReader.open("orders.csv", Dialect.CSV) as reader:
+        header = reader.header
+        plan = [
+            Column.i32(header.ordinal("id")),
+            Column.text(header.ordinal("name")),
+            Column.f64(header.ordinal("score")),
+        ]
+        reader.bind(plan)
         for batch in reader:
             ids, names, scores = batch.columns
 
@@ -30,9 +37,19 @@ which anything that takes a buffer takes — with no Python call per cell::
                     case Fault(reason, offset, length):
                         print(reason.name, "on line", batch.line(row), "in", scores.raw(row))
 
+    # A row at a time, across batches.
+    with DelimitedReader.open("orders.csv", Dialect.CSV, plan) as reader:
+        for row in reader.rows():
+            print(row.line, row.text(1), row.get(2))
+
     # A workbook reads into the same batch.
     book = Workbook.open("orders.xlsx")
     for batch in book.sheet("Orders", SheetOptions(), plan):
+        ...
+
+    # And asyncio: a reader over an asyncio.StreamReader, or anything with async read(size).
+    reader = await DelimitedReader.open_async(stream, Dialect.CSV, plan)
+    async for batch in reader:
         ...
 
 - **Nothing is sniffed.** The :class:`Dialect` states the separator, the quoting and the
@@ -49,14 +66,16 @@ which anything that takes a buffer takes — with no Python call per cell::
   is a ``Fault`` in its column and the read goes on. A record of the wrong width, input
   that ends inside a quoted cell, a workbook whose container or parts cannot be read,
   raises :class:`TabularError` — after every intact row before it has been delivered.
-- **A batch owns what it shows.** It stays valid after the reader has moved on.
+- **A batch owns what it shows.** It stays valid after the reader has moved on, and so does
+  a :class:`Row` of it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import ClassVar
+from typing import ClassVar, Self, overload
 
 from hypercast import (
     CastFailure,
@@ -86,6 +105,9 @@ __all__ = [
     "SheetOptions",
     "Batch",
     "ColumnData",
+    "Row",
+    "Rows",
+    "Header",
     "Dialect",
     "Column",
     "Door",
@@ -454,6 +476,66 @@ class Column:
         return cls(ordinal, Door.TEXT)
 
 
+class Header(tuple[str, ...]):
+    """The names a source's header declares, in column order: a tuple of ``str`` — which is
+    what the header always was, so code that treats it as one goes on working — that also
+    looks a name up, for a plan whose ordinals come from the names rather than from where
+    the publisher happened to put each column::
+
+        reader = DelimitedReader.open("orders.csv", Dialect.CSV)
+        header = reader.header
+        reader.bind([Column.i32(header.ordinal("id")), Column.text(header.ordinal("name"))])
+
+    A lookup is exact — case, spaces and all, nothing trimmed — and finds the first column
+    by that name. A ``bytes`` name is matched against the bytes the header was read from, so
+    a name that is not UTF-8 is still found by its own bytes.
+    """
+
+    _raw: tuple[bytes, ...]
+
+    def __new__(cls, names: Iterable[str] = (), raw: Iterable[bytes] | None = None) -> Self:
+        """The header of ``names``; ``raw`` is the bytes each was read from (by default,
+        each name encoded as UTF-8)."""
+        header = super().__new__(cls, names)
+        header._raw = (
+            tuple(raw) if raw is not None else tuple(name.encode("utf-8") for name in header)
+        )
+        if len(header._raw) != len(header):
+            raise ValueError("raw must have one entry for each name")
+        return header
+
+    def ordinal(self, name: str | bytes) -> int:
+        """The ordinal of the first column named ``name`` — what a :class:`Column` factory
+        takes. A name the header does not have raises ``KeyError``, naming it."""
+        found = self.get(name)
+        if found is None:
+            raise KeyError(f"the header has no column named {name!r}")
+        return found
+
+    @overload
+    def get(self, name: str | bytes) -> int | None: ...
+    @overload
+    def get(self, name: str | bytes, default: int) -> int: ...
+    def get(self, name: str | bytes, default: int | None = None) -> int | None:
+        """The ordinal of the first column named ``name``, or ``default`` (``None``) when
+        the header has none: :meth:`ordinal` without the exception."""
+        names: tuple[str, ...] | tuple[bytes, ...]
+        if isinstance(name, str):
+            names = self
+        elif isinstance(name, bytes):
+            names = self._raw
+        else:
+            raise TypeError(f"a column name is a str or bytes, not {type(name).__name__}")
+        try:
+            return names.index(name)
+        except ValueError:
+            return default
+
+    def __repr__(self) -> str:
+        """The header as the call that makes it."""
+        return f"Header({tuple(self)!r})"
+
+
 @dataclass(frozen=True, slots=True)
 class SheetOptions:
     """How a sheet of a :class:`Workbook` is read."""
@@ -476,9 +558,9 @@ class SheetOptions:
 
 
 # The extension's own classes are the package surface. _bind hands it this package's plan
-# column, dialect, structural failure and workbook format; it imports HyperCast's verdict
-# types itself.
-_native._bind(Column, Dialect, TabularError, TabularFailure, WorkbookFormat)
+# column, dialect, structural failure, workbook format and header; it imports HyperCast's
+# verdict types itself.
+_native._bind(Column, Dialect, TabularError, TabularFailure, WorkbookFormat, Header)
 
 DelimitedReader = _native.DelimitedReader
 Workbook = _native.Workbook
@@ -486,4 +568,6 @@ Sheet = _native.Sheet
 SheetInfo = _native.SheetInfo
 Batch = _native.Batch
 ColumnData = _native.ColumnData
+Row = _native.Row
+Rows = _native.Rows
 native_version = _native.native_version

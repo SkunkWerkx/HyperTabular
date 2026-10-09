@@ -370,6 +370,37 @@ impl<'r> Batch<'r> {
         }
     }
 
+    /// [`Batch::text`] as a `str`: borrowed from the batch when the bytes are UTF-8, which
+    /// they are unless the input was not, and otherwise a copy with each invalid sequence
+    /// replaced by U+FFFD — the one way this allocates.
+    ///
+    /// # Panics
+    /// As [`Batch::text`].
+    pub fn text_str(&self, column: usize, row: usize) -> Result<Cow<'r, str>, Fault> {
+        self.text(column, row).map(String::from_utf8_lossy)
+    }
+
+    /// The row at `row`: the batch read across instead of down.
+    ///
+    /// # Panics
+    /// If the row is not in the batch.
+    pub fn row(&self, row: usize) -> Row<'r> {
+        assert!(row < self.rows, "row {row} of a batch of {}", self.rows);
+        Row {
+            batch: *self,
+            index: row,
+        }
+    }
+
+    /// The batch's rows in order — what `for row in batch` iterates.
+    pub fn iter(&self) -> Rows<'r> {
+        Rows {
+            batch: *self,
+            front: 0,
+            back: self.rows,
+        }
+    }
+
     /// The text of the cell at `row` of column `column`, whatever its door and whatever
     /// its verdict: what a fault's span is a span of. Borrowed, unless the cell is quoted
     /// delimited text with a doubled quote in it, which has to be unescaped to be read.
@@ -408,6 +439,150 @@ impl<'r> Batch<'r> {
         }
     }
 }
+
+impl<'r> IntoIterator for Batch<'r> {
+    type Item = Row<'r>;
+    type IntoIter = Rows<'r>;
+
+    fn into_iter(self) -> Rows<'r> {
+        self.iter()
+    }
+}
+
+impl<'r> IntoIterator for &Batch<'r> {
+    type Item = Row<'r>;
+    type IntoIter = Rows<'r>;
+
+    fn into_iter(self) -> Rows<'r> {
+        self.iter()
+    }
+}
+
+/// One row of a [`Batch`]: the batch read across rather than down, for code that builds a
+/// value a row at a time. A view of the batch and nothing more — each method is the
+/// batch's own with this row's index — so it borrows the reader as the batch does, and is
+/// over when the next batch is read.
+///
+/// ```
+/// # use hypertabular::{Column, DelimitedReader, Dialect};
+/// let plan = [Column::text(0), Column::i32(1)];
+/// let mut reader = DelimitedReader::from_slice(b"name,n\na,1\nb,2\n", Dialect::CSV, &plan)?;
+/// while let Some(batch) = reader.read()? {
+///     for row in batch {
+///         let (name, n) = (row.text_str(0), row.get::<i32>(1));
+///     }
+/// }
+/// # Ok::<(), hypertabular::Error>(())
+/// ```
+#[derive(Clone, Copy)]
+pub struct Row<'r> {
+    batch: Batch<'r>,
+    index: usize,
+}
+
+impl<'r> Row<'r> {
+    /// The row's place in its batch, from zero.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Where the row came from: [`Batch::line`].
+    pub fn line(&self) -> u32 {
+        self.batch.line(self.index)
+    }
+
+    /// The cell in column `column` as HyperCast judged it: [`Batch::get`].
+    ///
+    /// # Panics
+    /// As [`Batch::get`].
+    pub fn get<T: Value>(&self, column: usize) -> Result<T, Fault> {
+        self.batch.get(column, self.index)
+    }
+
+    /// The verdict of the cell in column `column`.
+    ///
+    /// # Panics
+    /// If the column is not in the batch.
+    pub fn verdict(&self, column: usize) -> CellVerdict {
+        self.batch.verdicts(column)[self.index]
+    }
+
+    /// The text cell in column `column`: [`Batch::text`].
+    ///
+    /// # Panics
+    /// As [`Batch::text`].
+    pub fn text(&self, column: usize) -> Result<&'r [u8], Fault> {
+        self.batch.text(column, self.index)
+    }
+
+    /// The text cell in column `column` as a `str`: [`Batch::text_str`].
+    ///
+    /// # Panics
+    /// As [`Batch::text`].
+    pub fn text_str(&self, column: usize) -> Result<Cow<'r, str>, Fault> {
+        self.batch.text_str(column, self.index)
+    }
+
+    /// The text the cell in column `column` was cast from: [`Batch::raw`].
+    ///
+    /// # Panics
+    /// If the column is not in the batch.
+    pub fn raw(&self, column: usize) -> Cow<'r, [u8]> {
+        self.batch.raw(column, self.index)
+    }
+}
+
+impl std::fmt::Debug for Row<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Row")
+            .field("index", &self.index)
+            .field("line", &self.line())
+            .finish()
+    }
+}
+
+/// The rows of a [`Batch`], in order: [`Batch::iter`].
+#[derive(Clone)]
+pub struct Rows<'r> {
+    batch: Batch<'r>,
+    front: usize,
+    back: usize,
+}
+
+impl<'r> Iterator for Rows<'r> {
+    type Item = Row<'r>;
+
+    fn next(&mut self) -> Option<Row<'r>> {
+        (self.front < self.back).then(|| {
+            self.front += 1;
+            Row {
+                batch: self.batch,
+                index: self.front - 1,
+            }
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.back - self.front;
+        (left, Some(left))
+    }
+}
+
+impl DoubleEndedIterator for Rows<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        (self.front < self.back).then(|| {
+            self.back -= 1;
+            Row {
+                batch: self.batch,
+                index: self.back,
+            }
+        })
+    }
+}
+
+impl ExactSizeIterator for Rows<'_> {}
+
+impl std::iter::FusedIterator for Rows<'_> {}
 
 impl std::fmt::Debug for Batch<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -27,6 +27,12 @@
 //! `list` of the Python values HyperCast's package gives them, built in one loop here on
 //! first use.
 //!
+//! A reader over an asynchronous stream (`asyncio.StreamReader`, or anything with an `async
+//! read(size)`) never calls it: the core never waits, and neither does this module. A step
+//! of such a read ends by saying how much input it has room for; the coroutines in
+//! `hypertabular/_aio.py` await that much from the stream, feed it in and take the next
+//! step, so all the core's work happens between awaits, the interpreter released as ever.
+//!
 //! HyperCast is the judge of every cell, and its Python package is the judge of how a
 //! verdict looks in Python: a cell is `hypercast.Success` or `hypercast.Fault` — that
 //! package's own classes, called here, not copies of them — carrying its own `CastFailure`
@@ -91,6 +97,8 @@ struct Companions {
     workbook_format: Py<PyAny>,
     /// HyperCast's `ExcelEpoch`, likewise.
     excel_epoch: Py<PyAny>,
+    /// `Header`, called with the names as `str`s and as the bytes they were read from.
+    header: Py<PyAny>,
     /// What every cast value is built with: HyperCast's own conversions.
     values: Values,
 }
@@ -187,6 +195,34 @@ fn view(
 fn text<'py>(py: Python<'py>, bytes: &[u8]) -> Bound<'py, PyString> {
     PyString::new(py, &String::from_utf8_lossy(bytes))
 }
+
+/// The package's `Header` for these names: a tuple of their `str`s, which also keeps the
+/// bytes each was read from, for a lookup by bytes to match exactly.
+fn header_of<'a>(py: Python<'_>, names: impl IntoIterator<Item = &'a [u8]>) -> PyResult<Py<PyAny>> {
+    let companions = companions(py)?;
+    let mut said = Vec::new();
+    let mut raw = Vec::new();
+    for name in names {
+        said.push(text(py, name));
+        raw.push(PyBytes::new(py, name));
+    }
+    let made = companions
+        .header
+        .bind(py)
+        .call1((PyTuple::new(py, said)?, PyTuple::new(py, raw)?))?;
+    Ok(made.unbind())
+}
+
+/// The exception for a reader or sheet used out of order: read before a plan is bound, or
+/// bound twice. Python's own word for an object in the wrong state for a call.
+fn out_of_order(message: &str) -> PyErr {
+    PyRuntimeError::new_err(message.to_owned())
+}
+
+/// What `read()` on a reader whose plan is still to be bound raises.
+const UNBOUND: &str = "the reader has no plan yet: bind(plan) before the first read";
+/// What a second `bind` raises.
+const ALREADY_BOUND: &str = "the reader already has a plan: a reader is bound once";
 
 fn fault<'py>(
     py: Python<'py>,
@@ -309,7 +345,7 @@ impl Batch {
     }
 
     /// A row index as Python gives it — negative counts from the end — checked.
-    fn row(&self, row: isize) -> PyResult<usize> {
+    fn row_index(&self, row: isize) -> PyResult<usize> {
         let index = if row < 0 {
             row + self.rows as isize
         } else {
@@ -432,6 +468,25 @@ impl Batch {
         })
     }
 
+    /// A text cell's value as a `str`, or `None` for one that did not cast.
+    fn text_cell<'py>(
+        &self,
+        py: Python<'py>,
+        column: usize,
+        row: usize,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let slot = self.slot(column)?;
+        if slot.door != Door::Text {
+            return Err(PyTypeError::new_err(format!(
+                "column {column} is not read through the text door"
+            )));
+        }
+        if !slot.verdict(py, row)?.is_ok() {
+            return Ok(None);
+        }
+        Ok(Some(self.object(py, companions(py)?, slot, row)?))
+    }
+
     /// A cell as HyperCast's verdict: `Success(value)` or `Fault(reason, offset, length)`.
     fn cell<'py>(
         &self,
@@ -493,7 +548,7 @@ impl Batch {
     /// Where row ``row`` came from: for delimited text the 1-based line its record starts
     /// on, for a sheet its 1-based row number.
     fn line(&self, row: isize) -> PyResult<u32> {
-        let row = self.row(row)?;
+        let row = self.row_index(row)?;
         let entry = self
             .cells
             .get(row * self.per_row + self.per_row - 1)
@@ -517,7 +572,45 @@ impl Batch {
         row: isize,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let slot = self.slot(column)?;
-        Ok(self.raw_text(py, slot, self.row(row)?))
+        Ok(self.raw_text(py, slot, self.row_index(row)?))
+    }
+
+    /// The cell at (``column``, ``row``) as HyperCast's verdict — ``Success(value)`` or
+    /// ``Fault(reason, offset, length)`` — as ``batch.column(column)[row]`` gives it.
+    fn get<'py>(&self, py: Python<'py>, column: usize, row: isize) -> PyResult<Bound<'py, PyAny>> {
+        let slot = self.slot(column)?;
+        self.cell(py, companions(py)?, slot, self.row_index(row)?)
+    }
+
+    /// The text cell at (``column``, ``row``) as a ``str``, or ``None`` for one that did
+    /// not cast (a text cell fails only by being empty) — the same ``str`` ``values``
+    /// holds. A column read through any other door raises ``TypeError``.
+    fn text<'py>(
+        &self,
+        py: Python<'py>,
+        column: usize,
+        row: isize,
+    ) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.text_cell(py, column, self.row_index(row)?)
+    }
+
+    /// Row ``row`` of the batch — negative counts from the end — as a :class:`Row`.
+    fn row(slf: &Bound<'_, Self>, row: isize) -> PyResult<Row> {
+        let index = slf.get().row_index(row)?;
+        Ok(Row {
+            batch: slf.clone().unbind(),
+            index,
+        })
+    }
+
+    /// The batch's rows, in order, as :class:`Row` views — what ``for row in batch``
+    /// iterates. Each is the batch and an index, nothing copied.
+    fn iter_rows(slf: &Bound<'_, Self>) -> Rows {
+        Rows::over(slf.clone().unbind())
+    }
+
+    fn __iter__(slf: &Bound<'_, Self>) -> Rows {
+        Rows::over(slf.clone().unbind())
     }
 
     fn __repr__(&self) -> String {
@@ -634,12 +727,12 @@ impl ColumnData {
     /// The text the cell at ``row`` was cast from — see ``Batch.raw``.
     fn raw<'py>(&self, py: Python<'py>, row: isize) -> PyResult<Bound<'py, PyBytes>> {
         let (batch, slot) = self.parts()?;
-        Ok(batch.raw_text(py, slot, batch.row(row)?))
+        Ok(batch.raw_text(py, slot, batch.row_index(row)?))
     }
 
     fn __getitem__<'py>(&self, py: Python<'py>, row: isize) -> PyResult<Bound<'py, PyAny>> {
         let (batch, slot) = self.parts()?;
-        batch.cell(py, companions(py)?, slot, batch.row(row)?)
+        batch.cell(py, companions(py)?, slot, batch.row_index(row)?)
     }
 
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -663,12 +756,146 @@ impl ColumnData {
     }
 }
 
+/// One row of a :class:`Batch`: the batch read across rather than down, for code that
+/// builds a value a row at a time. A view — the batch and an index, nothing copied — whose
+/// every method is the batch's own with this row's index. A batch owns what it shows, so a
+/// row stays valid for as long as it is referenced, after the reader has moved on.
+#[pyclass(frozen, module = "hypertabular")]
+struct Row {
+    batch: Py<Batch>,
+    index: usize,
+}
+
+#[pymethods]
+impl Row {
+    /// The row's place in its batch, from zero.
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Where the row came from: ``Batch.line``.
+    #[getter]
+    fn line(&self) -> PyResult<u32> {
+        self.batch.get().line(self.index as isize)
+    }
+
+    /// The batch the row is a row of.
+    #[getter]
+    fn batch(&self, py: Python<'_>) -> Py<Batch> {
+        self.batch.clone_ref(py)
+    }
+
+    /// The cell in column ``column`` as HyperCast's verdict: ``Batch.get``.
+    fn get<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Bound<'py, PyAny>> {
+        let batch = self.batch.get();
+        batch.cell(py, companions(py)?, batch.slot(column)?, self.index)
+    }
+
+    /// The text cell in column ``column`` as a ``str``, or ``None``: ``Batch.text``.
+    fn text<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Option<Bound<'py, PyAny>>> {
+        self.batch.get().text_cell(py, column, self.index)
+    }
+
+    /// The text the cell in column ``column`` was cast from: ``Batch.raw``.
+    fn raw<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Bound<'py, PyBytes>> {
+        let batch = self.batch.get();
+        Ok(batch.raw_text(py, batch.slot(column)?, self.index))
+    }
+
+    fn __len__(&self) -> usize {
+        self.batch.get().slots.len()
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "<hypertabular.Row index={} line={}>",
+            self.index,
+            self.line()?
+        ))
+    }
+}
+
+/// Where a :class:`Rows` takes its next batch from once the one in hand is done.
+enum Feeds {
+    Delimited(Py<DelimitedReader>),
+    Sheet(Py<Sheet>),
+}
+
+/// An iterator of :class:`Row` views: over one batch (``iter(batch)``), or over every batch
+/// a reader or sheet has left (``reader.rows()``), reading the next as the one in hand runs
+/// out.
+#[pyclass(module = "hypertabular")]
+struct Rows {
+    batch: Option<Py<Batch>>,
+    next: usize,
+    feeds: Option<Feeds>,
+}
+
+impl Rows {
+    fn over(batch: Py<Batch>) -> Rows {
+        Rows {
+            batch: Some(batch),
+            next: 0,
+            feeds: None,
+        }
+    }
+
+    fn reading(feeds: Feeds) -> Rows {
+        Rows {
+            batch: None,
+            next: 0,
+            feeds: Some(feeds),
+        }
+    }
+}
+
+#[pymethods]
+impl Rows {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Row>> {
+        loop {
+            if let Some(batch) = &self.batch
+                && self.next < batch.get().rows
+            {
+                let row = Row {
+                    batch: batch.clone_ref(py),
+                    index: self.next,
+                };
+                self.next += 1;
+                return Ok(Some(row));
+            }
+            let read = match &self.feeds {
+                None => None,
+                Some(Feeds::Delimited(reader)) => {
+                    reader.bind(py).try_borrow_mut()?.next_batch(py)?
+                }
+                Some(Feeds::Sheet(sheet)) => sheet.bind(py).try_borrow_mut()?.next_batch(py)?,
+            };
+            let Some(batch) = read else {
+                self.batch = None;
+                self.feeds = None;
+                return Ok(None);
+            };
+            self.batch = Some(Py::new(py, batch)?);
+            self.next = 0;
+        }
+    }
+}
+
 /// What a stream is read from.
 enum Reads {
     /// A file this reader opened, read without the interpreter in the way.
     File(File),
     /// The caller's binary file object: anything with ``read(size)``.
     Object(Py<PyAny>),
+    /// The caller's asynchronous stream — anything with ``async read(size)``, an
+    /// ``asyncio.StreamReader`` — which this reader never calls: a refill says how much it
+    /// wants instead, and ``read_async`` awaits that much from the stream and feeds it in.
+    Fed(Py<PyAny>),
 }
 
 enum Source {
@@ -681,13 +908,15 @@ enum Source {
     },
     /// A stream, read into `buf`; `buf[at..]` is what the core has not finished with.
     /// `limit` is how full the buffer is allowed to get before it has to grow, and
-    /// `ceiling` is where it stops growing.
+    /// `ceiling` is where it stops growing. `wanted` is what a fed stream was last asked
+    /// for and has not yet been given.
     Stream {
         buf: Vec<u8>,
         at: usize,
         limit: usize,
         ceiling: usize,
         eof: bool,
+        wanted: usize,
         reads: Reads,
     },
     Closed,
@@ -735,11 +964,16 @@ fn read_full(file: &mut File, into: &mut [u8]) -> (usize, Option<std::io::Error>
 /// Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time
 /// into typed columns, every cell a HyperCast verdict.
 ///
-/// ``DelimitedReader(source, dialect, plan, *, batch_rows=4096, buffer_bytes=262144)``
+/// ``DelimitedReader(source, dialect, plan=None, *, batch_rows=4096, buffer_bytes=262144)``
 /// reads ``source``: ``bytes``, read in place and never copied, or a binary file object —
 /// anything with ``read(size)`` — read forward only. ``DelimitedReader.open(path, …)``
-/// opens a file. ``dialect`` is a :class:`Dialect` and ``plan`` an iterable of
-/// :class:`Column`: nothing is sniffed and nothing is inferred.
+/// opens a file, and ``await DelimitedReader.open_async(stream, …)`` reads an asynchronous
+/// stream. ``dialect`` is a :class:`Dialect` and ``plan`` an iterable of :class:`Column`:
+/// nothing is sniffed and nothing is inferred.
+///
+/// The header, when the dialect declares one, is read as the reader is made. A reader made
+/// without a plan reads it all the same and waits for one: ``bind(plan)``, once, with
+/// ordinals the :class:`Header` has looked up by name.
 ///
 /// Iterating yields :class:`Batch` objects of up to ``batch_rows`` rows. A value that does
 /// not cast is that cell's verdict, and the read goes on. Input that is not rows of cells
@@ -752,7 +986,9 @@ fn read_full(file: &mut File, into: &mut [u8]) -> (usize, Option<std::io::Error>
 #[pyclass(module = "hypertabular")]
 struct DelimitedReader {
     dialect: Py<PyAny>,
+    /// The plan, as the caller's own `Column`s: empty until one is bound.
     plan: Py<PyTuple>,
+    bound: bool,
     doors: Vec<Door>,
     specs: Vec<ColumnSpec>,
     /// Cell-table entries one row takes: the widest ordinal the plan reads, plus two.
@@ -770,19 +1006,36 @@ struct DelimitedReader {
     /// Whether the last batch ended early because the arena filled: the next one starts
     /// with it doubled, so that escaped text costs a few batches, not one per row.
     cramped: bool,
-    header: Option<Py<PyTuple>>,
+    /// The package's `Header`, once read.
+    header: Option<Py<PyAny>>,
+    /// Whether the dialect declares a header that has not been read yet: only ever true of
+    /// a reader over an asynchronous stream, whose header `open_async` reads as it is fed.
+    header_pending: bool,
     /// The structural failure that ended the input: final, and raised again on every read.
     failure: Option<PyErr>,
     done: bool,
 }
 
+/// What one step of a read came to.
+enum Step {
+    Batch(Batch),
+    /// The input is exhausted.
+    End,
+    /// A fed stream has to be given up to this many bytes before the read can go on.
+    Wants(usize),
+}
+
 impl DelimitedReader {
+    /// A reader over `source`, bound to `plan` when there is one — before the header is
+    /// read, so that a plan that cannot be honoured is refused first. The header is read
+    /// here unless `defer_header` (a fed stream, which has nothing to read it from yet).
     fn build(
         py: Python<'_>,
         source: Source,
         dialect: &Bound<'_, PyAny>,
-        plan: &Bound<'_, PyAny>,
+        plan: Option<&Bound<'_, PyAny>>,
         batch_rows: usize,
+        defer_header: bool,
     ) -> PyResult<Self> {
         let companions = companions(py)?;
         if batch_rows == 0 {
@@ -813,6 +1066,41 @@ impl DelimitedReader {
         let state = State::init(raw).ok_or_else(invalid)?;
         let has_header = dialect.getattr("has_header")?.is_truthy()?;
 
+        let mut reader = DelimitedReader {
+            dialect: dialect.clone().unbind(),
+            plan: PyTuple::empty(py).unbind(),
+            bound: false,
+            doors: Vec::new(),
+            specs: Vec::new(),
+            per_row: 0,
+            batch_rows,
+            state,
+            source,
+            values: Vec::new(),
+            verdicts: Vec::new(),
+            cells: Vec::new(),
+            arena: vec![0; ARENA_BYTES],
+            cramped: false,
+            header: None,
+            header_pending: has_header,
+            failure: None,
+            done: false,
+        };
+        if let Some(plan) = plan {
+            reader.bind_plan(py, plan)?;
+        }
+        if !defer_header && reader.settle_header(py)?.is_some() {
+            // Only a fed stream asks for input, and its header is deferred.
+            return Err(PyRuntimeError::new_err(CONTRACT));
+        }
+        Ok(reader)
+    }
+
+    /// Checks `plan` and allocates everything the core writes into for it, once, to be
+    /// reused for every batch. A plan refused leaves the reader as it was: unbound.
+    fn bind_plan(&mut self, py: Python<'_>, plan: &Bound<'_, PyAny>) -> PyResult<()> {
+        let companions = companions(py)?;
+        let batch_rows = self.batch_rows;
         let mut columns = Vec::new();
         let mut doors = Vec::new();
         let mut specs = Vec::new();
@@ -826,7 +1114,6 @@ impl DelimitedReader {
             specs.push(spec);
         }
 
-        // Everything the core writes into, allocated once and reused for every batch.
         let per_row = widest.map_or(0, |ordinal| ordinal + 1) + 1;
         let mut values = Vec::with_capacity(doors.len());
         let mut verdicts = Vec::with_capacity(doors.len());
@@ -841,28 +1128,15 @@ impl DelimitedReader {
             .map(|entries| cells.resize(entries, Span::default()))
             .ok_or_else(|| PyMemoryError::new_err("batch_rows is too large for this plan"))?;
 
-        let mut reader = DelimitedReader {
-            dialect: dialect.clone().unbind(),
-            plan: PyTuple::new(py, columns)?.unbind(),
-            doors,
-            specs,
-            per_row,
-            batch_rows,
-            state,
-            source,
-            values,
-            verdicts,
-            cells,
-            arena: vec![0; ARENA_BYTES],
-            cramped: false,
-            header: None,
-            failure: None,
-            done: false,
-        };
-        if has_header {
-            reader.read_header(py)?;
-        }
-        Ok(reader)
+        self.plan = PyTuple::new(py, columns)?.unbind();
+        self.doors = doors;
+        self.specs = specs;
+        self.per_row = per_row;
+        self.values = values;
+        self.verdicts = verdicts;
+        self.cells = cells;
+        self.bound = true;
+        Ok(())
     }
 
     /// The exception for a structural failure, kept so that every later read raises it.
@@ -887,11 +1161,12 @@ impl DelimitedReader {
         )
     }
 
-    /// Makes room behind the unfinished record and reads more into it.
-    fn refill(&mut self, py: Python<'_>) -> PyResult<()> {
+    /// Makes room behind the unfinished record and reads more into it — or, for a fed
+    /// stream, says how much it has room for, to be fed with `_feed` before the next step.
+    fn refill(&mut self, py: Python<'_>) -> PyResult<Option<usize>> {
         let position = (self.state.records, self.state.line, self.state.offset);
         let too_long = match &mut self.source {
-            Source::Closed => return Ok(()),
+            Source::Closed => return Ok(None),
             // Read in place, so there is nothing to make room in: one record is larger
             // than the core takes in a call.
             Source::Bytes { .. } => true,
@@ -901,6 +1176,7 @@ impl DelimitedReader {
                 limit,
                 ceiling,
                 eof,
+                wanted,
                 reads,
             } => {
                 buf.drain(..*at);
@@ -944,6 +1220,13 @@ impl DelimitedReader {
                             buf.extend_from_slice(chunk);
                             *eof = chunk.is_empty();
                         }
+                        // Nothing is read here: the step ends, asking for this much. Room
+                        // made and a buffer grown are kept, so a step taken again — after a
+                        // cancelled await, say — asks for the same.
+                        Reads::Fed(_) => {
+                            *wanted = room;
+                            return Ok(Some(room));
+                        }
                     }
                 }
                 room == 0
@@ -952,10 +1235,23 @@ impl DelimitedReader {
         if too_long {
             return Err(self.failed(py, 3, position, (0, 0)));
         }
-        Ok(())
+        Ok(None)
     }
 
-    fn read_header(&mut self, py: Python<'_>) -> PyResult<()> {
+    /// Reads the header, if the dialect declares one and it has not been read yet. `Some`
+    /// is how much a fed stream wants before the header can be finished.
+    fn settle_header(&mut self, py: Python<'_>) -> PyResult<Option<usize>> {
+        if self.header_pending {
+            if let Some(wanted) = self.read_header(py)? {
+                return Ok(Some(wanted));
+            }
+            self.header_pending = false;
+        }
+        Ok(None)
+    }
+
+    /// Reads the header record. `Some` is how much a fed stream wants before it can go on.
+    fn read_header(&mut self, py: Python<'_>) -> PyResult<Option<usize>> {
         let mut names = vec![Span::default(); 64];
         let mut out = Filled::default();
         loop {
@@ -971,25 +1267,30 @@ impl DelimitedReader {
             let consumed = out.consumed as usize;
             match code {
                 OK if out.rows > 0 => {
-                    let header = names.iter().take(out.rows as usize).map(|name| {
-                        let from: &[u8] = if name.flagged() { &self.arena } else { window };
-                        let start = name.offset as usize;
-                        text(py, from.get(start..start + name.len()).unwrap_or_default())
-                    });
-                    self.header = Some(PyTuple::new(py, header)?.unbind());
+                    let header = header_of(
+                        py,
+                        names.iter().take(out.rows as usize).map(|name| {
+                            let from: &[u8] = if name.flagged() { &self.arena } else { window };
+                            let start = name.offset as usize;
+                            from.get(start..start + name.len()).unwrap_or_default()
+                        }),
+                    )?;
+                    self.header = Some(header);
                     self.source.advance(consumed);
-                    return Ok(());
+                    return Ok(None);
                 }
                 OK => {
                     let rest = window.len();
                     self.source.advance(consumed);
                     if last && (consumed == rest || consumed == 0) {
                         // An empty input has no header and no rows; the width is unknown.
-                        self.header = Some(PyTuple::empty(py).unbind());
-                        return Ok(());
+                        self.header = Some(header_of(py, [])?);
+                        return Ok(None);
                     }
-                    if consumed == 0 {
-                        self.refill(py)?;
+                    if consumed == 0
+                        && let Some(wanted) = self.refill(py)?
+                    {
+                        return Ok(Some(wanted));
                     }
                 }
                 ERR_CELLS => names.resize(out.needed as usize, Span::default()),
@@ -1000,16 +1301,36 @@ impl DelimitedReader {
         }
     }
 
+    /// The next batch, for a caller that cannot feed a stream: a fed one's want is an
+    /// error here, saying what to call instead.
     fn next_batch(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
+        match self.step(py)? {
+            Step::Batch(batch) => Ok(Some(batch)),
+            Step::End => Ok(None),
+            Step::Wants(_) => Err(PyRuntimeError::new_err(
+                "this reader reads an asynchronous stream: await read_async(), or async for",
+            )),
+        }
+    }
+
+    /// One step of a read: a batch, the end, or — for a fed stream — how much it wants
+    /// before it can go on. A step that wants is taken again once fed, from where it was.
+    fn step(&mut self, py: Python<'_>) -> PyResult<Step> {
+        if !self.bound {
+            return Err(out_of_order(UNBOUND));
+        }
         if let Some(failure) = &self.failure {
             return Err(failure.clone_ref(py));
         }
         if matches!(self.source, Source::Closed) {
             return Err(PyValueError::new_err("read of a closed DelimitedReader"));
         }
+        if let Some(wanted) = self.settle_header(py)? {
+            return Ok(Step::Wants(wanted));
+        }
         if self.done || matches!(self.source.window(py), (&[], true)) {
             self.done = true;
-            return Ok(None);
+            return Ok(Step::End);
         }
 
         // Where the core writes: this reader's own arrays, one pair per plan column.
@@ -1105,7 +1426,7 @@ impl DelimitedReader {
                         });
                     }
                     self.source.advance(consumed);
-                    return Ok(Some(Batch {
+                    return Ok(Step::Batch(Batch {
                         rows,
                         per_row: self.per_row,
                         plan: self.plan.clone_ref(py),
@@ -1121,10 +1442,12 @@ impl DelimitedReader {
                     self.source.advance(consumed);
                     if last && (consumed == rest || consumed == 0) {
                         self.done = true;
-                        return Ok(None);
+                        return Ok(Step::End);
                     }
-                    if consumed == 0 {
-                        self.refill(py)?;
+                    if consumed == 0
+                        && let Some(wanted) = self.refill(py)?
+                    {
+                        return Ok(Step::Wants(wanted));
                     }
                 }
                 // The table is sized for the plan in `build`, so this is not expected;
@@ -1211,12 +1534,12 @@ impl DelimitedReader {
     const MAX_ROW_BYTES: usize = MAX_ROW_BYTES;
 
     #[new]
-    #[pyo3(signature = (source, dialect, plan, *, batch_rows = DEFAULT_BATCH_ROWS, buffer_bytes = DEFAULT_BUFFER_BYTES))]
+    #[pyo3(signature = (source, dialect, plan = None, *, batch_rows = DEFAULT_BATCH_ROWS, buffer_bytes = DEFAULT_BUFFER_BYTES))]
     fn new(
         py: Python<'_>,
         source: &Bound<'_, PyAny>,
         dialect: &Bound<'_, PyAny>,
-        plan: &Bound<'_, PyAny>,
+        plan: Option<&Bound<'_, PyAny>>,
         batch_rows: usize,
         buffer_bytes: usize,
     ) -> PyResult<Self> {
@@ -1238,30 +1561,153 @@ impl DelimitedReader {
                 source.get_type().name()?
             )));
         };
-        DelimitedReader::build(py, source, dialect, plan, batch_rows)
+        DelimitedReader::build(py, source, dialect, plan, batch_rows, false)
     }
 
     /// Opens the file at ``path`` — a ``str`` or ``os.PathLike`` — and reads it. The
     /// reader owns the file: ``close()``, or leaving a ``with`` block, closes it.
     #[staticmethod]
-    #[pyo3(signature = (path, dialect, plan, *, batch_rows = DEFAULT_BATCH_ROWS, buffer_bytes = DEFAULT_BUFFER_BYTES))]
+    #[pyo3(signature = (path, dialect, plan = None, *, batch_rows = DEFAULT_BATCH_ROWS, buffer_bytes = DEFAULT_BUFFER_BYTES))]
     fn open(
         py: Python<'_>,
         path: PathBuf,
         dialect: &Bound<'_, PyAny>,
-        plan: &Bound<'_, PyAny>,
+        plan: Option<&Bound<'_, PyAny>>,
         batch_rows: usize,
         buffer_bytes: usize,
     ) -> PyResult<Self> {
         let source = stream(Reads::File(File::open(path)?), buffer_bytes)?;
-        DelimitedReader::build(py, source, dialect, plan, batch_rows)
+        DelimitedReader::build(py, source, dialect, plan, batch_rows, false)
     }
 
-    /// The header's names, when the dialect declares a header: a tuple of ``str``, empty
-    /// for an input with no record at all. ``None`` when the dialect declares none.
+    /// A reader over an asynchronous stream — anything with ``async read(size)``, such as
+    /// an ``asyncio.StreamReader`` — made by a coroutine that reads the header (when the
+    /// dialect declares one) before it returns: ``await DelimitedReader.open_async(stream,
+    /// dialect)``. Read it with ``await read_async()`` or ``async for``. ``bytes`` are taken
+    /// too, and read as the constructor reads them. The stream is the caller's to close.
+    #[staticmethod]
+    #[pyo3(signature = (stream, dialect, plan = None, *, batch_rows = DEFAULT_BATCH_ROWS, buffer_bytes = DEFAULT_BUFFER_BYTES))]
+    fn open_async<'py>(
+        py: Python<'py>,
+        stream: &Bound<'py, PyAny>,
+        dialect: &Bound<'py, PyAny>,
+        plan: Option<&Bound<'py, PyAny>>,
+        batch_rows: usize,
+        buffer_bytes: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        asynchronous(py, "open_reader")?.call1((stream, dialect, plan, batch_rows, buffer_bytes))
+    }
+
+    /// For ``open_async``: the reader over ``stream``, its header still to be read.
+    #[staticmethod]
+    #[pyo3(signature = (stream, dialect, plan, batch_rows, buffer_bytes))]
+    fn _over_async(
+        py: Python<'_>,
+        stream: &Bound<'_, PyAny>,
+        dialect: &Bound<'_, PyAny>,
+        plan: Option<&Bound<'_, PyAny>>,
+        batch_rows: usize,
+        buffer_bytes: usize,
+    ) -> PyResult<Self> {
+        let source = if let Ok(bytes) = stream.cast::<PyBytes>() {
+            Source::Bytes {
+                bytes: bytes.clone().unbind(),
+                at: 0,
+                window: WINDOW,
+            }
+        } else if stream.hasattr("read")? {
+            self::stream(Reads::Fed(stream.clone().unbind()), buffer_bytes)?
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "stream must be bytes or have an async read(size), not {}",
+                stream.get_type().name()?
+            )));
+        };
+        DelimitedReader::build(py, source, dialect, plan, batch_rows, true)
+    }
+
+    /// One step of an asynchronous read: a :class:`Batch`, ``None`` at the end, or how
+    /// many bytes the stream is to be read for and fed in (``_feed``) before the next step.
+    fn _advance(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match self.step(py)? {
+            Step::Batch(batch) => Py::new(py, batch)?.into_any(),
+            Step::End => py.None(),
+            Step::Wants(wanted) => wanted.into_pyobject(py)?.into_any().unbind(),
+        })
+    }
+
+    /// Reads the header of a reader ``_over_async`` made: ``None`` once it is read, or how
+    /// many bytes to feed in first.
+    fn _header(&mut self, py: Python<'_>) -> PyResult<Option<usize>> {
+        self.settle_header(py)
+    }
+
+    /// Feeds a fed stream's reader what the stream's ``read(size)`` returned for the size
+    /// it last asked for; ``b""`` is the end of the stream.
+    fn _feed(&mut self, chunk: &Bound<'_, PyAny>) -> PyResult<()> {
+        let Source::Stream {
+            buf,
+            eof,
+            wanted,
+            reads: Reads::Fed(_),
+            ..
+        } = &mut self.source
+        else {
+            return Err(PyRuntimeError::new_err(
+                "only a reader over an asynchronous stream is fed",
+            ));
+        };
+        if *wanted == 0 {
+            return Err(PyRuntimeError::new_err(
+                "the reader asked for nothing to be fed",
+            ));
+        }
+        let chunk = chunk.cast::<PyBytes>().map_err(|_| {
+            PyTypeError::new_err("read() must return bytes: read the stream in binary mode")
+        })?;
+        let chunk = chunk.as_bytes();
+        if chunk.len() > *wanted {
+            return Err(PyValueError::new_err(
+                "read(size) returned more than size bytes",
+            ));
+        }
+        buf.extend_from_slice(chunk);
+        *eof = chunk.is_empty();
+        *wanted = 0;
+        Ok(())
+    }
+
+    /// Binds the plan a reader made without one reads through — once, before the first
+    /// read: ``plan`` an iterable of :class:`Column`, typically with ordinals the header
+    /// looked up (``header.ordinal("id")``). A second call raises ``RuntimeError``; a plan
+    /// that cannot be honoured raises as the constructor would, and leaves the reader
+    /// unbound.
+    fn bind(&mut self, py: Python<'_>, plan: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.bound {
+            return Err(out_of_order(ALREADY_BOUND));
+        }
+        self.bind_plan(py, plan)
+    }
+
+    /// Whether a plan has been bound: always, for a reader made with one.
     #[getter]
-    fn header<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
+    fn is_bound(&self) -> bool {
+        self.bound
+    }
+
+    /// The header's names, when the dialect declares a header: a :class:`Header` — a tuple
+    /// of ``str`` that looks a name up — empty for an input with no record at all. ``None``
+    /// when the dialect declares none.
+    #[getter]
+    fn header<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         self.header.as_ref().map(|header| header.bind(py).clone())
+    }
+
+    /// How many cells a record has: the header's count once it has been read, otherwise
+    /// the first record's once it has been — ``None`` until then.
+    #[getter]
+    fn column_count(&self) -> Option<usize> {
+        (self.state.expected != 0).then_some(self.state.expected as usize)
     }
 
     /// The dialect in force.
@@ -1270,7 +1716,8 @@ impl DelimitedReader {
         self.dialect.bind(py).clone()
     }
 
-    /// The plan every batch is filled through: a tuple of :class:`Column`.
+    /// The plan every batch is filled through: a tuple of :class:`Column`, empty until one
+    /// is bound.
     #[getter]
     fn plan<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
         self.plan.bind(py).clone()
@@ -1291,9 +1738,37 @@ impl DelimitedReader {
     /// Reads the next batch, or returns ``None`` once the input is exhausted.
     ///
     /// Raises :class:`TabularError` for input that is structurally broken — after every
-    /// intact row before the break has been delivered, and again on every later call.
+    /// intact row before the break has been delivered, and again on every later call — and
+    /// ``RuntimeError`` before a plan is bound (which a later ``bind`` puts right).
     fn read(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
         self.next_batch(py)
+    }
+
+    /// ``read()``, as a coroutine: ``await reader.read_async()``. A reader over an
+    /// asynchronous stream awaits the stream's ``read(size)`` whenever it needs more input,
+    /// with the core's own work done between awaits, the interpreter released; any other
+    /// reader completes without awaiting anything.
+    ///
+    /// Cancellation is asyncio's: a read cancelled while it awaits the stream has fed the
+    /// reader nothing, and the next read picks up where it was — the reader is not spoiled.
+    /// One read at a time: a reader is not read by two coroutines at once.
+    fn read_async<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let stream = match &slf.borrow().source {
+            Source::Stream {
+                reads: Reads::Fed(stream),
+                ..
+            } => stream.clone_ref(py),
+            _ => py.None(),
+        };
+        asynchronous(py, "read")?.call1((slf, stream))
+    }
+
+    /// Every row left, batch by batch, as :class:`Row` views: the next batch is read as the
+    /// one in hand runs out. Each row's batch owns what it shows, so a row stays valid
+    /// after the iteration has moved on.
+    fn rows(slf: &Bound<'_, Self>) -> Rows {
+        Rows::reading(Feeds::Delimited(slf.clone().unbind()))
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -1302,6 +1777,15 @@ impl DelimitedReader {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
         self.next_batch(py)
+    }
+
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        asynchronous(py, "next_batch")?.call1((Self::read_async(slf)?,))
     }
 
     /// Lets go of the source: closes the file this reader opened, or drops its reference
@@ -1356,6 +1840,8 @@ fn workbook_error(py: Python<'_>, error: crate::Error) -> PyErr {
         crate::Error::NoSheet(which) => {
             PyKeyError::new_err(format!("the workbook has no sheet {which}"))
         }
+        crate::Error::Unbound => out_of_order(UNBOUND),
+        crate::Error::AlreadyBound => out_of_order(ALREADY_BOUND),
         other => PyValueError::new_err(other.to_string()),
     }
 }
@@ -1386,7 +1872,10 @@ impl SheetInfo {
 /// An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
 /// styles loaded: what a :class:`Sheet` reads from.
 ///
-/// ``Workbook(data)`` opens ``bytes``; ``Workbook.open(path)`` reads a file. A workbook
+/// ``Workbook(data)`` opens ``bytes``, or reads a binary file object — anything with
+/// ``read(size)`` — to its end; ``Workbook.open(path)`` reads a file, and ``await
+/// Workbook.open_async(stream)`` an asynchronous stream. Which format it is, is read from
+/// the bytes, whatever the source was called. A workbook
 /// that cannot be read — not a zip, encrypted, a part missing or broken — raises
 /// :class:`TabularError`.
 #[pyclass(frozen, module = "hypertabular")]
@@ -1414,11 +1903,65 @@ impl Workbook {
     }
 }
 
+/// How much of a file object a workbook asks for at a time.
+const WORKBOOK_CHUNK: usize = 1 << 20;
+
+/// Appends a chunk a stream's `read` returned, which has to be `bytes`.
+fn append_chunk(into: &mut Vec<u8>, chunk: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let chunk = chunk
+        .cast::<PyBytes>()
+        .map_err(|_| {
+            PyTypeError::new_err("read() must return bytes: open the file in binary mode")
+        })?
+        .as_bytes();
+    into.try_reserve(chunk.len())
+        .map_err(|_| PyMemoryError::new_err("no memory for a workbook this large"))?;
+    into.extend_from_slice(chunk);
+    Ok(chunk.len())
+}
+
 #[pymethods]
 impl Workbook {
     #[new]
-    fn new(py: Python<'_>, data: &Bound<'_, PyBytes>) -> PyResult<Self> {
-        Workbook::build(py, data.as_bytes().to_vec())
+    fn new(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        if let Ok(bytes) = data.cast::<PyBytes>() {
+            return Workbook::build(py, bytes.as_bytes().to_vec());
+        }
+        if data.is_instance_of::<PyString>() || data.hasattr("__fspath__")? {
+            return Err(PyTypeError::new_err(
+                "data must be bytes or a binary file object; Workbook.open(path) opens a file",
+            ));
+        }
+        if !data.hasattr("read")? {
+            return Err(PyTypeError::new_err(format!(
+                "data must be bytes or a binary file object, not {}",
+                data.get_type().name()?
+            )));
+        }
+        // To its end, into memory the workbook owns: a zip is read from its directory at
+        // the end back, which a forward-only stream cannot offer.
+        let mut bytes = Vec::new();
+        while append_chunk(&mut bytes, &data.call_method1("read", (WORKBOOK_CHUNK,))?)? > 0 {}
+        Workbook::build(py, bytes)
+    }
+
+    /// A workbook read from an asynchronous stream — anything with ``async read(size)``,
+    /// such as an ``asyncio.StreamReader`` — to its end, by a coroutine: ``await
+    /// Workbook.open_async(stream)``. The stream is the caller's to close.
+    #[staticmethod]
+    fn open_async<'py>(py: Python<'py>, stream: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        asynchronous(py, "workbook")?.call1((stream, WORKBOOK_CHUNK))
+    }
+
+    /// For ``open_async``: the workbook the chunks an asynchronous stream returned make,
+    /// joined once, in memory the workbook owns.
+    #[staticmethod]
+    fn _from_chunks(py: Python<'_>, chunks: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut bytes = Vec::new();
+        for chunk in chunks.try_iter()? {
+            append_chunk(&mut bytes, &chunk?)?;
+        }
+        Workbook::build(py, bytes)
     }
 
     /// Reads the file at ``path`` — a ``str`` or ``os.PathLike`` — and opens it.
@@ -1457,16 +2000,17 @@ impl Workbook {
 
     /// Starts a read of one sheet — ``which`` is its index in :attr:`sheets` or its name —
     /// through ``plan``, as ``options`` (a :class:`SheetOptions`) says. When the options
-    /// declare a header it is read here. A sheet the workbook does not have raises
-    /// ``IndexError`` for an index and ``KeyError`` for a name.
+    /// declare a header it is read here. Without a plan the header is read all the same,
+    /// and the sheet waits for ``Sheet.bind(plan)``. A sheet the workbook does not have
+    /// raises ``IndexError`` for an index and ``KeyError`` for a name.
+    #[pyo3(signature = (which, options, plan = None))]
     fn sheet(
         &self,
         py: Python<'_>,
         which: &Bound<'_, PyAny>,
         options: &Bound<'_, PyAny>,
-        plan: &Bound<'_, PyAny>,
+        plan: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Sheet> {
-        let companions = companions(py)?;
         let batch_rows: usize = options.getattr("batch_rows")?.extract()?;
         if batch_rows == 0 {
             return Err(PyValueError::new_err("batch_rows must be at least 1"));
@@ -1476,19 +2020,8 @@ impl Workbook {
             skip_empty_rows: options.getattr("skip_empty_rows")?.is_truthy()?,
             batch_rows,
         };
-        let mut columns = Vec::new();
-        let mut planned_columns = Vec::new();
-        let mut doors = Vec::new();
-        for (index, column) in plan.try_iter()?.enumerate() {
-            let column = column?;
-            let (door, spec) = planned(py, companions, index, &column)?;
-            let format = spec.num_format().ok_or_else(|| {
-                PyValueError::new_err(format!("plan[{index}].format cannot be honoured"))
-            })?;
-            planned_columns.push(crate::Column::new(spec.ordinal as usize, door).format(format));
-            columns.push(column);
-            doors.push(door);
-        }
+        let sheet_plan = plan.map(|plan| SheetPlan::of(py, plan)).transpose()?;
+        let planned_columns = sheet_plan.as_ref().map(|plan| plan.planned.as_slice());
 
         let book: &crate::Workbook<'static> = &self.book;
         let shared = &self.book;
@@ -1503,7 +2036,7 @@ impl Workbook {
                     ))
                 })?;
             py.detach(|| {
-                crate::Workbook::shared_sheet(shared, index.into(), settings, &planned_columns)
+                crate::Workbook::shared_sheet(shared, index.into(), settings, planned_columns)
             })
         } else if let Ok(name) = which.extract::<String>() {
             py.detach(|| {
@@ -1511,7 +2044,7 @@ impl Workbook {
                     shared,
                     name.as_str().into(),
                     settings,
-                    &planned_columns,
+                    planned_columns,
                 )
             })
         } else {
@@ -1521,18 +2054,22 @@ impl Workbook {
             )));
         };
         let sheet = opened.map_err(|error| workbook_error(py, error))?;
-        let header = sheet.header().map(|header| {
-            let names: Vec<_> = header.names().map(|name| text(py, name)).collect();
-            PyTuple::new(py, names).map(Bound::unbind)
-        });
+        let header = sheet
+            .header()
+            .map(|header| header_of(py, header.names()))
+            .transpose()?;
+        let (plan, doors) = match sheet_plan {
+            Some(plan) => (plan.columns.unbind(), plan.doors),
+            None => (PyTuple::empty(py).unbind(), Vec::new()),
+        };
         Ok(Sheet {
             sheet,
             book: Arc::clone(&self.book),
             strings: self.strings.clone_ref(py),
             options: options.clone().unbind(),
-            plan: PyTuple::new(py, columns)?.unbind(),
+            plan,
             doors,
-            header: header.transpose()?,
+            header,
             failure: None,
         })
     }
@@ -1543,6 +2080,37 @@ impl Workbook {
             self.book.format(),
             self.book.sheets().len()
         )
+    }
+}
+
+/// A plan for a sheet, checked: the caller's columns, the crate's, and their doors.
+struct SheetPlan<'py> {
+    columns: Bound<'py, PyTuple>,
+    planned: Vec<crate::Column>,
+    doors: Vec<Door>,
+}
+
+impl<'py> SheetPlan<'py> {
+    fn of(py: Python<'py>, plan: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let companions = companions(py)?;
+        let mut columns = Vec::new();
+        let mut planned_columns = Vec::new();
+        let mut doors = Vec::new();
+        for (index, column) in plan.try_iter()?.enumerate() {
+            let column = column?;
+            let (door, spec) = planned(py, companions, index, &column)?;
+            let format = spec.num_format().ok_or_else(|| {
+                PyValueError::new_err(format!("plan[{index}].format cannot be honoured"))
+            })?;
+            planned_columns.push(crate::Column::new(spec.ordinal as usize, door).format(format));
+            columns.push(column);
+            doors.push(door);
+        }
+        Ok(SheetPlan {
+            columns: PyTuple::new(py, columns)?,
+            planned: planned_columns,
+            doors,
+        })
     }
 }
 
@@ -1562,9 +2130,10 @@ struct Sheet {
     book: Arc<crate::Workbook<'static>>,
     strings: Py<PyBytes>,
     options: Py<PyAny>,
+    /// The plan, as the caller's own `Column`s: empty until one is bound.
     plan: Py<PyTuple>,
     doors: Vec<Door>,
-    header: Option<Py<PyTuple>>,
+    header: Option<Py<PyAny>>,
     /// The structural failure that ended the sheet: final, and the same exception raised
     /// again on every read.
     failure: Option<PyErr>,
@@ -1572,6 +2141,10 @@ struct Sheet {
 
 impl Sheet {
     fn next_batch(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
+        // Not kept as the sheet's failure: binding a plan puts it right.
+        if !self.sheet.is_bound() {
+            return Err(out_of_order(UNBOUND));
+        }
         if let Some(failure) = &self.failure {
             return Err(failure.clone_ref(py));
         }
@@ -1639,22 +2212,52 @@ impl Sheet {
         self.options.bind(py).clone()
     }
 
-    /// The plan every batch is filled through: a tuple of :class:`Column`.
+    /// The plan every batch is filled through: a tuple of :class:`Column`, empty until one
+    /// is bound.
     #[getter]
     fn plan<'py>(&self, py: Python<'py>) -> Bound<'py, PyTuple> {
         self.plan.bind(py).clone()
     }
 
     /// The header row's names — a typed cell said the way the text door says it — as a
-    /// tuple of ``str``, or ``None`` when the options declare no header.
+    /// :class:`Header`, or ``None`` when the options declare no header.
     #[getter]
-    fn header<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyTuple>> {
+    fn header<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         self.header.as_ref().map(|header| header.bind(py).clone())
     }
 
-    /// Reads the next batch, or returns ``None`` once the sheet has no more rows.
+    /// Binds the plan a sheet opened without one reads through — once, before the first
+    /// read: :meth:`DelimitedReader.bind`, for a sheet. A second call raises
+    /// ``RuntimeError``; a plan that cannot be honoured leaves the sheet unbound.
+    fn bind(&mut self, py: Python<'_>, plan: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.sheet.is_bound() {
+            return Err(out_of_order(ALREADY_BOUND));
+        }
+        let plan = SheetPlan::of(py, plan)?;
+        self.sheet
+            .bind(&plan.planned)
+            .map_err(|error| workbook_error(py, error))?;
+        self.plan = plan.columns.unbind();
+        self.doors = plan.doors;
+        Ok(())
+    }
+
+    /// Whether a plan has been bound: always, for a sheet opened with one.
+    #[getter]
+    fn is_bound(&self) -> bool {
+        self.sheet.is_bound()
+    }
+
+    /// Reads the next batch, or returns ``None`` once the sheet has no more rows. Raises
+    /// ``RuntimeError`` before a plan is bound.
     fn read(&mut self, py: Python<'_>) -> PyResult<Option<Batch>> {
         self.next_batch(py)
+    }
+
+    /// Every row left, batch by batch, as :class:`Row` views: :meth:`DelimitedReader.rows`,
+    /// for a sheet.
+    fn rows(slf: &Bound<'_, Self>) -> Rows {
+        Rows::reading(Feeds::Sheet(slf.clone().unbind()))
     }
 
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -1674,6 +2277,12 @@ impl Sheet {
     }
 }
 
+/// One of the coroutine functions in `hypertabular._aio`, which await a stream on a
+/// reader's behalf: the core never waits, so the waiting is done in Python.
+fn asynchronous<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("hypertabular._aio")?.getattr(name)
+}
+
 fn stream(reads: Reads, buffer_bytes: usize) -> PyResult<Source> {
     if buffer_bytes == 0 {
         return Err(PyValueError::new_err("buffer_bytes must be at least 1"));
@@ -1684,6 +2293,7 @@ fn stream(reads: Reads, buffer_bytes: usize) -> PyResult<Source> {
         limit: buffer_bytes.min(MAX_ROW_BYTES),
         ceiling: MAX_ROW_BYTES,
         eof: false,
+        wanted: 0,
         reads,
     })
 }
@@ -1704,7 +2314,8 @@ fn native_version() -> String {
 }
 
 /// Hands this module the package's own classes — the plan column, the dialect, the
-/// structural failure and its kinds, the workbook format — and has it import HyperCast's.
+/// structural failure and its kinds, the workbook format, the header — and has it import
+/// HyperCast's.
 #[pyfunction]
 fn _bind(
     py: Python<'_>,
@@ -1713,6 +2324,7 @@ fn _bind(
     error: Bound<'_, PyAny>,
     failure: Bound<'_, PyAny>,
     workbook_format: Bound<'_, PyAny>,
+    header: Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let hypercast = py.import("hypercast")?;
     let reason = hypercast.getattr("CastFailure")?;
@@ -1731,6 +2343,7 @@ fn _bind(
         failure: failure.unbind(),
         workbook_format: workbook_format.unbind(),
         excel_epoch: hypercast.getattr("ExcelEpoch")?.unbind(),
+        header: header.unbind(),
         values: Values::import(py)?,
     };
     let _ = COMPANIONS.set(py, companions);
@@ -1757,6 +2370,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DelimitedReader>()?;
     m.add_class::<Batch>()?;
     m.add_class::<ColumnData>()?;
+    m.add_class::<Row>()?;
+    m.add_class::<Rows>()?;
     m.add_class::<Workbook>()?;
     m.add_class::<SheetInfo>()?;
     m.add_class::<Sheet>()?;

@@ -60,7 +60,7 @@ checksum = "76d9b0ad5cc33479f55818d0176f8718020c70b7788a3072fc33ddc4affafadc"
 
 [[package]]
 name = "hypertabular"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "hypercast",
 ]

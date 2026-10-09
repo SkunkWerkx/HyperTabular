@@ -114,6 +114,18 @@ token at a time for this: a token is looked at, acted on, and only then stepped 
   id, a cell format's number format by its id — are a sort and a search in the caller's
   scratch, not a walk.
 
+## Opening, and the plan
+
+- A workbook is read from its end — a zip's directory is there — so a stream
+  (`Workbook::from_reader`, and `from_async_reader` behind the `async` feature) is read
+  whole into memory the workbook owns before the core is handed it.
+- A sheet opens with a plan, or without one (`Workbook::sheet_unbound`) to read its header
+  first and `bind` the plan after. The core holds the header row's cells in the caller's
+  row slots as well as naming them, because a row an ODS sheet repeats is delivered again
+  from those slots; so a sheet without a plan gives the header call a slot for every name
+  (the slots grow with the cell table), and binding only ever grows them. Every binding
+  does the same, and `generated-a.ods` in the corpus is the case that holds them to it.
+
 ## Allocation story
 
 The core allocates nothing: `tests/kernel_workbook_allocation_free.rs` watches four

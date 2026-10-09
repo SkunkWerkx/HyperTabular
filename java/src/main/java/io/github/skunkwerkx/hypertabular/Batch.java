@@ -7,13 +7,20 @@ import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -28,8 +35,11 @@ import java.util.UUID;
  * the reader is asked for the next batch — the reader hands out the same instance each time —
  * and every segment it hands out is valid as long, and refused by the runtime once the reader
  * is closed. Not thread-safe, and confined to the reader's thread.
+ *
+ * <p>A batch is also its rows, in order — {@code for (Row row : batch)} — each a {@link Row}
+ * view with the batch's accessors, valid as long as the batch is.
  */
-public final class Batch {
+public final class Batch implements Iterable<Row> {
     private static final ValueLayout.OfByte BYTE = ValueLayout.JAVA_BYTE;
     private static final ValueLayout.OfShort SHORT = ValueLayout.JAVA_SHORT;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
@@ -48,6 +58,26 @@ public final class Batch {
     private MemorySegment arena;
     /** Where a raw quoted cell is unescaped to; made on first use, closed with the reader. */
     private Block scratch;
+    /**
+     * Where {@link #chars} decodes to: made on first use, filled from the front, and started
+     * over at each batch. Replaced, never resized, when it runs out, so that a view handed out
+     * earlier keeps the old array, unchanged.
+     */
+    private char[] chars;
+    /** {@link #chars}, read-only, for the views it hands out. */
+    private CharBuffer charsView;
+
+    private int charsUsed;
+    /** Chars decoded for this batch, in every arena it has had: what the next arena is sized by. */
+    private long charsDecoded;
+    /** What a cell that is not UTF-8 is decoded by, replacing as {@link #string} does; made on first use. */
+    private CharsetDecoder decoder;
+
+    /** For the tests: the char arena starts with room for one cell and grows only to what a cell needs. */
+    static boolean stingyChars;
+
+    /** For the tests: how many times a char arena was made or replaced. */
+    static long charsGrown;
 
     Batch(Columns columns, boolean workbook) {
         this.columns = columns;
@@ -62,6 +92,8 @@ public final class Batch {
         this.base = base;
         this.baseStart = baseStart;
         this.arena = arena;
+        charsUsed = 0;
+        charsDecoded = 0;
         return this;
     }
 
@@ -97,6 +129,43 @@ public final class Batch {
      */
     public List<Column> columns() {
         return columns.planList;
+    }
+
+    /**
+     * Row {@code row} of the batch, as a {@link Row} view.
+     *
+     * @param row row of the batch
+     * @return the row, valid as long as the batch is
+     * @throws IndexOutOfBoundsException if the row is not in the batch
+     */
+    public Row row(int row) {
+        return new Row(this, Objects.checkIndex(row, rows));
+    }
+
+    /**
+     * The batch's rows, in order: what {@code for (Row row : batch)} walks. Each row is a view
+     * of this batch, valid until the next read, as the batch is.
+     *
+     * @return an iterator over the rows
+     */
+    @Override
+    public Iterator<Row> iterator() {
+        return new Iterator<>() {
+            private int next;
+
+            @Override
+            public boolean hasNext() {
+                return next < rows;
+            }
+
+            @Override
+            public Row next() {
+                if (next >= rows) {
+                    throw new NoSuchElementException();
+                }
+                return new Row(Batch.this, next++);
+            }
+        };
     }
 
     /**
@@ -327,6 +396,168 @@ public final class Batch {
     public String string(int column, int row) {
         MemorySegment text = text(column, row);
         return text == null ? null : decode(text);
+    }
+
+    /**
+     * The cell of a {@link Door#TEXT} column as UTF-16, without making a string: its bytes
+     * decoded (an invalid sequence replaced, as {@link #string} replaces it) into a char array
+     * the batch keeps, and handed out as a read-only view of it — position zero, limit the
+     * cell's length. Valid until the next read, as everything a batch gives out is: the array
+     * is only ever appended to while the batch is current, so a view handed out earlier is
+     * never written over, and it starts over with the next batch, so after the first few
+     * batches it is large enough and nothing but the view itself is allocated.
+     *
+     * @param column index into the plan
+     * @param row row of the batch
+     * @return the cell's text, or {@code null} for an empty cell, as {@link #string} says
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     */
+    public CharBuffer chars(int column, int row) {
+        requireText(column);
+        if (code(column, row) != 0) {
+            return null;
+        }
+        MemorySegment value = columns.values[column];
+        int offset = value.get(INT, row * 8L);
+        int span = value.get(INT, row * 8L + 4);
+        int length = span & Native.SPAN_LENGTH;
+        // UTF-16 never takes more units than UTF-8 takes bytes, a replacement included.
+        if (chars == null || chars.length - charsUsed < length) {
+            // A view handed out earlier keeps the old array alive and unchanged; the new one
+            // starts empty, with room for twice what this batch has decoded so far, so that
+            // the next batch like it fits in one.
+            long room = stingyChars ? Math.max(length, 1) : Math.max((charsDecoded + length) * 2, 1024);
+            chars = new char[(int) Math.min(room, Integer.MAX_VALUE - 8)];
+            charsView = CharBuffer.wrap(chars).asReadOnlyBuffer();
+            charsUsed = 0;
+            charsGrown++;
+        }
+        int written = span < 0
+                ? decode(arena, offset, length, chars, charsUsed, length)
+                : decode(base, baseStart + offset, length, chars, charsUsed, length);
+        CharBuffer view = charsView.slice(charsUsed, written);
+        charsUsed += written;
+        charsDecoded += written;
+        return view;
+    }
+
+    /**
+     * The cell of a {@link Door#TEXT} column decoded as UTF-16 into {@code destination} from
+     * {@code offset}, an invalid sequence replaced as {@link #string} replaces it. Nothing is
+     * allocated. An empty cell writes nothing and returns {@code 0}; a cell that is not empty
+     * has at least one char.
+     *
+     * @param column index into the plan
+     * @param row row of the batch
+     * @param destination where the text is written
+     * @param offset where in {@code destination} it starts
+     * @return the chars written, or {@code -1} if they do not fit between {@code offset} and
+     *     the end of {@code destination} — in which case what is there is unspecified
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     * @throws IndexOutOfBoundsException if {@code offset} is not within {@code destination}
+     */
+    public int getChars(int column, int row, char[] destination, int offset) {
+        requireText(column);
+        Objects.checkFromToIndex(offset, destination.length, destination.length);
+        if (code(column, row) != 0) {
+            return 0;
+        }
+        MemorySegment value = columns.values[column];
+        int at = value.get(INT, row * 8L);
+        int span = value.get(INT, row * 8L + 4);
+        int length = span & Native.SPAN_LENGTH;
+        int room = destination.length - offset;
+        return span < 0
+                ? decode(arena, at, length, destination, offset, room)
+                : decode(base, baseStart + at, length, destination, offset, room);
+    }
+
+    /**
+     * Decodes {@code length} bytes of UTF-8 from {@code from} at {@code at} into {@code to} at
+     * {@code offset}, writing no more than {@code room} chars. Returns how many it wrote, or
+     * {@code -1} if they do not fit. Well-formed text — almost all of it — is decoded here, a
+     * byte at a time; text with anything wrong in it is handed whole to the JDK's own decoder,
+     * so that it is replaced exactly as {@link #string} replaces it.
+     */
+    private int decode(MemorySegment from, long at, int length, char[] to, int offset, int room) {
+        int written = 0;
+        int index = 0;
+        while (index < length) {
+            int lead = from.get(BYTE, at + index) & 0xFF;
+            if (lead < 0x80) {
+                if (written == room) {
+                    return -1;
+                }
+                to[offset + written++] = (char) lead;
+                index++;
+                continue;
+            }
+            int extra;
+            int point;
+            int least;
+            if (lead >= 0xC2 && lead <= 0xDF) {
+                extra = 1;
+                point = lead & 0x1F;
+                least = 0x80;
+            } else if (lead >= 0xE0 && lead <= 0xEF) {
+                extra = 2;
+                point = lead & 0x0F;
+                least = 0x800;
+            } else if (lead >= 0xF0 && lead <= 0xF4) {
+                extra = 3;
+                point = lead & 0x07;
+                least = 0x10000;
+            } else {
+                return decodeReplacing(from, at, length, to, offset, room);
+            }
+            if (index + extra >= length) {
+                // Cut off by the end of the cell.
+                return decodeReplacing(from, at, length, to, offset, room);
+            }
+            for (int next = 1; next <= extra; next++) {
+                int trail = from.get(BYTE, at + index + next) & 0xFF;
+                if ((trail & 0xC0) != 0x80) {
+                    return decodeReplacing(from, at, length, to, offset, room);
+                }
+                point = (point << 6) | (trail & 0x3F);
+            }
+            // Overlong, past the last code point, or a surrogate's own encoding.
+            if (point < least || point > Character.MAX_CODE_POINT || (point >= 0xD800 && point <= 0xDFFF)) {
+                return decodeReplacing(from, at, length, to, offset, room);
+            }
+            if (point < 0x10000) {
+                if (written == room) {
+                    return -1;
+                }
+                to[offset + written++] = (char) point;
+            } else {
+                if (room - written < 2) {
+                    return -1;
+                }
+                to[offset + written++] = Character.highSurrogate(point);
+                to[offset + written++] = Character.lowSurrogate(point);
+            }
+            index += extra + 1;
+        }
+        return written;
+    }
+
+    /** {@link #decode} of text that is not well-formed UTF-8: the JDK's decoder, replacing. */
+    private int decodeReplacing(MemorySegment from, long at, int length, char[] to, int offset, int room) {
+        if (decoder == null) {
+            decoder = StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(CodingErrorAction.REPLACE);
+        }
+        ByteBuffer in = from.asSlice(at, length).asByteBuffer();
+        CharBuffer out = CharBuffer.wrap(to, offset, room);
+        decoder.reset();
+        CoderResult result = decoder.decode(in, out, true);
+        if (result.isOverflow() || decoder.flush(out).isOverflow()) {
+            return -1;
+        }
+        return out.position() - offset;
     }
 
     /**

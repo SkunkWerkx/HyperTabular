@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Unicode;
 using HyperCast;
 using HyperCast.Interop;
 
@@ -31,6 +32,19 @@ public sealed unsafe class Batch
 	/// <summary>Where a flagged span's bytes are.</summary>
 	byte[] _arena = [];
 	byte[] _scratch = [];
+	/// <summary>Where <see cref="GetChars"/> decodes to: made on first use, filled from the front, and started over at each batch.</summary>
+	char[] _chars = [];
+	int _charsUsed;
+	/// <summary>Chars decoded for this batch, in every arena it has had: what the next arena is sized by.</summary>
+	int _charsDecoded;
+
+	/// <summary>For the tests: the char arena starts with room for one element and grows only to what a cell needs.</summary>
+	[ThreadStatic]
+	internal static bool Stingy;
+
+	/// <summary>For the tests: how many times a char arena was made or grown on this thread.</summary>
+	[ThreadStatic]
+	internal static int CharsGrown;
 
 	internal Batch(Columns columns, bool workbook)
 	{
@@ -46,6 +60,8 @@ public sealed unsafe class Batch
 		_perRow = perRow;
 		_base = @base;
 		_arena = arena;
+		_charsUsed = 0;
+		_charsDecoded = 0;
 		return this;
 	}
 
@@ -54,6 +70,39 @@ public sealed unsafe class Batch
 
 	/// <summary>How many rows the batch holds. Never zero while the batch is current.</summary>
 	public int Rows => _rows;
+
+	/// <summary>Row <paramref name="index"/> of the batch, as a view (<see cref="HyperTabular.Row"/>).</summary>
+	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
+	public Row Row(int index)
+	{
+		CheckRow(index);
+		return new(this, index);
+	}
+
+	/// <summary>
+	/// The batch's rows, in order, for <c>foreach (var row in batch)</c>: each a view of the
+	/// batch (<see cref="HyperTabular.Row"/>), made without allocating, and valid as long as the batch is.
+	/// </summary>
+	public RowEnumerator GetEnumerator() => new(this);
+
+	/// <summary>A loop over a batch's rows.</summary>
+	public ref struct RowEnumerator
+	{
+		readonly Batch _batch;
+		int _index;
+
+		internal RowEnumerator(Batch batch)
+		{
+			_batch = batch;
+			_index = -1;
+		}
+
+		/// <summary>The row the loop is on.</summary>
+		public readonly Row Current => new(_batch, _index);
+
+		/// <summary>Moves to the next row.</summary>
+		public bool MoveNext() => ++_index < _batch._rows;
+	}
 
 	/// <summary>The plan the batch was read through: column <c>i</c> of the batch is <c>Columns[i]</c>.</summary>
 	public IReadOnlyList<Column> Columns => _columns.Plan;
@@ -215,6 +264,56 @@ public sealed unsafe class Batch
 	/// <summary>The cell of a <see cref="Door.Text"/> column as a string, or <see langword="null"/> for an empty cell.</summary>
 	public string? GetString(int column, int row) =>
 		TryGetText(column, row, out var utf8) ? Encoding.UTF8.GetString(utf8) : null;
+
+	/// <summary>
+	/// The cell of a <see cref="Door.Text"/> column as UTF-16, without making a string: its
+	/// bytes decoded (an invalid sequence replaced, as <see cref="GetString"/> replaces it) into
+	/// an arena the batch keeps. Empty for an empty cell. Valid until the next read, as
+	/// everything a batch gives out is: the arena is only ever appended to while the batch is
+	/// current — a span handed out earlier is never written over — and starts over with the
+	/// next batch, so after the first few batches it is large enough and nothing is allocated.
+	/// </summary>
+	/// <exception cref="InvalidOperationException">The column is not read through <see cref="Door.Text"/>.</exception>
+	public ReadOnlySpan<char> GetChars(int column, int row)
+	{
+		if (!TryGetText(column, row, out var utf8) || utf8.IsEmpty)
+			return default;
+		// UTF-16 never takes more units than UTF-8 takes bytes, a replacement included.
+		if (_chars.Length - _charsUsed < utf8.Length)
+		{
+			// A span handed out earlier keeps the old arena alive and unchanged; the new one
+			// starts empty, with room for twice what this batch has decoded so far, so that
+			// the next batch like it fits in one.
+			_chars = new char[Stingy
+				? utf8.Length
+				: (int)Math.Min(Math.Max(((long)_charsDecoded + utf8.Length) * 2, 1024), Array.MaxLength)];
+			_charsUsed = 0;
+			CharsGrown++;
+		}
+		Utf8.ToUtf16(utf8, _chars.AsSpan(_charsUsed), out _, out var written, replaceInvalidSequences: true);
+		var chars = _chars.AsSpan(_charsUsed, written);
+		_charsUsed += written;
+		_charsDecoded += written;
+		return chars;
+	}
+
+	/// <summary>
+	/// The cell of a <see cref="Door.Text"/> column decoded as UTF-16 into
+	/// <paramref name="destination"/>, an invalid sequence replaced as <see cref="GetString"/>
+	/// replaces it. An empty cell writes nothing.
+	/// </summary>
+	/// <returns><see langword="false"/>, and <paramref name="charsWritten"/> zero, if <paramref name="destination"/> is too small for the cell.</returns>
+	/// <exception cref="InvalidOperationException">The column is not read through <see cref="Door.Text"/>.</exception>
+	public bool TryGetChars(int column, int row, Span<char> destination, out int charsWritten)
+	{
+		charsWritten = 0;
+		if (!TryGetText(column, row, out var utf8))
+			return true;
+		if (Utf8.ToUtf16(utf8, destination, out _, out var written, replaceInvalidSequences: true) != System.Buffers.OperationStatus.Done)
+			return false;
+		charsWritten = written;
+		return true;
+	}
 
 	/// <summary>
 	/// The text the cell at (<paramref name="column"/>, <paramref name="row"/>) was cast from,

@@ -1,11 +1,13 @@
 package hypertabular
 
 // Replays corpus/workbook.json — the contract every binding replays, and the one the Rust
-// binding replays — through this binding: each package opened from memory and from its path,
-// each sheet read by index and (where the name finds it) by name, in batches of one row, of
-// two, and of more than any sheet has.
+// binding replays — through this binding: each package opened from memory, from its path and
+// from an io.Reader, each sheet read by index and (where the name finds it) by name, with
+// the plan given and with it bound after the header, in batches of one row, of two, and of
+// more than any sheet has.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/iotest"
 
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 )
@@ -95,6 +98,10 @@ func replayWorkbookCorpus(t *testing.T) {
 		}{
 			{"memory", func() (*Workbook, error) { return NewWorkbook(container) }},
 			{"path", func() (*Workbook, error) { return OpenWorkbook(path) }},
+			// A reader that hands over a few bytes at a time, as a network body would.
+			{"a reader", func() (*Workbook, error) {
+				return NewWorkbookReader(iotest.HalfReader(bytes.NewReader(container)))
+			}},
 		}
 
 		// A package the core refuses: every way of opening it gives the one failure.
@@ -147,20 +154,31 @@ func replayWorkbookCorpus(t *testing.T) {
 
 			for _, batchRows := range []int{1, 2, 1024} {
 				options := SheetOptions{HasHeader: c.Options.HasHeader, SkipEmptyRows: c.Options.SkipEmptyRows, BatchRows: batchRows}
-				for _, named := range []bool{false, true} {
-					if named && !byName {
+				// Each of those with the plan given, and with it bound after the header.
+				for _, way := range []struct{ named, unbound bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
+					if way.named && !byName {
 						continue
 					}
 					label := fmt.Sprintf("%s: %s, %d rows a batch", c.Name, opening.source, batchRows)
 					var sheet *Sheet
-					if named {
+					switch {
+					case way.named && way.unbound:
+						label += ", by name, bound after the header"
+						sheet, err = book.SheetNamedUnbound(sheetName, options)
+					case way.unbound:
+						label += ", bound after the header"
+						sheet, err = book.SheetUnbound(*c.Sheet, options)
+					case way.named:
 						label += ", by name"
 						sheet, err = book.SheetNamed(sheetName, options, plan)
-					} else {
+					default:
 						sheet, err = book.Sheet(*c.Sheet, options, plan)
 					}
 					if err != nil {
 						t.Fatalf("%s: %v", label, err)
+					}
+					if way.unbound {
+						bindSheet(t, label, sheet, plan)
 					}
 					replaySheet(t, label, c, sheet, batchRows)
 				}
@@ -169,6 +187,24 @@ func replayWorkbookCorpus(t *testing.T) {
 	}
 	if cells < 12_000 {
 		t.Errorf("the corpus reaches %d cells; expected at least 12,000", cells)
+	}
+}
+
+// bindSheet binds a plan to a sheet opened without one, holding it to what an unbound sheet
+// does first: no plan, ErrUnbound from Read, and ErrAlreadyBound from a second Bind.
+func bindSheet(t *testing.T, label string, sheet *Sheet, plan []Column) {
+	t.Helper()
+	if sheet.IsBound() || sheet.Plan() != nil {
+		t.Errorf("%s: a sheet opened without a plan says it has one", label)
+	}
+	if _, err := sheet.Read(); err != ErrUnbound {
+		t.Errorf("%s: Read before Bind: %v", label, err)
+	}
+	if err := sheet.Bind(plan); err != nil {
+		t.Fatalf("%s: Bind: %v", label, err)
+	}
+	if err := sheet.Bind(plan); err != ErrAlreadyBound || !sheet.IsBound() || len(sheet.Plan()) != len(plan) {
+		t.Errorf("%s: a second Bind: %v", label, err)
 	}
 }
 
@@ -181,8 +217,10 @@ func replaySheet(t *testing.T, label string, c *workbookCase, sheet *Sheet, batc
 		if header != nil {
 			t.Errorf("%s: header %q, want none", label, header)
 		}
-	case header == nil || !reflect.DeepEqual(header, *c.Header):
+	case header == nil || !reflect.DeepEqual([]string(header), *c.Header):
 		t.Errorf("%s: header %q, want %q", label, header, *c.Header)
+	default:
+		assertLookups(t, label, header)
 	}
 
 	seen := 0

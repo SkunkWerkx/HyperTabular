@@ -16,6 +16,11 @@ final class CorpusTests: XCTestCase {
         #if os(WASI)
             return nil
         #else
+            // A device run (Android, through adb) has the corpus pushed beside the test
+            // bundle, nowhere above the host path #filePath names.
+            if let pushed = ProcessInfo.processInfo.environment["HYPERTABULAR_CORPUS"] {
+                return URL(fileURLWithPath: pushed)
+            }
             var dir = URL(fileURLWithPath: #filePath)
             while dir.path != "/" {
                 let candidate = dir.appendingPathComponent("corpus")
@@ -365,15 +370,53 @@ final class CorpusTests: XCTestCase {
         }
     }
 
-    func replay(_ label: String, _ vector: Case, open: (Dialect, [Column]) throws -> DelimitedReader) {
+    /// Replays the case twice: opened with its plan, and opened header first — `open` given
+    /// no plan — with the plan bound once the header has been read. The two must agree.
+    func replay(_ label: String, _ vector: Case, open: (Dialect, [Column]?) throws -> DelimitedReader) {
+        for headerFirst in [false, true] {
+            replay(headerFirst ? "\(label), header first" : label, vector, headerFirst: headerFirst, open: open)
+        }
+    }
+
+    /// Holds a reader just opened without a plan to what an unbound reader promises, and
+    /// binds `plan` to it.
+    func bindHeaderFirst(_ label: String, _ reader: DelimitedReader, _ plan: [Column]) throws {
+        XCTAssertFalse(reader.isBound, label)
+        XCTAssertEqual(reader.plan, [], label)
+        // Reading before a plan is an error that does not stick.
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try reader.read(), label) { XCTAssertEqual($0 as? PlanError, .unbound, label) }
+        }
+        if let names = reader.header, !names.isEmpty {
+            XCTAssertEqual(reader.columnCount, names.count, label)
+            // Every name finds its own column, or the first of its name.
+            for (ordinal, name) in names.enumerated() {
+                XCTAssertEqual(names.firstIndex(of: name), names.firstIndex { $0.utf8.elementsEqual(name.utf8) }, label)
+                XCTAssertLessThanOrEqual(try names.ordinal(of: name), ordinal, label)
+                XCTAssertEqual(try names.ordinal(of: names.bytes(at: ordinal)), try names.ordinal(of: name), label)
+            }
+        }
+        try reader.bind(plan)
+        XCTAssertTrue(reader.isBound, label)
+        XCTAssertThrowsError(try reader.bind(plan), label) {
+            XCTAssertEqual($0 as? PlanError, .alreadyBound, label)
+        }
+    }
+
+    private func replay(
+        _ label: String, _ vector: Case, headerFirst: Bool, open: (Dialect, [Column]?) throws -> DelimitedReader
+    ) {
         let plan = vector.plan.map(column(of:))
         let rows = vector.rows
         var seen = 0
         var failure: TabularError?
         do {
             // A header that is itself broken fails the open, after no rows at all.
-            let reader = try open(dialect(of: vector), plan)
-            XCTAssertEqual(reader.header, vector.header, "\(label): header")
+            let reader = try open(dialect(of: vector), headerFirst ? nil : plan)
+            XCTAssertEqual(reader.header.map(Array.init), vector.header, "\(label): header")
+            if headerFirst {
+                try bindHeaderFirst(label, reader, plan)
+            }
             XCTAssertEqual(reader.plan, plan, label)
             do {
                 while let batch = try reader.read() {
@@ -415,6 +458,48 @@ final class CorpusTests: XCTestCase {
         }
     }
 
+    /// An asynchronous sequence of bytes that hands them over `chunk` at a time, suspending
+    /// between chunks as a network body does — and, given `failAt`, throws
+    /// `CancellationError` once on reaching that byte, as a cancelled download does, then
+    /// goes on where it was.
+    struct ShortReads: AsyncSequence, Sendable {
+        typealias Element = UInt8
+
+        let bytes: [UInt8]
+        let chunk: Int
+        let failAt: Int?
+
+        init(_ bytes: [UInt8], chunk: Int, failAt: Int? = nil) {
+            self.bytes = bytes
+            self.chunk = chunk
+            self.failAt = failAt
+        }
+
+        struct AsyncIterator: AsyncIteratorProtocol {
+            let bytes: [UInt8]
+            let chunk: Int
+            var failAt: Int?
+            var position = 0
+
+            mutating func next() async throws -> UInt8? {
+                if position == failAt {
+                    failAt = nil
+                    throw CancellationError()
+                }
+                guard position < bytes.count else { return nil }
+                if position % chunk == 0 {
+                    await Task.yield()
+                }
+                defer { position += 1 }
+                return bytes[position]
+            }
+        }
+
+        func makeAsyncIterator() -> AsyncIterator {
+            AsyncIterator(bytes: bytes, chunk: chunk, failAt: failAt)
+        }
+    }
+
     // MARK: - the corpus
 
     func testDelimitedCorpus() throws {
@@ -427,14 +512,25 @@ final class CorpusTests: XCTestCase {
             let input = Array(vector.input.utf8)
             for batchRows in [1, 2, 1024] {
                 replay("\(name) (memory, \(batchRows) rows a batch)", vector) { dialect, plan in
-                    try DelimitedReader(bytes: input, dialect: dialect, plan: plan, batchRows: batchRows)
+                    guard let plan else {
+                        return try DelimitedReader(bytes: input, dialect: dialect, batchRows: batchRows)
+                    }
+                    return try DelimitedReader(bytes: input, dialect: dialect, plan: plan, batchRows: batchRows)
                 }
                 replay("\(name) (a string's utf8, \(batchRows) rows a batch)", vector) { dialect, plan in
-                    try DelimitedReader(bytes: vector.input.utf8, dialect: dialect, plan: plan, batchRows: batchRows)
+                    guard let plan else {
+                        return try DelimitedReader(bytes: vector.input.utf8, dialect: dialect, batchRows: batchRows)
+                    }
+                    return try DelimitedReader(
+                        bytes: vector.input.utf8, dialect: dialect, plan: plan, batchRows: batchRows)
                 }
                 input.withUnsafeBytes { bytes in
                     replay("\(name) (memory in place, \(batchRows) rows a batch)", vector) { dialect, plan in
-                        try DelimitedReader(bytesNoCopy: bytes, dialect: dialect, plan: plan, batchRows: batchRows)
+                        guard let plan else {
+                            return try DelimitedReader(bytesNoCopy: bytes, dialect: dialect, batchRows: batchRows)
+                        }
+                        return try DelimitedReader(
+                            bytesNoCopy: bytes, dialect: dialect, plan: plan, batchRows: batchRows)
                     }
                 }
                 for windowBytes in [1, 5] {
@@ -447,13 +543,98 @@ final class CorpusTests: XCTestCase {
                 for chunk in [1, 5, 64, DelimitedReader.defaultBufferBytes] {
                     replay("\(name) (stream in chunks of \(chunk), \(batchRows) rows a batch)", vector) {
                         dialect, plan in
-                        try DelimitedReader(
+                        guard let plan else {
+                            return try DelimitedReader(
+                                reading: self.chunked(input, chunk), dialect: dialect, batchRows: batchRows,
+                                bufferBytes: chunk)
+                        }
+                        return try DelimitedReader(
                             reading: self.chunked(input, chunk), dialect: dialect, plan: plan, batchRows: batchRows,
                             bufferBytes: chunk)
                     }
                 }
             }
         }
+    }
+
+    /// The corpus from an asynchronous sequence that hands its bytes over a few at a time,
+    /// suspending between them, read with `readAsync()` — opened with the plan, and header
+    /// first.
+    func testDelimitedCorpusFromAnAsyncSequence() async throws {
+        let corpus = try corpus()
+        for vector in corpus {
+            let input = Array(vector.input.utf8)
+            for (chunk, batchRows, bufferBytes) in [
+                (1, 1, 3), (5, 2, 7), (64, 1024, DelimitedReader.defaultBufferBytes),
+            ] {
+                for headerFirst in [false, true] {
+                    let label =
+                        "\(vector.name) (async sequence in chunks of \(chunk), \(batchRows) rows a batch"
+                        + "\(headerFirst ? ", header first" : ""))"
+                    await replayAsync(label, vector, headerFirst: headerFirst) { dialect, plan in
+                        let bytes = ShortReads(input, chunk: chunk)
+                        guard let plan else {
+                            return try await DelimitedReader(
+                                bytes: bytes, dialect: dialect, batchRows: batchRows, bufferBytes: bufferBytes)
+                        }
+                        return try await DelimitedReader(
+                            bytes: bytes, dialect: dialect, plan: plan, batchRows: batchRows, bufferBytes: bufferBytes)
+                    }
+                }
+            }
+        }
+    }
+
+    private func replayAsync(
+        _ label: String, _ vector: Case, headerFirst: Bool,
+        open: (Dialect, [Column]?) async throws -> DelimitedReader
+    ) async {
+        let plan = vector.plan.map(column(of:))
+        let rows = vector.rows
+        var seen = 0
+        var failure: TabularError?
+        do {
+            let reader = try await open(dialect(of: vector), headerFirst ? nil : plan)
+            XCTAssertEqual(reader.header.map(Array.init), vector.header, "\(label): header")
+            if headerFirst {
+                do {
+                    _ = try await reader.readAsync()
+                    XCTFail("\(label): read before a plan")
+                } catch {
+                    XCTAssertEqual(error as? PlanError, .unbound, label)
+                }
+                try reader.bind(plan)
+            }
+            do {
+                while let batch = try await reader.readAsync() {
+                    for row in batch {
+                        guard seen < rows.count else {
+                            XCTFail("\(label): more rows than the corpus lists")
+                            return
+                        }
+                        for column in plan.indices {
+                            assertCell(
+                                "\(label), row \(seen), column \(column)", batch, column, row.index, rows[seen][column])
+                        }
+                        seen += 1
+                    }
+                }
+            } catch let error as TabularError {
+                failure = error
+                do {
+                    _ = try await reader.readAsync()
+                    XCTFail("\(label): a structural failure is final")
+                } catch {
+                    XCTAssertEqual(error as? TabularError, failure, label)
+                }
+            }
+        } catch let error as TabularError {
+            failure = error
+        } catch {
+            XCTFail("\(label): \(error)")
+        }
+        XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
+        XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
     }
 
     func testDelimitedCorpusFromFiles() throws {
@@ -466,7 +647,11 @@ final class CorpusTests: XCTestCase {
             for (batchRows, bufferBytes) in [(1, 3), (2, 7), (1024, DelimitedReader.defaultBufferBytes)] {
                 replay("\(vector.name) (file through \(bufferBytes) bytes, \(batchRows) rows a batch)", vector) {
                     dialect, plan in
-                    try DelimitedReader(
+                    guard let plan else {
+                        return try DelimitedReader(
+                            contentsOfFile: path, dialect: dialect, batchRows: batchRows, bufferBytes: bufferBytes)
+                    }
+                    return try DelimitedReader(
                         contentsOfFile: path, dialect: dialect, plan: plan, batchRows: batchRows,
                         bufferBytes: bufferBytes)
                 }

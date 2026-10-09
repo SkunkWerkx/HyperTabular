@@ -16,19 +16,23 @@
 Reading a spreadsheet or a CSV into typed values usually means one of two things: a library that guesses (the separator, the header, whether `1/7/2026` is January or July, whether `12.185` is a thousand or twelve) and throws on the first cell it cannot read, or a string per cell and a parser per cell in the host language. HyperTabular does neither. The dialect and the plan — which source column, through which HyperCast door, in which notation — are declared, and nothing is sniffed. A cell that does not cast is a verdict in its column, `Empty`, `Malformed` or `OutOfRange` with the span of the offending text, and the read goes on. And the work happens in one native call per batch: the binding allocates the column buffers once, the core fills them, and the boundary is crossed once per few thousand rows, not once per cell.
 
 ```csharp
-// C# (.NET 11+) — the same batch for delimited text and for a sheet
-Column[] plan = [Column.Int32(0), Column.Text(1), Column.Double(2)];
-using var reader = DelimitedReader.Open("orders.csv", Dialect.Csv, plan);
+// C# (.NET 11+) — open, read the header, bind the plan by name; the same batch for
+// delimited text and for a sheet
+using var reader = DelimitedReader.Open("orders.csv", Dialect.Csv);
+var header = reader.Header!;
+Column[] plan = [Column.Int32(header.Ordinal("id")), Column.Text(header.Ordinal("customer")),
+    Column.Double(header.Ordinal("score"))];
+reader.Bind(plan);
 
 while (reader.Read() is { } batch)
 {
     ReadOnlySpan<int> ids = batch.Values<int>(0);          // a whole column, as the core wrote it
-    for (var row = 0; row < batch.Rows; row++)
+    foreach (var row in batch)                             // or a row at a time, allocating nothing
     {
-        var line = batch.Get<double>(2, row) switch        // or one cell, as HyperCast's union
+        var line = row.Get<double>(2) switch               // one cell, as HyperCast's union
         {
-            Success<double> score => $"{batch.GetString(1, row)}: {score.Value}",
-            Fault fault => $"line {batch.Line(row)}: {fault.Reason}",
+            Success<double> score => $"{row.GetString(1)}: {score.Value}",
+            Fault fault => $"line {row.Line}: {fault.Reason}",
         };
     }
 }
@@ -40,11 +44,15 @@ while (sheet.Read() is { } batch) { /* the same batch */ }
 
 ```rust
 // Rust — the API over the core
-let plan = [Column::i64(0), Column::f64(2), Column::text(3)];
-let mut reader = DelimitedReader::open("data.csv", Dialect::CSV, &plan)?;
+let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
+let header = reader.header().unwrap();
+let plan = [Column::i64(header.require("id")?), Column::f64(header.require("amount")?)];
+reader.bind(&plan)?;
 while let Some(batch) = reader.read()? {
     let ids: &[i64] = batch.i64(0);
-    let amount: Result<f64, Fault> = batch.get(1, 0);
+    for row in batch {
+        let amount: Result<f64, Fault> = row.get(1);
+    }
 }
 ```
 
@@ -61,11 +69,14 @@ while let Some(batch) = reader.read()? {
 | [Ruby](ruby/) | `gem install hypertabular` |
 | [PHP](php/) | `composer require skunkwerkx/hypertabular` |
 
-Each brings HyperCast 0.7 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
+Each brings HyperCast 0.8 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
 
 ## The shape
 
 - **One batch type.** `read()` returns a batch — rows, the line each row came from, a whole column as the core wrote it (a span, a slice, a `memoryview`, a `MemorySegment`), a verdict beside each value, one cell as HyperCast's union, and the raw text a cell was cast from — or nothing when the input is done. The same type for delimited text and for a sheet.
+- **Header first, plan after.** A reader or a sheet opens without a plan, reads its header, and is told its plan once it knows where each column is: `Header.Ordinal("M49 Code")` in C#, `header.require("M49 Code")` in Rust, the same in every binding — exact and first match, a missing name an error that names it. A plan known by position can still be given up front.
+- **Rows, when that is the shape you want.** A batch read across: `foreach (var row in batch)` and its equivalent in every binding hand out a row view with the batch's own accessors, and every reader and sheet iterates its rows across batches.
+- **Streams and async.** A workbook opens from a path, bytes or a stream. Where the language has an async idiom — C# (`ReadAsync`, `OpenAsync`), Swift (`readAsync`), Python (asyncio), Rust (the `async` feature) — a delimited source is read asynchronously and cancellably, and a cancelled read loses nothing.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and whether blank lines are skipped; `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size; the plan states each column's door and, for numbers, its `NumFormat` (separators, grouping, accounting parens, currency — or HyperCast's structural `DETECT`, which refuses the ambiguous rather than guess). Dates in text are read under a declared field order.
 - **HyperCast is the judge.** A text cell means exactly what HyperCast's door would say of the same text. A workbook's numeric cell is converted from the stored `f64` by HyperCast's typed doors: an exact decimal (the shortest one that names the double, so a stored `0.1` is one tenth), a date or date-time under the workbook's own date system (1900 or 1904), a time of day, a span — each time snapped to the fewest fractional-second digits that store as the same double, so Excel's `9999-12-31 23:59:59` reads on the second.
 - **A bad value is a verdict; a broken file is an error.** A record of the wrong width, input that ends inside a quoted cell, a workbook whose container or parts cannot be read, an encrypted package: each is a structural error, raised only after every intact row before it has been delivered.
@@ -127,6 +138,8 @@ The design record — why one repository, how the scanner and the workbook reade
 Swift and Go link the core into the consumer's executable on every platform, so there is nothing to deploy beside it; C# does for a Native AOT publish. Everything else loads the shared library.
 
 **iOS and Mac Catalyst** load no libraries at all, so C#, Swift and Go link the core into the app there, from static libraries cross-compiled in the same job as the rest: C# for `ios-arm64`, `iossimulator-arm64`, `maccatalyst-arm64` and `maccatalyst-x64`, where a .NET iOS, MAUI or Mac Catalyst app (`net11.0-ios`, `net11.0-maccatalyst`) needs nothing but the package reference; Swift for the three arm64 ones, as an XCFramework, from iOS 16 and Mac Catalyst 16; and Go for all four, chosen by build tag, since Go builds every one of them as `GOOS=ios`. HyperCast's archives link beside them in the same app, and the two share no symbols. CI's `test-apple-mobile` job builds them on a Mac from that run's archives: C# and Swift run in an iOS simulator and as a Mac Catalyst process, Go's suite runs in the simulator, and each links an iOS device build.
+
+**Android**, arm64 and x86_64, is reached by the same three bindings, so that a .NET MAUI app has the core on every platform MAUI targets and a Go or Swift Android build links it as on any other platform. C# carries a shared library cross-built with the NDK at API level 21, its segments aligned to the 16 KB pages Android 15 devices may use and Google Play requires: an app on CoreCLR, .NET 11's Android runtime, loads it out of the APK like any Linux library, and a Native AOT publish links it in from a static archive like every other RID. Go links its own pair of archives under `GOOS=android` with the NDK's clang, and Swift links them from its artifact bundle with the [Swift SDK for Android](https://www.swift.org/documentation/articles/swift-sdk-for-android-getting-started.html) (Swift 6.3+, API 28+). HyperCast reaches Android the same three ways, and its libraries sit beside these in the same app. CI's `test-android` job builds the C# app both ways for both RIDs from a package packed in that run, cross-builds the Go and Swift suites, runs everything x86_64 in an emulator whose image uses 16 KB pages, and links or inspects the arm64 builds. See [`csharp/README.md`](csharp/README.md#android), [`go/README.md`](go/README.md#android) and [`swift/README.md`](swift/README.md#linking-and-deployment).
 
 **Runtime floors** follow upstream support and match HyperCast's: .NET 11, JDK 25, Go 1.26, Swift 6.2, Python 3.11, Ruby 3.3 and PHP 8.2. The crate's floor is Rust 1.88, HyperCast's own.
 

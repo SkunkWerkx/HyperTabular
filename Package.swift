@@ -36,7 +36,7 @@ let appleCoreTargets: [Target] =
 let coreDependency: [Target.Dependency] =
     linksAppleCore
     ? [
-        .target(name: "HyperTabularCore", condition: .when(platforms: [.macOS, .linux, .windows, .wasi])),
+        .target(name: "HyperTabularCore", condition: .when(platforms: [.macOS, .linux, .windows, .wasi, .android])),
         .target(name: "HyperTabularCoreApple", condition: .when(platforms: [.iOS, .macCatalyst])),
     ] : ["HyperTabularCore"]
 
@@ -53,7 +53,7 @@ let package = Package(
         .library(name: "HyperTabular", targets: ["HyperTabular"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.7.0")
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.8.0")
     ],
     targets: [
         .binaryTarget(

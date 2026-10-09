@@ -37,6 +37,20 @@ RSpec.describe "native backend" do
     expect(fiddle_eval("Agreement.digest")).to eq(Agreement.digest)
   end
 
+  # The same, header first: every reader and sheet bound after its header has been read —
+  # which for a sheet is the read whose header row's slots must outlive the bind — every
+  # workbook opened from an IO, and every row walked as a Row.
+  it "agrees with the Fiddle backend on every read in both corpora, header first" do
+    expect(fiddle_eval("Agreement.header_first_digest")).to eq(Agreement.header_first_digest)
+  end
+
+  it "agrees with the Fiddle backend on a sheet whose repeated header row a late plan reads" do
+    path = File.expand_path("../../corpus/workbook/generated-a.ods", __dir__).dump
+    script = "s = HyperTabular::Workbook.open(#{path}).sheet(1, HyperTabular::SheetOptions::DEFAULT); " \
+             "s.bind(s.header.each_index.map { |i| HyperTabular::Column.text(i) }); s.map(&:to_a).inspect"
+    expect(fiddle_eval(script)).to eq(eval(script))
+  end
+
   it "agrees with the Fiddle backend on a fault span in multi-byte text" do
     script = 'r = HyperTabular::DelimitedReader.new("n\nééx\n", HyperTabular::Dialect::CSV, ' \
              "[HyperTabular::Column.i32(0)]); b = r.read; [b.get(0, 0), b.raw(0, 0)].inspect"

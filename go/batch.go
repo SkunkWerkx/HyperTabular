@@ -13,10 +13,11 @@ import (
 // and for a sheet of a workbook.
 //
 // A column is handed out whole — I32, F64, Text and the rest, one element per row, with
-// Verdicts beside them — or a cell at a time through Get. Everything it hands out points
-// into its reader's own buffers (and, for text in memory, into that text itself) and is
-// valid until the reader's next Read: views, not copies, so do not write through them. The
-// reader hands out the same *Batch every time, with the next rows in it.
+// Verdicts beside them — or a cell at a time through Get, or a row at a time through Row and
+// All. Everything it hands out points into its reader's own buffers (and, for text in
+// memory, into that text itself) and is valid until the reader's next Read: views, not
+// copies, so do not write through them. The reader hands out the same *Batch every time,
+// with the next rows in it.
 type Batch struct {
 	columns *columns
 	rows    int

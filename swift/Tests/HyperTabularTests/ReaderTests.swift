@@ -396,6 +396,252 @@ final class ReaderTests: XCTestCase {
         XCTAssertLessThan(batches, 15)
     }
 
+    // MARK: - header first
+
+    private static let regions = Array(
+        """
+        Region Code,Region Name,M49 Code,Region Code
+        002,Africa,4,dup
+        019,Americas,8,dup
+        142,Asia,12,dup
+        150,Europe,20,dup
+        009,Oceania,24,dup
+
+        """.utf8)
+
+    func testAPlanIsBuiltFromTheHeaderAndBoundOnce() throws {
+        let reader = try DelimitedReader(bytes: Self.regions, dialect: .csv)
+        XCTAssertFalse(reader.isBound)
+        XCTAssertEqual(reader.plan, [])
+        XCTAssertEqual(reader.columnCount, 4)
+        // Reading before a plan is an error, and not one that sticks.
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try reader.read()) { XCTAssertEqual($0 as? PlanError, .unbound) }
+        }
+
+        let header = try XCTUnwrap(reader.header)
+        XCTAssertEqual(header, ["Region Code", "Region Name", "M49 Code", "Region Code"])
+        XCTAssertEqual(header.count, 4)
+        XCTAssertEqual(header[1], "Region Name")
+        // The first of two columns with one name; a string and its bytes find the same.
+        XCTAssertEqual(try header.ordinal(of: "Region Code"), 0)
+        XCTAssertEqual(try header.ordinal(of: Array("M49 Code".utf8)), 2)
+        XCTAssertEqual(header.firstIndex(of: "M49 Code".utf8), 2)
+        XCTAssertNil(header.firstIndex(of: "m49 code"), "exact, case included")
+        XCTAssertNil(header.firstIndex(of: " M49 Code"), "exact, spaces included")
+        XCTAssertThrowsError(try header.ordinal(of: "Country")) { error in
+            XCTAssertEqual(error as? NoSuchColumn, NoSuchColumn(name: "Country"))
+            XCTAssertEqual(error.localizedDescription, "The header has no column named \"Country\".")
+        }
+
+        let plan: [Column] = [.i32(try header.ordinal(of: "M49 Code")), .text(try header.ordinal(of: "Region Name"))]
+        try reader.bind(plan)
+        XCTAssertTrue(reader.isBound)
+        XCTAssertEqual(reader.plan, plan)
+        XCTAssertThrowsError(try reader.bind(plan)) { XCTAssertEqual($0 as? PlanError, .alreadyBound) }
+
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [4, 8, 12, 20, 24])
+        XCTAssertEqual(batch.string(1, row: 4), "Oceania")
+        XCTAssertNil(try reader.read())
+        XCTAssertThrowsError(try reader.bind(plan)) { XCTAssertEqual($0 as? PlanError, .alreadyBound) }
+    }
+
+    /// A name is matched as the bytes the file holds: no Unicode equivalence, which `String`'s
+    /// own `==` would apply.
+    func testANameIsMatchedByItsBytes() throws {
+        let composed = "caf\u{E9}"
+        let decomposed = "cafe\u{301}"
+        XCTAssertEqual(composed, decomposed, "String's == is canonical equivalence")
+        let reader = try DelimitedReader(bytes: Array("\(decomposed),\(composed)\n1,2\n".utf8), dialect: .csv)
+        let header = try XCTUnwrap(reader.header)
+        XCTAssertEqual(try header.ordinal(of: composed), 1)
+        XCTAssertEqual(try header.ordinal(of: decomposed), 0)
+        XCTAssertEqual(header.bytes(at: 1), Array(composed.utf8))
+    }
+
+    func testAHeaderlessSourceIsBoundByPosition() throws {
+        var dialect = Dialect.csv
+        dialect.hasHeader = false
+        let reader = try DelimitedReader(bytes: Array("1,a\n2,b\n".utf8), dialect: dialect)
+        XCTAssertNil(reader.header)
+        XCTAssertNil(reader.columnCount, "no record has been read")
+        try reader.bind([.text(1), .i64(0)])
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(Array(batch.values(1, as: Int64.self)), [1, 2])
+        XCTAssertEqual(reader.columnCount, 2)
+    }
+
+    func testEveryOpeningHasAPlanlessForm() throws {
+        let expected: Header = ["Region Code", "Region Name", "M49 Code", "Region Code"]
+        var position = 0
+        let readers = [
+            try DelimitedReader(bytes: Self.regions, dialect: .csv, batchRows: 2),
+            try Self.regions.withUnsafeBytes { try DelimitedReader(bytesNoCopy: $0, dialect: .csv, batchRows: 2) },
+            try DelimitedReader(
+                reading: { buffer in
+                    // Three bytes at a time.
+                    let count = min(3, buffer.count, Self.regions.count - position)
+                    buffer.copyBytes(from: Self.regions[position..<position + count])
+                    position += count
+                    return count
+                }, dialect: .csv, batchRows: 2, bufferBytes: 4),
+        ]
+        for reader in readers {
+            XCTAssertEqual(reader.header, expected)
+            try reader.bind([.i32(2)])
+            var sum: Int32 = 0
+            try reader.forEachRow { row in
+                if case .success(let value) = row.get(0, as: Int32.self) { sum += value }
+            }
+            XCTAssertEqual(sum, 68)
+        }
+    }
+
+    // MARK: - rows
+
+    func testARowIsItsBatchReadAcross() throws {
+        let plan: [Column] = [.i32(2), .text(1), .i32(1), .text(3)]
+        let reader = try DelimitedReader(bytes: Self.regions, dialect: .csv, plan: plan)
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(batch.count, batch.rows)
+        var seen = 0
+        for (index, row) in batch.enumerated() {
+            XCTAssertEqual(row.index, index)
+            XCTAssertEqual(row.line, batch.line(index))
+            XCTAssertEqual(row.get(0, as: Int32.self), batch.get(0, row: index, as: Int32.self))
+            XCTAssertEqual(row.get(2, as: Int32.self), batch.get(2, row: index, as: Int32.self))
+            XCTAssertEqual(row.verdict(2), batch.verdicts(2)[index])
+            XCTAssertEqual(row.text(1).map(Array.init), batch.text(1, row: index).map(Array.init))
+            XCTAssertEqual(row.string(1), batch.string(1, row: index))
+            XCTAssertEqual(Array(row.raw(2)), Array(batch.raw(2, row: index)))
+            seen += 1
+        }
+        XCTAssertEqual(seen, 5)
+        XCTAssertEqual(batch.last?.index, 4)
+        XCTAssertEqual(batch[1].string(1), "Americas")
+        XCTAssertEqual(batch[1].line, 3)
+    }
+
+    func testForEachRowReadsAcrossBatchesToTheEnd() throws {
+        var text = "n\n"
+        for row in 1...7 { text += "\(row)\n" }
+        let reader = try DelimitedReader(bytes: Array(text.utf8), dialect: .csv, plan: [.i64(0)], batchRows: 2)
+        var values = [Int64]()
+        var lines = [Int]()
+        try reader.forEachRow { row in
+            if case .success(let value) = row.get(0, as: Int64.self) { values.append(value) }
+            lines.append(row.line)
+        }
+        // Seven rows in batches of two: four batches.
+        XCTAssertEqual(values, [1, 2, 3, 4, 5, 6, 7])
+        XCTAssertEqual(lines, Array(2...8))
+        XCTAssertNil(try reader.read())
+
+        struct Enough: Error {}
+        let again = try DelimitedReader(bytes: Array(text.utf8), dialect: .csv, plan: [.i64(0)], batchRows: 2)
+        var visited = 0
+        XCTAssertThrowsError(
+            try again.forEachRow { _ in
+                visited += 1
+                if visited == 3 { throw Enough() }
+            }
+        ) { XCTAssertTrue($0 is Enough) }
+        XCTAssertEqual(visited, 3)
+    }
+
+    // MARK: - asynchronous
+
+    func testAnAsyncSequenceIsReadAsItArrives() async throws {
+        let total = 5_000
+        var text = "n\n"
+        for row in 1...total { text += "\(row)\n" }
+        let reader = try await DelimitedReader(
+            bytes: CorpusTests.ShortReads(Array(text.utf8), chunk: 3), dialect: .csv, batchRows: 256, bufferBytes: 16)
+        XCTAssertEqual(reader.header, ["n"])
+        try reader.bind([.i64(try XCTUnwrap(reader.header).ordinal(of: "n"))])
+        var sum: Int64 = 0
+        var rows = 0
+        while let batch = try await reader.readAsync() {
+            sum += batch.values(0, as: Int64.self).reduce(0, +)
+            rows += batch.rows
+        }
+        XCTAssertEqual(rows, total)
+        XCTAssertEqual(sum, Int64(total) * Int64(total + 1) / 2)
+
+        // A reader of memory reads the same asynchronously, and never needs to wait.
+        let memory = try DelimitedReader(bytes: Array(text.utf8), dialect: .csv, plan: [.i64(0)])
+        var memoryRows = 0
+        while let batch = try await memory.readAsync() { memoryRows += batch.rows }
+        XCTAssertEqual(memoryRows, total)
+    }
+
+    /// A read the sequence's cancellation interrupts loses nothing: every byte that arrived
+    /// stays buffered, and the next read goes on from it.
+    func testACancelledReadIsResumable() async throws {
+        let total = 2_000
+        var text = "n\n"
+        for row in 1...total { text += "\(row)\n" }
+        let bytes = Array(text.utf8)
+        // Past the first 64 bytes, which the opening awaits for the header.
+        for failAt in [64, 100, 1_000, bytes.count - 1] {
+            let reader = try await DelimitedReader(
+                bytes: CorpusTests.ShortReads(bytes, chunk: 5, failAt: failAt), dialect: .csv, plan: [.i64(0)],
+                batchRows: 100, bufferBytes: 64
+            )
+            var sum: Int64 = 0
+            var rows = 0
+            var cancelled = 0
+            while true {
+                do {
+                    guard let batch = try await reader.readAsync() else { break }
+                    sum += batch.values(0, as: Int64.self).reduce(0, +)
+                    rows += batch.rows
+                } catch is CancellationError {
+                    cancelled += 1
+                }
+            }
+            XCTAssertEqual(cancelled, 1, "failAt \(failAt)")
+            XCTAssertEqual(rows, total, "failAt \(failAt)")
+            XCTAssertEqual(sum, Int64(total) * Int64(total + 1) / 2, "failAt \(failAt)")
+        }
+    }
+
+    /// A cancelled task's read throws before it reads anything; the reader is left as it was.
+    func testACancelledTaskReadsNothing() async throws {
+        final class Held: @unchecked Sendable {
+            let reader: DelimitedReader
+            init(_ reader: DelimitedReader) { self.reader = reader }
+        }
+        let held = Held(try DelimitedReader(bytes: Self.orders, dialect: .csv, plan: [.i32(0)]))
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await held.reader.readAsync()?.rows
+        }
+        do {
+            _ = try await task.value
+            XCTFail("a cancelled task read")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let read = try await held.reader.readAsync()
+        let batch = try XCTUnwrap(read)
+        XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [1, 2, 3])
+
+        let orders = CorpusTests.ShortReads(Self.orders, chunk: 4)
+        let opening = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            let reader = try await DelimitedReader(bytes: orders, dialect: .csv)
+            return reader.header?.count
+        }
+        do {
+            _ = try await opening.value
+            XCTFail("a cancelled task opened a reader")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+
     /// The shapes this binding and the core share, as the header declares them.
     func testTheSharedShapes() {
         XCTAssertEqual(MemoryLayout<CellVerdict>.size, 12)

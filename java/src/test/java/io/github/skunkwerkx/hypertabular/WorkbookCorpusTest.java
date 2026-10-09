@@ -1,6 +1,7 @@
 package io.github.skunkwerkx.hypertabular;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -11,6 +12,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
+import java.io.ByteArrayInputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -26,9 +28,10 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Replays {@code corpus/workbook.json} — the contract every binding replays, and the one the
- * Rust binding replays — through this binding: each package opened from a byte array and
- * mapped from its path, each sheet read by index and (where the name finds it) by name, in
- * batches of one row, of two, and of more than any sheet has.
+ * Rust binding replays — through this binding: each package opened from a byte array, read
+ * from a stream and mapped from its path, each sheet read by index and (where the name finds
+ * it) by name, opened with its plan and header-first with the plan bound after, in batches of
+ * one row, of two, and of more than any sheet has.
  */
 final class WorkbookCorpusTest {
     private static final int[] BATCH_ROWS = {1, 2, 1024};
@@ -65,12 +68,18 @@ final class WorkbookCorpusTest {
     @Test
     void theWorkbookCorpusWithBuffersThatStartWithNoRoom() throws Exception {
         Workbook.stingy = true;
+        Batch.stingyChars = true;
         java.util.Arrays.fill(Workbook.grown, 0);
+        Batch.charsGrown = 0;
         try {
             replay();
         } finally {
             Workbook.stingy = false;
+            Batch.stingyChars = false;
         }
+        // The char arena, too, started with room for one cell and was replaced every time a
+        // cell did not fit, every cell's chars still its string.
+        assertTrue(Batch.charsGrown > 1_000, "chars grown " + Batch.charsGrown);
         // Not once per call: many times, mid-part, for each of the three.
         System.out.println("grown: " + java.util.Arrays.toString(Workbook.grown));
         for (long times : Workbook.grown) {
@@ -87,8 +96,13 @@ final class WorkbookCorpusTest {
             String name = vector.get("name").getAsString();
             Path path = CorpusTest.CORPUS_DIRECTORY.resolve(vector.get("file").getAsString());
             byte[] bytes = Files.readAllBytes(path);
-            Map<String, Supplier<Workbook>> openings =
-                    Map.of("memory", () -> Workbook.of(bytes), "path", () -> Workbook.open(path));
+            Map<String, Supplier<Workbook>> openings = Map.of(
+                    "memory",
+                    () -> Workbook.of(bytes),
+                    "path",
+                    () -> Workbook.open(path),
+                    "stream",
+                    () -> Workbook.of(new ByteArrayInputStream(bytes)));
 
             // A package the core refuses: every way of opening it gives the one failure.
             if (!vector.has("sheet")) {
@@ -148,11 +162,16 @@ final class WorkbookCorpusTest {
                             if (named && !byName) {
                                 continue;
                             }
-                            String label = name + ": " + opening.getKey() + ", " + batchRows + " rows a batch"
-                                    + (named ? ", by name" : "");
-                            try (Sheet sheet =
-                                    named ? book.sheet(sheetName, options, plan) : book.sheet(index, options, plan)) {
-                                replay(label, sheet, batchRows, plan, rows, numbers, vector);
+                            for (boolean headerFirst : new boolean[] {false, true}) {
+                                String label = name + ": " + opening.getKey() + ", " + batchRows + " rows a batch"
+                                        + (named ? ", by name" : "") + (headerFirst ? ", header first" : "");
+                                try (Sheet sheet = headerFirst
+                                        ? (named ? book.sheet(sheetName, options) : book.sheet(index, options))
+                                        : (named
+                                                ? book.sheet(sheetName, options, plan)
+                                                : book.sheet(index, options, plan))) {
+                                    replay(label, sheet, batchRows, plan, rows, numbers, vector);
+                                }
                             }
                         }
                     }
@@ -178,12 +197,18 @@ final class WorkbookCorpusTest {
             header.getAsJsonArray().forEach(entry -> names.add(entry.getAsString()));
             assertEquals(names, sheet.header(), label);
         }
+        if (!sheet.isBound()) {
+            CorpusTest.bindHeaderFirst(
+                    label, sheet.header(), sheet.plan(), sheet.isBound(), sheet::read, sheet::bind, plan);
+        }
+        assertEquals(plan, sheet.plan(), label);
 
         int seen = 0;
         TabularException failure = null;
         try {
             for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
                 assertTrue(batch.rows() >= 1 && batch.rows() <= batchRows, label);
+                CorpusTest.assertRows(label, batch);
                 for (int row = 0; row < batch.rows(); row++, seen++) {
                     assertTrue(seen < rows.size(), label + ": more rows than the corpus lists");
                     assertEquals(numbers.get(seen).getAsInt(), batch.line(row), label + ", row " + seen);
@@ -235,5 +260,117 @@ final class WorkbookCorpusTest {
         TabularException notAZip = assertThrows(
                 TabularException.class, () -> Workbook.of("not a zip at all".getBytes(StandardCharsets.UTF_8)));
         assertEquals(TabularFailure.NOT_A_ZIP, notAZip.failure());
+    }
+
+    /** A stream that says whether it was closed, and can be made to fail part-way. */
+    private static final class Watched extends java.io.InputStream {
+        private final ByteArrayInputStream bytes;
+        private final int failAt;
+        private int read;
+        boolean closed;
+
+        Watched(byte[] bytes, int failAt) {
+            this.bytes = new ByteArrayInputStream(bytes);
+            this.failAt = failAt;
+        }
+
+        @Override
+        public int read() throws java.io.IOException {
+            byte[] one = new byte[1];
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xFF;
+        }
+
+        @Override
+        public int read(byte[] into, int offset, int length) throws java.io.IOException {
+            if (read >= failAt) {
+                throw new java.io.IOException("the stream broke");
+            }
+            // A short read at a time, so the workbook's memory has to grow to hold it.
+            int got = bytes.read(into, offset, Math.min(length, 1000));
+            read += Math.max(got, 0);
+            return got;
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
+
+    @Test
+    void aWorkbookReadFromAStreamOwnsWhatItRead() throws Exception {
+        Path basic = CorpusTest.CORPUS_DIRECTORY.resolve("workbook").resolve("basic.xlsx");
+        byte[] bytes = Files.readAllBytes(basic);
+        Watched stream = new Watched(bytes, Integer.MAX_VALUE);
+        List<String> header;
+        int rows = 0;
+        try (Workbook book = Workbook.of(stream)) {
+            // Read to the end and closed before the workbook was handed out.
+            assertTrue(stream.closed);
+            assertEquals(WorkbookFormat.XLSX, book.format());
+            try (Sheet sheet = book.sheet(0, SheetOptions.DEFAULT)) {
+                header = new ArrayList<>(sheet.header());
+                sheet.bind(List.of(Column.text(0)));
+                for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
+                    rows += batch.rows();
+                }
+            }
+        }
+        try (Workbook book = Workbook.of(bytes);
+                Sheet sheet = book.sheet(0, SheetOptions.DEFAULT, List.of(Column.text(0)))) {
+            assertEquals(header, sheet.header());
+            int expected = 0;
+            for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
+                expected += batch.rows();
+            }
+            assertEquals(expected, rows);
+        }
+
+        // A stream that fails is closed, and the failure is the caller's to see.
+        Watched broken = new Watched(bytes, 3000);
+        assertThrows(UncheckedIOException.class, () -> Workbook.of(broken));
+        assertTrue(broken.closed);
+        // A stream that is not a workbook is closed too, its failure the core's.
+        Watched notAZip = new Watched("not a zip".getBytes(StandardCharsets.UTF_8), Integer.MAX_VALUE);
+        assertEquals(
+                TabularFailure.NOT_A_ZIP,
+                assertThrows(TabularException.class, () -> Workbook.of(notAZip)).failure());
+        assertTrue(notAZip.closed);
+        // And an empty one is an empty container.
+        assertThrows(TabularException.class, () -> Workbook.of(new ByteArrayInputStream(new byte[0])));
+    }
+
+    @Test
+    void aSheetStartedWithoutAPlanIsBoundOnce() {
+        Path basic = CorpusTest.CORPUS_DIRECTORY.resolve("workbook").resolve("basic.xlsx");
+        try (Workbook book = Workbook.open(basic)) {
+            String first = book.sheets().get(0).name();
+            try (Sheet sheet = book.sheet(first, SheetOptions.DEFAULT)) {
+                assertFalse(sheet.isBound());
+                assertEquals(List.of(), sheet.plan());
+                assertThrows(IllegalStateException.class, sheet::read);
+                assertThrows(IllegalStateException.class, sheet::read);
+                Header header = sheet.header();
+                assertEquals(0, header.ordinal(header.get(0)));
+                assertThrows(NoSuchElementException.class, () -> header.ordinal("No such column"));
+                assertThrows(NullPointerException.class, () -> sheet.bind(null));
+                assertFalse(sheet.isBound());
+                List<Column> plan = List.of(Column.text(0));
+                sheet.bind(plan);
+                assertTrue(sheet.isBound());
+                assertEquals(plan, sheet.plan());
+                assertThrows(IllegalStateException.class, () -> sheet.bind(plan));
+                List<Integer> lines = new ArrayList<>();
+                sheet.forEachRow(row -> lines.add(row.line()));
+                assertFalse(lines.isEmpty());
+                assertEquals(2, lines.get(0), "the header is row 1");
+                assertNull(sheet.read());
+            }
+            assertThrows(NoSuchElementException.class, () -> book.sheet("No such sheet", SheetOptions.DEFAULT));
+            assertThrows(IndexOutOfBoundsException.class, () -> book.sheet(99, SheetOptions.DEFAULT));
+            Sheet closed = book.sheet(0, SheetOptions.DEFAULT);
+            closed.close();
+            assertThrows(IllegalStateException.class, () -> closed.bind(List.of(Column.text(0))));
+        }
     }
 }

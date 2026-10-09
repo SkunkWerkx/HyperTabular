@@ -1,20 +1,34 @@
 """Replays ``corpus/workbook.json`` — the contract every binding replays, and the one the Rust
-binding replays — through this binding: each package opened from ``bytes`` and from its
-path, each sheet read by index and (where the name finds it) by name, in batches of one row,
-of two, and of more than any sheet has. And the workbook's own surface around that."""
+binding replays — through this binding: each package opened from ``bytes``, from its path,
+from a file object (whole, and a few bytes a read) and from an asyncio stream, each sheet
+read by index and (where the name finds it) by name, in batches of one row, of two, and of
+more than any sheet has — with the plan up front, and header first, bound once the header
+is read. And the workbook's own surface around that."""
 
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-from test_corpus import _assert_cell, _assert_column, _assert_failure, _column_of, _corpus_dir
+from test_corpus import (
+    _AsyncDribble,
+    _assert_cell,
+    _assert_column,
+    _assert_failure,
+    _assert_rows,
+    _column_of,
+    _corpus_dir,
+    _Dribble,
+)
 
 from hypertabular import (
     Column,
     ExcelEpoch,
+    Header,
     Sheet,
     SheetInfo,
     SheetOptions,
@@ -37,7 +51,13 @@ def _path(case: dict[str, Any]) -> Path:
 
 def _openings(case: dict[str, Any]) -> list[tuple[str, Any]]:
     path = _path(case)
-    return [("bytes", lambda: Workbook(path.read_bytes())), ("path", lambda: Workbook.open(path))]
+    return [
+        ("bytes", lambda: Workbook(path.read_bytes())),
+        ("path", lambda: Workbook.open(path)),
+        ("file object", lambda: Workbook(io.BytesIO(path.read_bytes()))),
+        ("short reads", lambda: Workbook(_Dribble(path.read_bytes()))),
+        ("asyncio", lambda: asyncio.run(Workbook.open_async(_AsyncDribble(path.read_bytes())))),
+    ]
 
 
 def test_the_corpus_is_the_whole_contract():
@@ -76,6 +96,7 @@ def _replay(
                     )
                     assert batch.raw(index, row) == data.raw(row), label
                 _assert_column(f"{label}, column {index}", column, data, expected)
+            _assert_rows(label, plan, batch)
             seen += batch.rows
     except TabularError as error:
         failure = error
@@ -118,6 +139,38 @@ def test_workbook_corpus(case: dict[str, Any]) -> None:
             for which in (index, sheet_name) if by_name else (index,):
                 label = f"{name}: {source}, {batch_rows} rows a batch, sheet {which!r}"
                 _replay(label, case, plan, book.sheet(which, options, plan), batch_rows)
+                # Header first: the sheet opened without a plan, its header read, and the
+                # plan bound after — the header row's cells kept for a row that repeats it.
+                label = f"{label}, header first"
+                _replay(
+                    label,
+                    case,
+                    plan,
+                    _header_first(label, case, book, which, options, plan),
+                    batch_rows,
+                )
+
+
+def _header_first(
+    label: str,
+    case: dict[str, Any],
+    book: Workbook,
+    which: int | str,
+    options: SheetOptions,
+    plan: list[Column],
+) -> Sheet:
+    sheet = book.sheet(which, options)
+    expected = case["header"]
+    assert sheet.header == (None if expected is None else tuple(expected)), label
+    assert expected is None or isinstance(sheet.header, Header), label
+    assert not sheet.is_bound and sheet.plan == (), label
+    with pytest.raises(RuntimeError, match="bind"):
+        sheet.read()
+    sheet.bind(plan)
+    assert sheet.is_bound
+    with pytest.raises(RuntimeError, match="bound once"):
+        sheet.bind(plan)
+    return sheet
 
 
 def test_what_is_not_there_is_an_error_of_its_own(tmp_path: Path) -> None:

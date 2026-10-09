@@ -27,11 +27,19 @@ use HyperCast\Success;
  * }
  * ```
  *
+ * Or read across, a {@see Row} at a time: a batch iterates its rows in order.
+ *
+ * ```php
+ * foreach ($batch as $row) {
+ *     $verdict = $row->get(2);                     // $batch->get(2, $row->index())
+ * }
+ * ```
+ *
  * A batch owns what it shows — the arrays the core wrote are copied out of the reader's
  * buffers as it is made — so it stays good after the reader has moved on. A value is the
  * PHP carrier HyperCast's `Cast` returns for the column's door ({@see Door} lists them).
  */
-final class Batch
+final class Batch implements \IteratorAggregate
 {
     /** @var array<int, list<mixed>> each decoded column's values, null where the cell did not cast */
     private array $values = [];
@@ -76,6 +84,19 @@ final class Batch
     public function rows(): int
     {
         return $this->rows;
+    }
+
+    /**
+     * The batch's rows, in order, each a {@see Row} — keyed by its index — that answers as
+     * the batch does for that row.
+     *
+     * @return \Generator<int, Row> the rows
+     */
+    public function getIterator(): \Generator
+    {
+        for ($row = 0; $row < $this->rows; $row++) {
+            yield $row => new Row($this, $row);
+        }
     }
 
     /**

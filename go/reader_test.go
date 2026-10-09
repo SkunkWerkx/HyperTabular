@@ -56,8 +56,15 @@ func end(t *testing.T, r *DelimitedReader) {
 }
 
 // The version the linked core reports is the crate's own: the archive on the link line is
-// the one this checkout builds.
+// the one this checkout builds. A device run (Android, through
+// .github/scripts/android_device_test.sh) has no source tree and is handed the version.
 func TestNativeVersionIsTheCratesVersion(t *testing.T) {
+	if want := os.Getenv("HYPERTABULAR_CRATE_VERSION"); want != "" {
+		if got := NativeVersion(); got != want {
+			t.Errorf("NativeVersion() = %q; HYPERTABULAR_CRATE_VERSION says %q", got, want)
+		}
+		return
+	}
 	manifest, err := os.ReadFile(repositoryFile(t, "rust", "Cargo.toml"))
 	if err != nil {
 		t.Fatal(err)
