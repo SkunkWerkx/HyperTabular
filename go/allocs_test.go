@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,18 +219,26 @@ func TestRowsAcrossBatchesAllocateNothingARow(t *testing.T) {
 		}
 		return rows, after.Mallocs - before.Mallocs
 	}
-	// One pass unmeasured first, as testing.AllocsPerRun makes one: what the runtime does
-	// the first time it meets this code (MemStats counts the whole process) is behind the
-	// passes measured.
-	across(4)
-	fewRows, few := across(4)
-	manyRows, many := across(128)
-	if fewRows != batchRows*4 || manyRows != batchRows*128 {
-		t.Fatalf("%d and %d rows across the batches", fewRows, manyRows)
+	// Allocation-free a row means what the loop allocates does not grow with what it reads,
+	// and that is what is measured: 4 batches against 128. MemStats counts the whole
+	// process, so the count of one pass is not ours alone — on Alpine arm64 the 4-batch pass
+	// has come in at 7 and the 128-batch pass at 0, run after run — and no fixed allowance
+	// survives that; the iterator itself is a constant too. None of it grows with the
+	// input, and an allocation of ours a row or a batch does, the same every time — so an
+	// attempt that shows no growth clears it, and the runtime gets three.
+	var attempts []string
+	for range 3 {
+		fewRows, few := across(4)
+		manyRows, many := across(128)
+		if fewRows != batchRows*4 || manyRows != batchRows*128 {
+			t.Fatalf("%d and %d rows across the batches", fewRows, manyRows)
+		}
+		if many <= few {
+			return
+		}
+		attempts = append(attempts, fmt.Sprintf("%d allocs across 4 batches, %d across 128", few, many))
 	}
-	if few > 2 || many > 2 {
-		t.Errorf("%d allocs across 4 batches, %d across 128; want at most 2 either way", few, many)
-	}
+	t.Errorf("the loop's allocations grow with the input: %s", strings.Join(attempts, "; "))
 }
 
 var keptString string

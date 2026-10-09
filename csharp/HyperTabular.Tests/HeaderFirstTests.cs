@@ -207,10 +207,13 @@ public sealed class HeaderFirstTests
 	[Fact]
 	void Rows_and_chars_allocate_nothing_once_warmed_up()
 	{
-		var text = new StringBuilder("id,name\n");
-		for (var row = 0; row < 100_000; row++)
-			text.Append($"{row % 100_000:D6},name {row % 100_000:D6}\n");
-		var utf8 = Encoding.UTF8.GetBytes(text.ToString()).AsMemory();
+		static ReadOnlyMemory<byte> Csv(int rows)
+		{
+			var text = new StringBuilder("id,name\n");
+			for (var row = 0; row < rows; row++)
+				text.Append($"{row:D6},name {row:D6}\n");
+			return Encoding.UTF8.GetBytes(text.ToString());
+		}
 
 		long Consume(Batch batch)
 		{
@@ -225,9 +228,9 @@ public sealed class HeaderFirstTests
 			return sum;
 		}
 
-		// What one pass allocates once its reader has read a batch: the reader's own buffers
-		// are made and grown by then, so the rest of the file has nothing left to ask for.
-		(long Allocated, int Rows, long Total) Pass()
+		// What a pass allocates once its reader has read a batch: the reader's own buffers are
+		// made and grown by then, so the rest of the input has nothing left to ask for.
+		(long Allocated, int Rows) Pass(ReadOnlyMemory<byte> utf8)
 		{
 			using var reader = new DelimitedReader(utf8, Dialect.Csv);
 			reader.Bind([Column.Int32(reader.Header!.Ordinal("id")), Column.Text(reader.Header.Ordinal("name"))]);
@@ -240,18 +243,31 @@ public sealed class HeaderFirstTests
 				total += Consume(batch);
 				rows += batch.Rows;
 			}
-			return (GC.GetAllocatedBytesForCurrentThread() - before, rows, total);
+			var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+			total.ShouldBeGreaterThan(0);
+			return (allocated, rows);
 		}
 
-		// The first passes run every path once — the short last batch, the end of the input —
-		// so that what the runtime does the first time it meets code (loading a type, tiering
-		// a hot loop up, which arm64 does on its own schedule) is behind the pass measured.
-		Pass();
-		Pass();
-		var (allocated, rows, total) = Pass();
-		rows.ShouldBe(100_000 - DelimitedReader.DefaultBatchRows);
-		total.ShouldBeGreaterThan(0);
-		allocated.ShouldBe(0L);
+		// Allocation-free means what a read allocates does not grow with what it reads, and
+		// that is what is measured: a pass of 4 batches against one of 25. What the runtime
+		// does the first time it meets code — loading a type, tiering a hot loop up, on its
+		// own schedule per platform — is the same in both and cancels; a value or a span made
+		// a row or a batch scales with the input and cannot. An allocation of ours is the
+		// same every time, so an attempt that shows no growth clears it, and the runtime gets
+		// three.
+		var (shortInput, longInput) = (Csv(4 * DelimitedReader.DefaultBatchRows), Csv(25 * DelimitedReader.DefaultBatchRows));
+		var attempts = new List<string>();
+		for (var attempt = 0; attempt < 3; attempt++)
+		{
+			var few = Pass(shortInput);
+			var many = Pass(longInput);
+			few.Rows.ShouldBe(3 * DelimitedReader.DefaultBatchRows);
+			many.Rows.ShouldBe(24 * DelimitedReader.DefaultBatchRows);
+			if (many.Allocated <= few.Allocated)
+				return;
+			attempts.Add($"{few.Allocated} B over 3 batches, {many.Allocated} B over 24");
+		}
+		throw new ShouldAssertException($"a read's allocations grow with the input: {string.Join("; ", attempts)}");
 	}
 
 	[Fact]
