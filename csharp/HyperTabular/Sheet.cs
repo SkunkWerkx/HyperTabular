@@ -92,8 +92,10 @@ public sealed unsafe class Sheet : IBatchSource
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <exception cref="InvalidOperationException">The sheet already has a plan.</exception>
 	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured; the sheet is left without a plan.</exception>
+	/// <exception cref="ObjectDisposedException">The workbook has been disposed.</exception>
 	public void Bind(ReadOnlySpan<Column> plan)
 	{
+		ObjectDisposedException.ThrowIf(_book.Disposed, _book);
 		if (_columns is not null)
 			throw new InvalidOperationException("The sheet already has a plan; a plan is bound once.");
 		var columns = new Columns(plan, _options.BatchRows);

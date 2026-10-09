@@ -302,7 +302,12 @@ public sealed unsafe class Batch
 	/// <paramref name="destination"/>, an invalid sequence replaced as <see cref="GetString"/>
 	/// replaces it. An empty cell writes nothing.
 	/// </summary>
-	/// <returns><see langword="false"/>, and <paramref name="charsWritten"/> zero, if <paramref name="destination"/> is too small for the cell.</returns>
+	/// <returns>
+	/// <see langword="false"/>, and <paramref name="charsWritten"/> zero, if
+	/// <paramref name="destination"/> is too small for the cell — in which case what
+	/// <paramref name="destination"/> holds is unspecified: the decode may have written part
+	/// of the cell into it before running out of room.
+	/// </returns>
 	/// <exception cref="InvalidOperationException">The column is not read through <see cref="Door.Text"/>.</exception>
 	public bool TryGetChars(int column, int row, Span<char> destination, out int charsWritten)
 	{

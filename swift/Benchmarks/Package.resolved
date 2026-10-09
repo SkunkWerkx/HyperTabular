@@ -5,8 +5,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ordo-one/benchmark",
       "state" : {
-        "revision" : "ebe5f10cd0d08818f75c33744037c6cc53038abe",
-        "version" : "1.36.4"
+        "revision" : "1d1b7a56ade88f69c0cef1fa423b320059315f1a",
+        "version" : "1.37.0"
       }
     },
     {
@@ -23,8 +23,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SkunkWerkx/HyperCast",
       "state" : {
-        "revision" : "03aec55eb23e1885a3e21718b7f2cf877b1b2016",
-        "version" : "0.7.0"
+        "revision" : "43d62eb695117855312a2170023203dc82989bf7",
+        "version" : "0.8.0"
       }
     },
     {
@@ -32,8 +32,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ordo-one/malloc-interposer.git",
       "state" : {
-        "revision" : "9221411ac2e845a93ce65b9ca2ab84f8c1084b0d",
-        "version" : "1.4.0"
+        "revision" : "e4385a5c5c344c5de84bf84a78f2a359801fa585",
+        "version" : "1.5.0"
       }
     },
     {

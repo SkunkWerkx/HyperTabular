@@ -120,6 +120,16 @@ public sealed class HeaderFirstTests
 	}
 
 	[Fact]
+	void A_sheet_of_a_disposed_workbook_cannot_be_bound()
+	{
+		var book = Workbook.Open(Basic("xlsx"));
+		var sheet = book.Sheet(0, SheetOptions.Default);
+		book.Dispose();
+		Should.Throw<ObjectDisposedException>(() => sheet.Bind([Column.Text(0)]));
+		sheet.IsBound.ShouldBeFalse();
+	}
+
+	[Fact]
 	void The_rows_of_a_reader_span_its_batches_and_stop_at_its_end()
 	{
 		var text = new StringBuilder("n\n");
