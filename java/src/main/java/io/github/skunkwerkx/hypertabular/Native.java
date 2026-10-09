@@ -117,15 +117,17 @@ final class Native {
 
     /**
      * The fields of the state block this binding reads: {@code line} (u32), {@code records}
-     * and {@code offset} (u64). The rest is the core's; the block's size is asked of the
+     * and {@code offset} (u64), and {@code expected} (u32, the cells a record has; 0 until
+     * known). The rest is the core's; the block's size is asked of the
      * library ({@link #stateSize()}), never assumed.
      */
     static final long STATE_LINE = 4;
 
     static final long STATE_RECORDS = 8;
     static final long STATE_OFFSET = 16;
+    static final long STATE_EXPECTED = 24;
     /** The bytes of the state block the offsets above reach into. */
-    static final long STATE_READ_BYTES = 24;
+    static final long STATE_READ_BYTES = 28;
 
     /**
      * The downcall handles: one per export, none of them bound to an address. Each takes

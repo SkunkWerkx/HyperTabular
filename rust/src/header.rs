@@ -1,6 +1,8 @@
 //! The header a source declared: the names of its columns, in order, as bytes — a name is
 //! whatever the file holds, and a reader that wants a string decides how to read one.
 
+use crate::Error;
+
 /// A source's column names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Header {
@@ -42,8 +44,28 @@ impl Header {
         (0..self.spans.len()).map(|ordinal| self.name(ordinal).unwrap_or_default())
     }
 
-    /// The first column with this name: what a plan's ordinal is looked up by.
-    pub fn ordinal(&self, name: &[u8]) -> Option<usize> {
+    /// The first column with this name: what a plan's ordinal is looked up by. The match
+    /// is exact — byte for byte, case and spaces included — so a `&str` and a `&[u8]` find
+    /// the same column.
+    pub fn ordinal(&self, name: impl AsRef<[u8]>) -> Option<usize> {
+        let name = name.as_ref();
         self.names().position(|candidate| candidate == name)
+    }
+
+    /// [`Header::ordinal`], with a missing name an error that says which: what a plan built
+    /// from names reads best with, a `?` on each column.
+    ///
+    /// ```
+    /// # use hypertabular::{Column, DelimitedReader, Dialect};
+    /// let mut reader = DelimitedReader::from_slice_unbound(b"id,name\n1,a\n", Dialect::CSV)?;
+    /// let header = reader.header().unwrap();
+    /// let plan = [Column::text(header.require("name")?), Column::i32(header.require("id")?)];
+    /// reader.bind(&plan)?;
+    /// # Ok::<(), hypertabular::Error>(())
+    /// ```
+    pub fn require(&self, name: impl AsRef<[u8]>) -> Result<usize, Error> {
+        let name = name.as_ref();
+        self.ordinal(name)
+            .ok_or_else(|| Error::NoColumn(String::from_utf8_lossy(name).into_owned()))
     }
 }

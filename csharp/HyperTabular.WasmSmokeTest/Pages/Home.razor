@@ -2,6 +2,8 @@
 @using System.Text
 @using HyperCast
 @using HyperTabular
+@using Microsoft.AspNetCore.Components.WebAssembly.Http
+@inject HttpClient Http
 
 <PageTitle>@Title</PageTitle>
 
@@ -13,7 +15,7 @@
     private string Title = "RUNNING";
     private string Results = "running...";
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         var lines = new List<string>();
         var failed = false;
@@ -40,13 +42,7 @@
                 Fail($"{name}: {verdict} (expected {expected})");
         }
 
-        static byte[] Resource(string name)
-        {
-            using var stream = typeof(Home).Assembly.GetManifestResourceStream(name)!;
-            using var copy = new MemoryStream();
-            stream.CopyTo(copy);
-            return copy.ToArray();
-        }
+        static Stream Resource(string name) => typeof(Home).Assembly.GetManifestResourceStream(name)!;
 
         // Every export the binding imports is reached through its public surface, each landing
         // in the statically linked wasm module through LibraryImport("*"), so an export missing
@@ -62,10 +58,13 @@
                 lines.Add($"ok   native: version={Tabular.NativeVersion}");
 
             var csv = "id,name,score,day\n1,\"say \"\"hi\"\"\",2.5,2024-02-29\n2,bob,x,2026-02-29\n"u8.ToArray();
-            Column[] plan = [Column.Int64(0), Column.Text(1), Column.Double(2), Column.Date(3)];
-            using (var reader = new DelimitedReader(csv, Dialect.Csv, plan))
+            // Header first: the plan is bound by name once the header is read.
+            using (var reader = new DelimitedReader(csv, Dialect.Csv))
             {
-                Check("csv header", string.Join(",", reader.Header!), "id,name,score,day");
+                var header = reader.Header!;
+                Check("csv header", string.Join(",", header), "id,name,score,day");
+                reader.Bind([Column.Int64(header.Ordinal("id")), Column.Text(header.Ordinal("name")),
+                    Column.Double(header.Ordinal("score")), Column.Date(header.Ordinal("day"))]);
                 var batch = reader.Read() ?? throw new InvalidOperationException("no batch");
                 Check("csv rows", batch.Rows, 2);
                 Check("csv ids", string.Join(",", batch.Values<long>(0).ToArray()), "1,2");
@@ -79,16 +78,44 @@
                     Fault f => $"fault {f.Reason} in \"{Encoding.UTF8.GetString(batch.Raw(2, 1))}\"",
                 };
                 Check("csv fault", disposition, "fault Malformed in \"x\"");
+                Check("csv chars", batch.Row(0).GetChars(1).ToString(), "say \"hi\"");
                 Check("csv end", reader.Read() is null, true);
+            }
+
+            // A served file read as the browser serves it: an HttpClient response streamed
+            // (a stream that cannot be read synchronously), opened and read asynchronously.
+            using (var request = new HttpRequestMessage(HttpMethod.Get, "orders.csv"))
+            {
+                request.SetBrowserResponseStreamingEnabled(true);
+                using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                await using var reader = await DelimitedReader.OpenAsync(
+                    await response.Content.ReadAsStreamAsync(), Dialect.Csv, bufferBytes: 4096);
+                var header = reader.Header!;
+                reader.Bind([Column.Int32(header.Ordinal("id")), Column.Text(header.Ordinal("name")), Column.Double(header.Ordinal("score"))], batchRows: 256);
+                long rows = 0, ids = 0;
+                var lastName = "";
+                while (await reader.ReadAsync() is { } batch)
+                {
+                    foreach (var row in batch)
+                    {
+                        ids += row.Get<int>(0) is Success<int> id ? id.Value : 0;
+                        lastName = row.GetString(1) ?? "";
+                    }
+                    rows += batch.Rows;
+                }
+                Check("fetched rows", rows, 3000L);
+                Check("fetched ids", ids, 3000L * 3001 / 2);
+                Check("fetched last name", lastName, "name \"3000\"");
             }
 
             using (var book = new Workbook(Resource("basic.xlsx")))
             {
                 Check("xlsx format", book.Format, WorkbookFormat.Xlsx);
                 Check("xlsx first sheet", book.Sheets[0].Name, "Data");
-                Column[] cells = [Column.Int64(0), Column.Text(1), Column.Double(2), Column.Timestamp(3)];
-                var sheet = book.Sheet(0, SheetOptions.Default, cells);
+                var sheet = book.Sheet(0, SheetOptions.Default);
                 Check("xlsx header", sheet.Header![1], "name");
+                sheet.Bind([Column.Int64(0), Column.Text(sheet.Header.Ordinal("name")), Column.Double(2), Column.Timestamp(3)]);
                 var batch = sheet.Read() ?? throw new InvalidOperationException("no batch");
                 CheckCell("xlsx i64", batch.Get<long>(0, 0), 1L);
                 Check("xlsx shared string", batch.GetString(1, 1), "bob, jr");

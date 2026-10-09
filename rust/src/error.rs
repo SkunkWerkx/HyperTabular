@@ -25,6 +25,13 @@ pub enum Error {
     },
     /// The workbook has no sheet by that name, or at that index.
     NoSheet(String),
+    /// The header has no column by this name ([`crate::Header::require`]).
+    NoColumn(String),
+    /// A reader opened without a plan was read before one was bound.
+    Unbound,
+    /// A plan was bound to a reader that already has one: a reader is bound once, before
+    /// its first read.
+    AlreadyBound,
     /// The data is structurally broken. Every intact row before the break was delivered
     /// first.
     Structure(Failure),
@@ -206,6 +213,11 @@ impl fmt::Display for Error {
                 "plan column {column} declares a numeric format or an ordinal that cannot be honoured"
             ),
             Error::NoSheet(which) => write!(f, "the workbook has no sheet {which}"),
+            Error::NoColumn(name) => write!(f, "the header has no column named {name:?}"),
+            Error::Unbound => f.write_str("the reader has no plan yet: bind one before reading"),
+            Error::AlreadyBound => {
+                f.write_str("the reader already has a plan: a plan is bound once")
+            }
             Error::Structure(failure) => failure.fmt(f),
         }
     }

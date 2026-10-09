@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import io.github.skunkwerkx.hypercast.CastFailure;
 import io.github.skunkwerkx.hypercast.DateOrder;
@@ -22,6 +23,7 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -31,6 +33,8 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -450,6 +454,252 @@ final class ReaderTest {
             }
             assertEquals(20_000, rows);
             assertTrue(batches < 15, batches + " batches");
+        }
+    }
+
+    @Test
+    void aReaderOpenedWithoutAPlanReadsItsHeaderAndIsBoundOnce() {
+        byte[] text = utf8("id,name,score,name\n1,alice,2.5,x\n2,bob,3.5,y\n");
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV)) {
+            Header header = reader.header();
+            assertEquals(List.of("id", "name", "score", "name"), header);
+            assertEquals(4, reader.columnCount().getAsInt());
+            assertFalse(reader.isBound());
+            assertEquals(List.of(), reader.plan());
+            // Read before bind is a caller bug, and not for good.
+            assertThrows(IllegalStateException.class, reader::read);
+            assertThrows(IllegalStateException.class, reader::read);
+
+            // Exact, case-sensitive and untrimmed; a duplicate resolves to the first.
+            assertEquals(1, header.ordinal("name"));
+            assertEquals(1, header.indexOf("name"));
+            assertEquals(1, header.ordinal(utf8("name")));
+            assertEquals(OptionalInt.of(2), header.findOrdinal("score"));
+            assertEquals(OptionalInt.empty(), header.findOrdinal("Score"));
+            assertEquals(OptionalInt.empty(), header.findOrdinal(" score"));
+            assertEquals(OptionalInt.empty(), header.findOrdinal(utf8("nam")));
+            NoSuchElementException missing = assertThrows(NoSuchElementException.class, () -> header.ordinal("total"));
+            assertTrue(missing.getMessage().contains("\"total\""), missing.getMessage());
+            missing = assertThrows(NoSuchElementException.class, () -> header.ordinal(utf8("tötal")));
+            assertTrue(missing.getMessage().contains("\"tötal\""), missing.getMessage());
+            assertEquals("score", CorpusTest.utf8(header.utf8(2)));
+            assertThrows(UnsupportedOperationException.class, () -> header.add("more"));
+            assertThrows(IndexOutOfBoundsException.class, () -> header.get(4));
+
+            // A plan refused leaves the reader without one, to be bound again.
+            assertThrows(IllegalArgumentException.class, () -> reader.bind(List.of(Column.i32(0)), 0));
+            assertFalse(reader.isBound());
+            List<Column> plan = List.of(Column.i32(header.ordinal("id")), Column.f64(header.ordinal("score")));
+            reader.bind(plan, 1);
+            assertTrue(reader.isBound());
+            assertEquals(plan, reader.plan());
+            assertThrows(IllegalStateException.class, () -> reader.bind(plan));
+            assertEquals(new Success<>(2.5), reader.read().get(1, 0, Double.class));
+            assertEquals(new Success<>(2), reader.read().get(0, 0, Integer.class));
+            assertNull(reader.read());
+        }
+        // A plan the reader is opened with is still checked before the header is read.
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DelimitedReader.of(utf8("a,\"b"), Dialect.CSV, List.of(Column.i32(0)), 0));
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV, List.of(Column.i32(0)))) {
+            assertTrue(reader.isBound());
+            assertThrows(IllegalStateException.class, () -> reader.bind(List.of(Column.i32(0))));
+        }
+    }
+
+    @Test
+    void theColumnCountIsTheFirstRecordsWithoutAHeader() {
+        try (DelimitedReader reader = DelimitedReader.of(utf8("1,2,3\n4,5,6\n"), Dialect.CSV.withHeader(false))) {
+            assertNull(reader.header());
+            assertEquals(OptionalInt.empty(), reader.columnCount());
+            reader.bind(List.of(Column.i32(2)));
+            assertEquals(2, reader.read().rows());
+            assertEquals(OptionalInt.of(3), reader.columnCount());
+            reader.close();
+            assertEquals(OptionalInt.of(3), reader.columnCount());
+            assertThrows(IllegalStateException.class, () -> reader.bind(List.of()));
+        }
+        try (DelimitedReader reader = DelimitedReader.of(new byte[0], Dialect.CSV)) {
+            assertEquals(List.of(), reader.header());
+            assertEquals(OptionalInt.empty(), reader.columnCount());
+        }
+    }
+
+    @Test
+    void everyFactoryHasAFormWithoutAPlan(@TempDir Path directory) throws IOException {
+        Path file = directory.resolve("orders.csv");
+        Files.write(file, ORDERS);
+        Watched stream = new Watched(ORDERS);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment memory = arena.allocateFrom(ValueLayout.JAVA_BYTE, ORDERS);
+            List<DelimitedReader> readers = List.of(
+                    DelimitedReader.of(ORDERS, Dialect.CSV),
+                    DelimitedReader.of(memory, Dialect.CSV),
+                    DelimitedReader.of(new ByteArrayInputStream(ORDERS), Dialect.CSV),
+                    DelimitedReader.of(stream, Dialect.CSV, 3),
+                    DelimitedReader.open(file, Dialect.CSV),
+                    DelimitedReader.open(file, Dialect.CSV, 3));
+            for (DelimitedReader reader : readers) {
+                try (reader) {
+                    reader.bind(List.of(Column.text(reader.header().ordinal("name"))));
+                    List<String> names = new ArrayList<>();
+                    reader.forEachRow(row -> names.add(row.string(0)));
+                    assertEquals(Arrays.asList("alice", "bob, jr", null), names);
+                }
+            }
+        }
+        assertTrue(stream.closed);
+        Watched refused = new Watched(ORDERS);
+        assertThrows(IllegalArgumentException.class, () -> DelimitedReader.of(refused, Dialect.CSV, 0));
+        assertTrue(refused.closed, "a reader never handed out closes its stream");
+        assertThrows(
+                UncheckedIOException.class, () -> DelimitedReader.open(directory.resolve("missing.csv"), Dialect.CSV));
+    }
+
+    @Test
+    void aRowIsTheBatchsAccessorsAtOneRow() {
+        List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
+        try (DelimitedReader reader = DelimitedReader.of(ORDERS, Dialect.CSV, plan)) {
+            Batch batch = reader.read();
+            CorpusTest.assertRows("orders", batch);
+            Row bob = batch.row(1);
+            assertEquals(1, bob.index());
+            assertEquals(3, bob.line());
+            assertEquals(new Success<>(2), bob.get(0, Integer.class));
+            assertEquals("bob, jr", bob.string(1));
+            assertEquals("bob, jr", bob.chars(1).toString());
+            assertEquals("bob, jr", CorpusTest.utf8(bob.text(1)));
+            assertFalse(bob.isOk(2));
+            assertEquals(CastFailure.MALFORMED, bob.verdict(2).reason());
+            assertEquals("x", bob.rawString(2));
+            assertEquals("x", CorpusTest.utf8(bob.raw(2)));
+            char[] into = new char[7];
+            assertEquals(7, bob.getChars(1, into, 0));
+            assertEquals("bob, jr", new String(into));
+            assertEquals(-1, bob.getChars(1, into, 1));
+            assertNull(batch.row(2).chars(1));
+            assertEquals(0, batch.row(2).getChars(1, into, 7));
+            assertThrows(IndexOutOfBoundsException.class, () -> batch.row(3));
+            assertThrows(IllegalStateException.class, () -> bob.chars(0));
+            java.util.Iterator<Row> rows = batch.iterator();
+            for (int row = 0; row < 3; row++) {
+                assertEquals(row, rows.next().index());
+            }
+            assertFalse(rows.hasNext());
+            assertThrows(NoSuchElementException.class, rows::next);
+        }
+    }
+
+    @Test
+    void forEachRowReadsEveryBatchAndStopsAtTheEnd() {
+        StringBuilder text = new StringBuilder("n\n");
+        for (int n = 0; n < 10; n++) {
+            text.append(n).append('\n');
+        }
+        for (boolean headerFirst : new boolean[] {false, true}) {
+            try (DelimitedReader reader = headerFirst
+                    ? DelimitedReader.of(utf8(text.toString()), Dialect.CSV)
+                    : DelimitedReader.of(utf8(text.toString()), Dialect.CSV, List.of(Column.i32(0)), 3)) {
+                if (headerFirst) {
+                    reader.bind(List.of(Column.i32(0)), 3);
+                }
+                List<Integer> seen = new ArrayList<>();
+                List<Integer> lines = new ArrayList<>();
+                reader.forEachRow(row -> {
+                    seen.add(((Success<Integer>) row.get(0, Integer.class)).value());
+                    lines.add(row.line());
+                });
+                // Four batches of at most three.
+                assertEquals(List.of(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), seen);
+                assertEquals(List.of(2, 3, 4, 5, 6, 7, 8, 9, 10, 11), lines);
+                assertNull(reader.read());
+                reader.forEachRow(row -> fail("no rows are left"));
+            }
+        }
+        // A structural failure comes out of the loop after the intact rows.
+        try (DelimitedReader reader = DelimitedReader.of(utf8("a,b\n1,2\n3\n"), Dialect.CSV, List.of(Column.i32(0)))) {
+            List<Integer> lines = new ArrayList<>();
+            TabularException failure =
+                    assertThrows(TabularException.class, () -> reader.forEachRow(row -> lines.add(row.line())));
+            assertEquals(TabularFailure.COLUMN_COUNT, failure.failure());
+            assertEquals(List.of(2), lines);
+        }
+    }
+
+    @Test
+    void charsAreDecodedIntoAnArenaThatKeepsEveryEarlierView() {
+        // Wider than one arena, with characters outside the BMP (two chars from four bytes)
+        // and inside it (one from two or three), so the char count is not the byte count.
+        StringBuilder text = new StringBuilder();
+        List<String> cells = new ArrayList<>();
+        for (int n = 0; n < 300; n++) {
+            String cell = "row " + n + " é€😀 " + "x".repeat(n % 17);
+            cells.add(cell);
+            text.append(cell).append('\n');
+        }
+        for (boolean stingy : new boolean[] {false, true}) {
+            Batch.stingyChars = stingy;
+            Batch.charsGrown = 0;
+            try (DelimitedReader reader = DelimitedReader.of(
+                    utf8(text.toString()), Dialect.CSV.withHeader(false), List.of(Column.text(0)), 200)) {
+                int seen = 0;
+                for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+                    List<CharBuffer> views = new ArrayList<>();
+                    for (int row = 0; row < batch.rows(); row++) {
+                        views.add(batch.chars(0, row));
+                    }
+                    // Every view handed out this batch is still its cell's, after all the rest.
+                    for (int row = 0; row < batch.rows(); row++) {
+                        assertEquals(cells.get(seen + row), views.get(row).toString());
+                        assertTrue(views.get(row).isReadOnly());
+                        assertEquals(0, views.get(row).position());
+                    }
+                    seen += batch.rows();
+                }
+                assertEquals(300, seen);
+            } finally {
+                Batch.stingyChars = false;
+            }
+            // From one cell's room, the arena was replaced for nearly every cell; from the
+            // ordinary start, a handful of times.
+            assertTrue(stingy ? Batch.charsGrown > 200 : Batch.charsGrown <= 5, "grown " + Batch.charsGrown);
+        }
+    }
+
+    @Test
+    void textThatIsNotUtf8IsReplacedAsTheStringIs() {
+        byte[][] cells = {
+            {'a', (byte) 0xFF, 'b'},
+            {(byte) 0xC3},
+            {'x', (byte) 0xE2, (byte) 0x82},
+            {(byte) 0xED, (byte) 0xA0, (byte) 0x80, 'z'},
+            {(byte) 0xC0, (byte) 0xAF},
+            {(byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80},
+            {(byte) 0xF0, (byte) 0x9F, (byte) 0x98},
+            {(byte) 0xE0, (byte) 0x80, (byte) 0x80, 'q'},
+        };
+        java.io.ByteArrayOutputStream text = new java.io.ByteArrayOutputStream();
+        for (byte[] cell : cells) {
+            text.writeBytes(cell);
+            text.write('\n');
+        }
+        try (DelimitedReader reader = DelimitedReader.of(
+                text.toByteArray(), Dialect.CSV.withHeader(false), List.of(Column.text(0), Column.i32(0)))) {
+            Batch batch = reader.read();
+            assertEquals(cells.length, batch.rows());
+            for (int row = 0; row < batch.rows(); row++) {
+                String label = "cell " + row;
+                String expected = new String(cells[row], StandardCharsets.UTF_8);
+                assertEquals(expected, batch.string(0, row), label);
+                assertEquals(expected, batch.chars(0, row).toString(), label);
+                char[] into = new char[expected.length()];
+                assertEquals(expected.length(), batch.getChars(0, row, into, 0), label);
+                assertEquals(expected, new String(into), label);
+                if (expected.length() > 1) {
+                    assertEquals(-1, batch.getChars(0, row, new char[expected.length() - 1], 0), label);
+                }
+            }
         }
     }
 }

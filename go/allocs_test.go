@@ -8,6 +8,8 @@ package hypertabular
 import (
 	"bytes"
 	"fmt"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,3 +148,97 @@ var (
 // kept is where the faults above go, so that the compiler cannot prove they are unused and
 // leave them on the stack.
 var kept *hypercast.Fault
+
+// The row view is a (batch, index) pair: iterating a batch's rows, and reading each cell
+// through them — a value, a verdict, text as bytes and as a string — allocates nothing.
+func TestRowsAllocateNothing(t *testing.T) {
+	const batchRows = 32
+	input, plan := allocationInput(batchRows * 4)
+	r, err := NewDelimitedReaderBytes(input, CSV, plan, BatchRows(batchRows))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.Read()
+	if err != nil || b.Rows() != batchRows {
+		t.Fatalf("Read returned %v, %v", b, err)
+	}
+	// What the loop reads is checked after it, so that nothing in it is boxed for a message.
+	rows, sum, bad := 0, 0, 0
+	assertAllocs(t, "Batch.All", 0, func() {
+		rows, sum, bad = 0, 0, 0
+		for row := range b.All() {
+			// A fault is the one allocation a cell makes, here as through Get: the verdict
+			// is free to ask first.
+			if row.Verdict(0).OK() {
+				if id, _ := Cell[int32](row, 0); int(id) != row.Index() {
+					bad++
+				}
+			}
+			if len(row.TextString(1)) < 6 || len(row.Text(5)) < 8 || row.Line() < 2 || !row.Verdict(1).OK() {
+				bad++
+			}
+			keptString = row.TextString(1)
+			sum += row.Index()
+			rows++
+		}
+	})
+	if rows != batchRows || bad != 0 || sum != batchRows*(batchRows-1)/2 {
+		t.Fatalf("%d rows, %d of them bad", rows, bad)
+	}
+	assertAllocs(t, "Batch.TextString", 0, func() { keptString = b.TextString(5, 3) })
+}
+
+// Rows read across batches through the reader cost nothing a row and nothing a batch: what
+// the loop allocates, if anything, is the iterator itself — at most a couple of allocations,
+// for four batches as for a hundred and twenty-eight (the runtime's own, which MemStats
+// counts too, are the slack).
+func TestRowsAcrossBatchesAllocateNothingARow(t *testing.T) {
+	const batchRows = 32
+	across := func(batches int) (rows int, allocs uint64) {
+		input, plan := allocationInput(batchRows * batches)
+		r, err := NewDelimitedReaderBytes(input, CSV, plan, BatchRows(batchRows))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		var ended error
+		for row, err := range r.All() {
+			if err != nil {
+				ended = err
+				break
+			}
+			keptString = row.TextString(1)
+			keptTime, _ = Cell[time.Time](row, 2)
+			rows++
+		}
+		runtime.ReadMemStats(&after)
+		if ended != nil {
+			t.Fatal(ended)
+		}
+		return rows, after.Mallocs - before.Mallocs
+	}
+	// Allocation-free a row means what the loop allocates does not grow with what it reads,
+	// and that is what is measured: 4 batches against 128. MemStats counts the whole
+	// process, so the count of one pass is not ours alone — on Alpine arm64 the 4-batch pass
+	// has come in at 7 and the 128-batch pass at 0, run after run — and no fixed allowance
+	// survives that; the iterator itself is a constant too. None of it grows with the
+	// input, and an allocation of ours a row or a batch does, the same every time — so an
+	// attempt that shows no growth clears it, and the runtime gets three.
+	var attempts []string
+	for range 3 {
+		fewRows, few := across(4)
+		manyRows, many := across(128)
+		if fewRows != batchRows*4 || manyRows != batchRows*128 {
+			t.Fatalf("%d and %d rows across the batches", fewRows, manyRows)
+		}
+		if many <= few {
+			return
+		}
+		attempts = append(attempts, fmt.Sprintf("%d allocs across 4 batches, %d across 128", few, many))
+	}
+	t.Errorf("the loop's allocations grow with the input: %s", strings.Join(attempts, "; "))
+}
+
+var keptString string

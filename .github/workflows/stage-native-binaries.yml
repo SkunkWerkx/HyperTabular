@@ -157,10 +157,14 @@ jobs:
           # committed whole: its Info.plist and each slice's header and module map are
           # generated text, unattested and readable in the diff like info.json. Go's tree takes
           # the four Apple mobile archives beside its seven.
+          #
+          # And Android, arm64 and x86_64, in both of the first trees: two more variants in
+          # Swift's bundle, which the Swift SDK for Android links, and two more archives in
+          # Go's, which cgo links under GOOS=android. That makes eleven and thirteen.
           declare -A STATIC_TREES=(
-            [swift/HyperTabularCore.artifactbundle]=9
+            [swift/HyperTabularCore.artifactbundle]=11
             [swift/HyperTabularCoreApple.xcframework]=3
-            [go/staticlib]=11
+            [go/staticlib]=13
           )
           for tree in "${!STATIC_TREES[@]}"; do
             archives=()

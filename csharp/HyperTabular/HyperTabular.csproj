@@ -5,7 +5,7 @@
   <PropertyGroup>
     <PackageId>HyperTabular</PackageId>
     <!-- The committed version prepare-release.yml bumps, in lockstep with rust/Cargo.toml. -->
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
     <!-- HyperTabular.dll and hypertabular.dll differ only by case, and on Windows one would
          overwrite the other in the output directory: HyperCast's rename, for its reason. -->
     <AssemblyName>HyperTabular.Managed</AssemblyName>
@@ -41,7 +41,7 @@
   <ItemGroup>
     <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
          its types, not copies of them. -->
-    <PackageReference Include="HyperCast" Version="0.7.0" />
+    <PackageReference Include="HyperCast" Version="0.8.0" />
   </ItemGroup>
 
   <ItemGroup>

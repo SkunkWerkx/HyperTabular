@@ -10,15 +10,21 @@
 //! ```no_run
 //! use hypertabular::{Column, DelimitedReader, Dialect, Workbook, SheetOptions};
 //!
-//! let plan = [Column::i64(0), Column::f64(2), Column::text(3)];
-//!
-//! let mut reader = DelimitedReader::open("data.csv", Dialect::CSV, &plan)?;
+//! // Open, read the header, then bind the plan: which source column, through which door.
+//! let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
+//! let header = reader.header().unwrap();
+//! let plan = [
+//!     Column::i64(header.require("id")?),
+//!     Column::f64(header.require("amount")?),
+//!     Column::text(header.require("name")?),
+//! ];
+//! reader.bind(&plan)?;
 //! while let Some(batch) = reader.read()? {
 //!     let ids: &[i64] = batch.i64(0);                  // a whole column, as the core wrote it
 //!     let verdicts = batch.verdicts(0);                // and a verdict beside each value
-//!     for row in 0..batch.rows() {
-//!         let amount: Result<f64, _> = batch.get(1, row); // one cell, as HyperCast judged it
-//!         let name = batch.text(2, row);
+//!     for row in batch {                               // or a row at a time
+//!         let amount: Result<f64, _> = row.get(1);     // one cell, as HyperCast judged it
+//!         let name = row.text(2);
 //!     }
 //! }
 //!
@@ -31,7 +37,9 @@
 //! - [`Column`] — one output column: a source ordinal, a [`Door`], a numeric format. A
 //!   plan is a slice of them.
 //! - [`DelimitedReader`] and [`Dialect`]; [`Workbook`], [`Sheet`] and [`SheetOptions`].
-//! - [`Batch`] — the rows of one read, column-major, lent by the reader that owns them.
+//! - [`Header`] — the names a source declared, and the ordinal each is at.
+//! - [`Batch`] — the rows of one read, column-major, lent by the reader that owns them;
+//!   [`Row`] — one of them, read across.
 //! - [`Error`] — the read, the caller's declarations, or a structural [`Failure`]. A cell
 //!   that does not cast is never an error: it is a [`Fault`] in the batch.
 //!
@@ -128,7 +136,7 @@ pub use kernel::abi::{CellVerdict, Span};
 pub use kernel::door::Door;
 
 #[cfg(feature = "std")]
-pub use batch::{Batch, Value};
+pub use batch::{Batch, Row, Rows, Value};
 #[cfg(feature = "std")]
 pub use column::Column;
 #[cfg(feature = "std")]

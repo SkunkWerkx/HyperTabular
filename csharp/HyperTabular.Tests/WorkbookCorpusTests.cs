@@ -59,6 +59,7 @@ public sealed class WorkbookCorpusTests
 	void Workbook_corpus_with_buffers_that_start_with_no_room()
 	{
 		Workbook.Stingy = true;
+		Batch.Stingy = true;
 		Workbook.Grown = default;
 		try
 		{
@@ -67,6 +68,7 @@ public sealed class WorkbookCorpusTests
 		finally
 		{
 			Workbook.Stingy = false;
+			Batch.Stingy = false;
 		}
 		var (window, arena, cells) = Workbook.Grown;
 		// Not once per call: many times, mid-part, for each of the three.
@@ -74,6 +76,35 @@ public sealed class WorkbookCorpusTests
 		arena.ShouldBeGreaterThan(1_000);
 		cells.ShouldBeGreaterThan(1_000);
 	}
+
+	/// <summary>
+	/// Every way a workbook is opened: from memory, from its path, and from a stream — a
+	/// <see cref="MemoryStream"/> the workbook disposes, a non-seekable one it leaves open, and
+	/// one read asynchronously (completing synchronously, so that the thread-static switches
+	/// the stingy pass sets hold throughout) — each checked, once it has been read, for whether the stream
+	/// was disposed as asked.
+	/// </summary>
+	static (string Source, Func<ValueTask<Workbook>> Open, Action<string> Check)[] Sources(string path, byte[] bytes)
+	{
+		MemoryStream? owned = null;
+		ShortReadStream? kept = null;
+		ShortReadStream? awaited = null;
+		return
+		[
+			("memory", () => new(new Workbook(bytes)), _ => { }),
+			("path", () => new(Workbook.Open(path)), _ => { }),
+			("stream", () => new(new Workbook(owned = new MemoryStream(bytes))),
+				label => owned!.CanRead.ShouldBeFalse($"{label}: the stream is disposed once read")),
+			("non-seekable stream, left open", () => new(Workbook.Open(kept = new ShortReadStream(bytes, 4096), leaveOpen: true)),
+				label => kept!.Disposed.ShouldBeFalse($"{label}: the stream is left open")),
+			("stream read asynchronously", () => Workbook.OpenAsync(awaited = new ShortReadStream(bytes, 4096) { Yields = false }),
+				label => awaited!.DisposedAsynchronously.ShouldBeTrue($"{label}: the stream is disposed asynchronously once read")),
+		];
+	}
+
+	/// <summary>A workbook every source opens synchronously, the asynchronous one included: the replay stays on the thread its switches are set on.</summary>
+	static Workbook Now(ValueTask<Workbook> open) =>
+		open.IsCompleted ? open.Result : throw new InvalidOperationException("a source did not complete synchronously");
 
 	static void Replay()
 	{
@@ -89,8 +120,11 @@ public sealed class WorkbookCorpusTests
 			// A package the core refuses: every way of opening it gives the one failure.
 			if (!@case.TryGetProperty("sheet", out var sheetIndex))
 			{
-				AssertFailure($"{name} (memory)", Should.Throw<TabularException>(() => new Workbook(bytes)), @case);
-				AssertFailure($"{name} (path)", Should.Throw<TabularException>(() => Workbook.Open(path)), @case);
+				foreach (var (source, open, check) in Sources(path, bytes))
+				{
+					AssertFailure($"{name} ({source})", Should.Throw<TabularException>(() => Now(open())), @case);
+					check($"{name} ({source})");
+				}
 				continue;
 			}
 
@@ -102,13 +136,10 @@ public sealed class WorkbookCorpusTests
 			var numbers = @case.GetProperty("numbers");
 			cells += rows.GetArrayLength() * plan.Length;
 
-			foreach (var (source, open) in new (string, Func<Workbook>)[]
+			foreach (var (source, open, check) in Sources(path, bytes))
 			{
-				("memory", () => new Workbook(bytes)),
-				("path", () => Workbook.Open(path)),
-			})
-			{
-				using var book = open();
+				using var book = Now(open());
+				check($"{name} ({source})");
 				book.Format.ShouldBe(@case.GetProperty("format").GetString() == "xlsx" ? WorkbookFormat.Xlsx : WorkbookFormat.Ods, name);
 				book.DateSystem.ShouldBe((ExcelEpoch)@case.GetProperty("epoch").GetInt32(), name);
 				book.Sheets.Select(sheet => (sheet.Name, sheet.Hidden)).ShouldBe(
@@ -122,17 +153,28 @@ public sealed class WorkbookCorpusTests
 						settings.GetProperty("has_header").GetBoolean(),
 						settings.GetProperty("skip_empty_rows").GetBoolean(),
 						batchRows);
-					foreach (var named in (bool[])[false, true])
+					foreach (var (named, headerFirst) in ((bool, bool)[])[(false, false), (true, false), (false, true), (true, true)])
 					{
 						if (named && !byName)
 							continue;
-						var label = $"{name}: {source}, {batchRows} rows a batch{(named ? ", by name" : "")}";
-						var sheet = named ? book.Sheet(sheetName, options, plan) : book.Sheet(index, options, plan);
+						var label = $"{name}: {source}, {batchRows} rows a batch{(named ? ", by name" : "")}{(headerFirst ? ", header first" : "")}";
+						var sheet = headerFirst
+							? named ? book.Sheet(sheetName, options) : book.Sheet(index, options)
+							: named ? book.Sheet(sheetName, options, plan) : book.Sheet(index, options, plan);
 						var header = @case.GetProperty("header");
 						if (header.ValueKind == JsonValueKind.Null)
 							sheet.Header.ShouldBeNull(label);
 						else
 							sheet.Header.ShouldBe(header.EnumerateArray().Select(entry => entry.GetString()!), label);
+						if (headerFirst)
+						{
+							sheet.IsBound.ShouldBeFalse(label);
+							sheet.Plan.ShouldBeEmpty(label);
+							Should.Throw<InvalidOperationException>(() => sheet.Read(), label);
+							sheet.Bind(plan);
+							Should.Throw<InvalidOperationException>(() => sheet.Bind(plan), label);
+						}
+						sheet.IsBound.ShouldBeTrue(label);
 
 						var seen = 0;
 						TabularException? failure = null;
@@ -141,6 +183,7 @@ public sealed class WorkbookCorpusTests
 							while (sheet.Read() is { } batch)
 							{
 								batch.Rows.ShouldBeInRange(1, batchRows, label);
+								CorpusTests.AssertRows(label, batch);
 								for (var row = 0; row < batch.Rows; row++, seen++)
 								{
 									seen.ShouldBeLessThan(rows.GetArrayLength(), label);

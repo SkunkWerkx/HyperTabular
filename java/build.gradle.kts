@@ -10,11 +10,11 @@ plugins {
 // io.github.skunkwerkx — the SkunkWerkx org's Central Portal namespace, the one HyperCast
 // and HyperUuid publish under.
 group = "io.github.skunkwerkx"
-// CI may override this (0.7.0-ci.<run_number>) via HYPERTABULAR_VERSION so repeated manual
+// CI may override this (0.8.0-ci.<run_number>) via HYPERTABULAR_VERSION so repeated manual
 // runs do not collide with a published version; a real publish never sets it and uses the
 // committed version as-is. It moves with rust/Cargo.toml: the suite pins the loaded
 // library's own version to it.
-version = System.getenv("HYPERTABULAR_VERSION") ?: "0.7.0"
+version = System.getenv("HYPERTABULAR_VERSION") ?: "0.8.0"
 
 repositories {
     mavenCentral()
@@ -48,7 +48,7 @@ dependencies {
     // jar, and they are this binding's public API — hence `api`, so a consumer gets them
     // transitively. Nothing here calls HyperCast's doors: the core this binding loads has
     // HyperCast compiled in, and casts every cell itself.
-    api("io.github.skunkwerkx:hypercast:0.7.0")
+    api("io.github.skunkwerkx:hypercast:0.8.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("com.google.code.gson:gson:2.11.0")

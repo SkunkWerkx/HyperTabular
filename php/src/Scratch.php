@@ -119,14 +119,46 @@ final class Scratch
     }
 
     /**
+     * Makes the cell table at least `$length` spans if it is smaller, what it held kept.
+     *
+     * @param int $length spans
+     * @return void
+     */
+    public function growCellsTo(int $length): void
+    {
+        if ($this->cellsCap < $length) {
+            [$this->cells, $this->cellsCap] = self::grown($this->cells, $this->cellsCap, $length, 'ht_span', 8);
+        }
+    }
+
+    /**
+     * Makes the row at least `$length` slots if it is smaller, what it held kept: the slots
+     * may hold a header row a sheet is still to repeat.
+     *
+     * @param int $length slots
+     * @return void
+     */
+    public function growRowTo(int $length): void
+    {
+        if ($this->rowCap < $length) {
+            [$this->row, $this->rowCap] = self::grown($this->row, $this->rowCap, $length, 'ht_slot', 16);
+        }
+    }
+
+    /**
      * Makes `$call` until it stops asking for room, growing the buffer it names each time.
      * Returns the code it ended on; what it reported is in {@see $filled}.
      *
+     * With `$rowFollowsCells` the row's slots are grown with the cell table, so that there is
+     * a slot for every cell the table can name: what reading a sheet's header without a plan
+     * needs, since the header row's cells are kept in the slots as well.
+     *
      * @param callable(CData): int $call the call, given the buffers block
      * @param Workbook|null $tables the workbook whose tables the call is handed
+     * @param bool $rowFollowsCells whether the row grows with the cell table
      * @return int the code
      */
-    public function drive(callable $call, ?Workbook $tables = null): int
+    public function drive(callable $call, ?Workbook $tables = null, bool $rowFollowsCells = false): int
     {
         while (true) {
             $code = $call($this->buffers($tables));
@@ -142,6 +174,9 @@ final class Scratch
                     break;
                 case Native::ERR_CELLS:
                     $this->growCells($needed);
+                    if ($rowFollowsCells) {
+                        $this->growRowTo($this->cellsCap);
+                    }
                     self::$grown[2]++;
                     break;
                 default:

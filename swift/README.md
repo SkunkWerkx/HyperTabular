@@ -20,30 +20,56 @@ there.
 import HyperCast
 import HyperTabular
 
-let reader = try DelimitedReader(
-    contentsOfFile: "orders.csv", dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
-print(reader.header ?? [])                       // ["id", "name", "score"]
+// Open, read the header, and build the plan from the names it declares.
+let reader = try DelimitedReader(contentsOfFile: "orders.csv", dialect: .csv)
+let header = reader.header!                      // ["id", "name", "score"]
+try reader.bind([
+    .i32(header.ordinal(of: "id")),              // throws NoSuchColumn("id") if it is missing
+    .text(header.ordinal(of: "name")),
+    .f64(header.ordinal(of: "score")),
+])
 
 while let batch = try reader.read() {
     // A column at a time, as the core wrote it…
     let ids = batch.values(0, as: Int32.self)    // UnsafeBufferPointer<Int32>
     let verdicts = batch.verdicts(2)             // a CellVerdict beside each value
 
-    // …or a cell at a time, as HyperCast's union.
-    for row in 0..<batch.rows {
-        switch batch.get(2, row: row, as: Double.self) {
-        case .success(let score): print(batch.string(1, row: row) ?? "", score)
-        case .fault(let fault): print("line \(batch.line(row)): \(fault.reason)")
+    // …or a row at a time, each cell as HyperCast's union.
+    for row in batch {
+        switch row.get(2, as: Double.self) {
+        case .success(let score): print(row.string(1) ?? "", score)
+        case .fault(let fault): print("line \(row.line): \(fault.reason)")
         }
     }
 }
 
-// A workbook reads into the same batch.
+// Columns known by position: the plan goes in with the opening.
+let byPosition = try DelimitedReader(
+    contentsOfFile: "orders.csv", dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
+try byPosition.forEachRow { row in print(row.line, row.string(1) ?? "") }
+
+// A workbook reads into the same batch: from a file, memory, a stream or async bytes.
 let book = try Workbook(contentsOfFile: "orders.xlsx")
-print(book.sheets)                               // [SheetInfo(name: "Orders", hidden: false)]
-let sheet = try book.sheet(named: "Orders", plan: [.i32(0), .text(1), .f64(2)])
+print(book.sheets.map(\.name))                   // ["Orders"]
+let sheet = try book.sheet(named: "Orders")      // its header read; bind as above
+try sheet.bind([.i32(sheet.header!.ordinal(of: "id"))])
 while let batch = try sheet.read() { /* … */ }
 ```
+
+Asynchronous input — `URL.resourceBytes`, `FileHandle.bytes`, any `AsyncSequence` of
+`UInt8` — is read as it arrives, with Task cancellation honoured between refills:
+
+```swift
+let (bytes, _) = try await URLSession.shared.bytes(from: url)
+let reader = try await DelimitedReader(bytes: bytes, dialect: .csv)   // awaits the header
+try reader.bind([.text(reader.header!.ordinal(of: "name"))])
+while let batch = try await reader.readAsync() { /* … */ }
+
+let workbook = try await Workbook(bytes: try await URLSession.shared.bytes(from: bookURL).0)
+```
+
+A cancelled `readAsync()` throws `CancellationError` and loses nothing: every byte that had
+arrived stays buffered, and the next read goes on from there.
 
 ## The shape
 
@@ -57,6 +83,14 @@ once per few thousand rows, not once per cell.
   as HyperCast's `Verdict`, `string`/`text` for text and `raw` for the text a cell was cast
   from — or `nil` when there are no more rows. It is a view of the reader's buffers, valid
   until the next `read()`, and the same type for delimited text and for a sheet.
+- **Rows, too.** A `Batch` is a `RandomAccessCollection` of `Row` — `index`, `line`,
+  `get(_:as:)`, `verdict(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`, the batch's accessors
+  with the row fixed, allocating nothing — and `forEachRow` on a reader or a sheet reads
+  every row left across batches. A row is valid as long as its batch.
+- **Header first, or plan first.** Opened without a plan, a reader or sheet reads its
+  header — a `Header`, a collection of `String` with `ordinal(of:)` (throwing
+  `NoSuchColumn`) and `firstIndex(of:)`, both exact byte for byte — and is bound once with
+  `bind(_:)`; reading before that, or binding twice, throws `PlanError`.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
   `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
   the plan states each column's door and, for numbers, its `NumFormat`.
@@ -87,6 +121,19 @@ targets define the one `HyperTabularCore` module the binding imports. The floors
 and Mac Catalyst 16. CI's `test-apple-mobile` job runs the suite on an iOS simulator and as
 a Mac Catalyst process with `xcodebuild test`, and builds the package for an iOS device.
 
+Android uses the same artifact bundle: it carries the core for `aarch64-unknown-linux-android`
+and `x86_64-unknown-linux-android`, and a package built with the
+[Swift SDK for Android](https://www.swift.org/documentation/articles/swift-sdk-for-android-getting-started.html)
+(`swift build --swift-sdk aarch64-unknown-linux-android28`; Swift 6.3 or later, API 28 or
+later) links it like any other triple, beside HyperCast's own. Page alignment is the final
+link's, which the SDK does with the NDK's linker; NDK r28 and later align to the 16 KB pages
+Android 15 devices may use by default. CI cross-builds this suite with the SDK for x86_64 and
+runs it in an emulator whose image uses 16 KB pages, through
+`.github/scripts/android_build_suite.sh` and `android_device_test.sh`, which run the same way
+against a local emulator; the aarch64 build is linked. The Swift runtime on Android is shared
+libraries, which an app packages the way the SDK's documentation describes; the core adds
+nothing to them.
+
 ### WebAssembly
 
 The binding compiles to WebAssembly from Swift 6.2 with swift.org's WebAssembly SDK:
@@ -109,7 +156,7 @@ SwiftPM resolves from the git tag, so the archives committed in the bundle are w
 consumer links. Each was attested when the forge built it and verified again before it was
 committed:
 
-```
+```sh
 gh attestation verify HyperTabularCore.artifactbundle/x86_64-unknown-linux-gnu/libhypertabular.a --owner SkunkWerkx
 ```
 

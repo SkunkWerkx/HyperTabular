@@ -5,8 +5,9 @@ import XCTest
 
 /// Replays `corpus/workbook.json` — the contract every binding replays, and the one the Rust
 /// binding replays — through this binding: each package opened from memory copied, in
-/// place, and from its path, each sheet read by index and (where the name finds it) by
-/// name, in batches of one row, of two, and of more than any sheet has.
+/// place, from its path, and from a stream, each sheet read by index and (where the name
+/// finds it) by name, opened with its plan and header first, in batches of one row, of two,
+/// and of more than any sheet has.
 extension CorpusTests {
     struct WorkbookCase: Decodable {
         let name: String
@@ -78,6 +79,8 @@ extension CorpusTests {
                     ("memory", { try Workbook(bytes: bytes) }),
                     ("in place", { try Workbook(bytesNoCopy: UnsafeRawBufferPointer(inPlace)) }),
                     ("path", { try Workbook(contentsOfFile: path) }),
+                    ("input stream", { try Workbook(reading: InputStream(data: bytes)) }),
+                    ("source in chunks of 7", { try Workbook(reading: self.chunked(Array(bytes), 7)) }),
                 ]
 
                 // A package the core refuses: every way of opening it gives the one failure.
@@ -116,6 +119,14 @@ extension CorpusTests {
                                 ? try book.sheet(named: name, options: options, plan: plan)
                                 : try book.sheet(index, options: options, plan: plan)
                             replay(label, vector, sheet, batchRows: batchRows)
+                            // Header first: the plan bound once the header has been read. The
+                            // header row stays in the row's slots for a sheet that repeats it.
+                            let unbound =
+                                named
+                                ? try book.sheet(named: name, options: options)
+                                : try book.sheet(index, options: options)
+                            try bindHeaderFirst("\(label), header first", unbound, plan)
+                            replay("\(label), header first", vector, unbound, batchRows: batchRows)
                         }
                     }
                 }
@@ -124,8 +135,22 @@ extension CorpusTests {
         XCTAssertGreaterThanOrEqual(cells, 12_000)
     }
 
+    /// Holds a sheet just opened without a plan to what an unbound sheet promises, and binds
+    /// `plan` to it.
+    private func bindHeaderFirst(_ label: String, _ sheet: Sheet, _ plan: [Column]) throws {
+        XCTAssertFalse(sheet.isBound, label)
+        XCTAssertEqual(sheet.plan, [], label)
+        for _ in 0..<2 {
+            XCTAssertThrowsError(try sheet.read(), label) { XCTAssertEqual($0 as? PlanError, .unbound, label) }
+        }
+        try sheet.bind(plan)
+        XCTAssertTrue(sheet.isBound, label)
+        XCTAssertEqual(sheet.plan, plan, label)
+        XCTAssertThrowsError(try sheet.bind(plan), label) { XCTAssertEqual($0 as? PlanError, .alreadyBound, label) }
+    }
+
     private func replay(_ label: String, _ vector: WorkbookCase, _ sheet: Sheet, batchRows: Int) {
-        XCTAssertEqual(sheet.header, vector.header, "\(label): header")
+        XCTAssertEqual(sheet.header.map(Array.init), vector.header, "\(label): header")
         let rows = vector.rows!
         var seen = 0
         var failure: TabularError?
@@ -153,6 +178,65 @@ extension CorpusTests {
         }
         XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
         XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
+    }
+
+    /// Every package awaited from an asynchronous sequence that suspends between short reads:
+    /// the same workbook, or the same refusal, as from memory.
+    func testWorkbookCorpusFromAnAsyncSequence() async throws {
+        for vector in try workbookCorpus() {
+            let path = Self.corpusDirectory!.appendingPathComponent(vector.file).path
+            let bytes = Array(try Data(contentsOf: URL(fileURLWithPath: path)))
+            let stream = ShortReads(bytes, chunk: 4093)
+            guard let index = vector.sheet else {
+                do {
+                    _ = try await Workbook(bytes: stream)
+                    XCTFail("\(vector.name): opened")
+                } catch {
+                    XCTAssertEqual(error as? TabularError, expectedFailure(vector.failure), vector.name)
+                }
+                continue
+            }
+            let book = try await Workbook(bytes: stream)
+            XCTAssertEqual(book.sheets.map(\.name), vector.sheets!.map(\.name), vector.name)
+            let options = SheetOptions(
+                hasHeader: vector.options!.has_header, skipEmptyRows: vector.options!.skip_empty_rows, batchRows: 2)
+            let plan = vector.plan!.map(column(of:))
+            let sheet = try book.sheet(index, options: options)
+            try bindHeaderFirst("\(vector.name): async", sheet, plan)
+            replay("\(vector.name): async", vector, sheet, batchRows: 2)
+        }
+    }
+
+    /// A workbook read from a sheet a row at a time, across batches, is the batches read down.
+    func testASheetIsReadARowAtATime() throws {
+        guard let directory = Self.corpusDirectory else {
+            throw XCTSkip("the conformance corpus is not reachable from a WASI sandbox")
+        }
+        let book = try Workbook(contentsOfFile: directory.appendingPathComponent("workbook/basic.xlsx").path)
+        let options = SheetOptions(batchRows: 1)
+        let sheet = try book.sheet(0, options: options)
+        let header = try XCTUnwrap(sheet.header)
+        try sheet.bind([.text(header.ordinal(of: header[0]))])
+        var lines = [Int]()
+        var cells = [String]()
+        try sheet.forEachRow { row in
+            lines.append(row.line)
+            cells.append(String(decoding: row.raw(0), as: UTF8.self))
+        }
+
+        let planned = try book.sheet(0, options: options, plan: [.text(0)])
+        var batches = 0
+        var expected = [(Int, String)]()
+        while let batch = try planned.read() {
+            batches += 1
+            for row in 0..<batch.rows {
+                expected.append((batch.line(row), String(decoding: batch.raw(0, row: row), as: UTF8.self)))
+            }
+        }
+        XCTAssertGreaterThanOrEqual(batches, 3)
+        XCTAssertEqual(lines, expected.map(\.0))
+        XCTAssertEqual(cells, expected.map(\.1))
+        XCTAssertNil(try sheet.read(), "forEachRow read to the end")
     }
 
     func testWhatIsNotThereIsAnErrorOfItsOwn() throws {

@@ -15,10 +15,10 @@
     <rule ref="PSR12"/>
 
     <rule ref="Squiz.Commenting.ClassComment">
-        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
+        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Header|Row|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
     </rule>
     <rule ref="Squiz.Commenting.FunctionComment">
-        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
+        <include-pattern>src/(DelimitedReader|Column|Dialect|Door|Header|Row|Tabular|TabularException|TabularFailure)\.php$</include-pattern>
         <!-- Doc-comment presence and @param/@return/@throws accuracy only — not full Squiz
              formatting (alignment, blank-line placement, etc.), which isn't this project's
              comment style and isn't what "force documentation" is asking for. -->

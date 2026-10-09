@@ -63,6 +63,52 @@ func ExampleDelimitedReader() {
 	// 2 bob "the builder": total "12x4" is malformed at byte 2; placed "2026-02-30" is out of range
 }
 
+func ExampleDelimitedReader_Bind() {
+	// The publisher controls the column order; the names are the contract. Open without a
+	// plan, look the names up in the header, and bind the plan built from them.
+	const countries = "Country,M49 Code,ISO-alpha2 Code\n" +
+		"Algeria,012,DZ\n" +
+		"Argentina,032,AR\n"
+	reader, err := hypertabular.NewDelimitedReaderUnbound(strings.NewReader(countries), hypertabular.CSV)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+
+	header := reader.Header()
+	m49, err := header.Ordinal("M49 Code")
+	if err != nil {
+		log.Fatal(err)
+	}
+	iso, err := header.Ordinal("ISO-alpha2 Code")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := reader.Bind([]hypertabular.Column{
+		hypertabular.U16(m49, hypercast.Invariant),
+		hypertabular.Text(iso),
+	}); err != nil {
+		log.Fatal(err)
+	}
+	// A name the header lacks is an error that says which.
+	_, err = header.Ordinal("Region Code")
+	fmt.Println(err, errors.Is(err, hypertabular.ErrNoColumn))
+
+	// Row by row, across batches: each row is valid for its own iteration.
+	for row, err := range reader.All() {
+		if err != nil {
+			log.Fatal(err)
+		}
+		code, _ := hypertabular.Cell[uint16](row, 0)
+		// TextString is a view, not a copy: kept past the row, it would need strings.Clone.
+		fmt.Println(row.Line(), row.TextString(1), code)
+	}
+	// Output:
+	// hypertabular: the header has no column named "Region Code" true
+	// 2 DZ 12
+	// 3 AR 32
+}
+
 func ExampleFailure() {
 	// A record of the wrong width is not a cell's verdict: the input is not rows of cells.
 	// It is returned after every intact row before it.
@@ -97,12 +143,17 @@ func ExampleWorkbook() {
 		log.Fatal(err)
 	}
 	fmt.Println(book.Format(), book.Sheets()[0].Name)
-	plan := []hypertabular.Column{hypertabular.Text(0), hypertabular.Text(1)}
-	sheet, err := book.Sheet(0, hypertabular.DefaultSheetOptions, plan)
+	// Header first: the sheet is opened, its header read, and the plan bound by name.
+	sheet, err := book.SheetUnbound(0, hypertabular.DefaultSheetOptions)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(sheet.Header()[:2])
+	id, _ := sheet.Header().Ordinal("id")
+	named, _ := sheet.Header().Ordinal("name")
+	if err := sheet.Bind([]hypertabular.Column{hypertabular.Text(id), hypertabular.Text(named)}); err != nil {
+		log.Fatal(err)
+	}
 	batch, err := sheet.Read()
 	if err != nil {
 		log.Fatal(err)

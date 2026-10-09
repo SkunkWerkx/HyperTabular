@@ -4,7 +4,7 @@ Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks �
 read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell.
 
-```
+```sh
 go get github.com/SkunkWerkx/HyperTabular/go@latest
 ```
 
@@ -18,18 +18,29 @@ import (
 	hypertabular "github.com/SkunkWerkx/HyperTabular/go"
 )
 
-// The dialect and the plan are declared; nothing is sniffed.
-plan := []hypertabular.Column{
-	hypertabular.I32(0, hypercast.Invariant),
-	hypertabular.Text(1),
-	hypertabular.Exact(2, hypercast.Invariant),
-	hypertabular.DateOnly(3),
-}
-reader, err := hypertabular.OpenDelimited("orders.csv", hypertabular.CSV, plan)
+// The dialect is declared; nothing is sniffed. Open header first, look the columns up by
+// name, and bind the plan built from them.
+reader, err := hypertabular.OpenDelimitedUnbound("orders.csv", hypertabular.CSV)
 if err != nil {
 	log.Fatal(err)
 }
 defer reader.Close()
+
+header := reader.Header() // a hypertabular.Header: a []string with lookups
+id, err := header.Ordinal("id") // a missing name is a *NoColumnError that names it
+if err != nil {
+	log.Fatal(err)
+}
+customer, _ := header.Ordinal("customer")
+total, _ := header.Ordinal("total")
+plan := []hypertabular.Column{
+	hypertabular.I32(id, hypercast.Invariant),
+	hypertabular.Text(customer),
+	hypertabular.Exact(total, hypercast.Invariant),
+}
+if err := reader.Bind(plan); err != nil {
+	log.Fatal(err)
+}
 
 for {
 	batch, err := reader.Read()
@@ -51,13 +62,38 @@ for {
 		fmt.Println(ids[row], string(customers[row]), total)
 	}
 }
+```
 
-// A workbook reads into the same batch, a sheet at a time.
-book, err := hypertabular.OpenWorkbook("orders.xlsx")
+A plan known up front goes straight to the constructor — `OpenDelimited(path, dialect, plan)`,
+and likewise `NewDelimitedReader` and `NewDelimitedReaderBytes` — and `Bind` is not called.
+
+Or read row by row, across batches, with Go's range-over-func iterators:
+
+```go
+for row, err := range reader.All() {
+	if err != nil {
+		log.Fatal(err) // how the input ended, if not at its end
+	}
+	id, fault := hypertabular.Cell[int32](row, 0)
+	name := row.TextString(1) // a view of the batch's bytes, not a copy
+	…
+}
+```
+
+A workbook reads into the same batch, a sheet at a time:
+
+```go
+book, err := hypertabular.OpenWorkbook("orders.xlsx") // or NewWorkbook(bytes), NewWorkbookReader(r)
 if err != nil {
 	log.Fatal(err)
 }
-sheet, err := book.SheetNamed("Orders", hypertabular.DefaultSheetOptions, plan)
+sheet, err := book.SheetNamedUnbound("Orders", hypertabular.DefaultSheetOptions)
+if err != nil {
+	log.Fatal(err)
+}
+id, err = sheet.Header().Ordinal("id")
+…
+err = sheet.Bind(plan)
 ```
 
 `example_test.go` holds these as runnable examples, with their output checked by `go test`.
@@ -76,6 +112,30 @@ rows, not once per cell.
   parameters) — or `io.EOF` once there are no more rows. It is a view of the reader's
   buffers, valid until the next `Read()`, and the same type for delimited text and for a
   sheet.
+- **Header first, or plan first.** `OpenDelimitedUnbound`, `NewDelimitedReaderUnbound`,
+  `NewDelimitedReaderBytesUnbound`, `Workbook.SheetUnbound` and `Workbook.SheetNamedUnbound`
+  read the header and leave the plan to `Bind(plan)`, once, before the first `Read()` —
+  which returns `ErrUnbound` until then, and a second `Bind` `ErrAlreadyBound`. `Header()`
+  is a `Header`, a `[]string` underneath, whose `Ordinal(name)` / `OrdinalBytes` find the
+  first column of that exact name (case and spaces included) or return a `*NoColumnError`
+  naming it (`errors.Is(err, ErrNoColumn)`), and whose `Find` / `FindBytes` answer with an
+  `ok` instead. `ColumnCount()` is a record's width: the header's, or the first record's once
+  read.
+- **Rows, when that is the shape.** `batch.All()` is an `iter.Seq[Row]` over the batch, and
+  `reader.All()` / `sheet.All()` an `iter.Seq2[Row, error]` that reads batch after batch.
+  A `Row` — `Index()`, `Line()`, `Verdict(column)`, `Fault(column)`, `Text(column)`,
+  `TextString(column)`, `Raw(column)`, and `Cell[T](row, column)` — is a (batch, index) pair
+  and allocates nothing; like the batch, it is valid until the next read.
+- **Text as a string, without the copy.** `batch.TextString(column, row)` and
+  `row.TextString(column)` are the cell's bytes as a `string` made with `unsafe.String`: no
+  allocation, ready for `strconv`, a map lookup or a `switch`. The bytes are the reader's and
+  are reused by the next `Read()`, so a string kept past it changes under you — clone what
+  you keep (`strings.Clone`, or `Get[string]`, which copies).
+- **Cancellation is the source's.** A read blocks only in the `io.Reader`'s own `Read`; a
+  source tied to a `context.Context` — an `http.Request` made with one, a connection whose
+  deadline is set — ends with the context's error, and `Read()` returns it wrapped.
+  Everything after the bytes arrive is in memory and short. A loop over `All()` stops at a
+  `break`.
 - **HyperCast is the judge.** `hypercast.Fault`, `NumFormat`, `Decimal`, `Date`,
   `CivilDateTime`, `Duration`, `UnixPrecision`, `DateOrder` and `ExcelEpoch` are HyperCast's
   own types. A text cell means exactly what HyperCast's door would say of the same text; a
@@ -88,7 +148,8 @@ rows, not once per cell.
 ## Linking
 
 The core is linked in through cgo from the module's own `staticlib/{GOOS}_{GOARCH}`
-archives — Linux, macOS and Windows on x86-64 and arm64 — so a binary carries the core and
+archives — Linux, macOS, Windows and [Android](#android) on x86-64 and arm64, and
+[iOS and Mac Catalyst](#ios-and-mac-catalyst) — so a binary carries the core and
 loads nothing. Building takes a C compiler; `CGO_ENABLED=0` or any other target is a
 compile error rather than a binary that fails at run time. HyperCast's Go module links its
 own core the same way, and the two archives link side by side.
@@ -107,10 +168,35 @@ between them:
 | Mac Catalyst | `maccatalyst` | `staticlib/maccatalyst_arm64`, `staticlib/maccatalyst_amd64` |
 
 `gomobile` sets `maccatalyst` itself; nothing sets `iossimulator`, so a simulator build
-passes `-tags iossimulator` by hand. The simulator on an Intel Mac and Android have no
-archive and are compile errors. CI checks the selection for every platform
+passes `-tags iossimulator` by hand. The simulator on an Intel Mac has no archive and is a
+compile error. CI checks the selection for every platform
 (`.github/scripts/check_go_archives.sh`), runs this suite in an iOS simulator through Go's
 `misc/ios/go_ios_exec.go`, and links a device build.
+
+### Android
+
+`GOOS=android` with cgo, the NDK's clang as `CC`, as `gomobile` arranges and as any cgo
+package on Android needs:
+
+```shell
+CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
+  GOOS=android GOARCH=arm64 CGO_ENABLED=1 go build ./...
+```
+
+(`x86_64-linux-android21-clang` and `GOARCH=amd64` for the emulator.) `GOOS=android` also
+satisfies Go's `linux` constraint, so the Linux link lines exclude it and it takes its own
+archives, `staticlib/android_arm64` and `staticlib/android_amd64`, built for Android against
+Bionic (API 21+). HyperCast's Go module does the same for its own core, and the two link
+side by side. Page alignment is the final link's: NDK r28 and later align to the 16 KB pages
+Android 15 devices may use by default, and an older NDK needs
+`-extldflags=-Wl,-z,max-page-size=16384`.
+
+CI checks that both select their own archive (`.github/scripts/check_go_archives.sh`),
+cross-compiles this whole suite for `android/amd64`, and runs it in an x86_64 emulator whose
+image uses 16 KB pages (`.github/scripts/android_build_suite.sh` and
+`android_device_test.sh`, which run the same way against a local emulator); `android/arm64`
+is linked. `ExampleWorkbook` is skipped there, since it opens `../corpus` by its path and
+nothing is above the directory the suite is pushed to.
 
 ### In the browser (TinyGo)
 
@@ -137,7 +223,7 @@ Go has no package registry to attest; `go get` resolves straight from the `go/vX
 Each committed archive was attested when the forge built it and verified again before it was
 committed, and can be checked against the build that made it:
 
-```
+```sh
 gh attestation verify staticlib/linux_amd64/libhypertabular.a --owner SkunkWerkx
 ```
 

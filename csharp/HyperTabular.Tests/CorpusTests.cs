@@ -103,7 +103,13 @@ public sealed class CorpusTests
 				Encoding.UTF8.GetString(batch.Raw(column, row)).ShouldBe(expected.GetProperty("raw").GetString(), label);
 			}
 			if (door == Door.Text)
+			{
 				batch.TryGetText(column, row, out _).ShouldBeFalse(label);
+				// An empty cell is an empty span, where GetString says null.
+				batch.GetChars(column, row).IsEmpty.ShouldBeTrue(label);
+				batch.TryGetChars(column, row, [], out var none).ShouldBeTrue(label);
+				none.ShouldBe(0, label);
+			}
 			else
 				FaultOf(batch, column, row, door).ShouldBe(verdict.ToFault(), label);
 			return;
@@ -185,6 +191,14 @@ public sealed class CorpusTests
 				batch.TryGetText(column, row, out var utf8).ShouldBeTrue(label);
 				Encoding.UTF8.GetString(utf8).ShouldBe(expected.GetProperty("text").GetString(), label);
 				batch.GetString(column, row).ShouldBe(expected.GetProperty("text").GetString(), label);
+				// The same text as UTF-16 without a string: into the batch's arena, and into the caller's buffer.
+				var text = batch.GetString(column, row)!;
+				batch.GetChars(column, row).ToString().ShouldBe(text, label);
+				var chars = new char[text.Length + 1];
+				batch.TryGetChars(column, row, chars, out var written).ShouldBeTrue(label);
+				new string(chars, 0, written).ShouldBe(text, label);
+				if (text.Length > 0)
+					batch.TryGetChars(column, row, chars.AsSpan(0, text.Length - 1), out _).ShouldBeFalse(label);
 				break;
 			default:
 				throw new InvalidOperationException($"{label}: no accessor for {door}");
@@ -244,31 +258,128 @@ public sealed class CorpusTests
 				(expected.GetProperty("expected").GetInt32(), expected.GetProperty("found").GetInt32()), label);
 	}
 
-	static void Replay(string label, JsonElement vector, Func<Dialect, Column[], DelimitedReader> open)
+	static Dialect DialectOf(JsonElement vector)
 	{
 		var settings = vector.GetProperty("dialect");
-		var dialect = new Dialect(
+		return new Dialect(
 			settings.GetProperty("separator").GetString()![0],
 			settings.GetProperty("quoting").GetBoolean(),
 			settings.GetProperty("has_header").GetBoolean(),
 			settings.GetProperty("skip_blank_lines").GetBoolean());
+	}
+
+	/// <summary>
+	/// Holds a header the reader read before a plan was bound to what the reader with no plan
+	/// promises — names resolved first-match, by string and by bytes; no plan, no read — and
+	/// binds <paramref name="plan"/>.
+	/// </summary>
+	static void BindHeaderFirst(string label, Header? header, IReadOnlyList<Column> unbound, bool isBound,
+		Action read, Action<Column[]> bind, Column[] plan)
+	{
+		isBound.ShouldBeFalse(label);
+		unbound.ShouldBeEmpty(label);
+		Should.Throw<InvalidOperationException>(read, label);
+		if (header is not null)
+			for (var ordinal = 0; ordinal < header.Count; ordinal++)
+			{
+				var found = header.Ordinal(header[ordinal]);
+				found.ShouldBeLessThanOrEqualTo(ordinal, label);
+				header[found].ShouldBe(header[ordinal], label);
+				header.TryOrdinal(header.Utf8(ordinal), out var byBytes).ShouldBeTrue(label);
+				byBytes.ShouldBeLessThanOrEqualTo(ordinal, label);
+				header.Utf8(byBytes).SequenceEqual(header.Utf8(ordinal)).ShouldBeTrue(label);
+			}
+		bind(plan);
+		Should.Throw<InvalidOperationException>(() => bind(plan), label);
+	}
+
+	/// <summary>Holds every <see cref="Row"/> of a batch, met by <c>foreach</c>, to the batch's own accessors.</summary>
+	internal static void AssertRows(string label, Batch batch)
+	{
+		var index = 0;
+		foreach (var row in batch)
+		{
+			row.Index.ShouldBe(index, label);
+			row.Line.ShouldBe(batch.Line(index), label);
+			for (var column = 0; column < batch.Columns.Count; column++)
+			{
+				row.Verdict(column).ShouldBe(batch.Verdicts(column)[index], label);
+				row.Raw(column).SequenceEqual(batch.Raw(column, index)).ShouldBeTrue(label);
+				var door = batch.Columns[column].Door;
+				if (door == Door.Text)
+				{
+					row.TryGetText(column, out var mine).ShouldBe(batch.TryGetText(column, index, out var its), label);
+					mine.SequenceEqual(its).ShouldBeTrue(label);
+					row.GetString(column).ShouldBe(batch.GetString(column, index), label);
+					row.GetChars(column).SequenceEqual(batch.GetChars(column, index)).ShouldBeTrue(label);
+					continue;
+				}
+				var (a, b) = door switch
+				{
+					Door.Boolean => (row.Get<bool>(column).ToString(), batch.Get<bool>(column, index).ToString()),
+					Door.SByte => (row.Get<sbyte>(column).ToString(), batch.Get<sbyte>(column, index).ToString()),
+					Door.Int16 => (row.Get<short>(column).ToString(), batch.Get<short>(column, index).ToString()),
+					Door.Int32 => (row.Get<int>(column).ToString(), batch.Get<int>(column, index).ToString()),
+					Door.Int64 => (row.Get<long>(column).ToString(), batch.Get<long>(column, index).ToString()),
+					Door.Byte => (row.Get<byte>(column).ToString(), batch.Get<byte>(column, index).ToString()),
+					Door.UInt16 => (row.Get<ushort>(column).ToString(), batch.Get<ushort>(column, index).ToString()),
+					Door.UInt32 => (row.Get<uint>(column).ToString(), batch.Get<uint>(column, index).ToString()),
+					Door.UInt64 => (row.Get<ulong>(column).ToString(), batch.Get<ulong>(column, index).ToString()),
+					Door.Single => (row.Get<float>(column).ToString(), batch.Get<float>(column, index).ToString()),
+					Door.Double => (row.Get<double>(column).ToString(), batch.Get<double>(column, index).ToString()),
+					Door.Decimal => (row.Get<decimal>(column).ToString(), batch.Get<decimal>(column, index).ToString()),
+					Door.Uuid => (row.Get<Guid>(column).ToString(), batch.Get<Guid>(column, index).ToString()),
+					Door.Timestamp or Door.Unix or Door.ExcelSerial =>
+						(row.Get<DateTimeOffset>(column).ToString(), batch.Get<DateTimeOffset>(column, index).ToString()),
+					Door.Date or Door.DateOrdered => (row.Get<DateOnly>(column).ToString(), batch.Get<DateOnly>(column, index).ToString()),
+					Door.DateTime => (row.Get<DateTime>(column).ToString(), batch.Get<DateTime>(column, index).ToString()),
+					Door.Time => (row.Get<TimeOnly>(column).ToString(), batch.Get<TimeOnly>(column, index).ToString()),
+					Door.Duration => (row.Get<TimeSpan>(column).ToString(), batch.Get<TimeSpan>(column, index).ToString()),
+					_ => throw new InvalidOperationException($"no typed accessor for {door}"),
+				};
+				a.ShouldBe(b, label);
+			}
+			index++;
+		}
+		index.ShouldBe(batch.Rows, label);
+	}
+
+	/// <summary>
+	/// Reads a corpus vector through a reader <paramref name="open"/> makes — bound already,
+	/// or opened header-first and bound here, in batches of <paramref name="batchRows"/> — with
+	/// <see cref="DelimitedReader.Read"/> or, when <paramref name="async"/>,
+	/// <see cref="DelimitedReader.ReadAsync"/>, and holds every row and the failure to it.
+	/// </summary>
+	static async Task Replay(string label, JsonElement vector, Func<Dialect, Column[], ValueTask<DelimitedReader>> open,
+		int batchRows, bool async = false)
+	{
+		var dialect = DialectOf(vector);
 		Column[] plan = [.. vector.GetProperty("plan").EnumerateArray().Select(ColumnOf)];
 		var rows = vector.GetProperty("rows");
 
-		using var reader = open(dialect, plan);
+		await using var reader = await open(dialect, plan);
 		var header = vector.GetProperty("header");
 		if (header.ValueKind == JsonValueKind.Null)
 			reader.Header.ShouldBeNull(label);
 		else
+		{
 			reader.Header.ShouldBe(header.EnumerateArray().Select(name => name.GetString()!), label);
+			if (reader.Header!.Count > 0)
+				reader.ColumnCount.ShouldBe(reader.Header.Count, label);
+		}
+		if (!reader.IsBound)
+			BindHeaderFirst(label, reader.Header, reader.Plan, reader.IsBound, () => reader.Read(),
+				resolved => reader.Bind(resolved, batchRows), plan);
+		reader.Plan.ShouldBe(plan, label);
 
 		var seen = 0;
 		TabularException? failure = null;
 		try
 		{
-			while (reader.Read() is { } batch)
+			while ((async ? await reader.ReadAsync() : reader.Read()) is { } batch)
 			{
 				batch.Rows.ShouldBeGreaterThan(0, label);
+				AssertRows(label, batch);
 				for (var row = 0; row < batch.Rows; row++, seen++)
 				{
 					seen.ShouldBeLessThan(rows.GetArrayLength(), label);
@@ -288,7 +399,7 @@ public sealed class CorpusTests
 	}
 
 	[Fact]
-	void Delimited_corpus()
+	async Task Delimited_corpus()
 	{
 		var corpus = Corpus("delimited.json");
 		corpus.Length.ShouldBeGreaterThanOrEqualTo(30);
@@ -298,12 +409,47 @@ public sealed class CorpusTests
 			var input = Encoding.UTF8.GetBytes(vector.GetProperty("input").GetString()!);
 			foreach (var batchRows in (int[])[1, 2, 1024])
 			{
-				Replay($"{name} (memory, {batchRows} rows a batch)", vector,
-					(dialect, plan) => new DelimitedReader(input.AsMemory(), dialect, plan, batchRows));
+				await Replay($"{name} (memory, {batchRows} rows a batch)", vector,
+					(dialect, plan) => new(new DelimitedReader(input.AsMemory(), dialect, plan, batchRows)), batchRows);
+				await Replay($"{name} (memory, header first, {batchRows} rows a batch)", vector,
+					(dialect, _) => new(new DelimitedReader(input.AsMemory(), dialect)), batchRows);
 				foreach (var bufferBytes in (int[])[1, 5, 64, DelimitedReader.DefaultBufferBytes])
-					Replay($"{name} (stream through {bufferBytes} bytes, {batchRows} rows a batch)", vector,
-						(dialect, plan) => new DelimitedReader(new MemoryStream(input), dialect, plan, batchRows, bufferBytes));
+				{
+					await Replay($"{name} (stream through {bufferBytes} bytes, {batchRows} rows a batch)", vector,
+						(dialect, plan) => new(new DelimitedReader(new MemoryStream(input), dialect, plan, batchRows, bufferBytes)), batchRows);
+					await Replay($"{name} (stream through {bufferBytes} bytes, header first, {batchRows} rows a batch)", vector,
+						(dialect, _) => new(new DelimitedReader(new MemoryStream(input), dialect, bufferBytes)), batchRows);
+				}
 			}
+		}
+	}
+
+	/// <summary>
+	/// The corpus read asynchronously from a stream that hands out 1 to 5 bytes a read, so
+	/// that every batch takes many refills: opened with the plan and header-first, the header
+	/// awaited too, and every batch the same as the synchronous read makes.
+	/// </summary>
+	[Fact]
+	async Task Delimited_corpus_read_asynchronously_through_short_reads()
+	{
+		foreach (var vector in Corpus("delimited.json"))
+		{
+			var name = vector.GetProperty("name").GetString()!;
+			var input = Encoding.UTF8.GetBytes(vector.GetProperty("input").GetString()!);
+			foreach (var batchRows in (int[])[1, 2, 1024])
+				foreach (var bufferBytes in (int[])[1, 7, DelimitedReader.DefaultBufferBytes])
+				{
+					await Replay($"{name} (async, {bufferBytes}-byte buffer, {batchRows} rows a batch)", vector,
+						(dialect, plan) => DelimitedReader.OpenAsync(new ShortReadStream(input), dialect, plan, batchRows, bufferBytes),
+						batchRows, async: true);
+					await Replay($"{name} (async, header first, {bufferBytes}-byte buffer, {batchRows} rows a batch)", vector,
+						(dialect, _) => DelimitedReader.OpenAsync(new ShortReadStream(input), dialect, bufferBytes),
+						batchRows, async: true);
+				}
+			// A reader of memory reads asynchronously too, completing synchronously.
+			await Replay($"{name} (async from memory)", vector,
+				(dialect, plan) => new(new DelimitedReader(input.AsMemory(), dialect, plan)),
+				DelimitedReader.DefaultBatchRows, async: true);
 		}
 	}
 }

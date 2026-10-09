@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!-- The package on Android, as an app: the same SmokeTest.Run() the Native AOT smoke test
+	     runs, crossing every native entry point, started from an Activity (SmokeActivity.cs),
+	     since an Android app has no Main of its own. It needs the android workload, so it is not
+	     in HyperTabular.slnx, which every other leg builds; CI's test-android job builds it on
+	     CoreCLR and under Native AOT, for both RIDs, and runs the x64 builds in an emulator.
+	     HyperCast's AndroidSmokeTest is the model.
+
+	     Unlike the other smoke tests, this one takes HyperTabular as a package, not a project
+	     reference. What Android needs proving is the package's own layout: that the .NET for
+	     Android SDK finds runtimes/{rid}/native/libhypertabular.so in the .nupkg and puts it in
+	     the APK under lib/{abi}/, and that build/net11.0/HyperTabular.targets, imported by
+	     NuGet and not by hand, hands a Native AOT publish staticlibs/{rid}/libhypertabular.a.
+	     A project reference would take neither path. CI packs the package from the staged
+	     native binaries into a local folder and passes it in:
+
+	       dotnet build -p:HyperTabularVersion=<version> -p:RestoreAdditionalProjectSources=<folder> -->
+	<PropertyGroup>
+		<TargetFramework>net11.0-android</TargetFramework>
+		<SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
+		<OutputType>Exe</OutputType>
+		<IsPackable>false</IsPackable>
+		<ApplicationId>io.github.skunkwerkx.hypertabular.androidsmoketest</ApplicationId>
+		<ApplicationTitle>HyperTabular smoke test</ApplicationTitle>
+		<ApplicationVersion>1</ApplicationVersion>
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<!-- An .apk, which installs with a plain `adb install`; an .aab needs bundletool. -->
+		<AndroidPackageFormat>apk</AndroidPackageFormat>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Compile Include="../HyperTabular.AotSmokeTest/SmokeTest.cs" Link="SmokeTest.cs" />
+		<PackageReference Include="HyperTabular" Version="$(HyperTabularVersion)" />
+	</ItemGroup>
+
+	<!-- The workbook SmokeTest.cs reads, compiled in as the Native AOT smoke test compiles it:
+	     an app on the device has no corpus/ beside it. -->
+	<ItemGroup>
+		<EmbeddedResource Include="../../corpus/workbook/basic.xlsx" LogicalName="basic.xlsx" />
+	</ItemGroup>
+
+	<Target Name="_RequireHyperTabularVersion" BeforeTargets="CollectPackageReferences" Condition="'$(HyperTabularVersion)' == ''">
+		<Error Text="Pass -p:HyperTabularVersion=... and -p:RestoreAdditionalProjectSources=... naming a locally packed HyperTabular (see this project's header)." />
+	</Target>
+
+</Project>

@@ -160,6 +160,146 @@ public sealed unsafe class Workbook : IDisposable
 	/// <exception cref="TabularException">The file is not a workbook this reader can read.</exception>
 	public static Workbook Open(string path) => new(File.ReadAllBytes(path));
 
+	/// <summary>
+	/// Reads <paramref name="container"/> to its end and opens what it held — an embedded
+	/// resource, a network response, anything that is a stream rather than a file. A workbook
+	/// is read from its end (a zip's directory is there), so the whole container is read
+	/// first, into pinned memory the workbook then owns: exactly as much as a seekable stream
+	/// has left, or a buffer that doubles for one that cannot say. The format is told from the
+	/// bytes.
+	/// </summary>
+	/// <param name="container">The stream, read from where it stands to its end.</param>
+	/// <param name="leaveOpen">
+	/// Whether the stream is left open. Unless it is, the stream is disposed as soon as it has
+	/// been read — the workbook holds its own copy — not when the workbook is.
+	/// </param>
+	/// <exception cref="TabularException">
+	/// The bytes are not a workbook this reader can read; or the stream holds more than
+	/// <see cref="int.MaxValue"/> bytes (<see cref="TabularFailure.TooLarge"/>), which a
+	/// seekable stream is refused for before anything is allocated.
+	/// </exception>
+	public Workbook(Stream container, bool leaveOpen = false)
+		: this(ReadToEnd(container, leaveOpen))
+	{
+	}
+
+	/// <summary>Reads <paramref name="container"/> to its end and opens what it held: the <see cref="Workbook(Stream, bool)"/> constructor.</summary>
+	/// <param name="container">The stream, read from where it stands to its end.</param>
+	/// <param name="leaveOpen">Whether the stream is left open; unless it is, it is disposed as soon as it has been read.</param>
+	/// <exception cref="TabularException">The bytes are not a workbook this reader can read, or there are more than <see cref="int.MaxValue"/> of them.</exception>
+	public static Workbook Open(Stream container, bool leaveOpen = false) => new(container, leaveOpen);
+
+	/// <summary>
+	/// <see cref="Workbook(Stream, bool)"/>, awaiting the stream: for one a browser serves (an
+	/// <c>HttpClient</c> response, a picked file), which cannot be read synchronously, or to
+	/// observe a cancellation while a large container arrives. Once read, the workbook is in
+	/// memory, and its sheets are read synchronously.
+	/// </summary>
+	/// <param name="container">The stream, read from where it stands to its end.</param>
+	/// <param name="leaveOpen">Whether the stream is left open; unless it is, it is disposed (asynchronously) as soon as it has been read.</param>
+	/// <param name="cancellationToken">Observed before anything is done, and at every read of the stream.</param>
+	/// <exception cref="TabularException">The bytes are not a workbook this reader can read, or there are more than <see cref="int.MaxValue"/> of them.</exception>
+	/// <exception cref="OperationCanceledException">The token was cancelled; what had been read is dropped.</exception>
+	public static async ValueTask<Workbook> OpenAsync(Stream container, bool leaveOpen = false, CancellationToken cancellationToken = default)
+	{
+		cancellationToken.ThrowIfCancellationRequested();
+		ArgumentNullException.ThrowIfNull(container);
+		ReadOnlyMemory<byte> bytes;
+		try
+		{
+			var buffer = Allocate(container);
+			var length = 0;
+			var probe = new byte[1];
+			while (true)
+			{
+				if (length == buffer.Length)
+				{
+					// Full: probed for more before anything is grown, so that a stream that
+					// told its length truly is read into exactly that.
+					if (await container.ReadAsync(probe, cancellationToken).ConfigureAwait(false) == 0)
+						break;
+					buffer = Larger(buffer);
+					buffer[length++] = probe[0];
+					continue;
+				}
+				var read = await container.ReadAsync(buffer.AsMemory(length), cancellationToken).ConfigureAwait(false);
+				if (read == 0)
+					break;
+				length += read;
+			}
+			bytes = buffer.AsMemory(0, length);
+		}
+		finally
+		{
+			if (!leaveOpen)
+				await container.DisposeAsync().ConfigureAwait(false);
+		}
+		return new Workbook(bytes);
+	}
+
+	/// <summary>The bytes of <paramref name="container"/> from where it stands to its end, in a pinned buffer.</summary>
+	static ReadOnlyMemory<byte> ReadToEnd(Stream container, bool leaveOpen)
+	{
+		ArgumentNullException.ThrowIfNull(container);
+		try
+		{
+			var buffer = Allocate(container);
+			var length = 0;
+			Span<byte> probe = stackalloc byte[1];
+			while (true)
+			{
+				if (length == buffer.Length)
+				{
+					// Full: probed for more before anything is grown, so that a stream that
+					// told its length truly is read into exactly that.
+					if (container.Read(probe) == 0)
+						break;
+					buffer = Larger(buffer);
+					buffer[length++] = probe[0];
+					continue;
+				}
+				var read = container.Read(buffer, length, buffer.Length - length);
+				if (read == 0)
+					break;
+				length += read;
+			}
+			return buffer.AsMemory(0, length);
+		}
+		finally
+		{
+			if (!leaveOpen)
+				container.Dispose();
+		}
+	}
+
+	/// <summary>
+	/// The buffer a stream is read into: exactly what a seekable stream has left — refused
+	/// before it is allocated if that is more than an array can hold — or a start to double
+	/// from.
+	/// </summary>
+	static byte[] Allocate(Stream container)
+	{
+		long remaining = 64 * 1024;
+		if (container.CanSeek)
+		{
+			remaining = Math.Max(container.Length - container.Position, 0);
+			if (remaining > int.MaxValue)
+				throw TooLarge();
+		}
+		return GC.AllocateUninitializedArray<byte>((int)remaining, pinned: true);
+	}
+
+	/// <summary>Twice the room, holding what <paramref name="buffer"/> held; no more than an array can hold.</summary>
+	static byte[] Larger(byte[] buffer)
+	{
+		if (buffer.Length >= Array.MaxLength)
+			throw TooLarge();
+		return Columns.Grow(buffer, Math.Max((long)buffer.Length * 2, 64 * 1024));
+	}
+
+	static TabularException TooLarge() =>
+		new(TabularFailure.TooLarge, "The stream holds more bytes than a workbook can be read from.");
+
 	static T[] Pinned<T>(ReadOnlySpan<T> data) where T : unmanaged
 	{
 		var copy = GC.AllocateUninitializedArray<T>(data.Length, pinned: true);
@@ -219,7 +359,7 @@ public sealed unsafe class Workbook : IDisposable
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
 		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)_sheets.Length, nameof(index));
-		return new Sheet(this, _sheets[index], options, plan);
+		return new Sheet(this, _sheets[index], options, plan, bound: true);
 	}
 
 	/// <summary>Starts a read of the first sheet named <paramref name="name"/> through <paramref name="plan"/>.</summary>
@@ -232,7 +372,37 @@ public sealed unsafe class Workbook : IDisposable
 		ArgumentNullException.ThrowIfNull(name);
 		foreach (var sheet in _sheets)
 			if (sheet.Name == name)
-				return new Sheet(this, sheet, options, plan);
+				return new Sheet(this, sheet, options, plan, bound: true);
+		throw new KeyNotFoundException($"The workbook has no sheet named \"{name}\".");
+	}
+
+	/// <summary>
+	/// Starts a read of the sheet at <paramref name="index"/> of <see cref="Sheets"/> and reads
+	/// its header, leaving the plan to <see cref="HyperTabular.Sheet.Bind"/> once the header has
+	/// said where each column is.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">The workbook has no sheet at that index.</exception>
+	/// <exception cref="TabularException">The sheet, or its header row, is structurally broken.</exception>
+	public Sheet Sheet(int index, SheetOptions options)
+	{
+		ObjectDisposedException.ThrowIf(_disposed, this);
+		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)_sheets.Length, nameof(index));
+		return new Sheet(this, _sheets[index], options, default, bound: false);
+	}
+
+	/// <summary>
+	/// Starts a read of the first sheet named <paramref name="name"/> and reads its header,
+	/// leaving the plan to <see cref="HyperTabular.Sheet.Bind"/>.
+	/// </summary>
+	/// <exception cref="KeyNotFoundException">The workbook has no sheet by that name.</exception>
+	/// <exception cref="TabularException">The sheet, or its header row, is structurally broken.</exception>
+	public Sheet Sheet(string name, SheetOptions options)
+	{
+		ObjectDisposedException.ThrowIf(_disposed, this);
+		ArgumentNullException.ThrowIfNull(name);
+		foreach (var sheet in _sheets)
+			if (sheet.Name == name)
+				return new Sheet(this, sheet, options, default, bound: false);
 		throw new KeyNotFoundException($"The workbook has no sheet named \"{name}\".");
 	}
 
@@ -279,7 +449,7 @@ public sealed unsafe class Workbook : IDisposable
 		public byte[] Window = GC.AllocateUninitializedArray<byte>(window, pinned: true);
 		public byte[] Arena = GC.AllocateUninitializedArray<byte>(arena, pinned: true);
 		public Native.RawSpan[] Cells = GC.AllocateUninitializedArray<Native.RawSpan>(cells, pinned: true);
-		public readonly Native.RawSlot[] Row = GC.AllocateUninitializedArray<Native.RawSlot>(row, pinned: true);
+		public Native.RawSlot[] Row = GC.AllocateUninitializedArray<Native.RawSlot>(row, pinned: true);
 
 		/// <summary>This scratch as the core takes it, with the workbook's tables when a sheet is being read.</summary>
 		public Native.RawBuffers Buffers(Workbook? book)
@@ -303,7 +473,16 @@ public sealed unsafe class Workbook : IDisposable
 		/// names each time — with what the buffer held kept, which is what lets the core go
 		/// on from where it stopped. Returns the code it ended on and what it reported.
 		/// </summary>
-		public (int Code, Native.RawFilled Filled) Drive(Workbook book, ulong[] state, Columns? columns, Call call)
+		/// <param name="book">The workbook the call reads.</param>
+		/// <param name="state">The read state the call goes on from.</param>
+		/// <param name="columns">The plan's columns, for a fill.</param>
+		/// <param name="call">The call.</param>
+		/// <param name="rowFollowsCells">
+		/// Whether the row's slots are grown with the cell table, keeping what they held — for
+		/// the header of a sheet with no plan, whose slots are to hold every cell the header
+		/// row has, since a row the sheet repeats is delivered again from them.
+		/// </param>
+		public (int Code, Native.RawFilled Filled) Drive(Workbook book, ulong[] state, Columns? columns, Call call, bool rowFollowsCells = false)
 		{
 			var tables = call is Call.Header or Call.Fill;
 			while (true)
@@ -333,6 +512,8 @@ public sealed unsafe class Workbook : IDisposable
 					case Native.ErrCells:
 						Cells = Columns.Grow(Cells, (long)filled.Needed);
 						Grown.Cells++;
+						if (rowFollowsCells && Row.Length < Cells.Length)
+							Row = Columns.Grow(Row, Cells.Length);
 						break;
 					default:
 						return (code, filled);

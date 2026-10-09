@@ -284,7 +284,8 @@ struct Delimited {
 
 struct DelimitedRead {
     state: State,
-    columns: Columns,
+    /// The plan's arrays, once one is bound: the header is read before there is one.
+    columns: Option<Columns>,
     per_row: usize,
     cramped: bool,
     cells: Vec<Span>,
@@ -301,23 +302,25 @@ impl DataTypeFunctions for Delimited {
     }
 }
 
+/// A delimited read's arena, at least +needed+ bytes and at least doubled: the core rewrites
+/// what it needs, so nothing is kept.
+fn grow_arena(arena: &mut Vec<u8>, needed: usize) {
+    let capacity = needed.max(arena.len() * 2);
+    *arena = vec![0; capacity];
+}
+
 impl DelimitedRead {
-    fn grow_arena(&mut self, needed: usize) {
-        let capacity = needed.max(self.arena.len() * 2);
-        self.arena = vec![0; capacity];
+    /// The plan's arrays, or a contract violation: the reader above never fills before
+    /// it has bound a plan.
+    fn columns(&self, ruby: &Ruby) -> Result<&Columns, Error> {
+        self.columns.as_ref().ok_or_else(|| contract(ruby))
     }
 }
 
 impl Delimited {
-    /// `Delimited.start`: nil when the core refuses the dialect.
-    fn start(
-        ruby: &Ruby,
-        dialect: RString,
-        specs: RArray,
-        sizes: RArray,
-        batch_rows: usize,
-        per_row: usize,
-    ) -> Result<Option<Obj<Delimited>>, Error> {
+    /// `Delimited.start`: nil when the core refuses the dialect. The plan comes later, by
+    /// `bind`, so that the header can be read first.
+    fn start(ruby: &Ruby, dialect: RString) -> Result<Option<Obj<Delimited>>, Error> {
         // SAFETY: four bytes copied out at once.
         let packed: [u8; 4] = unsafe { dialect.as_slice() }
             .try_into()
@@ -331,13 +334,12 @@ impl Delimited {
         let Some(state) = State::init(raw) else {
             return Ok(None);
         };
-        let columns = Columns::new(ruby, specs, sizes, batch_rows)?;
         let read = DelimitedRead {
             state,
-            columns,
-            per_row,
+            columns: None,
+            per_row: 0,
             cramped: false,
-            cells: vec![Span::default(); per_row * batch_rows],
+            cells: Vec::new(),
             names: Vec::new(),
             arena: vec![0; ARENA_BYTES],
             out: Filled::default(),
@@ -346,6 +348,25 @@ impl Delimited {
             input: Cell::new(None),
             read: RefCell::new(read),
         })))
+    }
+
+    /// Takes the plan: +specs+ is one packed `ColumnSpec` per plan column and +sizes+ the
+    /// bytes one value of each takes, +batch_rows+ the most rows a fill writes and
+    /// +per_row+ the cell-table entries one row takes. Once, before the first fill.
+    fn bind(
+        ruby: &Ruby,
+        rb_self: &Self,
+        specs: RArray,
+        sizes: RArray,
+        batch_rows: usize,
+        per_row: usize,
+    ) -> Result<(), Error> {
+        let columns = Columns::new(ruby, specs, sizes, batch_rows)?;
+        let mut read = rb_self.read.borrow_mut();
+        read.per_row = per_row;
+        read.cells = vec![Span::default(); per_row * batch_rows];
+        read.columns = Some(columns);
+        Ok(())
     }
 
     /// Names the String the calls that follow read, held where it is.
@@ -382,7 +403,7 @@ impl Delimited {
             match code {
                 OK | ERR_STRUCTURE => return Ok(code),
                 ERR_CELLS => read.names = vec![Span::default(); needed],
-                ERR_ARENA => read.grow_arena(needed),
+                ERR_ARENA => grow_arena(&mut read.arena, needed),
                 _ => return Err(contract(ruby)),
             }
         }
@@ -413,14 +434,17 @@ impl Delimited {
         let text = attached(ruby, &rb_self.input)?;
         let mut guard = rb_self.read.borrow_mut();
         let read = &mut *guard;
+        let Some(columns) = read.columns.as_mut() else {
+            return Err(contract(ruby));
+        };
         if read.cramped {
             let doubled = read.arena.len() * 2;
-            read.grow_arena(doubled);
+            grow_arena(&mut read.arena, doubled);
         }
         read.cramped = false;
-        let batch_rows = read.columns.batch_rows;
+        let batch_rows = columns.batch_rows;
         loop {
-            let buffers = read.columns.buffers();
+            let buffers = columns.buffers();
             // SAFETY: handed to the core and let go of before anything Ruby runs.
             let input = unsafe { window(ruby, &text, start, length)? };
             // SAFETY: each column's two arrays have room for `batch_rows` values of its
@@ -430,7 +454,7 @@ impl Delimited {
                     &mut read.state,
                     input,
                     last,
-                    &read.columns.specs,
+                    &columns.specs,
                     &buffers,
                     batch_rows,
                     &mut read.cells,
@@ -452,7 +476,7 @@ impl Delimited {
                     read.per_row = read.per_row.max(needed);
                     read.cells = vec![Span::default(); read.per_row * batch_rows];
                 }
-                ERR_ARENA => read.grow_arena(needed),
+                ERR_ARENA => grow_arena(&mut read.arena, needed),
                 _ => return Err(contract(ruby)),
             }
         }
@@ -502,24 +526,37 @@ impl Delimited {
         failure_array(ruby, &rb_self.read.borrow().out.failure)
     }
 
+    /// Cells per record, fixed by the header or the first record; 0 before either.
+    fn expected(&self) -> u32 {
+        self.read.borrow().state.expected
+    }
+
     fn per_row(&self) -> usize {
         self.read.borrow().per_row
     }
 
-    fn count(&self) -> usize {
-        self.read.borrow().columns.specs.len()
+    fn count(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        Ok(rb_self.read.borrow().columns(ruby)?.specs.len())
     }
 
-    fn batch_rows(&self) -> usize {
-        self.read.borrow().columns.batch_rows
+    fn batch_rows(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        Ok(rb_self.read.borrow().columns(ruby)?.batch_rows)
     }
 
     fn values(ruby: &Ruby, rb_self: &Self, column: usize, rows: usize) -> Result<RString, Error> {
-        rb_self.read.borrow().columns.values(ruby, column, rows)
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .values(ruby, column, rows)
     }
 
     fn verdicts(ruby: &Ruby, rb_self: &Self, column: usize, rows: usize) -> Result<RString, Error> {
-        rb_self.read.borrow().columns.verdicts(ruby, column, rows)
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .verdicts(ruby, column, rows)
     }
 }
 
@@ -604,12 +641,24 @@ impl Scratch {
         }
     }
 
+    /// The buffer at least +needed+ long if it is shorter, what it held kept.
+    fn reserve<T: Copy + Default>(buffer: &mut Vec<T>, needed: usize) {
+        if buffer.len() < needed {
+            buffer.resize(needed, T::default());
+        }
+    }
+
     /// Makes +call+ until it stops asking for room, growing the buffer it names each time.
     /// Returns the code it ended on, with what it wrote in +out+.
+    ///
+    /// With +row_follows_cells+, the row's slots are grown with the cell table, so that
+    /// there is a slot for every cell a header names: what a sheet whose plan is not yet
+    /// known reads its header with.
     fn drive(
         &mut self,
         ruby: &Ruby,
         tables: Tables<'_>,
+        row_follows_cells: bool,
         out: &mut Filled,
         mut call: impl FnMut(&mut Memory<'_>, &mut Filled) -> i32,
     ) -> Result<i32, Error> {
@@ -626,6 +675,9 @@ impl Scratch {
                 }
                 ERR_CELLS => {
                     Scratch::grow(&mut self.cells, out.needed);
+                    if row_follows_cells {
+                        Scratch::reserve(&mut self.row, self.cells.len());
+                    }
                     grown(ruby, 2)?;
                 }
                 _ => return Ok(code),
@@ -707,7 +759,7 @@ impl Opened {
         // The sheets: three spans each — name, part, then one whose offset's low bit says
         // hidden and whose length is the sheet's index.
         let mut out = Filled::default();
-        let code = scratch.drive(ruby, NO_TABLES, &mut out, |memory, out| {
+        let code = scratch.drive(ruby, NO_TABLES, false, &mut out, |memory, out| {
             book::sheets(&mut state, bytes(), memory, out)
         })?;
         settle(ruby, code, &out)?;
@@ -737,14 +789,14 @@ impl Opened {
         if !stingy && scratch.arena.len() < bound {
             Scratch::grow(&mut scratch.arena, bound as u64);
         }
-        let code = scratch.drive(ruby, NO_TABLES, &mut out, |memory, out| {
+        let code = scratch.drive(ruby, NO_TABLES, false, &mut out, |memory, out| {
             book::strings(&mut state, bytes(), memory, out)
         })?;
         settle(ruby, code, &out)?;
         let used = (out.arena_used as usize).min(scratch.arena.len());
         let strings_bytes = scratch.arena[..used].to_vec();
         let table = scratch.cells[..(out.rows as usize).min(scratch.cells.len())].to_vec();
-        let code = scratch.drive(ruby, NO_TABLES, &mut out, |memory, out| {
+        let code = scratch.drive(ruby, NO_TABLES, false, &mut out, |memory, out| {
             book::styles(&mut state, bytes(), memory, out)
         })?;
         settle(ruby, code, &out)?;
@@ -802,7 +854,7 @@ impl Opened {
 
 /// runtime/workbook.rb's `Reading`: one sheet being read — its own copy of the state, its
 /// plan's arrays, its scratch. `columns` answers with the object itself, as `Delimited`'s
-/// does.
+/// does. The plan's arrays wait for `bind`, so that the header can be read first.
 #[derive(TypedData)]
 #[magnus(
     class = "HyperTabular::Runtime::Native::Reading",
@@ -811,13 +863,14 @@ impl Opened {
 )]
 struct Reading {
     book: Opaque<Obj<Opened>>,
-    header: Opaque<Value>,
     read: RefCell<SheetRead>,
 }
 
 struct SheetRead {
     state: Box<Book>,
-    columns: Columns,
+    /// The plan's arrays, once one is bound.
+    columns: Option<Columns>,
+    batch_rows: usize,
     per_row: usize,
     scratch: Scratch,
     out: Filled,
@@ -826,35 +879,28 @@ struct SheetRead {
 impl DataTypeFunctions for Reading {
     fn mark(&self, marker: &gc::Marker) {
         marker.mark(self.book);
-        marker.mark(self.header);
     }
 }
 
 impl Reading {
     /// `Reading.new`: positions a copy of the workbook's state on +sheet+ (an entry of
-    /// `Opened#sheets`) and, with a header declared, reads it.
-    #[allow(clippy::too_many_arguments)]
+    /// `Opened#sheets`).
     fn new(
         ruby: &Ruby,
         book: Obj<Opened>,
         sheet: RArray,
         has_header: bool,
         skip_empty_rows: bool,
-        specs: RArray,
-        sizes: RArray,
         batch_rows: usize,
-        width: usize,
     ) -> Result<Obj<Reading>, Error> {
         let part: RString = sheet.entry(2)?;
         // SAFETY: copied out at once.
         let part = unsafe { part.as_slice() }.to_vec();
         let index: u32 = sheet.entry(3)?;
-        let columns = Columns::new(ruby, specs, sizes, batch_rows)?;
-        let per_row = columns.specs.len() + 1;
         let scratch = if stingy(ruby)? {
-            Scratch::new(1, 1, 1, width)
+            Scratch::new(1, 1, 1, 0)
         } else {
-            Scratch::new(0, 4096, batch_rows * per_row, width)
+            Scratch::new(0, 4096, 64, 0)
         };
         let mut state = Box::new(Book::new());
         // SAFETY: a state block is plain integers with no destructor, the two do not
@@ -862,8 +908,9 @@ impl Reading {
         unsafe { std::ptr::copy_nonoverlapping(&*book.state, &mut *state, 1) };
         let mut read = SheetRead {
             state,
-            columns,
-            per_row,
+            columns: None,
+            batch_rows,
+            per_row: 0,
             scratch,
             out: Filled::default(),
         };
@@ -880,16 +927,42 @@ impl Reading {
             &mut read.out,
         );
         settle(ruby, code, &read.out)?;
-        let header = if has_header {
-            read.header(ruby, &book)?.as_value()
-        } else {
-            ruby.qnil().as_value()
-        };
         Ok(ruby.obj_wrap(Reading {
             book: Opaque::from(book),
-            header: Opaque::from(header),
             read: RefCell::new(read),
         }))
+    }
+
+    /// Takes the plan: +specs+ is one packed `ColumnSpec` per plan column, +sizes+ the bytes
+    /// one value of each takes, and +width+ the slots a row needs to reach every source
+    /// column the plan reads. Once, before the first fill. The core keeps a header row's
+    /// cells in the row's slots — a row the sheet repeats (an ODS `number-rows-repeated`) is
+    /// delivered again from them — so the slots are only ever grown here, never replaced.
+    fn bind(
+        ruby: &Ruby,
+        rb_self: &Self,
+        specs: RArray,
+        sizes: RArray,
+        width: usize,
+    ) -> Result<(), Error> {
+        let stingy = stingy(ruby)?;
+        let mut guard = rb_self.read.borrow_mut();
+        let read = &mut *guard;
+        let columns = Columns::new(ruby, specs, sizes, read.batch_rows)?;
+        read.per_row = columns.specs.len() + 1;
+        // A stingy scratch is left to grow into the cell table the hard way, mid-read.
+        if !stingy {
+            Scratch::reserve(&mut read.scratch.cells, read.batch_rows * read.per_row);
+        }
+        Scratch::reserve(&mut read.scratch.row, width);
+        read.columns = Some(columns);
+        Ok(())
+    }
+
+    /// Reads the header row: its names, as frozen UTF-8 Strings in a frozen Array.
+    fn read_header(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let book = ruby.get_inner(rb_self.book);
+        rb_self.read.borrow_mut().header(ruby, &book)
     }
 
     /// The next batch: `[rows, cells, arena, failure]` — its rows, its cell table and the
@@ -899,21 +972,22 @@ impl Reading {
         let book = ruby.get_inner(rb_self.book);
         let mut guard = rb_self.read.borrow_mut();
         let read = &mut *guard;
-        let buffers = read.columns.buffers();
-        let (state, specs, batch_rows) = (
-            &mut read.state,
-            &read.columns.specs,
-            read.columns.batch_rows,
-        );
+        let Some(columns) = read.columns.as_mut() else {
+            return Err(contract(ruby));
+        };
+        let buffers = columns.buffers();
+        let (state, specs, batch_rows) = (&mut read.state, &columns.specs, columns.batch_rows);
         // SAFETY: the container is frozen, and the slice is let go of before Ruby runs.
         let container = unsafe { book.container(ruby) };
-        let code = read
-            .scratch
-            .drive(ruby, book.tables(), &mut read.out, |memory, out| {
-                // SAFETY: each column's two arrays have room for `batch_rows` values of its
-                // door's type (`Columns::new`) and `batch_rows` verdicts.
-                unsafe { rows::fill(state, container, specs, &buffers, batch_rows, memory, out) }
-            })?;
+        let code =
+            read.scratch
+                .drive(ruby, book.tables(), false, &mut read.out, |memory, out| {
+                    // SAFETY: each column's two arrays have room for `batch_rows` values of its
+                    // door's type (`Columns::new`) and `batch_rows` verdicts.
+                    unsafe {
+                        rows::fill(state, container, specs, &buffers, batch_rows, memory, out)
+                    }
+                })?;
         if code != OK && code != ERR_STRUCTURE {
             return Err(contract(ruby));
         }
@@ -933,43 +1007,63 @@ impl Reading {
         ]))
     }
 
-    fn header(ruby: &Ruby, rb_self: &Self) -> Value {
-        ruby.get_inner(rb_self.header)
-    }
-
     fn per_row(&self) -> usize {
         self.read.borrow().per_row
     }
 
-    fn count(&self) -> usize {
-        self.read.borrow().columns.specs.len()
+    fn count(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        Ok(rb_self.read.borrow().columns(ruby)?.specs.len())
     }
 
     fn batch_rows(&self) -> usize {
-        self.read.borrow().columns.batch_rows
+        self.read.borrow().batch_rows
     }
 
     fn values(ruby: &Ruby, rb_self: &Self, column: usize, rows: usize) -> Result<RString, Error> {
-        rb_self.read.borrow().columns.values(ruby, column, rows)
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .values(ruby, column, rows)
     }
 
     fn verdicts(ruby: &Ruby, rb_self: &Self, column: usize, rows: usize) -> Result<RString, Error> {
-        rb_self.read.borrow().columns.verdicts(ruby, column, rows)
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .verdicts(ruby, column, rows)
     }
 }
 
 impl SheetRead {
+    /// The plan's arrays, or a contract violation: the sheet above never fills before it
+    /// has bound a plan.
+    fn columns(&self, ruby: &Ruby) -> Result<&Columns, Error> {
+        self.columns.as_ref().ok_or_else(|| contract(ruby))
+    }
+
     /// The header row's names: in the shared strings as written, or — flagged — in the
     /// arena. Frozen UTF-8 Strings in a frozen Array.
+    ///
+    /// Read before a plan is bound, the row's slots are made — and kept — as many as the
+    /// cell table has spans, a slot for every name: the core keeps the header row's cells
+    /// there as well as naming them, and a row the sheet repeats is delivered from them.
     fn header(&mut self, ruby: &Ruby, book: &Opened) -> Result<RArray, Error> {
         // SAFETY: the container is frozen, and the slice is let go of before Ruby runs.
         let container = unsafe { book.container(ruby) };
+        let unbound = self.columns.is_none();
+        if unbound {
+            Scratch::reserve(&mut self.scratch.row, self.scratch.cells.len());
+        }
         let state = &mut self.state;
-        let code = self
-            .scratch
-            .drive(ruby, book.tables(), &mut self.out, |memory, out| {
-                rows::header(state, container, memory, out)
-            })?;
+        let code = self.scratch.drive(
+            ruby,
+            book.tables(),
+            unbound,
+            &mut self.out,
+            |memory, out| rows::header(state, container, memory, out),
+        )?;
         settle(ruby, code, &self.out)?;
         let count = (self.out.rows as usize).min(self.scratch.cells.len());
         let names = ruby.ary_new_capa(count);
@@ -1016,6 +1110,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
     let delimited = native.define_class("Delimited", ruby.class_object())?;
     delimited.undef_default_alloc_func();
+    delimited.define_method("bind", method!(Delimited::bind, 4))?;
     delimited.define_method("attach", method!(Delimited::attach, 1))?;
     delimited.define_method("header", method!(Delimited::header, 3))?;
     delimited.define_method("names", method!(Delimited::names, 0))?;
@@ -1025,6 +1120,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     delimited.define_method("records", method!(Delimited::records, 0))?;
     delimited.define_method("line", method!(Delimited::line, 0))?;
     delimited.define_method("offset", method!(Delimited::offset, 0))?;
+    delimited.define_method("expected", method!(Delimited::expected, 0))?;
     delimited.define_method("rows", method!(Delimited::rows, 0))?;
     delimited.define_method("consumed", method!(Delimited::consumed, 0))?;
     delimited.define_method("arena_used", method!(Delimited::arena_used, 0))?;
@@ -1045,8 +1141,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
 
     let reading = native.define_class("Reading", ruby.class_object())?;
     reading.undef_default_alloc_func();
+    reading.define_method("bind", method!(Reading::bind, 3))?;
+    reading.define_method("read_header", method!(Reading::read_header, 0))?;
     reading.define_method("fill", method!(Reading::fill, 0))?;
-    reading.define_method("header", method!(Reading::header, 0))?;
     reading.define_method("per_row", method!(Reading::per_row, 0))?;
     reading.define_method("columns", method!(|rb_self: Obj<Reading>| rb_self, 0))?;
     reading.define_method("count", method!(Reading::count, 0))?;
@@ -1055,7 +1152,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     reading.define_method("verdicts", method!(Reading::verdicts, 2))?;
 
     // The entry points the Ruby above calls, now handing out the objects above.
-    fiddle_delimited.define_singleton_method("start", function!(Delimited::start, 5))?;
+    fiddle_delimited.define_singleton_method("start", function!(Delimited::start, 1))?;
     fiddle_delimited.define_singleton_method("version", function!(version, 0))?;
     runtime.define_singleton_method("unescape", function!(unescape, 1))?;
     book_module
@@ -1063,6 +1160,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         .define_singleton_method("new", function!(Opened::open, 1))?;
     book_module
         .const_get::<_, RClass>("Reading")?
-        .define_singleton_method("new", function!(Reading::new, 8))?;
+        .define_singleton_method("new", function!(Reading::new, 5))?;
     Ok(())
 }

@@ -51,7 +51,11 @@ module HyperTabular
       # it opens, one for each sheet.
       class Scratch
         # The buffers, each a Fiddle::Pointer, and their sizes (in bytes, spans, slots).
-        attr_reader :window, :arena, :cells, :arena_cap, :cells_cap
+        attr_reader :window, :arena, :cells, :arena_cap, :cells_cap, :row_cap
+
+        # Whether the row's slots grow with the cell table: what a header read before there
+        # is a plan needs, so that there is a slot for every cell the header names.
+        attr_accessor :row_follows_cells
 
         def initialize(window, arena, cells, row)
           @window_cap = window
@@ -84,9 +88,22 @@ module HyperTabular
           @arena, @arena_cap = grown(@arena, @arena_cap, needed, 1)
         end
 
-        # Makes the cell table at least +needed+ spans, what it held kept.
+        # Makes the cell table at least +needed+ spans, what it held kept — and, while the
+        # row follows it, the row's slots as many.
         def grow_cells(needed)
           @cells, @cells_cap = grown(@cells, @cells_cap, needed, SPAN_BYTES)
+          reserve_row(@cells_cap) if @row_follows_cells
+        end
+
+        # Makes the cell table at least +needed+ spans if it is smaller, what it held kept.
+        def reserve_cells(needed)
+          @cells, @cells_cap = grown(@cells, @cells_cap, needed, SPAN_BYTES) if @cells_cap < needed
+        end
+
+        # Makes the row at least +needed+ slots if it is smaller, what it held kept: a header
+        # row still to be repeated is never dropped.
+        def reserve_row(needed)
+          @row, @row_cap = grown(@row, @row_cap, needed, SLOT_BYTES) if @row_cap < needed
         end
 
         # Makes +call+ (a block taking the Buffers block and the out block) until it stops
@@ -210,18 +227,19 @@ module HyperTabular
         end
       end
 
-      # One sheet being read: its own copy of the state, its plan's arrays, its scratch.
+      # One sheet being read: its own copy of the state, its plan's arrays, its scratch. The
+      # plan's arrays wait for #bind, so that the header can be read before there is a plan.
       class Reading
         # The plan's arrays, and the cell-table entries one row takes: one per plan column,
-        # and one for the row's number.
-        attr_reader :columns, :per_row, :header
+        # and one for the row's number. Nil until #bind.
+        attr_reader :columns, :per_row
 
-        def initialize(book, sheet, has_header, skip_empty_rows, specs, sizes, batch_rows, width)
+        # Positions a copy of the workbook's state on +sheet+ (an entry of Opened#sheets).
+        def initialize(book, sheet, has_header, skip_empty_rows, batch_rows)
           @book = book
           @state = book.copy_of_state
-          @columns = Columns.new(specs, sizes, batch_rows)
-          @per_row = specs.size + 1
-          @scratch = Book.stingy ? Scratch.new(1, 1, 1, width) : Scratch.new(0, 4096, batch_rows * @per_row, width)
+          @batch_rows = batch_rows
+          @scratch = Book.stingy ? Scratch.new(1, 1, 1, 0) : Scratch.new(0, 4096, 64, 0)
           @out = Runtime.buffer(FILLED_BYTES)
           _name, _hidden, part, index = sheet
           code = Runtime.function(:hypertabular_workbook_sheet).call(
@@ -229,7 +247,19 @@ module HyperTabular
             has_header ? 1 : 0, skip_empty_rows ? 1 : 0, @out
           )
           Book.settle(code, @out[0, FILLED_BYTES].unpack(FILLED))
-          @header = read_header if has_header
+        end
+
+        # Takes the plan: +specs+ is one packed ColumnSpec per plan column, +sizes+ the bytes
+        # one value of each takes, and +width+ the slots a row needs to reach every source
+        # column the plan reads. Once, before the first #fill. The core keeps a header row's
+        # cells in the row's slots — a row the sheet repeats (an ODS number-rows-repeated) is
+        # delivered again from them — so the slots are only ever grown here, never replaced.
+        def bind(specs, sizes, width)
+          @columns = Columns.new(specs, sizes, @batch_rows)
+          @per_row = specs.size + 1
+          # A stingy scratch is left to grow into the cell table the hard way, mid-read.
+          @scratch.reserve_cells(@batch_rows * @per_row) unless Book.stingy
+          @scratch.reserve_row(width)
         end
 
         # The next batch's rows, its cell table, the arena as far as the core wrote into it
@@ -249,13 +279,18 @@ module HyperTabular
            code == OK ? nil : filled[4..]]
         end
 
-        private
-
+        # Reads the header row: its names, as frozen UTF-8 Strings in a frozen Array. Read
+        # before #bind, the row's slots are made — and kept — as many as the cell table has
+        # spans, which is a slot for every name.
         def read_header
           call = Runtime.function(:hypertabular_workbook_header)
+          unbound = @columns.nil?
+          @scratch.reserve_row(@scratch.cells_cap) if unbound
+          @scratch.row_follows_cells = unbound
           code, filled = @scratch.drive(@out, @book.tables) do |buffers|
             call.call(@state, @book.container, @book.length, buffers, @out)
           end
+          @scratch.row_follows_cells = false
           rows = Book.settle(code, filled).first
           spans = @scratch.cells[0, SPAN_BYTES * rows].unpack("L<*")
           arena = nil

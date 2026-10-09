@@ -20,9 +20,15 @@ use HyperTabular\Dialect;
 use HyperTabular\SheetOptions;
 use HyperTabular\Workbook;
 
-$plan = [Column::i32(0), Column::text(1), Column::f64(2)];
-$reader = DelimitedReader::open('orders.csv', Dialect::csv(), $plan);
+// Open first, read the header, then build the plan from its names.
+$reader = DelimitedReader::open('orders.csv', Dialect::csv());
 $reader->header();                       // ['id', 'name', 'score']
+$header = $reader->headerIndex();        // the same names, looked up by name
+$reader->bind([
+    Column::i32($header->ordinal('id')), // an OutOfBoundsException naming a missing column
+    Column::text($header->ordinal('name')),
+    Column::f64($header->ordinal('score')),
+]);
 
 while (($batch = $reader->read()) !== null) {
     // A column at a time, decoded in one unpack — null where a cell did not cast…
@@ -31,22 +37,33 @@ while (($batch = $reader->read()) !== null) {
         echo "line {$batch->line($row)}: {$fault->reason->name} in \"{$batch->raw(2, $row)}\"\n";
     }
 
-    // …or a cell at a time, as HyperCast's union.
-    for ($row = 0; $row < $batch->rows(); $row++) {
-        $verdict = $batch->get(2, $row);
+    // …or a row at a time, each cell as HyperCast's union.
+    foreach ($batch as $row) {
+        $verdict = $row->get(2);
         echo match (true) {
-            $verdict instanceof Success => "{$batch->raw(1, $row)}: {$verdict->value}\n",
+            $verdict instanceof Success => "{$row->raw(1)}: {$verdict->value}\n",
             $verdict instanceof Fault => "{$verdict->reason->name}\n",
         };
     }
 }
 $reader->close();
 
-// A workbook reads into the same batch.
-$book = Workbook::open('orders.xlsx');
+// A plan known up front is handed straight to the factory.
+$plan = [Column::i32(0), Column::text(1), Column::f64(2)];
+$reader = DelimitedReader::fromString("id,name,score\n1,alice,2.5\n", Dialect::csv(), $plan);
+foreach ($reader->rows() as $row) {      // every row, batch after batch
+    $row->line();                        // 2
+    $row->value(0);                      // 1, or null where the cell did not cast
+}
+
+// A workbook — from a path, a string or a stream — reads into the same batch.
+$stream = fopen('orders.xlsx', 'rb');
+$book = Workbook::fromStream($stream);   // read to its end; the stream stays yours
+fclose($stream);
 $book->sheets();                         // [SheetInfo { name: 'Orders', hidden: false, … }]
-$sheet = $book->sheet('Orders', new SheetOptions(), $plan);
-while (($batch = $sheet->read()) !== null) {
+$sheet = $book->sheet('Orders', new SheetOptions());
+$sheet->bind([Column::i32($sheet->headerIndex()->ordinal('id'))]);
+foreach ($sheet->rows() as $row) {
     // …
 }
 ```
@@ -59,13 +76,28 @@ that locates each cell — once, and the core fills them in one native call per 
 column then comes out of its buffer in one `unpack()`. The boundary is crossed once per few
 thousand rows, not once per cell.
 
+- **The header first, if you like.** `DelimitedReader::open`, `fromString`, `fromStream`
+  and `Workbook::sheet` take the plan, or leave it out (`null`) to read the header and stop.
+  `header()` is the names as an array; `headerIndex()` is a `Header` over the same names —
+  countable, iterable, indexable — with `ordinal($name)` (exact, case-sensitive, first match;
+  an `OutOfBoundsException` naming the column when it is missing) and `find($name)` (`null`
+  instead). `bind($plan)` declares the plan once, before the first read — a second `bind`
+  is a `LogicException`, and so is `read()` until a plan is bound; `isBound()` says which.
+  `columnCount()` is a record's width.
 - **One batch class.** `read()` returns a `Batch` — `rows()`, `columns()`, `line($row)`,
   `values($column)`, `faults($column)`, `verdicts($column)`, `get($column, $row)` and
   `raw($column, $row)` — or `null` once there are no more rows, for delimited text and a
   sheet alike. A batch owns what it shows: it stays good after the reader has moved on.
+- **Or a row at a time.** A `Batch` iterates its rows as `Row` objects — `index()`,
+  `line()`, `get($column)`, `value($column)`, `fault($column)`, `raw($column)`, each the
+  batch's own answer for that row — and `rows()` on a reader or a sheet is a generator of
+  every row left, reading batch after batch. A row owns what it shows, as its batch does.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
   `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
   the plan states each column's door and, for numbers, its `HyperCast\NumFormat`.
+- **No async API.** PHP has no event loop of its own to hand a read to; a stream is read as a
+  blocking stream, and a Fiber-based runtime (Amp, ReactPHP) drives it as it drives any other.
+  A workbook is wholly in memory once it is open.
 - **HyperCast is the judge.** `Success`, `Fault`, `CastFailure`, `NumFormat`, `Decimal`,
   `Duration`, `UnixPrecision`, `DateOrder` and `ExcelEpoch` are the `skunkwerkx/hypercast`
   package's own. A text cell means exactly what `HyperCast\Cast` would say of the same text;

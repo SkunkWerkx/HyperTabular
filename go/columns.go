@@ -113,3 +113,13 @@ func grownTo[T any](old []T, needed uint64) []T {
 	copy(larger, old)
 	return larger
 }
+
+// atLeast is old made at least n long, what it held kept; old itself when it is long enough.
+func atLeast[T any](old []T, n int) []T {
+	if len(old) >= n {
+		return old
+	}
+	larger := make([]T, n)
+	copy(larger, old)
+	return larger
+}

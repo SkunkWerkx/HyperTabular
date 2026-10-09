@@ -3,14 +3,17 @@ require "yard"
 
 GEMSPEC = Bundler.load_gemspec("hypertabular.gemspec")
 
-# The public API surface: the module, the dialect, the plan's columns, the reader, the
-# batch it hands out, the workbook and its sheets, and the error. runtime*.rb is internal
-# FFI plumbing, the same public/internal boundary hypercast's Rakefile draws.
+# The public API surface: the module, the dialect, the plan's columns, the reader and its
+# header, the batch it hands out and its rows, the workbook and its sheets, and the error.
+# runtime*.rb is internal FFI plumbing, the same public/internal boundary hypercast's
+# Rakefile draws.
 PUBLIC_API = %w[
   lib/hypertabular.rb
   lib/hypertabular/dialect.rb
   lib/hypertabular/column.rb
   lib/hypertabular/tabular_error.rb
+  lib/hypertabular/header.rb
+  lib/hypertabular/row.rb
   lib/hypertabular/delimited_reader.rb
   lib/hypertabular/batch.rb
   lib/hypertabular/workbook.rb

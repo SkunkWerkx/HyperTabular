@@ -132,6 +132,18 @@ module HyperTabular
     # String. A cell with no bytes at all is the one way text fails (an :empty Fault).
     def self.text(ordinal) = new(ordinal: ordinal, door: :text)
 
+    # +plan+ as a reader holds it: a frozen Array of its own, every entry a Column — what
+    # DelimitedReader and Sheet check a plan with. ArgumentError naming the first entry that
+    # is not a Column.
+    def self.plan(plan)
+      plan = Array(plan).dup.freeze
+      plan.each_with_index do |column, index|
+        raise ArgumentError, "plan column #{index} must be a HyperTabular::Column; got #{column.inspect}" unless
+          column.is_a?(Column)
+      end
+      plan
+    end
+
     # Bytes one value of this column's door takes in a column buffer.
     def value_bytes
       Column::VALUE_BYTES.fetch(door)

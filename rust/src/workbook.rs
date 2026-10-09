@@ -11,7 +11,7 @@
 //! [`Sheet`] is one forward-only read of one sheet; several can be open at once, each
 //! with its own buffers, all borrowing the workbook.
 
-use crate::batch::{Batch, Columns, Origin};
+use crate::batch::{Batch, Columns, Origin, Row};
 use crate::column;
 use crate::kernel::abi::{
     ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened, Slot, Span,
@@ -136,9 +136,14 @@ impl Scratch {
     /// — with what the buffer held kept, which is what lets the core go on from where it
     /// stopped. Returns the code it ended on (`OK` or a refusal that room does not cure)
     /// and what it reported.
+    ///
+    /// With `row_follows_cells`, the row's slots are grown with the cell table, so that
+    /// there is a slot for every cell a header names: what a sheet whose plan is not yet
+    /// known reads its header with (see [`Sheet::read_header`]).
     fn drive(
         &mut self,
-        row: &mut [Slot],
+        row: &mut Vec<Slot>,
+        row_follows_cells: bool,
         tables: Tables<'_>,
         mut call: impl FnMut(&mut Memory<'_>, &mut Filled) -> i32,
     ) -> (i32, Filled) {
@@ -160,9 +165,13 @@ impl Scratch {
             match code {
                 ERR_WINDOW => self.window.resize(needed.max(self.window.len() + 1), 0),
                 ERR_ARENA => self.arena.resize(needed.max(self.arena.len() + 1), 0),
-                ERR_CELLS => self
-                    .cells
-                    .resize(needed.max(self.cells.len() + 1), Span::default()),
+                ERR_CELLS => {
+                    self.cells
+                        .resize(needed.max(self.cells.len() + 1), Span::default());
+                    if row_follows_cells && row.len() < self.cells.len() {
+                        row.resize(self.cells.len(), Slot::default());
+                    }
+                }
                 _ => return (code, out),
             }
         }
@@ -211,6 +220,37 @@ impl Workbook<'static> {
     /// Opens a workbook from bytes it then owns.
     pub fn from_vec(bytes: Vec<u8>) -> Result<Workbook<'static>, Error> {
         Workbook::build(Cow::Owned(bytes))
+    }
+
+    /// Reads `reader` to its end and opens what it held — an embedded resource, a network
+    /// response, anything that is a stream rather than a file. A workbook is read from its
+    /// end (a zip's directory is there), so the whole container is read first, into memory
+    /// the workbook then owns.
+    pub fn from_reader(mut reader: impl std::io::Read) -> Result<Workbook<'static>, Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Workbook::from_vec(bytes)
+    }
+
+    /// [`Workbook::from_reader`] over an asynchronous byte source, which is awaited to its
+    /// end. Cancelling it (dropping the future) drops what had been read.
+    #[cfg(feature = "async")]
+    pub async fn from_async_reader(
+        reader: impl futures_io::AsyncRead + Send,
+    ) -> Result<Workbook<'static>, Error> {
+        let mut reader = std::pin::pin!(reader);
+        let mut bytes = Vec::new();
+        let mut chunk = vec![0; 64 * 1024];
+        loop {
+            let read = std::future::poll_fn(|cx| reader.as_mut().poll_read(cx, &mut chunk)).await;
+            match read {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Workbook::from_vec(bytes)
     }
 }
 
@@ -263,7 +303,7 @@ impl<'a> Workbook<'a> {
         let epoch = ExcelEpoch::from_code(opened.epoch).unwrap_or(ExcelEpoch::Y1900);
 
         let none = Tables::default();
-        let (code, out) = scratch.drive(&mut [], none, |memory, out| {
+        let (code, out) = scratch.drive(&mut Vec::new(), false, none, |memory, out| {
             book::sheets(&mut state, bytes, memory, out)
         });
         settle(code, &out)?;
@@ -289,14 +329,14 @@ impl<'a> Workbook<'a> {
         if scratch.arena.len() < bound.min(1 << 28) {
             scratch.arena.resize(bound.min(1 << 28), 0);
         }
-        let (code, out) = scratch.drive(&mut [], none, |memory, out| {
+        let (code, out) = scratch.drive(&mut Vec::new(), false, none, |memory, out| {
             book::strings(&mut state, bytes, memory, out)
         });
         settle(code, &out)?;
         let strings = scratch.arena[..out.arena_used as usize].to_vec();
         let table = scratch.cells[..out.rows as usize].to_vec();
 
-        let (code, out) = scratch.drive(&mut [], none, |memory, out| {
+        let (code, out) = scratch.drive(&mut Vec::new(), false, none, |memory, out| {
             book::styles(&mut state, bytes, memory, out)
         });
         settle(code, &out)?;
@@ -345,7 +385,17 @@ impl<'a> Workbook<'a> {
         options: SheetOptions,
         plan: &[Column],
     ) -> Result<Sheet<'_>, Error> {
-        Sheet::open(Book::Borrowed(self), which.into(), options, plan)
+        Sheet::open(Book::Borrowed(self), which.into(), options, Some(plan))
+    }
+
+    /// Starts a read of one sheet and reads its header, leaving the plan to be bound
+    /// ([`Sheet::bind`]) once the header has said where each column is.
+    pub fn sheet_unbound<'n>(
+        &self,
+        which: impl Into<SheetRef<'n>>,
+        options: SheetOptions,
+    ) -> Result<Sheet<'_>, Error> {
+        Sheet::open(Book::Borrowed(self), which.into(), options, None)
     }
 
     /// The sheet `which` of a workbook shared behind an `Arc`, read by a sheet that holds a
@@ -356,7 +406,7 @@ impl<'a> Workbook<'a> {
         book: &std::sync::Arc<Workbook<'static>>,
         which: SheetRef<'_>,
         options: SheetOptions,
-        plan: &[Column],
+        plan: Option<&[Column]>,
     ) -> Result<Sheet<'static>, Error> {
         Sheet::open(
             Book::Shared(std::sync::Arc::clone(book)),
@@ -389,7 +439,7 @@ impl<'w> Sheet<'w> {
         book: Book<'w>,
         which: SheetRef<'_>,
         options: SheetOptions,
-        plan: &[Column],
+        plan: Option<&[Column]>,
     ) -> Result<Sheet<'w>, Error> {
         let workbook = book.get();
         let info = match which {
@@ -404,8 +454,6 @@ impl<'w> Sheet<'w> {
                 .ok_or_else(|| Error::NoSheet(format!("named {name:?}")))?,
         };
         let (part, index) = (info.part.clone(), info.index);
-        let (specs, width) = column::specs(plan)?;
-        let batch_rows = options.batch_rows.max(1);
         let state = copy_of(&workbook.state);
         let mut sheet = Sheet {
             book,
@@ -414,15 +462,18 @@ impl<'w> Sheet<'w> {
             scratch: Scratch {
                 window: Vec::new(),
                 arena: vec![0; 4096],
-                cells: vec![Span::default(); batch_rows * (plan.len() + 1)],
+                cells: vec![Span::default(); 64],
             },
-            row: vec![Slot::default(); width],
-            per_row: plan.len() + 1,
-            columns: Columns::new(plan, specs, batch_rows),
+            row: Vec::new(),
+            per_row: 0,
+            columns: None,
             header: None,
             pending: None,
             error: None,
         };
+        if let Some(plan) = plan {
+            sheet.bind(plan)?;
+        }
         let mut out = Filled::default();
         let code = rows::sheet(
             &mut sheet.state,
@@ -451,7 +502,8 @@ pub struct Sheet<'w> {
     row: Vec<Slot>,
     /// Cell-table entries to a row: one per plan column, and one more.
     per_row: usize,
-    columns: Columns,
+    /// The plan's columns, once one is bound.
+    columns: Option<Columns>,
     header: Option<Header>,
     /// A failure met with rows before it: those went out first, and this is next.
     pending: Option<Error>,
@@ -472,9 +524,19 @@ impl<'w> Sheet<'w> {
         let book = self.book.get();
         let tables = tables(book);
         let state = &mut *self.state;
-        let (code, out) = self.scratch.drive(&mut self.row, tables, |memory, out| {
-            rows::header(state, &book.container, memory, out)
-        });
+        // The header row's cells are kept in the row's slots as well as named — the slots
+        // are what a row the sheet repeats (an ODS `number-rows-repeated`) is delivered
+        // again from. A plan says how many slots it reads; without one, there is a slot for
+        // every name, and binding a plan later keeps them.
+        let unbound = self.columns.is_none();
+        if unbound && self.row.len() < self.scratch.cells.len() {
+            self.row.resize(self.scratch.cells.len(), Slot::default());
+        }
+        let (code, out) = self
+            .scratch
+            .drive(&mut self.row, unbound, tables, |memory, out| {
+                rows::header(state, &book.container, memory, out)
+            });
         settle(code, &out)?;
         let mut header = Header::new();
         for name in &self.scratch.cells[..out.rows as usize] {
@@ -495,9 +557,53 @@ impl<'w> Sheet<'w> {
         self.options
     }
 
-    /// The plan the sheet is read through.
+    /// Declares the plan a sheet opened without one reads through — once, before the
+    /// first read: [`DelimitedReader::bind`](crate::DelimitedReader::bind), for a sheet.
+    ///
+    /// # Errors
+    /// [`Error::AlreadyBound`] if the sheet has a plan; [`Error::Plan`] if a column cannot
+    /// be honoured.
+    pub fn bind(&mut self, plan: &[Column]) -> Result<(), Error> {
+        if self.columns.is_some() {
+            return Err(Error::AlreadyBound);
+        }
+        let (specs, width) = column::specs(plan)?;
+        let batch_rows = self.options.batch_rows.max(1);
+        self.per_row = plan.len() + 1;
+        let cells = batch_rows * self.per_row;
+        if self.scratch.cells.len() < cells {
+            self.scratch.cells.resize(cells, Span::default());
+        }
+        // What the slots hold — a header row still to be repeated — is kept.
+        if self.row.len() < width {
+            self.row.resize(width, Slot::default());
+        }
+        self.columns = Some(Columns::new(plan, specs, batch_rows));
+        Ok(())
+    }
+
+    /// Whether a plan has been bound: always, for a sheet opened with one.
+    pub fn is_bound(&self) -> bool {
+        self.columns.is_some()
+    }
+
+    /// The plan the sheet is read through: empty until one is bound.
     pub fn plan(&self) -> &[Column] {
-        self.columns.plan()
+        self.columns.as_ref().map_or(&[], Columns::plan)
+    }
+
+    /// Reads every row left, batch by batch, handing each to `f`:
+    /// [`DelimitedReader::for_each_row`](crate::DelimitedReader::for_each_row), for a sheet.
+    pub fn for_each_row<E: From<Error>>(
+        &mut self,
+        mut f: impl FnMut(Row<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        while let Some(batch) = self.read()? {
+            for row in batch {
+                f(row)?;
+            }
+        }
+        Ok(())
     }
 
     /// The header row's names — a typed cell said the way the text door says it — or
@@ -512,8 +618,12 @@ impl<'w> Sheet<'w> {
     /// for.
     ///
     /// A structural failure is returned once every intact row before it has been
-    /// delivered, and again on every call after.
+    /// delivered, and again on every call after. A sheet opened without a plan returns
+    /// [`Error::Unbound`] until one is bound.
     pub fn read(&mut self) -> Result<Option<Batch<'_>>, Error> {
+        let Some(columns) = self.columns.as_mut() else {
+            return Err(Error::Unbound);
+        };
         if let Some(error) = self.pending.take() {
             self.error = Some(error);
         }
@@ -522,24 +632,26 @@ impl<'w> Sheet<'w> {
         }
         let book = self.book.get();
         let tables = tables(book);
-        let max_rows = self.columns.batch_rows();
+        let max_rows = columns.batch_rows();
         let state = &mut *self.state;
-        let (specs, buffers) = self.columns.for_core();
-        let (code, out) = self.scratch.drive(&mut self.row, tables, |memory, out| {
-            // SAFETY: every buffer has room for `max_rows` values of its column's door
-            // and as many verdicts, which is what `Columns` allocated.
-            unsafe {
-                rows::fill(
-                    state,
-                    &book.container,
-                    specs,
-                    buffers,
-                    max_rows,
-                    memory,
-                    out,
-                )
-            }
-        });
+        let (specs, buffers) = columns.for_core();
+        let (code, out) = self
+            .scratch
+            .drive(&mut self.row, false, tables, |memory, out| {
+                // SAFETY: every buffer has room for `max_rows` values of its column's door
+                // and as many verdicts, which is what `Columns` allocated.
+                unsafe {
+                    rows::fill(
+                        state,
+                        &book.container,
+                        specs,
+                        buffers,
+                        max_rows,
+                        memory,
+                        out,
+                    )
+                }
+            });
         if let Err(error) = settle(code, &out) {
             if out.rows == 0 {
                 self.error = Some(error.clone());
@@ -551,7 +663,7 @@ impl<'w> Sheet<'w> {
             return Ok(None);
         }
         Ok(Some(Batch::new(
-            &self.columns,
+            columns,
             out.rows as usize,
             &self.scratch.cells,
             self.per_row,

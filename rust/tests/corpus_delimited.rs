@@ -101,6 +101,38 @@ fn every_case_reads_as_the_corpus_says() {
                 expected,
                 "{name}: a file, {batch_rows} rows a batch"
             );
+            // Header first, the plan bound after: the same reads, whatever the source.
+            fn bound<'a>(
+                reader: Result<DelimitedReader<'a>, Error>,
+                plan: &[Column],
+            ) -> Result<DelimitedReader<'a>, Error> {
+                let mut reader = reader?;
+                reader.bind(plan)?;
+                Ok(reader)
+            }
+            assert_eq!(
+                read(bound(options.from_slice_unbound(input, dialect), &plan)),
+                expected,
+                "{name}: a slice bound after its header, {batch_rows} rows a batch"
+            );
+            assert_eq!(
+                read(bound(
+                    options
+                        .buffer_bytes(5)
+                        .from_reader_unbound(Cursor::new(input), dialect),
+                    &plan
+                )),
+                expected,
+                "{name}: a stream bound after its header, {batch_rows} rows a batch"
+            );
+            assert_eq!(
+                read(bound(
+                    options.buffer_bytes(7).open_unbound(&path, dialect),
+                    &plan
+                )),
+                expected,
+                "{name}: a file bound after its header, {batch_rows} rows a batch"
+            );
         }
     }
 }

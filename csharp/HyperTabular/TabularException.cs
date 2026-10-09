@@ -53,6 +53,10 @@ public sealed class TabularException : Exception
 		Found = found;
 	}
 
+	/// <summary>A failure found by the binding rather than the core, which has nowhere in the input to point at.</summary>
+	internal TabularException(TabularFailure failure, string message)
+		: base(message) => Failure = failure;
+
 	/// <summary>The failure the core reported, read the way the Rust binding reads it.</summary>
 	internal static TabularException From(in Native.RawFailure failure) =>
 		new(failure.Code switch

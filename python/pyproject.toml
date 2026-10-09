@@ -22,9 +22,9 @@ authors = [{ name = "Brian Buvinghausen" }]
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
-# column's notation is its `NumFormat`. 0.7.0 is the first release with the interop surface
-# this package reads cells through; below 0.8 because a 0.x minor is where its surface is allowed to move.
-dependencies = ["hypercast>=0.7.0,<0.8"]
+# column's notation is its `NumFormat`. 0.8.0, released alongside this package's 0.8.0, and
+# below 0.9 because a 0.x minor is where its surface is allowed to move.
+dependencies = ["hypercast>=0.8.0,<0.9"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.

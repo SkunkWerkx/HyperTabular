@@ -8,28 +8,34 @@ read a batch at a time into typed columns, with a
 import io.github.skunkwerkx.hypercast.*;
 import io.github.skunkwerkx.hypertabular.*;
 
-List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
-try (DelimitedReader reader = DelimitedReader.open(Path.of("orders.csv"), Dialect.CSV, plan)) {
+// Header first: open, find each column by its name, then bind the plan.
+try (DelimitedReader reader = DelimitedReader.open(Path.of("orders.csv"), Dialect.CSV)) {
+    Header header = reader.header();
+    reader.bind(List.of(
+            Column.i32(header.ordinal("id")),       // NoSuchElementException naming "id" if absent
+            Column.text(header.ordinal("name")),
+            Column.f64(header.ordinal("score"))));
     for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
         // A column at a time, as the core wrote it…
         MemorySegment ids = batch.values(0);          // ids.getAtIndex(ValueLayout.JAVA_INT, row)
         MemorySegment verdicts = batch.verdicts(0);   // CellVerdict.LAYOUT, one per row
 
-        // …or a cell at a time, as HyperCast's union.
-        for (int row = 0; row < batch.rows(); row++) {
-            String line = switch (batch.get(2, row, Double.class)) {
-                case Success<Double> score -> batch.string(1, row) + ": " + score.value();
-                case Fault<Double> fault -> "line " + batch.line(row) + ": " + fault.reason()
-                        + " in \"" + batch.rawString(2, row) + "\"";
+        // …or a row at a time, each cell as HyperCast's union.
+        for (Row row : batch) {
+            String line = switch (row.get(2, Double.class)) {
+                case Success<Double> score -> row.string(1) + ": " + score.value();
+                case Fault<Double> fault -> "line " + row.line() + ": " + fault.reason()
+                        + " in \"" + row.rawString(2) + "\"";
             };
         }
     }
 }
 
-// A workbook reads into the same batch.
+// A plan known up front is passed to the factory instead, and a workbook reads into the same batch.
+List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
 try (Workbook book = Workbook.open(Path.of("orders.xlsx"));
         Sheet sheet = book.sheet("Orders", SheetOptions.DEFAULT, plan)) {
-    for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) { /* … */ }
+    sheet.forEachRow(row -> { /* … */ });
 }
 ```
 
@@ -43,9 +49,14 @@ rows, not once per cell.
 
 - **One batch type.** `read()` returns a `Batch` — `rows()`, `columns()`, `line(row)`,
   `verdicts(column)`, `values(column)` for a whole primitive column, `get(column, row, type)`
-  for any one cell, `text`/`string` for text, and `raw` for the text a cell was cast from —
-  or `null` when there are no more rows. It is a view of the reader's buffers, valid until
-  the next `read()`, and the same type for delimited text and for a sheet.
+  for any one cell, `text`/`string`/`chars` for text, and `raw` for the text a cell was cast
+  from — or `null` when there are no more rows. It is a view of the reader's buffers, valid
+  until the next `read()`, and the same type for delimited text and for a sheet.
+- **Rows, when that is how the code thinks.** A `Batch` is `Iterable<Row>` (and `row(i)`
+  picks one): a `Row` is the batch's accessors with the row chosen — `index()`, `line()`,
+  `get(column, type)`, `verdict`, `text`, `string`, `chars`, `raw` — a view, valid as long
+  as the batch. `reader.forEachRow(row -> …)` and `sheet.forEachRow(row -> …)` read every
+  batch left and hand over each row; a row is valid only for its own call.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
   `SheetOptions` states a sheet's header and whether empty rows are skipped; the plan states each column's door and, for numbers, its `NumFormat`.
 - **HyperCast is the judge.** `Verdict`, `Success`, `Fault`, `CastFailure`, `NumFormat`,
@@ -67,6 +78,14 @@ rows, not once per cell.
   reader's own buffer — the input, or a workbook's shared strings; only a cell with `""`
   inside, or a typed workbook cell said as text, is written to an arena. `raw`
   gives the text any cell was cast from, one that did not cast included.
+- **UTF-16 without a `String`.** `chars(column, row)` decodes a text cell into a char array
+  the batch keeps and hands back a read-only `CharBuffer` over it (a `CharSequence`, for
+  `Integer.parseInt(cs, 0, cs.length(), 10)`, a `StringBuilder`, a regex): valid until the
+  next `read()`, every earlier view staying as it was, the array reused batch after batch.
+  `getChars(column, row, char[], offset)` decodes into the caller's array instead and
+  returns the count, or `-1` if it does not fit. Bytes that are not UTF-8 are replaced
+  exactly as `string` replaces them; an empty cell is `null` and `0`, as it is `null` for
+  `string`.
 - **The memory is native, and confined.** The core is never handed the Java heap: a fill
   reads a whole batch, which is not the instant a `critical` downcall is for. So the
   buffers are a confined `Arena`'s — freed by `close()`, with a view handed out earlier
@@ -83,17 +102,38 @@ rows, not once per cell.
 | `DelimitedReader.of(byte[], …)` | A byte array, copied into native memory once. |
 
 Each takes the dialect, the plan and, optionally, the rows per batch
-(`DEFAULT_BATCH_ROWS`, 4096). The header, when the dialect declares one, is read by the
+(`DEFAULT_BATCH_ROWS`, 4096) — and a file or a stream the size its read buffer starts at
+(`bufferBytes`). The header, when the dialect declares one, is read by the
 factory and is `reader.header()`.
+
+Each also comes without the plan — `open(path, dialect)`, `of(bytes, dialect)`,
+`of(segment, dialect)`, `of(stream, dialect[, bufferBytes])` — which reads the header and
+leaves the plan to `reader.bind(plan[, batchRows])`, once, before the first read. A read
+before `bind` is an `IllegalStateException`, and not a final one: bind, and read. The header
+is a `Header`, which is still the `List<String>` of names it always was, plus
+`ordinal(name)` (exact, case-sensitive, untrimmed; the first of two columns with one name;
+a `NoSuchElementException` naming a missing one), `findOrdinal(name)` → `OptionalInt`, and
+both again for the name's UTF-8 bytes (`byte[]` or `MemorySegment`). `columnCount()` is how
+many cells a record has — the header's count, or the first record's once read — as an
+`OptionalInt`; `isBound()` says whether a plan is in place.
 
 A failure of the stream or file is an `UncheckedIOException`, from the factory or from
 `read()`.
 
-A workbook is `Workbook.open(Path)` — the file mapped, not read — or `Workbook.of(byte[])`
-or `Workbook.of(MemorySegment)`. It lists its `sheets()` (name, and whether hidden), its
-`format()` and its `dateSystem()`; `sheet(index or name, options, plan)` starts a read with
-its own buffers, so several sheets can be read at once. A missing index is an
+A workbook is `Workbook.open(Path)` — the file mapped, not read — or `Workbook.of(byte[])`,
+`Workbook.of(MemorySegment)` or `Workbook.of(InputStream)`, which reads the stream to its end
+into native memory the workbook owns and closes it, as `DelimitedReader.of(InputStream, …)`
+takes its stream over. It lists its `sheets()` (name, and whether hidden), its `format()`
+and its `dateSystem()`; `sheet(index or name, options, plan)` starts a read with its own
+buffers, so several sheets can be read at once, and `sheet(index or name, options)` reads
+the header row first and leaves the plan to `sheet.bind(plan)`. A missing index is an
 `IndexOutOfBoundsException`, a missing name a `NoSuchElementException`.
+
+There is no asynchronous read. A reader is confined to the thread that built it, and in
+Java a virtual thread is the idiom for a read that blocks: run the loop on one, and a
+stream that blocks parks it rather than a carrier thread. `Thread.interrupt()` reaches a
+file read the way it reaches any `FileChannel` (an `UncheckedIOException` wrapping
+`ClosedByInterruptException`).
 
 ## The doors
 

@@ -9,11 +9,12 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
+import java.util.function.Consumer;
 
 /**
  * Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
@@ -45,6 +46,17 @@ import java.util.Objects;
  *             };
  *         }
  *     }
+ * }
+ * }
+ *
+ * <p>Every factory has a form without a plan, which reads the header and leaves the plan to
+ * {@link #bind(List, int)}, so that it can be made from the header's names:
+ *
+ * {@snippet :
+ * try (DelimitedReader reader = DelimitedReader.open(Path.of("orders.csv"), Dialect.CSV)) {
+ *     Header header = reader.header();
+ *     reader.bind(List.of(Column.i32(header.ordinal("id")), Column.f64(header.ordinal("score"))));
+ *     reader.forEachRow(row -> System.out.println(row.line() + ": " + row.get(1, Double.class)));
  * }
  * }
  *
@@ -143,8 +155,10 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     private final Dialect dialect;
-    private final Columns columns;
-    private final Batch batch;
+    /** The plan's columns and the batch they are read into: {@code null} until a plan is bound. */
+    private Columns columns;
+
+    private Batch batch;
     /** Cell-table entries one row takes: one per source column the plan reaches, and one more. */
     private int perRow;
 
@@ -173,10 +187,11 @@ public final class DelimitedReader implements AutoCloseable {
     private long end;
     private boolean eof;
 
-    private List<String> header;
+    private Header header;
     private TabularException failure;
     private boolean closed;
     private long recordsAtClose;
+    private int expectedAtClose;
 
     /**
      * Reads UTF-8 delimited text held in a byte array, {@value #DEFAULT_BATCH_ROWS} rows a
@@ -210,6 +225,25 @@ public final class DelimitedReader implements AutoCloseable {
      * @throws TabularException if the header record is structurally broken
      */
     public static DelimitedReader of(byte[] utf8, Dialect dialect, List<Column> plan, int batchRows) {
+        return ofArray(utf8, dialect, Columns.checked(plan, batchRows), batchRows);
+    }
+
+    /**
+     * Reads UTF-8 delimited text held in a byte array, copied into native memory once, and
+     * reads its header, leaving the plan to {@link #bind(List, int)} — so that the plan can be
+     * made from the header's names.
+     *
+     * @param utf8 the text
+     * @param dialect the declared dialect
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured
+     * @throws TabularException if the header record is structurally broken
+     */
+    public static DelimitedReader of(byte[] utf8, Dialect dialect) {
+        return ofArray(utf8, dialect, null, 0);
+    }
+
+    private static DelimitedReader ofArray(byte[] utf8, Dialect dialect, Column[] plan, int batchRows) {
         Objects.requireNonNull(utf8, "utf8");
         DelimitedReader reader = new DelimitedReader(dialect, plan, batchRows);
         try {
@@ -254,19 +288,36 @@ public final class DelimitedReader implements AutoCloseable {
      * @throws TabularException if the header record is structurally broken
      */
     public static DelimitedReader of(MemorySegment utf8, Dialect dialect, List<Column> plan, int batchRows) {
-        return windowed(utf8, dialect, plan, batchRows, MAX_WINDOW_BYTES);
+        return windowed(utf8, dialect, Objects.requireNonNull(plan, "plan"), batchRows, MAX_WINDOW_BYTES);
+    }
+
+    /**
+     * Reads UTF-8 delimited text held in a memory segment — read in place when it is native,
+     * as {@link #of(MemorySegment, Dialect, List, int)} reads it — and reads its header,
+     * leaving the plan to {@link #bind(List, int)}.
+     *
+     * @param utf8 the text, of any size
+     * @param dialect the declared dialect
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured
+     * @throws TabularException if the header record is structurally broken
+     */
+    public static DelimitedReader of(MemorySegment utf8, Dialect dialect) {
+        return windowed(utf8, dialect, null, 0, MAX_WINDOW_BYTES);
     }
 
     /**
      * {@link #of(MemorySegment, Dialect, List, int)}, with a stated limit on how much of the
      * memory one native call is handed. The limit is otherwise the ABI's own, just under
      * 2 GiB: memory larger than that is read a window at a time, and stating a small one is
-     * how the suite reaches that path without two gibibytes of input.
+     * how the suite reaches that path without two gibibytes of input. A {@code null} plan
+     * opens the reader header-first.
      */
     static DelimitedReader windowed(
             MemorySegment utf8, Dialect dialect, List<Column> plan, int batchRows, long windowBytes) {
         Objects.requireNonNull(utf8, "utf8");
-        DelimitedReader reader = new DelimitedReader(dialect, plan, batchRows);
+        DelimitedReader reader =
+                new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
         try {
             MemorySegment text = utf8;
             if (!utf8.isNative()) {
@@ -315,13 +366,53 @@ public final class DelimitedReader implements AutoCloseable {
      */
     public static DelimitedReader of(
             InputStream utf8, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
+        Objects.requireNonNull(plan, "plan");
+        return ofStream(utf8, dialect, plan, batchRows, bufferBytes);
+    }
+
+    /**
+     * Reads UTF-8 delimited text from a stream through a {@value #DEFAULT_BUFFER_BYTES}-byte
+     * buffer, and reads its header, leaving the plan to {@link #bind(List, int)}.
+     *
+     * @param utf8 the stream
+     * @param dialect the declared dialect
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured
+     * @throws TabularException if the header record is structurally broken
+     * @throws UncheckedIOException if the stream fails
+     * @see #of(InputStream, Dialect, int)
+     */
+    public static DelimitedReader of(InputStream utf8, Dialect dialect) {
+        return of(utf8, dialect, DEFAULT_BUFFER_BYTES);
+    }
+
+    /**
+     * Reads UTF-8 delimited text from a stream, and reads its header, leaving the plan to
+     * {@link #bind(List, int)}. The stream is the reader's from here on, as for
+     * {@link #of(InputStream, Dialect, List, int, int)}.
+     *
+     * @param utf8 the stream
+     * @param dialect the declared dialect
+     * @param bufferBytes the initial read buffer; it doubles when a record does not fit
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     *     {@code bufferBytes} is not positive
+     * @throws TabularException if the header record is structurally broken
+     * @throws UncheckedIOException if the stream fails
+     */
+    public static DelimitedReader of(InputStream utf8, Dialect dialect, int bufferBytes) {
+        return ofStream(utf8, dialect, null, 0, bufferBytes);
+    }
+
+    private static DelimitedReader ofStream(
+            InputStream utf8, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
         Objects.requireNonNull(utf8, "utf8");
         DelimitedReader reader;
         try {
             if (bufferBytes <= 0) {
                 throw new IllegalArgumentException("bufferBytes must be positive; got " + bufferBytes);
             }
-            reader = new DelimitedReader(dialect, plan, batchRows);
+            reader = new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
         } catch (RuntimeException | Error failure) {
             // No reader came to be, so the stream it would have owned is closed here.
             try {
@@ -368,11 +459,51 @@ public final class DelimitedReader implements AutoCloseable {
      * @throws UncheckedIOException if the file cannot be opened or read
      */
     public static DelimitedReader open(Path path, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
+        Objects.requireNonNull(plan, "plan");
+        return openFile(path, dialect, plan, batchRows, bufferBytes);
+    }
+
+    /**
+     * Opens a file of UTF-8 delimited text through a {@value #DEFAULT_BUFFER_BYTES}-byte
+     * buffer, and reads its header, leaving the plan to {@link #bind(List, int)}.
+     *
+     * @param path the file
+     * @param dialect the declared dialect
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured
+     * @throws TabularException if the header record is structurally broken
+     * @throws UncheckedIOException if the file cannot be opened or read
+     * @see #open(Path, Dialect, int)
+     */
+    public static DelimitedReader open(Path path, Dialect dialect) {
+        return open(path, dialect, DEFAULT_BUFFER_BYTES);
+    }
+
+    /**
+     * Opens a file of UTF-8 delimited text, and reads its header, leaving the plan to
+     * {@link #bind(List, int)}.
+     *
+     * @param path the file
+     * @param dialect the declared dialect
+     * @param bufferBytes the initial read buffer; it doubles when a record does not fit
+     * @return the reader, its header already read when the dialect declares one, and no plan
+     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     *     {@code bufferBytes} is not positive
+     * @throws TabularException if the header record is structurally broken
+     * @throws UncheckedIOException if the file cannot be opened or read
+     */
+    public static DelimitedReader open(Path path, Dialect dialect, int bufferBytes) {
+        return openFile(path, dialect, null, 0, bufferBytes);
+    }
+
+    private static DelimitedReader openFile(
+            Path path, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
         Objects.requireNonNull(path, "path");
         if (bufferBytes <= 0) {
             throw new IllegalArgumentException("bufferBytes must be positive; got " + bufferBytes);
         }
-        DelimitedReader reader = new DelimitedReader(dialect, plan, batchRows);
+        DelimitedReader reader =
+                new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
         FileChannel channel;
         try {
             channel = FileChannel.open(path, StandardOpenOption.READ);
@@ -386,9 +517,13 @@ public final class DelimitedReader implements AutoCloseable {
         return reader.overSource(new FileSource(channel), bufferBytes).begin(dialect);
     }
 
-    private DelimitedReader(Dialect dialect, List<Column> plan, int batchRows) {
+    /**
+     * Makes a reader of {@code dialect}, bound to {@code plan} — already checked, so that a
+     * plan the reader cannot take is refused before the header is read — or with no plan
+     * when it is {@code null}.
+     */
+    private DelimitedReader(Dialect dialect, Column[] plan, int batchRows) {
         this.dialect = Objects.requireNonNull(dialect, "dialect");
-        Column[] checked = Columns.checked(plan, batchRows);
         if (dialect.separator() > 0x7E) {
             throw new IllegalArgumentException(
                     String.format("Separator U+%04X is not a single ASCII byte.", (int) dialect.separator()));
@@ -406,10 +541,6 @@ public final class DelimitedReader implements AutoCloseable {
             state = arena.allocate(stateBytes, 8);
             filled = arena.allocate(Native.FILLED_BYTES, 8);
             buffers = arena.allocate(Native.BUFFERS_BYTES, 8);
-            columns = new Columns(checked, batchRows, arena);
-            batch = new Batch(columns, false);
-            perRow = columns.width + 1;
-            cells = new Block(Math.multiplyExact((long) perRow * batchRows, Native.SPAN_BYTES), 4);
             unescaped = new Block(4096, 1);
 
             MemorySegment raw = arena.allocate(Native.DIALECT_BYTES, 1);
@@ -421,10 +552,69 @@ public final class DelimitedReader implements AutoCloseable {
                 throw new IllegalArgumentException(
                         "Separator '" + dialect.separator() + "' is not tab or printable ASCII other than '\"'.");
             }
+            if (plan != null) {
+                attach(plan, batchRows);
+            }
         } catch (RuntimeException | Error failure) {
             release();
             throw failure;
         }
+    }
+
+    /** Sizes everything a batch is read into by the plan's columns. */
+    private void attach(Column[] plan, int batchRows) {
+        Columns bound = new Columns(plan, batchRows, arena);
+        int width = bound.width + 1;
+        Block table = new Block(Math.multiplyExact((long) width * batchRows, Native.SPAN_BYTES), 4);
+        perRow = width;
+        cells = table;
+        batch = new Batch(bound, false);
+        columns = bound;
+    }
+
+    /**
+     * Declares the plan a reader opened without one reads through,
+     * {@value #DEFAULT_BATCH_ROWS} rows a batch.
+     *
+     * @param plan the output columns, in output order
+     * @throws IllegalStateException if the reader already has a plan, or is closed
+     * @throws IllegalArgumentException if a column cannot be honoured; the reader is left
+     *     without a plan
+     * @see #bind(List, int)
+     */
+    public void bind(List<Column> plan) {
+        bind(plan, DEFAULT_BATCH_ROWS);
+    }
+
+    /**
+     * Declares the plan a reader opened without one reads through — once, before the first
+     * read, and usually after {@link #header()} has said where each column is
+     * ({@code Column.i32(reader.header().ordinal("id"))}). Every column array, the cell table
+     * and the batch are sized here, by the plan and {@code batchRows}.
+     *
+     * @param plan the output columns, in output order
+     * @param batchRows rows per batch
+     * @throws IllegalStateException if the reader already has a plan, or is closed
+     * @throws IllegalArgumentException if a column cannot be honoured, or {@code batchRows}
+     *     is not positive; the reader is left without a plan
+     */
+    public void bind(List<Column> plan, int batchRows) {
+        if (closed) {
+            throw new IllegalStateException("The reader is closed.");
+        }
+        if (columns != null) {
+            throw new IllegalStateException("The reader already has a plan; a plan is bound once.");
+        }
+        attach(Columns.checked(plan, batchRows), batchRows);
+    }
+
+    /**
+     * Whether a plan has been bound: always, for a reader opened with one.
+     *
+     * @return {@code true} once the reader has a plan
+     */
+    public boolean isBound() {
+        return columns != null;
     }
 
     private DelimitedReader overMemory(MemorySegment text, long windowBytes) {
@@ -470,13 +660,25 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     /**
-     * The header's names, when the dialect declares one: unmodifiable, and empty for an
-     * input with no record. {@code null} when the dialect declares no header.
+     * The header's names, when the dialect declares one — read when the reader is opened, so
+     * they are to hand before the plan is bound: unmodifiable, and empty for an input with no
+     * record. {@code null} when the dialect declares no header.
      *
      * @return the header's names, or {@code null}
      */
-    public List<String> header() {
+    public Header header() {
         return header;
+    }
+
+    /**
+     * How many cells a record has: the header's count once it has been read, otherwise the
+     * first record's once it has been; empty until then.
+     *
+     * @return the record width, or empty
+     */
+    public OptionalInt columnCount() {
+        int expected = closed ? expectedAtClose : state.get(INT, Native.STATE_EXPECTED);
+        return expected == 0 ? OptionalInt.empty() : OptionalInt.of(expected);
     }
 
     /**
@@ -490,12 +692,12 @@ public final class DelimitedReader implements AutoCloseable {
 
     /**
      * The plan the reader reads through: column {@code i} of every batch is
-     * {@code plan().get(i)}.
+     * {@code plan().get(i)}. Empty until one is bound.
      *
      * @return the plan, unmodifiable
      */
     public List<Column> plan() {
-        return columns.planList;
+        return columns == null ? List.of() : columns.planList;
     }
 
     /**
@@ -559,12 +761,6 @@ public final class DelimitedReader implements AutoCloseable {
         return failure = TabularException.from(filled, Native.FAILURE_CODE);
     }
 
-    private static String decode(MemorySegment from, long offset, int length) {
-        byte[] bytes = new byte[length];
-        MemorySegment.copy(from, BYTE, offset, bytes, 0, length);
-        return new String(bytes, StandardCharsets.UTF_8);
-    }
-
     private void readHeader() {
         // The name table is the header's alone, and gone when it has been read.
         try (Arena scope = Arena.ofConfined()) {
@@ -593,23 +789,24 @@ public final class DelimitedReader implements AutoCloseable {
                         long consumed = filled.get(LONG, Native.FILLED_CONSUMED);
                         int count = (int) filled.get(LONG, Native.FILLED_ROWS);
                         if (count > 0) {
-                            String[] found = new String[count];
+                            Header.Builder found = new Header.Builder(count);
                             for (int index = 0; index < count; index++) {
                                 int offset = names.get(INT, index * Native.SPAN_BYTES);
                                 int span = names.get(INT, index * Native.SPAN_BYTES + 4);
                                 // A flagged name had "" inside, and is in the arena, unescaped.
-                                found[index] = span < 0
-                                        ? decode(unescaped.segment, offset, span & Native.SPAN_LENGTH)
-                                        : decode(base, start + offset, span);
+                                found.add(
+                                        span < 0
+                                                ? unescaped.segment.asSlice(offset, span & Native.SPAN_LENGTH)
+                                                : base.asSlice(start + offset, span));
                             }
-                            header = List.of(found);
+                            header = found.build();
                             start += consumed;
                             return;
                         }
                         start += consumed;
                         if (last && (consumed == length || consumed == 0)) {
                             // An empty input has no header and no rows; the width is unknown.
-                            header = List.of();
+                            header = Header.EMPTY;
                             return;
                         }
                         if (consumed == 0) {
@@ -637,11 +834,15 @@ public final class DelimitedReader implements AutoCloseable {
      *     intact row before the break has been delivered, and again, the same exception, on
      *     every later call
      * @throws UncheckedIOException if the stream or file fails
-     * @throws IllegalStateException if the reader is closed
+     * @throws IllegalStateException if the reader is closed, or no plan has been bound — not
+     *     final: bind one and read
      */
     public Batch read() {
         if (closed) {
             throw new IllegalStateException("The reader is closed.");
+        }
+        if (columns == null) {
+            throw new IllegalStateException("The reader has no plan yet: bind one before reading.");
         }
         batch.clear();
         if (failure != null) {
@@ -713,6 +914,31 @@ public final class DelimitedReader implements AutoCloseable {
         }
     }
 
+    /**
+     * Reads every row left, batch by batch, handing each to {@code action} — the row view of a
+     * reader, whose batches are over when the next is read. Each {@link Row} is a view of the
+     * current batch, valid only for its own call: do not keep one. A failure, the reader's or
+     * {@code action}'s, ends the loop and is thrown from here.
+     *
+     * {@snippet :
+     * reader.forEachRow(row -> orders.add(new Order(row.get(0, Integer.class), row.string(1))));
+     * }
+     *
+     * @param action what is done with each row
+     * @throws TabularException if the input is structurally broken, after every intact row
+     *     before the break has been handed over
+     * @throws UncheckedIOException if the stream or file fails
+     * @throws IllegalStateException as {@link #read()} throws it
+     */
+    public void forEachRow(Consumer<? super Row> action) {
+        Objects.requireNonNull(action, "action");
+        for (Batch next = read(); next != null; next = read()) {
+            for (Row row : next) {
+                action.accept(row);
+            }
+        }
+    }
+
     private void release() {
         if (batch != null) {
             batch.close();
@@ -741,6 +967,7 @@ public final class DelimitedReader implements AutoCloseable {
             return;
         }
         recordsAtClose = state.get(LONG, Native.STATE_RECORDS);
+        expectedAtClose = state.get(INT, Native.STATE_EXPECTED);
         closed = true;
         release();
         if (source != null) {

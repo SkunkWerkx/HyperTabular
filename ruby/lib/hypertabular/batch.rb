@@ -17,7 +17,14 @@ module HyperTabular
   # HyperCast's gem's own for the same doors: true/false, Integer, Float, HyperCast::Decimal,
   # a hyphenated UUID String, a UTC Time, Date, DateTime, Integer nanoseconds since midnight,
   # Rational seconds, and a UTF-8 String for text.
+  #
+  # A batch is also Enumerable over its rows, for a caller that thinks in rows: #each yields
+  # a Row per row, in order.
+  #
+  #   batch.each { |row| orders << Order.new(row.value(0), row.value(1), row.line) }
   class Batch
+    include Enumerable
+
     # The verdict of every cell that had no bytes at all: one shared, frozen Fault.
     EMPTY = HyperCast::Fault.new(reason: :empty, offset: 0, length: 0)
 
@@ -108,6 +115,20 @@ module HyperTabular
       # A quoted cell with an escaped quote in it: unescaped, as the core cast it.
       quoted = @base.byteslice(@origin + offset, length & Runtime::Delimited::SPAN_LENGTH)
       Runtime.unescape(quoted).force_encoding(Encoding::UTF_8)
+    end
+
+    # Yields a Row for each row of the batch, in order, and returns the batch; without a
+    # block, an Enumerator.
+    def each
+      return to_enum(:each) { @rows } unless block_given?
+
+      @rows.times { |index| yield Row.new(self, index) }
+      self
+    end
+
+    # The Row at +row+. IndexError for a row outside the batch.
+    def row(row)
+      Row.new(self, at(row))
     end
 
     # The batch in a line — not its cells.

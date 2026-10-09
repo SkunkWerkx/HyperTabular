@@ -56,7 +56,9 @@ type core struct {
 //
 // Build one over an io.Reader (NewDelimitedReader), over text already in memory
 // (NewDelimitedReaderBytes) or over a file (OpenDelimited), with the Dialect and the plan of
-// columns declared. Read returns the next *Batch, whose column accessors — I32, F64, Text
+// columns declared — or header first, with the Unbound variant of each: the header is read,
+// its names looked up (Header().Ordinal), and the plan built from them handed to Bind. Read
+// returns the next *Batch, whose column accessors — I32, F64, Text
 // and the rest, with Verdicts beside them — hand it out as slices, one element per row, and
 // Get a cell at a time.
 //
@@ -67,8 +69,10 @@ type core struct {
 // A DelimitedReader is not safe for concurrent use.
 type DelimitedReader struct {
 	dialect Dialect
-	set     *columns
-	batch   Batch
+	// set is the plan and its buffers: nil until one is bound.
+	set       *columns
+	batch     Batch
+	batchRows int
 	// perRow is the cell-table entries one row takes: the widest ordinal the plan reads,
 	// plus two, or more if the core asked for more.
 	perRow int
@@ -91,7 +95,7 @@ type DelimitedReader struct {
 	eof         bool
 	maxRowBytes int
 
-	header []string
+	header Header
 	// err is how the input ended, once it has: io.EOF, a *Failure, or the source's error.
 	err    error
 	closed bool
@@ -102,10 +106,21 @@ type DelimitedReader struct {
 // is structurally broken — or a source that fails before the header is complete — is this
 // function's error. The reader does not close source.
 func NewDelimitedReader(source io.Reader, dialect Dialect, plan []Column, opts ...Option) (*DelimitedReader, error) {
+	return newStreamReader(source, dialect, plan, true, opts)
+}
+
+// NewDelimitedReaderUnbound is NewDelimitedReader without a plan: the header is read — when
+// the dialect declares one — and the plan is bound later, with Bind, once the header has
+// said where each column is. Read returns ErrUnbound until then.
+func NewDelimitedReaderUnbound(source io.Reader, dialect Dialect, opts ...Option) (*DelimitedReader, error) {
+	return newStreamReader(source, dialect, nil, false, opts)
+}
+
+func newStreamReader(source io.Reader, dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, error) {
 	if source == nil {
 		return nil, errors.New("hypertabular: the source is nil")
 	}
-	r, o, err := newReader(dialect, plan, opts)
+	r, o, err := newReader(dialect, plan, bound, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +134,17 @@ func NewDelimitedReader(source io.Reader, dialect Dialect, plan []Column, opts .
 // declares a header it is read here, so a header that is structurally broken is this
 // function's error.
 func NewDelimitedReaderBytes(utf8 []byte, dialect Dialect, plan []Column, opts ...Option) (*DelimitedReader, error) {
-	r, _, err := newReader(dialect, plan, opts)
+	return newBytesReader(utf8, dialect, plan, true, opts)
+}
+
+// NewDelimitedReaderBytesUnbound is NewDelimitedReaderBytes without a plan: the header is
+// read, and the plan bound later with Bind.
+func NewDelimitedReaderBytesUnbound(utf8 []byte, dialect Dialect, opts ...Option) (*DelimitedReader, error) {
+	return newBytesReader(utf8, dialect, nil, false, opts)
+}
+
+func newBytesReader(utf8 []byte, dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, error) {
+	r, _, err := newReader(dialect, plan, bound, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -132,11 +157,21 @@ func NewDelimitedReaderBytes(utf8 []byte, dialect Dialect, plan []Column, opts .
 // OpenDelimited opens a file of UTF-8 delimited text. The reader owns the file: Close
 // closes it.
 func OpenDelimited(path string, dialect Dialect, plan []Column, opts ...Option) (*DelimitedReader, error) {
+	return openFile(path, dialect, plan, true, opts)
+}
+
+// OpenDelimitedUnbound is OpenDelimited without a plan: the header is read, and the plan
+// bound later with Bind.
+func OpenDelimitedUnbound(path string, dialect Dialect, opts ...Option) (*DelimitedReader, error) {
+	return openFile(path, dialect, nil, false, opts)
+}
+
+func openFile(path string, dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	r, err := NewDelimitedReader(file, dialect, plan, opts...)
+	r, err := newStreamReader(file, dialect, plan, bound, opts)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -145,9 +180,10 @@ func OpenDelimited(path string, dialect Dialect, plan []Column, opts ...Option) 
 	return r, nil
 }
 
-// newReader builds everything but the source: the plan as the core reads it, and every
-// buffer the core fills.
-func newReader(dialect Dialect, plan []Column, opts []Option) (*DelimitedReader, options, error) {
+// newReader builds everything but the source: the core's state, and — when bound — the plan
+// as the core reads it and every buffer the core fills, bound before any input is read so
+// that a plan's error comes before the header's.
+func newReader(dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, options, error) {
 	o := options{batchRows: DefaultBatchRows, bufferBytes: DefaultBufferBytes, maxRowBytes: MaxRowBytes}
 	for _, opt := range opts {
 		opt(&o)
@@ -155,29 +191,17 @@ func newReader(dialect Dialect, plan []Column, opts []Option) (*DelimitedReader,
 	if o.bufferBytes <= 0 {
 		return nil, o, fmt.Errorf("hypertabular: BufferBytes must be positive, not %d", o.bufferBytes)
 	}
+	if o.batchRows <= 0 {
+		return nil, o, fmt.Errorf("hypertabular: BatchRows must be positive, not %d", o.batchRows)
+	}
 
-	set, err := newColumns(plan, o.batchRows)
-	if err != nil {
-		return nil, o, err
-	}
-	// A cell table entry for every source column up to the widest the plan reads, and one
-	// for the row's line.
-	perRow := set.width + 1
-	if perRow > math.MaxInt/int(unsafe.Sizeof(rawSpan{}))/o.batchRows {
-		return nil, o, fmt.Errorf("hypertabular: a plan reading source column %d at %d rows a batch needs too large a cell table",
-			set.width-1, o.batchRows)
-	}
 	r := &DelimitedReader{
 		dialect:     dialect,
-		set:         set,
-		batch:       Batch{columns: set},
-		perRow:      perRow,
+		batchRows:   o.batchRows,
 		core:        new(core),
-		cells:       make([]rawSpan, perRow*o.batchRows),
 		arena:       make([]byte, 4096),
 		maxRowBytes: o.maxRowBytes,
 	}
-
 	switch r.nativeInit(dialect) {
 	case codeOK:
 	case errStateSize:
@@ -185,22 +209,68 @@ func newReader(dialect Dialect, plan []Column, opts []Option) (*DelimitedReader,
 	default:
 		return nil, o, fmt.Errorf("hypertabular: separator %q is not tab or printable ASCII other than '\"'", dialect.Separator)
 	}
-	// The core's own word on the plan, before any input: a fill of no rows still judges
-	// every column's door and notation, and touches nothing else.
-	switch r.nativeFill(nil, false, 0) {
-	case codeOK:
-	case errShimMemory:
-		return nil, o, r.shimMemory()
-	default:
-		return nil, o, errors.New("hypertabular: the core refused the plan: a column's door, declared parameter or numeric format is not one it can honour")
+	if bound {
+		if err := r.Bind(plan); err != nil {
+			return nil, o, err
+		}
 	}
 	return r, o, nil
 }
 
+// Bind declares the plan a reader opened without one reads through: column i of every
+// batch is plan[i]. It is called once, before the first Read — typically with ordinals the
+// header has given:
+//
+//	header := reader.Header()
+//	id, err := header.Ordinal("id")
+//	…
+//	err = reader.Bind([]hypertabular.Column{hypertabular.I32(id, hypercast.Invariant)})
+//
+// A reader with a plan already — one it was opened with, or one bound before — returns
+// ErrAlreadyBound. A plan the reader cannot honour is this method's error, as it would have
+// been the constructor's, and leaves the reader unbound. The rows a batch are the
+// BatchRows option the reader was opened with.
+func (r *DelimitedReader) Bind(plan []Column) error {
+	if r.set != nil {
+		return ErrAlreadyBound
+	}
+	set, err := newColumns(plan, r.batchRows)
+	if err != nil {
+		return err
+	}
+	// A cell table entry for every source column up to the widest the plan reads, and one
+	// for the row's line.
+	perRow := set.width + 1
+	if perRow > math.MaxInt/int(unsafe.Sizeof(rawSpan{}))/r.batchRows {
+		return fmt.Errorf("hypertabular: a plan reading source column %d at %d rows a batch needs too large a cell table",
+			set.width-1, r.batchRows)
+	}
+	// The core's own word on the plan, before any rows: a fill of no rows still judges
+	// every column's door and notation, and touches nothing else — not the header read
+	// before it, nor the state the next fill goes on from.
+	r.set = set
+	switch r.nativeFill(nil, false, 0) {
+	case codeOK:
+	case errShimMemory:
+		r.set = nil
+		return shimMemory(len(plan))
+	default:
+		r.set = nil
+		return errors.New("hypertabular: the core refused the plan: a column's door, declared parameter or numeric format is not one it can honour")
+	}
+	r.batch = Batch{columns: set}
+	r.perRow = perRow
+	r.cells = make([]rawSpan, perRow*r.batchRows)
+	return nil
+}
+
+// IsBound says whether the reader has a plan: always, for a reader opened with one.
+func (r *DelimitedReader) IsBound() bool { return r.set != nil }
+
 // shimMemory is the error for a fill that could not allocate its column table (see
 // backend_static.go's ht_fill): only a plan wider than the shim's stack table asks for one.
-func (r *DelimitedReader) shimMemory() error {
-	return fmt.Errorf("hypertabular: out of memory for the column table of a %d-column plan", len(r.set.plan))
+func shimMemory(columns int) error {
+	return fmt.Errorf("hypertabular: out of memory for the column table of a %d-column plan", columns)
 }
 
 // begin reads the header, when the dialect declares one.
@@ -215,15 +285,26 @@ func (r *DelimitedReader) begin(dialect Dialect) (*DelimitedReader, error) {
 }
 
 // Header is the header's names, when the dialect declares one: nil when it does not, and
-// empty but not nil for an input with no record.
-func (r *DelimitedReader) Header() []string { return r.header }
+// empty but not nil for an input with no record. It is read when the reader is built, so it
+// is there to build a plan from before Bind.
+func (r *DelimitedReader) Header() Header { return r.header }
+
+// ColumnCount is how many cells a record has: the header's count once it has been read,
+// otherwise the first record's once that has been — and zero while neither is known (a
+// headerless input before its first Read, or an input with no record at all).
+func (r *DelimitedReader) ColumnCount() int { return int(r.core.state.expected) }
 
 // Dialect is the dialect the text is read in.
 func (r *DelimitedReader) Dialect() Dialect { return r.dialect }
 
-// Plan is the plan the text is read through: column i of every batch is Plan()[i]. Do not
-// modify it.
-func (r *DelimitedReader) Plan() []Column { return r.batch.Columns() }
+// Plan is the plan the text is read through: column i of every batch is Plan()[i]; nil until
+// one is bound. Do not modify it.
+func (r *DelimitedReader) Plan() []Column {
+	if r.set == nil {
+		return nil
+	}
+	return r.batch.Columns()
+}
 
 // Records is the number of records finished so far — the header and skipped blank lines
 // included.
@@ -304,7 +385,7 @@ func (r *DelimitedReader) readHeader() error {
 			consumed := int(filled.consumed)
 			r.start += consumed
 			if filled.rows > 0 {
-				header := make([]string, filled.rows)
+				header := make(Header, filled.rows)
 				for index := range header {
 					name := names[index]
 					from := window
@@ -318,7 +399,7 @@ func (r *DelimitedReader) readHeader() error {
 			}
 			if last && (consumed == len(window) || consumed == 0) {
 				// An empty input has no header and no rows; the width is unknown.
-				r.header = []string{}
+				r.header = Header{}
 				return nil
 			}
 			if consumed == 0 {
@@ -346,11 +427,15 @@ func (r *DelimitedReader) readHeader() error {
 // When the input is structurally broken it returns nil and a *Failure — after every intact
 // row before the break has been delivered by earlier calls — and the same *Failure on
 // every later call. An error from the underlying io.Reader ends the input the same way.
-// After Close it returns os.ErrClosed.
+// After Close it returns os.ErrClosed. A reader opened without a plan returns ErrUnbound
+// until Bind has given it one.
 func (r *DelimitedReader) Read() (*Batch, error) {
 	r.batch.clear()
 	if r.closed {
 		return nil, os.ErrClosed
+	}
+	if r.set == nil {
+		return nil, ErrUnbound
 	}
 	if r.err != nil {
 		return nil, r.err
@@ -396,7 +481,7 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 			r.err = structural(filled.failure)
 			return nil, r.err
 		case errShimMemory:
-			r.err = r.shimMemory()
+			r.err = shimMemory(len(r.set.plan))
 			return nil, r.err
 		default:
 			panic(contractViolation)

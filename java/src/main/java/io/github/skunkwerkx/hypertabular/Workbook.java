@@ -2,6 +2,7 @@ package io.github.skunkwerkx.hypertabular;
 
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -20,7 +21,9 @@ import java.util.Objects;
  *
  * <p>A workbook holds its container's bytes and what every sheet reads its cells against: the
  * shared strings and the number-format kind of each cell format, loaded once when it is
- * opened. {@link #sheet(int, SheetOptions, List)} starts a forward-only read of one sheet;
+ * opened. {@link #sheet(int, SheetOptions, List)} starts a forward-only read of one sheet —
+ * or {@link #sheet(int, SheetOptions)}, which reads its header first and leaves the plan to
+ * {@link Sheet#bind};
  * several can be open at once, each with its own buffers, all reading from the one workbook,
  * which has to outlive them.
  *
@@ -30,9 +33,10 @@ import java.util.Objects;
  * the call made again.
  *
  * {@snippet :
- * List<Column> plan = List.of(Column.i64(0), Column.text(1), Column.decimal(2));
  * try (Workbook book = Workbook.open(Path.of("orders.xlsx"));
- *         Sheet sheet = book.sheet("Orders", SheetOptions.DEFAULT, plan)) {
+ *         Sheet sheet = book.sheet("Orders", SheetOptions.DEFAULT)) {
+ *     Header header = sheet.header();
+ *     sheet.bind(List.of(Column.i64(header.ordinal("Id")), Column.decimal(header.ordinal("Total"))));
  *     for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
  *         // the same Batch delimited text is read into
  *     }
@@ -58,6 +62,8 @@ public final class Workbook implements AutoCloseable {
 
     private final Arena arena;
     private final MemorySegment container;
+    /** The memory a stream was read into, when the workbook was opened from one: closed with it. */
+    private final Block read;
     /** The state as opening left it: the template every sheet's own state is copied from. */
     private MemorySegment state;
 
@@ -138,9 +144,63 @@ public final class Workbook implements AutoCloseable {
         }
     }
 
+    /**
+     * Opens a workbook from a stream, read to its end into native memory the workbook owns.
+     * The stream is the workbook's to close, as a stream handed to
+     * {@link DelimitedReader#of(InputStream, Dialect, List)} is the reader's: it is closed as
+     * soon as it has been read, and when this method throws. The format is told from the
+     * bytes, as for every other way of opening one.
+     *
+     * @param container the workbook's bytes
+     * @return the workbook
+     * @throws TabularException if the bytes are not a workbook this reader can read
+     * @throws UncheckedIOException if the stream fails, or fails to close
+     */
+    public static Workbook of(InputStream container) {
+        Objects.requireNonNull(container, "container");
+        Block bytes = null;
+        long length = 0;
+        try (container) {
+            // What the stream says it has is only a hint for the first allocation; the
+            // memory doubles, keeping what it holds, whenever the stream has more.
+            bytes = new Block(Math.max(container.available(), 64 * 1024) + 1L, 8);
+            byte[] transfer = new byte[64 * 1024];
+            for (int got = container.read(transfer); got >= 0; got = container.read(transfer)) {
+                if (bytes.bytes() - length < got) {
+                    bytes.resize(Math.max(bytes.bytes() * 2, length + got), length);
+                }
+                MemorySegment.copy(transfer, 0, bytes.segment, ValueLayout.JAVA_BYTE, length, got);
+                length += got;
+            }
+        } catch (IOException e) {
+            if (bytes != null) {
+                bytes.close();
+            }
+            throw new UncheckedIOException(e);
+        } catch (RuntimeException | Error failure) {
+            if (bytes != null) {
+                bytes.close();
+            }
+            throw failure;
+        }
+        Arena arena = Arena.ofConfined();
+        try {
+            return new Workbook(arena, bytes.segment.asSlice(0, length), bytes);
+        } catch (RuntimeException | Error failure) {
+            arena.close();
+            bytes.close();
+            throw failure;
+        }
+    }
+
     private Workbook(Arena arena, MemorySegment container) {
+        this(arena, container, null);
+    }
+
+    private Workbook(Arena arena, MemorySegment container, Block read) {
         this.arena = arena;
         this.container = container;
+        this.read = read;
         state = arena.allocate(Native.workbookStateSize(), 8);
         Scratch scratch = stingy ? new Scratch(arena, 1, 1, 1, 0) : new Scratch(arena, Native.WINDOW_MIN, 1024, 64, 0);
         try {
@@ -267,8 +327,25 @@ public final class Workbook implements AutoCloseable {
      * @throws TabularException if the sheet, or its header row, is structurally broken
      */
     public Sheet sheet(int index, SheetOptions options, List<Column> plan) {
+        Objects.requireNonNull(plan, "plan");
         requireOpen();
         return new Sheet(this, sheets.get(Objects.checkIndex(index, sheets.size())), options, plan);
+    }
+
+    /**
+     * Starts a read of the sheet at {@code index} of {@link #sheets()} and reads its header,
+     * leaving the plan to {@link Sheet#bind} — so that the plan can be made from the
+     * header's names.
+     *
+     * @param index the sheet's place in {@link #sheets()}
+     * @param options how the sheet is read
+     * @return the sheet, its header already read when the options declare one
+     * @throws IndexOutOfBoundsException if the workbook has no sheet at that index
+     * @throws TabularException if the sheet, or its header row, is structurally broken
+     */
+    public Sheet sheet(int index, SheetOptions options) {
+        requireOpen();
+        return new Sheet(this, sheets.get(Objects.checkIndex(index, sheets.size())), options, null);
     }
 
     /**
@@ -282,11 +359,30 @@ public final class Workbook implements AutoCloseable {
      * @throws TabularException if the sheet, or its header row, is structurally broken
      */
     public Sheet sheet(String name, SheetOptions options, List<Column> plan) {
+        Objects.requireNonNull(plan, "plan");
+        return new Sheet(this, named(name), options, plan);
+    }
+
+    /**
+     * Starts a read of the first sheet named {@code name} and reads its header, leaving the
+     * plan to {@link Sheet#bind}.
+     *
+     * @param name the sheet's name
+     * @param options how the sheet is read
+     * @return the sheet, its header already read when the options declare one
+     * @throws NoSuchElementException if the workbook has no sheet by that name
+     * @throws TabularException if the sheet, or its header row, is structurally broken
+     */
+    public Sheet sheet(String name, SheetOptions options) {
+        return new Sheet(this, named(name), options, null);
+    }
+
+    private SheetInfo named(String name) {
         requireOpen();
         Objects.requireNonNull(name, "name");
         for (SheetInfo sheet : sheets) {
             if (sheet.name().equals(name)) {
-                return new Sheet(this, sheet, options, plan);
+                return sheet;
             }
         }
         throw new NoSuchElementException("The workbook has no sheet named \"" + name + "\".");
@@ -331,6 +427,9 @@ public final class Workbook implements AutoCloseable {
         }
         closed = true;
         arena.close();
+        if (read != null) {
+            read.close();
+        }
     }
 
     /** The buffers a call to the core may ask to have grown: one set while the workbook opens, one for each sheet. */
@@ -340,21 +439,37 @@ public final class Workbook implements AutoCloseable {
         final Block window;
         final Block arena;
         final Block cells;
-        final MemorySegment row;
+        /** The row's slots: where the core assembles a row, and keeps the header row's cells. */
+        final Block row;
+
         final MemorySegment buffers;
         final MemorySegment filled;
+        /** How many slots the core is told {@link #row} has. */
+        long rowSlots;
 
         Scratch(Arena owner, long window, long arena, long cells, long rowSlots) {
             this.window = new Block(window, 8);
             this.arena = new Block(arena, 8);
             this.cells = new Block(cells * Native.SPAN_BYTES, 4);
-            this.row = owner.allocate(Math.max(rowSlots, 1) * Native.SLOT_BYTES, 8);
+            this.row = new Block(Math.max(rowSlots, 1) * Native.SLOT_BYTES, 8);
             this.buffers = owner.allocate(Native.BUFFERS_BYTES, 8);
             this.filled = owner.allocate(Native.FILLED_BYTES, 8);
             this.rowSlots = rowSlots;
         }
 
-        private final long rowSlots;
+        /** Entries the cell table has room for. */
+        long cellEntries() {
+            return cells.bytes() / Native.SPAN_BYTES;
+        }
+
+        /** Grows the row's slots to {@code slots}, keeping what they held: never shrinks them. */
+        void growRow(long slots) {
+            if (rowSlots >= slots) {
+                return;
+            }
+            row.resize(Math.multiplyExact(slots, Native.SLOT_BYTES), rowSlots * Native.SLOT_BYTES);
+            rowSlots = slots;
+        }
 
         byte[] arenaBytes(int offset, int span) {
             return arena.segment.asSlice(offset, span & Native.SPAN_LENGTH).toArray(ValueLayout.JAVA_BYTE);
@@ -369,7 +484,7 @@ public final class Workbook implements AutoCloseable {
             buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ARENA + 8, arena.bytes());
             buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_CELLS, cells.segment);
             buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_CELLS + 8, cells.bytes() / Native.SPAN_BYTES);
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ROW, row);
+            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ROW, row.segment);
             buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ROW + 8, rowSlots);
             if (book != null) {
                 book.tables(buffers);
@@ -383,10 +498,17 @@ public final class Workbook implements AutoCloseable {
          * stopped. Returns the code it ended on and what it reported.
          */
         Answer drive(Workbook book, MemorySegment state, Native.Book call) {
-            return drive(book, state, call, null);
+            return drive(book, state, call, null, false);
         }
 
-        Answer drive(Workbook book, MemorySegment state, Native.Book call, Columns columns) {
+        /**
+         * {@link #drive(Workbook, MemorySegment, Native.Book)}, for a fill when {@code columns}
+         * is given. {@code rowFollowsCells} grows the row's slots with the cell table, keeping
+         * what they held — for the header of a sheet with no plan, whose slots are to hold
+         * every cell the header row has, since a row the sheet repeats (an ODS
+         * {@code number-rows-repeated}) is delivered again from them.
+         */
+        Answer drive(Workbook book, MemorySegment state, Native.Book call, Columns columns, boolean rowFollowsCells) {
             boolean tables = call == Native.Book.HEADER || columns != null;
             while (true) {
                 MemorySegment handed = buffers(tables ? book : null);
@@ -415,6 +537,9 @@ public final class Workbook implements AutoCloseable {
                         cells.resize(
                                 Math.max(needed * Native.SPAN_BYTES, cells.bytes() + Native.SPAN_BYTES), cells.bytes());
                         grown[2]++;
+                        if (rowFollowsCells) {
+                            growRow(cellEntries());
+                        }
                     }
                     default -> {
                         return new Answer(code, filled);
@@ -427,6 +552,7 @@ public final class Workbook implements AutoCloseable {
             window.close();
             arena.close();
             cells.close();
+            row.close();
         }
     }
 }

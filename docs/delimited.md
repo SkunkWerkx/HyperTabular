@@ -80,6 +80,16 @@ more behind it.
   batch is what ends the last.
 - An arena too small for a batch's unescaped text makes for short batches, not an error;
   the reader doubles it once the short batch has been given back.
+- The plan can wait for the header. `DelimitedReader::open_unbound` (and `from_slice_unbound`,
+  `from_reader_unbound`) read the header and stop; `bind(&plan)` then sizes the column
+  arrays and the cell table, once, before the first read. Nothing in the core's calls
+  changes: `_header` never touched the plan. Reading before binding is `Error::Unbound`,
+  binding twice `Error::AlreadyBound`, and the plan-taking constructors bind before the
+  header is read, so a plan error still comes first.
+- Behind the `async` feature, a reader opened with `from_async_reader` is refilled by
+  awaiting a `futures_io::AsyncRead`; the fill between awaits is the same synchronous
+  call. Each chunk is counted as it lands, so a `read_async` dropped part-way loses
+  nothing and the next goes on from there.
 
 ## The scanner (`kernel/delimited/engine.rs`, `scan.rs`)
 

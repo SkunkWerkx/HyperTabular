@@ -7,7 +7,9 @@ module HyperTabular
     #
     # The memory is allocated once and reused for every batch: the state block, the plan,
     # one value array and one verdict array per column, the cell table, the arena. The core
-    # keeps none of it between calls beyond what it writes into the state block.
+    # keeps none of it between calls beyond what it writes into the state block. The plan's
+    # arrays and the cell table wait for #bind, so the header can be read before there is a
+    # plan.
     class Delimited
       # The call did what it could; the result says how far it got.
       OK = 0
@@ -51,7 +53,8 @@ module HyperTabular
       attr_reader :rows, :consumed, :arena_used, :failure
 
       # The plan's arrays (Columns), and the cell-table entries one row takes: the widest
-      # ordinal the plan reads, plus two — or more, if the core asked for more.
+      # ordinal the plan reads, plus two — or more, if the core asked for more. Nil until
+      # #bind.
       attr_reader :columns, :per_row
 
       # The loaded core's version word, major << 16 | minor << 8 | patch.
@@ -59,29 +62,33 @@ module HyperTabular
         Runtime.function(:hypertabular_version).call
       end
 
-      # +dialect+ is the four bytes of a RawDialect; +specs+ one packed ColumnSpec per plan
-      # column and +sizes+ the bytes one value of each takes; +per_row+ the cell-table
-      # entries one row takes. Nil when the core refuses the dialect.
-      def self.start(dialect, specs, sizes, batch_rows, per_row)
-        reader = new(specs, sizes, batch_rows, per_row)
+      # +dialect+ is the four bytes of a RawDialect. Nil when the core refuses it.
+      def self.start(dialect)
+        reader = new
         reader.send(:init, dialect) ? reader : nil
       end
 
-      def initialize(specs, sizes, batch_rows, per_row)
+      def initialize
         @header = Runtime.function(:hypertabular_delimited_header)
         @fill = Runtime.function(:hypertabular_delimited_fill)
         @state = Runtime.buffer(Runtime.function(:hypertabular_delimited_state_size).call)
-        @batch_rows = batch_rows
-        @columns = Columns.new(specs, sizes, batch_rows)
-        @per_row = per_row
         @cramped = false
-        @cells_cap = per_row * batch_rows
-        @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
         @arena_cap = ARENA_BYTES
         @arena = Runtime.buffer(@arena_cap)
         @out = Runtime.buffer(FILLED_BYTES)
         @buffers = Runtime.buffer(BUFFERS_BYTES)
         @rows = @consumed = @arena_used = 0
+      end
+
+      # Takes the plan: +specs+ is one packed ColumnSpec per plan column and +sizes+ the
+      # bytes one value of each takes, +batch_rows+ the most rows a fill writes and +per_row+
+      # the cell-table entries one row takes. Once, before the first #fill.
+      def bind(specs, sizes, batch_rows, per_row)
+        @batch_rows = batch_rows
+        @columns = Columns.new(specs, sizes, batch_rows)
+        @per_row = per_row
+        @cells_cap = per_row * batch_rows
+        @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
       end
 
       # Names the String the calls that follow read: +start+ and +offset+ below index its
@@ -171,6 +178,11 @@ module HyperTabular
       # Absolute byte offset of the next unread byte.
       def offset
         @state[16, 8].unpack1("Q<")
+      end
+
+      # Cells per record, fixed by the header or the first record; 0 before either.
+      def expected
+        @state[24, 4].unpack1("L<")
       end
 
       private

@@ -11,6 +11,7 @@ import io.github.skunkwerkx.hypertabular.Batch;
 import io.github.skunkwerkx.hypertabular.Column;
 import io.github.skunkwerkx.hypertabular.DelimitedReader;
 import io.github.skunkwerkx.hypertabular.Dialect;
+import io.github.skunkwerkx.hypertabular.Header;
 import io.github.skunkwerkx.hypertabular.Sheet;
 import io.github.skunkwerkx.hypertabular.SheetOptions;
 import io.github.skunkwerkx.hypertabular.Tabular;
@@ -29,6 +30,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -68,7 +70,7 @@ public final class Main {
     }
 
     /**
-     * Reads one row through all twenty-two doors, one broken file and one workbook, prints every answer,
+     * Reads one row through all twenty-two doors, one file header-first, one broken file and one workbook, prints every answer,
      * and exits non-zero if any of them was wrong.
      *
      * @param args ignored
@@ -208,6 +210,18 @@ public final class Main {
             expect("end", reader.read() == null);
         }
 
+        // Header first: opened with no plan, the plan made from the header's names, and the
+        // rows read as rows, a text cell as chars without a string.
+        try (DelimitedReader reader =
+                DelimitedReader.of("id,name\n7,zoë\n".getBytes(StandardCharsets.UTF_8), Dialect.CSV)) {
+            Header header = reader.header();
+            reader.bind(List.of(Column.i32(header.ordinal("id")), Column.text(header.ordinal("name"))));
+            List<String> seen = new ArrayList<>();
+            reader.forEachRow(row -> seen.add(
+                    (row.get(0, Integer.class) instanceof Success<Integer> id ? id.value() : -1) + " " + row.chars(1)));
+            expect("header first " + seen, seen.equals(List.of("7 zoë")));
+        }
+
         // A structural failure is an exception, after the intact rows.
         try (DelimitedReader broken = DelimitedReader.of(
                 "a,b\n1,2\n3\n".getBytes(StandardCharsets.UTF_8), Dialect.CSV, List.of(Column.i32(0)))) {
@@ -231,17 +245,21 @@ public final class Main {
         // through the same batch.
         try (InputStream resource = Main.class.getResourceAsStream("/basic.xlsx")) {
             byte[] bytes = Objects.requireNonNull(resource, "basic.xlsx").readAllBytes();
-            try (Workbook book = Workbook.of(bytes)) {
+            // From a stream, read to its end into memory the workbook owns.
+            try (Workbook book = Workbook.of(new ByteArrayInputStream(bytes))) {
                 expect(
                         "workbook",
                         book.format() == WorkbookFormat.XLSX
                                 && book.dateSystem() == ExcelEpoch.Y1900
                                 && !book.sheets().isEmpty());
-                try (Sheet sheet = book.sheet(
-                        0, SheetOptions.DEFAULT, List.of(Column.i64(0), Column.text(1), Column.decimal(2)))) {
-                    expect(
-                            "sheet header",
-                            sheet.header() != null && sheet.header().size() > 2);
+                // Header first: the sheet's header row read before its plan is bound.
+                try (Sheet sheet = book.sheet(0, SheetOptions.DEFAULT)) {
+                    Header header = sheet.header();
+                    expect("sheet header", header != null && header.size() > 2);
+                    sheet.bind(List.of(
+                            Column.i64(header.ordinal(header.get(0))),
+                            Column.text(header.ordinal(header.get(1))),
+                            Column.decimal(header.ordinal(header.get(2)))));
                     int rows = 0;
                     for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
                         rows += batch.rows();

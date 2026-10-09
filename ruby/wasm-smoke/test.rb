@@ -38,6 +38,12 @@ rescue HyperTabular::TabularError => e
 end
 check.("structural failure", kind, :unclosed_quote)
 
+# Header first: the plan built from the header's names, bound after it has been read.
+late = HyperTabular::DelimitedReader.new(csv, HyperTabular::Dialect::CSV)
+late.bind([column.text(late.header.ordinal("name")), column.i32(late.header.ordinal("id"))])
+check.("header first, a row at a time", late.map { |row| [row.value(0), row.value(1), row.line] },
+       [["alice", 1, 2], ["y\"z", 2, 3], ["é", nil, 4]])
+
 # corpus/workbook/basic.ods, a LibreOffice workbook of two sheets.
 ods = <<~B64.unpack1("m")
   UEsDBBQAAAAAAAAAIQCFbDmKLgAAAC4AAAAIAAAAbWltZXR5cGVhcHBsaWNhdGlvbi92bmQub2FzaXMub3BlbmRvY3VtZW50LnNw
@@ -66,4 +72,10 @@ sheet = book.sheet("Data", HyperTabular::SheetOptions::DEFAULT, [column.i64(0), 
 check.("sheet header", sheet.header.first(3), %w[id amount pct])
 rows = sheet.read
 check.("sheet values", [rows.values(0), rows.values(1).map(&:to_s)], [[1, 9, 9], ["0.25", "", ""]])
+# Anything with #read is an IO to a workbook; this one hands the bytes over once.
+io = Object.new
+io.define_singleton_method(:read) { ods.dup }
+late_sheet = HyperTabular::Workbook.new(io).sheet(1, HyperTabular::SheetOptions::DEFAULT)
+late_sheet.bind([column.text(late_sheet.header.ordinal("only"))])
+check.("sheet header first, from an IO", late_sheet.map { |row| row.value(0) }.size, 1)
 checks.join("\n")
