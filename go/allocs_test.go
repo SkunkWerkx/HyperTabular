@@ -218,6 +218,10 @@ func TestRowsAcrossBatchesAllocateNothingARow(t *testing.T) {
 		}
 		return rows, after.Mallocs - before.Mallocs
 	}
+	// One pass unmeasured first, as testing.AllocsPerRun makes one: what the runtime does
+	// the first time it meets this code (MemStats counts the whole process) is behind the
+	// passes measured.
+	across(4)
 	fewRows, few := across(4)
 	manyRows, many := across(128)
 	if fewRows != batchRows*4 || manyRows != batchRows*128 {
