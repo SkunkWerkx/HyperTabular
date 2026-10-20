@@ -79,9 +79,8 @@ dependencies = [
 
 [[package]]
 name = "hypercast"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0357e2d7e4591909dc5c87f2cc16d73dd5fd0edf765178a9ca81283effa964e"
+version = "0.9.0"
+source = "git+https://github.com/SkunkWerkx/HyperCast.git?branch=master#888545ee21823c7d212fb43b9eef0acf08ef6d79"
 
 [[package]]
 name = "hypertabular"

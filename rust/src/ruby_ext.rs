@@ -52,9 +52,9 @@ const NAMES: usize = 64;
 const WINDOW_MIN: usize = 64 * 1024;
 /// The most a workbook's shared strings are given up front (`load_tables`).
 const STRINGS_BOUND: u64 = 1 << 28;
-/// Bytes in one packed `ColumnSpec`: ordinal, door, param, then HyperCast's 32-byte
-/// `RawNumFormat` (runtime/columns.rb's `SPEC_BYTES`).
-const SPEC_BYTES: usize = 44;
+/// Bytes in one packed `ColumnSpec`: ordinal, door, param, then HyperCast's 92-byte
+/// size-tagged `RawNumFormat` (runtime/columns.rb's `SPEC_BYTES`).
+const SPEC_BYTES: usize = 104;
 
 /// What the gem's objects need from Ruby, looked up once at load: the error a call raises
 /// for a structural failure, the module that holds the specs' switches, and the message of

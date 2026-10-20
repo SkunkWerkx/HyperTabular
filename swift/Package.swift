@@ -60,7 +60,7 @@ let package = Package(
         // HyperCast is the judge: every cell is one of its verdicts, and the verdict, the
         // fault, the number format and the declared enums are its own Swift types, from its
         // own package — never copies of them.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.8.0")
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.9.0")
     ],
     targets: [
         // The native core as static libraries, one per triple (SE-0482, which is what sets

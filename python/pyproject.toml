@@ -1,7 +1,8 @@
 [build-system]
-# 1.9 is the first maturin with full PEP 639 support — the SPDX `license` string and the
-# top-level `license-files` below. An older one does not build this file.
-requires = ["maturin>=1.9,<2.0"]
+# 1.15 is the first maturin that builds PyO3 0.30's abi3t extension correctly (its
+# PyModExport entry point; abi3t support itself came in 1.14), and it reads PEP 639's SPDX
+# `license` string and top-level `license-files` below, which needed 1.9.
+requires = ["maturin>=1.15,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -17,14 +18,16 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Brian Buvinghausen" }]
 # 3.11 floor, as HyperCast's package: `match`/`case` over Success | Fault, `typing.assert_never`
-# in the standard library, and the wheel is built abi3-py311, so one wheel per platform
-# covers the whole floor-and-up range.
+# in the standard library, and the extension is built abi3-py311, so one wheel per platform
+# covers the whole floor-and-up range with the GIL. Free-threaded CPython takes a cp314t
+# wheel and, from 3.15, the abi3t one (rust/Cargo.toml's abi3t-py315).
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
-# column's notation is its `NumFormat`. 0.8.0, released alongside this package's 0.8.0, and
-# below 0.9 because a 0.x minor is where its surface is allowed to move.
-dependencies = ["hypercast>=0.8.0,<0.9"]
+# column's notation is its `NumFormat`. 0.9.0, the first with free-threaded wheels (an
+# interpreter with the GIL off needs both extensions to declare they can run without it),
+# and below 0.10 because a 0.x minor is where its surface is allowed to move.
+dependencies = ["hypercast>=0.9.0,<0.10"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.
@@ -32,6 +35,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Libraries :: Python Modules",

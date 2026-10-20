@@ -67,7 +67,7 @@ sealed unsafe class Columns
 		return larger;
 	}
 
-	/// <summary>HyperCast's <see cref="NumFormat"/> in the core's 32-byte layout, validated by HyperCast as its own doors validate it.</summary>
+	/// <summary>HyperCast's <see cref="NumFormat"/> in the core's 92-byte size-tagged layout, validated by HyperCast as its own doors validate it.</summary>
 	static RawNumFormat ToRaw(NumFormat format, int column)
 	{
 		try

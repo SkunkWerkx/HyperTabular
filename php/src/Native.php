@@ -38,9 +38,14 @@ final class Native
     private const DECLARATIONS = <<<'C'
         typedef struct { uint32_t offset; uint32_t len; } ht_span;
         typedef struct { uint32_t offset; uint32_t len; uint32_t reason; } ht_verdict;
+        typedef struct { uint8_t bytes[8]; uint8_t len; } ht_symbol8;
+        typedef struct { uint8_t bytes[16]; uint8_t len; } ht_symbol16;
         typedef struct {
-            uint32_t decimal_sep; uint32_t group_sep; uint32_t flags; uint32_t currency_len;
-            uint8_t currency[16];
+            uint32_t size; uint32_t flags; uint32_t digit_zero;
+            ht_symbol8 decimal_sep; ht_symbol8 group_sep;
+            ht_symbol8 currency_decimal_sep; ht_symbol8 currency_group_sep;
+            ht_symbol8 minus_sign; ht_symbol8 plus_sign; ht_symbol8 percent;
+            ht_symbol16 currency;
         } ht_format;
         typedef struct { uint32_t ordinal; uint32_t door; uint32_t param; ht_format format; } ht_column_spec;
         typedef struct { void *values; ht_verdict *verdicts; } ht_column_buffer;

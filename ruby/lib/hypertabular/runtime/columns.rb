@@ -7,8 +7,9 @@ module HyperTabular
     class Columns
       # Bytes in one verdict (CellVerdict: offset, len, reason — three u32).
       VERDICT_BYTES = 12
-      # ColumnSpec: ordinal, door, param, then HyperCast's 32-byte RawNumFormat.
-      SPEC_BYTES = 44
+      # ColumnSpec: ordinal, door, param, then HyperCast's 92-byte size-tagged RawNumFormat
+      # (HyperCast::NumFormat::PACKED_BYTES).
+      SPEC_BYTES = 12 + HyperCast::NumFormat::PACKED_BYTES
 
       # The packed specs (nil for no columns), the ColumnBuffer table (likewise), how many
       # columns there are, and the most rows a batch holds.

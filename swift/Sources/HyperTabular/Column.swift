@@ -186,9 +186,10 @@ public struct Column: Equatable, Sendable {
     }
 
     /// The column as the core reads it, the format laid out by HyperCast as its own doors lay
-    /// it out. `NumFormat` has already refused what the native format cannot carry — equal
-    /// separators, a symbol over 16 UTF-8 bytes or with a digit or whitespace in it — so
-    /// nothing here can fail.
+    /// it out (the 92-byte size-tagged layout). `NumFormat` has already refused what the
+    /// native format cannot carry — equal separators, a separator or sign over 8 UTF-8 bytes,
+    /// a currency symbol over 16, a symbol with a digit or whitespace in it — so nothing here
+    /// can fail.
     var spec: hypertabular_column_spec {
         var spec = hypertabular_column_spec()
         spec.ordinal = UInt32(ordinal)

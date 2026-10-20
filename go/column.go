@@ -257,15 +257,11 @@ func (c Column) spec() (rawSpec, error) {
 		return spec, nil
 	}
 
-	// HyperCast's NumFormat in the core's 32-byte layout, validated by HyperCast as its own
-	// doors validate it. A NUL decimal separator is this core's rule: its spec reads a zero
-	// separator as "no format declared".
+	// HyperCast's NumFormat in the core's 92-byte size-tagged layout, validated by HyperCast
+	// as its own doors validate it.
 	format, err := c.format.Raw()
 	if err != nil {
 		return spec, err
-	}
-	if format.DecimalSep == 0 {
-		return spec, fmt.Errorf("the decimal separator must not be NUL")
 	}
 	spec.format = format
 	return spec, nil

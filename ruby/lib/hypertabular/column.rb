@@ -149,10 +149,10 @@ module HyperTabular
       Column::VALUE_BYTES.fetch(door)
     end
 
-    # The 44 little-endian bytes of the core's ColumnSpec: ordinal, door code, what the
+    # The 104 little-endian bytes of the core's ColumnSpec: ordinal, door code, what the
     # door declares (numbered as HyperCast numbers it), then the notation in HyperCast's
-    # own packed form — all zeros, which the core reads as invariant, for a door that
-    # reads none.
+    # own packed form (its 92-byte size-tagged layout) — all zeros, which the core reads
+    # as invariant, for a door that reads none.
     def packed
       param = declared.nil? ? 0 : Column::DECLARES.fetch(door).fetch(declared)
       [ordinal, DOORS.fetch(door), param].pack("L<3") + (format.nil? ? Column::NO_FORMAT : format.packed)
@@ -177,6 +177,6 @@ module HyperTabular
   # HyperCast's for its doors, and a text cell's span — two u32s — for this one's.
   Column::VALUE_BYTES = HyperCast::Interop::VALUE_BYTES.merge(text: 8).freeze
 
-  # The notation of a door that reads none: thirty-two zero bytes.
-  Column::NO_FORMAT = ("\0" * 32).b.freeze
+  # The notation of a door that reads none: ninety-two zero bytes, a size of zero.
+  Column::NO_FORMAT = ("\0" * HyperCast::NumFormat::PACKED_BYTES).b.freeze
 end

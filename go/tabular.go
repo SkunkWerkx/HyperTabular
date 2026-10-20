@@ -128,8 +128,8 @@ type rawState struct {
 type (
 	_ [unsafe.Sizeof(rawSpan{}) - 8]struct{}
 	_ [8 - unsafe.Sizeof(rawSpan{})]struct{}
-	_ [unsafe.Sizeof(rawSpec{}) - 44]struct{}
-	_ [44 - unsafe.Sizeof(rawSpec{})]struct{}
+	_ [unsafe.Sizeof(rawSpec{}) - 104]struct{}
+	_ [104 - unsafe.Sizeof(rawSpec{})]struct{}
 	_ [unsafe.Sizeof(rawFailure{}) - 32]struct{}
 	_ [32 - unsafe.Sizeof(rawFailure{})]struct{}
 	_ [unsafe.Sizeof(rawFilled{}) - 64]struct{}

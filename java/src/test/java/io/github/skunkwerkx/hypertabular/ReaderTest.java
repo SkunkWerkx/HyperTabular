@@ -183,9 +183,6 @@ final class ReaderTest {
         assertThrows(NullPointerException.class, () -> Column.dateTime(0, null));
         assertThrows(NullPointerException.class, () -> Column.excelSerial(0, null));
         assertThrows(NullPointerException.class, () -> Column.f64(0, null));
-        // The core reads a zero decimal separator as "no format": it must not get one.
-        assertThrows(
-                IllegalArgumentException.class, () -> Column.f64(0, new NumFormat('\0', ',', NumFormat.STYLE_ALL)));
     }
 
     @Test

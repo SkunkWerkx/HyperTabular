@@ -1,6 +1,6 @@
 [package]
 name = "hypertabular"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 # HyperCast's, the one dependency, whose own floor this cannot go below. CI checks the
 # library on it (check-msrv).
@@ -27,10 +27,16 @@ bench = false
 [dependencies]
 # The one upstream, and the core's only dependency: every cell verdict is a HyperCast
 # verdict. 0.7.0 brought the interop surface and the typed doors this crate reads workbook
-# cells through; 0.8.0 is the floor because it is the first with Android, which this
-# release's bindings ship for. `exports` stays off, so no library built from this
+# cells through, and 0.8.0 Android. 0.9.0 is the floor because its `python-values` is built
+# on PyO3 0.30, the PyO3 the Python binding below needs for free-threaded CPython, and
+# Cargo links one PyO3 per build. `exports` stays off, so no library built from this
 # crate carries HyperCast's `cast_*` symbols.
-hypercast = { version = "0.8.0", default-features = false }
+#
+# Pinned to HyperCast's main branch until 0.9.0 is on crates.io: the `version` is still
+# checked against what the branch carries, and the lockfile holds the exact commit. Drop
+# `git`/`branch` (back to a registry dependency) before this crate is published — cargo
+# publish refuses a git dependency.
+hypercast = { version = "0.9.0", git = "https://github.com/SkunkWerkx/HyperCast.git", branch = "master", default-features = false }
 # The asynchronous reads (the `async` feature): the runtime-neutral `AsyncRead` trait alone,
 # which Tokio's readers meet through `tokio_util::compat` and every other runtime's directly.
 futures-io = { version = "0.3", default-features = false, features = ["std"], optional = true }
@@ -41,8 +47,10 @@ ext-php-rs = { version = "0.16", optional = true }
 no-panic = { version = "0.1", optional = true }
 # The Python binding (src/python_ext.rs), linked into a CPython extension module.
 # abi3-py311, as HyperCast's is: one build per platform serves every CPython from the
-# package's floor up.
-pyo3 = { version = "0.27", features = ["extension-module", "abi3-py311"], optional = true }
+# package's floor up with the GIL. abi3t-py315 is PEP 803's stable ABI for 3.15+, with or
+# without the GIL; free-threaded 3.14 takes a build of its own. The same PyO3 as
+# HyperCast's `python-values`.
+pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311", "abi3t-py315"], optional = true }
 # The Ruby binding's Magnus extension (src/ruby_ext.rs), linked into a Ruby native
 # extension (`hypertabular_native`) and, for ruby.wasm, into the interpreter itself. The
 # versions HyperCast's own extension is built with.

@@ -172,7 +172,22 @@ wasm module and `"__Internal"` for iOS and Mac Catalyst — picked at the call s
 wires it into a Blazor WebAssembly project with no configuration: a `NativeFileReference`
 hands the archive to the linker beside HyperCast's (the two share no symbols), an
 `EmccExportedFunction` per export makes each resolvable through `"*"`, and the
-exception-handling translation .NET 11 needs is applied.
+exception-handling translation .NET 11 needs is applied. The archive reaches the linker by
+that path and nowhere else: the same targets file takes it back out of restore's copy-local
+list, so a consumer's output carries only the linked `dotnet.native.wasm`.
+
+That link happens whether or not the app ends up reading anything. The targets file is
+evaluated before the trimmer runs and cannot see what it removes, so a client bundle whose
+trimmer drops `HyperTabular` entirely still links the archive and exports all 14 entry
+points into `dotnet.native.wasm`, as HyperCast's package does for its own.
+
+**Needs the `wasm-tools` workload.** Only the workload's toolchain relinks the runtime.
+Without it the SDK skips the link with nothing louder than its own warning, and the publish
+succeeds with a `dotnet.native.wasm` that has no `hypertabular_*` symbols in it; `NETSDK1147`
+does not fire for this. So the targets file stops the build with error `HYPERTABULAR002`
+instead (`dotnet workload install wasm-tools`). An app that gates on `Tabular.IsAvailable`
+and keeps a managed fallback can set
+`<HyperTabularRequireWasmWorkload>false</HyperTabularRequireWasmWorkload>`.
 
 No export takes more than twelve integer arguments, because Mono's interpreter, which runs
 .NET in the browser, passes no more to a native function; the work buffers travel in one

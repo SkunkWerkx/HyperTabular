@@ -123,8 +123,16 @@ package hypertabular
 // rust/src/kernel/delimited/fill.rs, field for field.
 typedef struct { uint32_t offset; uint32_t len; } ht_span;
 typedef struct { uint32_t offset; uint32_t len; uint32_t reason; } ht_verdict;
-// HyperCast's RawNumFormat, 32 bytes: the currency symbol is currency_len UTF-8 bytes inline.
-typedef struct { uint32_t decimal_sep; uint32_t group_sep; uint32_t flags; uint32_t currency_len; uint8_t currency[16]; } ht_format;
+// HyperCast's RawNumFormat, 92 bytes, 4-aligned: a size word, the flags, the native digits'
+// zero code point, then every symbol inline — its UTF-8 bytes followed by its length (nine
+// bytes for a separator, a sign or the percent symbol; seventeen for the currency symbol).
+typedef struct { uint8_t bytes[8]; uint8_t len; } ht_symbol8;
+typedef struct { uint8_t bytes[16]; uint8_t len; } ht_symbol16;
+typedef struct {
+	uint32_t size; uint32_t flags; uint32_t digit_zero;
+	ht_symbol8 decimal_sep; ht_symbol8 group_sep; ht_symbol8 currency_decimal_sep; ht_symbol8 currency_group_sep;
+	ht_symbol8 minus_sign; ht_symbol8 plus_sign; ht_symbol8 percent; ht_symbol16 currency;
+} ht_format;
 typedef struct { uint32_t ordinal; uint32_t door; uint32_t param; ht_format format; } ht_spec;
 typedef struct { void *values; ht_verdict *verdicts; } ht_buffer;
 typedef struct { uint32_t code; uint32_t line; uint64_t record; uint64_t byte; uint32_t expected; uint32_t found; } ht_failure;
@@ -136,7 +144,8 @@ typedef struct { uint64_t words[8]; } ht_state;
 
 _Static_assert(sizeof(ht_span) == 8, "Span");
 _Static_assert(sizeof(ht_verdict) == 12, "CellVerdict");
-_Static_assert(sizeof(ht_spec) == 44, "ColumnSpec");
+_Static_assert(sizeof(ht_format) == 92, "RawNumFormat");
+_Static_assert(sizeof(ht_spec) == 104, "ColumnSpec");
 _Static_assert(sizeof(ht_failure) == 32, "Failure");
 _Static_assert(sizeof(ht_filled) == 64, "Filled");
 _Static_assert(sizeof(ht_dialect) == 4, "RawDialect");

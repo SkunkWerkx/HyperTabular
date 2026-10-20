@@ -46,10 +46,11 @@ final class Native {
 
     /**
      * {@code ColumnSpec}: {@code {u32 ordinal, u32 door, u32 param, RawNumFormat format}},
-     * the format {@code {u32 decimal_sep, u32 group_sep, u32 flags, u32 currency_len,
-     * u8[16] currency}}.
+     * the format HyperCast's 92-byte size-tagged layout ({@link NativeValues#FORMAT_BYTES}:
+     * a size word, the flags, the native digits' zero, then every symbol inline with its
+     * length), all zeros for the invariant notation.
      */
-    static final long SPEC_BYTES = 44;
+    static final long SPEC_BYTES = 12 + NativeValues.FORMAT_BYTES;
 
     static final long SPEC_ORDINAL = 0;
     static final long SPEC_DOOR = 4;

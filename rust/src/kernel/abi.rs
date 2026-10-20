@@ -116,8 +116,9 @@ pub struct ColumnSpec {
     /// What the door declares, where it declares something: the Unix precision, a date
     /// order, an Excel date system — numbered as HyperCast numbers them. `0` otherwise.
     pub param: u32,
-    /// The numeric notation, read by the numeric doors. All zeros is the invariant
-    /// notation.
+    /// The numeric notation, read by the numeric doors: HyperCast's size-tagged layout,
+    /// built whole (its `size` is `RawNumFormat::SIZE`, 92). All zeros — a `size` of `0` —
+    /// is the invariant notation.
     pub format: RawNumFormat,
 }
 
@@ -129,21 +130,19 @@ impl ColumnSpec {
             door,
             param,
             format: RawNumFormat {
-                decimal_sep: 0,
-                group_sep: 0,
-                flags: 0,
-                currency_len: 0,
-                currency: [0; 16],
+                size: 0,
+                ..RawNumFormat::ZERO
             },
         }
     }
 
-    /// The declared notation, or `None` for a contract violation.
+    /// The declared notation, or `None` for a contract violation: a format HyperCast's
+    /// own doors would refuse, or a layout whose size the core does not read.
     pub fn num_format(&self) -> Option<NumFormat> {
-        if self.format.decimal_sep == 0 {
+        if self.format.size == 0 {
             return Some(NumFormat::INVARIANT);
         }
-        self.format.resolve()
+        self.format.resolve().copied()
     }
 }
 

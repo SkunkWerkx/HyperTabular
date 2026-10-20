@@ -67,8 +67,8 @@ final class Columns
             $spec->ordinal = $column->ordinal;
             $spec->door = $column->door->value;
             $spec->param = $column->declared;
-            // HyperCast's NumFormat in the core's 32-byte layout, written by HyperCast as its own
-            // doors write it. The object validated itself when it was built.
+            // HyperCast's NumFormat in the core's 92-byte size-tagged layout, written by
+            // HyperCast as its own doors write it. The object validated itself when it was built.
             NativeValues::writeFormat($column->format, $spec->format);
 
             $values = $ffi->new('uint8_t[' . $batchRows * $column->door->valueSize() . ']');

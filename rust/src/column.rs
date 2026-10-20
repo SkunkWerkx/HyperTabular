@@ -112,27 +112,16 @@ impl Column {
             Door::ExcelSerial(epoch) => epoch as u32,
             _ => 0,
         };
-        let mut currency = [0u8; 16];
-        let symbol = self.format.currency.as_bytes();
-        currency
-            .get_mut(..symbol.len())
-            .ok_or(Error::Plan { column: index })?
-            .copy_from_slice(symbol);
         let spec = ColumnSpec {
             ordinal,
             door: self.door.code(),
             param,
-            format: RawNumFormat {
-                decimal_sep: u32::from(self.format.decimal_sep),
-                group_sep: u32::from(self.format.group_sep),
-                flags: self.format.flags,
-                currency_len: symbol.len() as u32,
-                currency,
-            },
+            format: RawNumFormat::from(self.format),
         };
-        // A format the core would refuse is the caller's mistake, said before any read —
-        // as is U+0000 for a decimal separator, which the core reads as "none declared".
-        if self.format.decimal_sep == '\0' || spec.num_format().is_none() {
+        // A format the core would refuse — equal separators, a symbol the format's own
+        // constructors would not have built — is the caller's mistake, said before any
+        // read.
+        if spec.num_format().is_none() {
             return Err(Error::Plan { column: index });
         }
         Ok(spec)

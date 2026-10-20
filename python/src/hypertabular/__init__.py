@@ -68,6 +68,10 @@ which anything that takes a buffer takes — with no Python call per cell::
   raises :class:`TabularError` — after every intact row before it has been delivered.
 - **A batch owns what it shows.** It stays valid after the reader has moved on, and so does
   a :class:`Row` of it.
+- **Free-threaded CPython runs it without the GIL.** Wheels ship for ``cp314t`` and, from
+  3.15, ``abi3t``, beside the ``abi3`` one for every CPython 3.11+. A batch and a workbook
+  can be shared by any number of threads; a reader or a sheet is read by one at a time, and
+  another thread calling into it meanwhile gets ``RuntimeError``, never a race.
 """
 
 from __future__ import annotations

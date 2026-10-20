@@ -74,8 +74,8 @@ pub fn door_of(entry: &Value) -> Door {
 
 pub fn format_json(format: &NumFormat) -> Value {
     let mut value = json!({
-        "decimal_sep": format.decimal_sep.to_string(),
-        "group_sep": format.group_sep.to_string(),
+        "decimal_sep": format.decimal_sep.as_str(),
+        "group_sep": format.group_sep.as_str(),
         "flags": format.flags,
     });
     if !format.currency.is_empty() {

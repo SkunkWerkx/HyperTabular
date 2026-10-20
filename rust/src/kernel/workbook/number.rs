@@ -10,15 +10,10 @@
 //! same double (HyperCast's `shortest_digits`, the number its decimal door reads), wall
 //! clocks and times in the ISO profiles, spans in ISO 8601.
 
-use hypercast::{CurrencySymbol, Date, Duration, NumFormat};
+use hypercast::{Date, Duration, NumFormat};
 
 /// The one notation a workbook part writes a double in.
-const PLAIN: NumFormat = NumFormat {
-    decimal_sep: '.',
-    group_sep: ',',
-    flags: NumFormat::EXPONENT,
-    currency: CurrencySymbol::NONE,
-};
+const PLAIN: NumFormat = NumFormat::new('.', ',', NumFormat::EXPONENT);
 
 /// A finite double from the text of a numeric cell, or `None` if the text is not one.
 pub fn parse_f64(bytes: &[u8]) -> Option<f64> {

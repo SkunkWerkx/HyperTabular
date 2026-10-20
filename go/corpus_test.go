@@ -135,8 +135,8 @@ func (c *corpusColumn) format() hypercast.NumFormat {
 		return hypercast.Invariant
 	}
 	return hypercast.NumFormat{
-		DecimalSep: []rune(c.Format.DecimalSep)[0],
-		GroupSep:   []rune(c.Format.GroupSep)[0],
+		DecimalSep: c.Format.DecimalSep,
+		GroupSep:   c.Format.GroupSep,
 		Styles:     hypercast.NumStyles(c.Format.Flags),
 		Currency:   c.Format.Currency,
 	}
