@@ -260,8 +260,9 @@ points into; `batch.line(row)` the line or the sheet row the row came from.
 
 ### Errors
 
-One type. `Error::Io` is the read; `Error::Separator`, `Error::Plan` and `Error::NoSheet`
-are the caller's own declarations, refused before any read; `Error::Structure` is data
+One type. `Error::Io` is the read; `Error::Separator`, `Error::Plan`, `Error::NoSheet` and
+`Error::NoColumn` are the caller's own declarations, refused before any read, and
+`Error::Unbound` and `Error::AlreadyBound` a plan bound out of turn; `Error::Structure` is data
 that is broken — a `Failure` with a `kind` (one enum over the delimited and the workbook
 failures, numbered as the core numbers them), and `record`, `line`, `byte`, `expected`,
 `found`. A structural failure is returned once every intact row before it has been

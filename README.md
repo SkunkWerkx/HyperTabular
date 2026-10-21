@@ -70,7 +70,7 @@ while let Some(batch) = reader.read()? {
 | [Ruby](ruby/) | `gem install hypertabular` |
 | [PHP](php/) | `composer require skunkwerkx/hypertabular` |
 
-Each brings HyperCast 0.8 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
+Each brings HyperCast 0.9 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
 
 ## The shape
 
@@ -154,7 +154,7 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 
 | Binding | WebAssembly |
 | --- | --- |
-| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1`, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo wasm-staticlib` builds the archive the bindings below link. |
+| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1`, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo wasm-staticlib` builds the `wasm32-unknown-emscripten` archive C# links; Go and Swift link a `wasm32-wasip1` one. |
 | C# | **Yes, on .NET 11.** `dotnet add package HyperTabular` into a Blazor WebAssembly project links the core beside HyperCast's through the package's `.targets`; `csharp/HyperTabular.WasmSmokeTest` proves it. |
 | Go | **Yes, through [TinyGo](https://tinygo.org) 0.42+.** `tinygo build -target=wasm` (or `wasip1`) links `staticlib/wasm`; stock Go's wasm toolchain cannot link a C library. |
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |

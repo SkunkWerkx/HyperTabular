@@ -90,8 +90,9 @@ several ways, and the two encrypted files refused — 765 rows and 39,548 cells.
 - `numbers` is each row's number in the sheet, parallel to `rows`.
 - A typed cell that fails its door has the cell said as text for its `raw` and a fault
   that spans all of it; a typed cell through the text door is that same text.
-- `failure`, when present (the one shown is `broken.xlsx`'s; no other case has one),
-  ends the sheet after the rows listed: `kind` is one of
+- `failure`, when present (the one shown is `broken.xlsx`'s; the only others are the two
+  encrypted files', cases of nothing but `name`, `file` and the failure), ends the sheet
+  after the rows listed: `kind` is one of
   `not_a_zip`, `container`, `encrypted`, `method`, `missing_part`, `xml`, `deflate`,
   `not_a_workbook`, `shared_string`, `too_large`; `record` is the part of the package
   being read (`6` a worksheet), `line` the sheet row, `byte` the offset in the part's
