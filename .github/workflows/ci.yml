@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   build-static:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:
       contents: read
       id-token: write
@@ -42,7 +42,7 @@ jobs:
       android: true
 
   build-android:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:
       contents: read
       id-token: write
@@ -53,14 +53,14 @@ jobs:
 
   test-swift-static:
     needs: build-static
-    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:
       contents: read
     with:
       project: HyperTabular
 
   build-native:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:            # attestation signs with OIDC; a reusable workflow
       contents: read        # can never escalate beyond its caller's grant
       id-token: write
@@ -105,7 +105,7 @@ jobs:
   # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
   # (release mode only: weekly and at release, not on PRs).
   build-wasm:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:
       contents: read
       id-token: write
@@ -125,7 +125,7 @@ jobs:
   # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
   # built, installed and attested here, and published unchanged by release.yml.
   build-wheels:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@e07bcd90b7bd369afe5b0e043e7a427bd312f081
     permissions:
       contents: read
       id-token: write
