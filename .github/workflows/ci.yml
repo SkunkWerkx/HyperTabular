@@ -314,7 +314,10 @@ jobs:
     needs: build-native
     # 28 minutes of simulators, behind the slowest build-native leg: release mode only.
     if: github.event_name != 'pull_request'
-    runs-on: macos-latest
+    # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) refuse any Xcode below 27.0, and
+    # macos-latest (macOS 26) tops out at Xcode 26.6. The xcode-27 image is macOS 27 with
+    # Xcode 27.0 as its default; .NET 11 GA will want Xcode 27 as well.
+    runs-on: xcode-27
     env:
       APP_ID: io.github.skunkwerkx.hypertabular.applesmoketest
       SMOKE_PROJECT: csharp/HyperTabular.AppleSmokeTest/HyperTabular.AppleSmokeTest.csproj

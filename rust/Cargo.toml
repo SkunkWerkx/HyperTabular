@@ -31,12 +31,7 @@ bench = false
 # on PyO3 0.30, the PyO3 the Python binding below needs for free-threaded CPython, and
 # Cargo links one PyO3 per build. `exports` stays off, so no library built from this
 # crate carries HyperCast's `cast_*` symbols.
-#
-# Pinned to HyperCast's main branch until 0.9.0 is on crates.io: the `version` is still
-# checked against what the branch carries, and the lockfile holds the exact commit. Drop
-# `git`/`branch` (back to a registry dependency) before this crate is published — cargo
-# publish refuses a git dependency.
-hypercast = { version = "0.9.0", git = "https://github.com/SkunkWerkx/HyperCast.git", branch = "master", default-features = false }
+hypercast = { version = "0.9.0", default-features = false }
 # The asynchronous reads (the `async` feature): the runtime-neutral `AsyncRead` trait alone,
 # which Tokio's readers meet through `tokio_util::compat` and every other runtime's directly.
 futures-io = { version = "0.3", default-features = false, features = ["std"], optional = true }

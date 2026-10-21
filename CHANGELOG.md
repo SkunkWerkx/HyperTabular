@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-21
+
 Built on HyperCast 0.9.0: its culture-fidelity sweep reaches every plan column's format, and
 its free-threaded Python extension lets this one go free-threaded beside it. Also the
 consumer feedback from the Blazor WebAssembly integration, in the same shape as HyperCast's.
@@ -509,6 +511,7 @@ cells through. *(every package)*
   using trusted publishing (OIDC) wherever the registry offers it. Packagist, SwiftPM and
   the Go module (`go/v0.7.0`) resolve from the tags. *(every package)*
 
-[Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/SkunkWerkx/HyperTabular/releases/tag/v0.7.0
