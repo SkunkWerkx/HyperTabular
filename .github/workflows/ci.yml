@@ -28,13 +28,48 @@ permissions:
   contents: read
 
 jobs:
+  build-static:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      project: HyperTabular
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      apple_mobile: true
+      android: true
+
+  build-android:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+
+  test-swift-static:
+    needs: build-static
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
+    permissions:
+      contents: read
+    with:
+      project: HyperTabular
+
   build-native:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@master
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
     permissions:            # attestation signs with OIDC; a reusable workflow
       contents: read        # can never escalate beyond its caller's grant
       id-token: write
       attestations: write
     with:
+      static_libs_artifact: false
+      swift_static_tests: false
+      android_shared_artifact: false
+      php_extension_schedule: parallel
       # pr: every leg and suite, nothing only a release needs (see the forge's README).
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       project: HyperTabular
@@ -70,7 +105,7 @@ jobs:
   # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
   # (release mode only: weekly and at release, not on PRs).
   build-wasm:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
     permissions:
       contents: read
       id-token: write
@@ -90,7 +125,7 @@ jobs:
   # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
   # built, installed and attested here, and published unchanged by release.yml.
   build-wheels:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@64522784d83ea5bab7f6c917fca84f0d27bb09e0
     permissions:
       contents: read
       id-token: write
@@ -99,6 +134,19 @@ jobs:
       # pr: the Pyodide wheel and its in-browser suite only; the native wheels are packaging.
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
+
+  # Release guards exercise the current C export declarations and reject invalid payloads.
+  check-exports:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - name: Install release-check toolchain
+        run: sudo apt-get update && sudo apt-get install -y llvm clang lld
+      - name: Check release preparation and artifact rejection paths
+        run: python -m unittest discover -s .github/scripts/tests -v
 
   check-core:
     strategy:
@@ -311,8 +359,8 @@ jobs:
   # app also writes what it prints to a file in its container (SmokeLog.cs) and that file is
   # what is checked.
   test-apple-mobile:
-    needs: build-native
-    # 28 minutes of simulators, behind the slowest build-native leg: release mode only.
+    needs: build-static
+    # Start when the static archives are ready; release mode only.
     if: github.event_name != 'pull_request'
     # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) refuse any Xcode below 27.0, and
     # macos-latest (macOS 26) tops out at Xcode 26.6. The xcode-27 image is macOS 27 with
@@ -515,7 +563,7 @@ jobs:
   # it opens ../corpus by its path, and the device has nothing above the pushed directory.
   # The aarch64 builds are linked, not run. Swift's SDK for Android needs Swift 6.3 or later.
   test-android:
-    needs: build-native
+    needs: [build-static, build-android]
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
