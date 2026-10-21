@@ -267,3 +267,8 @@ Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DI
   small read ever makes the preload the wrong trade.
 - **Cell-level styles beyond the number-format kind**, hidden rows/columns, merged
   ranges: not consulted; this reader delivers values.
+- **Performance candidates** left after the 2026-10-05 tokenizer pass (SWAR tag scan,
+  single-pass attributes, `<!` before `<![CDATA[`): inflate, about a sixth of a read, which
+  must stay under the no-panic proof; the bounds checks in `Attrs::next`, `trimmed` and
+  `slice`; and ODS open's full-part scan. A/B with two saved binaries, alternated, best-of;
+  the build is layout-sensitive and the machine noise is 3 to 5%.
