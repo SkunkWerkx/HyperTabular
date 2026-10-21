@@ -92,8 +92,8 @@ final class CorpusTest {
         }
         JsonObject format = entry.getAsJsonObject("format");
         return new NumFormat(
-                format.get("decimal_sep").getAsString().charAt(0),
-                format.get("group_sep").getAsString().charAt(0),
+                format.get("decimal_sep").getAsString(),
+                format.get("group_sep").getAsString(),
                 format.get("flags").getAsInt(),
                 format.has("currency") ? format.get("currency").getAsString() : "");
     }

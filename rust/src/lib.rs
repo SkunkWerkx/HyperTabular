@@ -129,7 +129,7 @@ mod ruby_ext;
 #[cfg(feature = "std")]
 pub use hypercast::{
     CivilDateTime, CurrencySymbol, Date, DateOrder, Decimal, Duration, ExcelEpoch, Fault,
-    NumFormat, Reason, Timestamp, UnixPrecision,
+    NativeDigits, NumFormat, Reason, Symbol, Timestamp, UnixPrecision,
 };
 
 pub use kernel::abi::{CellVerdict, Span};

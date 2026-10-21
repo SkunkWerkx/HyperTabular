@@ -1,6 +1,7 @@
 //! The Python binding: the core linked straight into a CPython extension module
-//! (`hypertabular._native`, PyO3, abi3-py311) — the whole Python backend, as HyperCast's
-//! extension is the whole of its own.
+//! (`hypertabular._native`, PyO3: abi3-py311 with the GIL, abi3t-py315 or a 3.14t build
+//! without it) — the whole Python backend, as HyperCast's extension is the whole of its
+//! own.
 //!
 //! Delimited text is read here, over the kernel directly. A workbook is read through this
 //! crate's own [`crate::Workbook`] and [`crate::Sheet`], which drive the kernel's workbook
@@ -41,6 +42,22 @@
 //! the `datetime` types, microsecond truncation) through HyperCast's own conversions
 //! (`hypercast::python::Values`), so it is the object `hypercast.cast_*` makes of the same
 //! text.
+//!
+//! Free-threading: PyO3 0.30 declares the module needs no GIL, so on 3.14t/3.15t calls from
+//! different threads really run at once, and nothing here leans on the GIL for exclusion:
+//! - What is shared is immutable. `Batch`, `ColumnData`, `Row` and `Workbook` are `frozen`,
+//!   their bytes are `bytes` objects or vectors never written after the batch is made, and
+//!   a `Workbook`'s core is behind an `Arc` that every sheet only reads. A column's lazily
+//!   built `values` and `verdicts` are `PyOnceLock`s, which run the build once however many
+//!   threads ask, and `COMPANIONS` is one, set once by `_bind`.
+//! - What is mutable is a reader's or a sheet's, borrowed `&mut` for each call. PyO3's
+//!   borrow flag is atomic on a free-threaded build, so a second thread calling into one
+//!   that another is inside of gets `RuntimeError` ("Already borrowed"), and that holds
+//!   across the `py.detach` the core runs under, too: the buffers the core writes are
+//!   reached only through that borrow.
+//! - The only Python storage read in place is a `bytes` (the caller's input, a stream's
+//!   chunk), which never changes or moves while the reference to it is held. A `bytearray`
+//!   or other mutable buffer is refused, never read through a raw pointer.
 
 use std::fs::File;
 use std::io::{ErrorKind, Read};
@@ -981,8 +998,8 @@ fn read_full(file: &mut File, into: &mut [u8]) -> (usize, Option<std::io::Error>
 /// :class:`TabularError`, after every intact row before it has been delivered, and again
 /// on every later read.
 ///
-/// A reader is read by one thread at a time; the batches it has handed out are immutable
-/// and can go anywhere.
+/// A reader is read by one thread at a time — another thread calling into it meanwhile gets
+/// ``RuntimeError`` — and the batches it has handed out are immutable and can go anywhere.
 #[pyclass(module = "hypertabular")]
 struct DelimitedReader {
     dialect: Py<PyAny>,
@@ -1357,7 +1374,10 @@ impl DelimitedReader {
             let (state, specs) = (&mut self.state, &self.specs);
             let (cells, arena) = (&mut self.cells, &mut self.arena);
             // The one call into the core, with the interpreter released: everything it
-            // reads and writes is this reader's, which nothing else can reach meanwhile.
+            // reads and writes is this reader's, which nothing else can reach meanwhile —
+            // on a free-threaded build too, where `&mut self` is PyO3's atomic borrow of
+            // the reader, held across the detach. `window` is either that reader's own
+            // buffer or the caller's `bytes`, which is immutable and kept alive by `source`.
             //
             // SAFETY: each column's two arrays were allocated in `build` with room for
             // `batch_rows` values of its door's type and `batch_rows` verdicts.
@@ -1496,7 +1516,7 @@ fn planned(
     }
     // HyperCast's NumFormat validated itself when it was built; its packed bytes are the
     // core's layout, which `resolve` below reads back.
-    let packed: [u8; 32] = format.getattr("packed")?.extract()?;
+    let packed: [u8; 92] = format.getattr("packed")?.extract()?;
     let spec = ColumnSpec {
         ordinal: column.getattr("ordinal")?.extract()?,
         door: column.getattr("door")?.extract()?,

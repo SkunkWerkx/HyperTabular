@@ -158,7 +158,7 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 | C# | **Yes, on .NET 11.** `dotnet add package HyperTabular` into a Blazor WebAssembly project links the core beside HyperCast's through the package's `.targets`; `csharp/HyperTabular.WasmSmokeTest` proves it. |
 | Go | **Yes, through [TinyGo](https://tinygo.org) 0.42+.** `tinygo build -target=wasm` (or `wasip1`) links `staticlib/wasm`; stock Go's wasm toolchain cannot link a C library. |
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |
-| Python | **Yes, on [Pyodide](https://pyodide.org/) 314.x.** `await micropip.install("hypertabular")` installs the ninth wheel (`pyemscripten_2026_0_wasm32`) and `hypercast`'s; CI runs the whole pytest suite in Pyodide under Node and in Chrome. |
+| Python | **Yes, on [Pyodide](https://pyodide.org/) 314.x.** `await micropip.install("hypertabular")` installs the twenty-fifth wheel (`pyemscripten_2026_0_wasm32`) and `hypercast`'s; CI runs the whole pytest suite in Pyodide under Node and in Chrome. |
 | Ruby | **Yes, through `rbwasm build`.** List `hypertabular-wasm` instead of `hypertabular` in the Gemfile handed to ruby.wasm 2.10+ (Ruby 3.4 or 4.0): it carries the Magnus extension prebuilt for `wasm32-wasip1` and shares the interpreter with `hypercast-wasm`. |
 | Java | **In process, through [GraalWasm](https://www.graalvm.org/webassembly/).** The jar bundles the core as a `wasm32-wasip1` module; `-Dhypertabular.backend=wasm` selects it, and it is the automatic fallback where the jar has no native build. On GraalVM's JIT it reads the 300 000-row workbook in 1.9 s against 0.72 s native; on a stock JDK it runs interpreted. CI runs the whole suite through it on every leg. Compiling the binding itself to wasm is blocked: no Java-to-wasm compiler supports the Foreign Function & Memory API. |
 | PHP | Not built. There is no maintained wasm engine PHP can embed, and HyperCast's `ext-php-rs` spike for WordPress Playground is not shipped. |
@@ -180,7 +180,7 @@ csharp/     the .NET 11 binding: LibraryImport, HyperCast's Verdict<T>, corpus r
 java/       the JDK 25+ binding: FFM, HyperCast's sealed Verdict, corpus replay, Native Image smoke test
 go/         the Go binding: the core linked in through cgo, typed slices and Get[T]
 swift/      the SwiftPM binding: the core linked in as a static library on every platform
-python/     the 3.11+ binding: a PyO3 extension, columns as memoryviews, abi3 wheels
+python/     the 3.11+ binding: a PyO3 extension, columns as memoryviews, abi3 and free-threaded wheels
 ruby/       the 3.3+ binding: a Magnus extension with a Fiddle fallback, pattern-matched Data verdicts
 php/        the 8.2+ binding: ext-ffi, Success|Fault per cell
 docs/       the design record: the core, delimited text, workbooks, prior art

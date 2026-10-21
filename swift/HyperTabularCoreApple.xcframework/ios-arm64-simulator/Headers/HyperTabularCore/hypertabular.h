@@ -50,13 +50,36 @@ typedef struct hypertabular_cell_verdict {
     uint32_t reason;
 } hypertabular_cell_verdict;
 
-// HyperCast's numeric notation as it crosses its ABI. All zeros is the invariant notation.
+// A symbol of up to 8 UTF-8 bytes (a separator, a sign, the percent symbol) or 16 (the
+// currency symbol), then its length; a length of 0 declares nothing.
+typedef struct hypertabular_symbol8 {
+    uint8_t bytes[8];
+    uint8_t len;
+} hypertabular_symbol8;
+
+typedef struct hypertabular_symbol16 {
+    uint8_t bytes[16];
+    uint8_t len;
+} hypertabular_symbol16;
+
+// HyperCast's numeric notation as it crosses its ABI (its 0.9.0 layout, 92 bytes,
+// 4-aligned): `size` is sizeof(hypertabular_num_format) as the caller built it, then the
+// format in place — flags, the native digits' zero code point (0 for none), the two number
+// separators (always declared), the currency amount's separators, the minus and plus signs,
+// the percent symbol and the currency symbol, each a further spelling read beside the ASCII
+// default where its length is 0. All zeros — a `size` of 0 — is the invariant notation.
 typedef struct hypertabular_num_format {
-    uint32_t decimal_sep;
-    uint32_t group_sep;
+    uint32_t size;
     uint32_t flags;
-    uint32_t currency_len;
-    uint8_t currency[16];
+    uint32_t digit_zero;
+    hypertabular_symbol8 decimal_sep;
+    hypertabular_symbol8 group_sep;
+    hypertabular_symbol8 currency_decimal_sep;
+    hypertabular_symbol8 currency_group_sep;
+    hypertabular_symbol8 minus_sign;
+    hypertabular_symbol8 plus_sign;
+    hypertabular_symbol8 percent;
+    hypertabular_symbol16 currency;
 } hypertabular_num_format;
 
 // One output column: the source ordinal it reads, the door's code (1 bool, 2-5 i8-i64,

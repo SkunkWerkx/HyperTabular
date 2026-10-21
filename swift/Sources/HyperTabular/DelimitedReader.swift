@@ -76,7 +76,7 @@ public final class DelimitedReader {
         precondition(
             MemoryLayout<hypertabular_cell_verdict>.stride == 12 && MemoryLayout<CellVerdict>.stride == 12
                 && MemoryLayout<hypertabular_span>.stride == 8
-                && MemoryLayout<hypertabular_column_spec>.stride == 44
+                && MemoryLayout<hypertabular_column_spec>.stride == 104
                 && MemoryLayout<hypertabular_timestamp>.stride == 16
                 && MemoryLayout<hypertabular_date>.stride == 4
                 && MemoryLayout<hypertabular_civil>.stride == 16

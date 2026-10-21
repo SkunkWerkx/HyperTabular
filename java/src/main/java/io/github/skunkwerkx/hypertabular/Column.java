@@ -28,12 +28,9 @@ public final class Column {
         if (ordinal < 0) {
             throw new IllegalArgumentException("ordinal must not be negative; got " + ordinal);
         }
+        // A NumFormat validated itself when it was built, as HyperCast's own doors validate
+        // it; the core reads it in its own layout and refuses nothing a NumFormat can hold.
         Objects.requireNonNull(format, "format");
-        // The core reads a zero decimal separator as "no format declared" — the invariant
-        // one — so a format that really declared U+0000 would be silently replaced.
-        if (format.decimalSeparator() == 0) {
-            throw new IllegalArgumentException("The decimal separator must not be U+0000");
-        }
         this.ordinal = ordinal;
         this.door = door;
         this.declared = declared;

@@ -9,6 +9,88 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-21
+
+Built on HyperCast 0.9.0: its culture-fidelity sweep reaches every plan column's format, and
+its free-threaded Python extension lets this one go free-threaded beside it. Also the
+consumer feedback from the Blazor WebAssembly integration, in the same shape as HyperCast's.
+
+### Added
+
+- **A plan column's format carries everything HyperCast 0.9.0's `NumFormat` declares.** The
+  numeric doors of a plan column read the currency amount's own separators, further spellings
+  of the minus and plus signs and the percent symbol, native digits beside ASCII, separators
+  of one or two characters, and the `TRAILING_SIGN` lenience, as HyperCast's doors do, because
+  the core casts every cell through them. Nothing a binding's caller writes changes: each
+  binding's `Column` takes HyperCast's own `NumFormat`, which now takes the whole
+  declaration (`NumFormat.From(CultureInfo)` in C#, `from(Locale)` in Java, and the rest).
+  *(core, every binding)*
+- **C# — error `HYPERTABULAR002` when the `wasm-tools` workload is missing.** Without the
+  workload a Blazor WebAssembly publish skips linking the native core with nothing louder than
+  the SDK's own warning, and ships a runtime with no `hypertabular_*` symbols; `NETSDK1147`
+  never fires for this. The package's targets now stop the build instead. An app that keeps a
+  managed fallback can set `HyperTabularRequireWasmWorkload` to `false`. HyperCast's and
+  HyperUuid's packages carry the same check. *(C#)*
+- **Python — free-threaded CPython, with the GIL off.** Each platform now gets three wheels
+  where it had one: `cp311-abi3` for CPython 3.11+ with the GIL as before, `cp314-cp314t` for
+  free-threaded 3.14, and `cp315-abi3.abi3t`, PEP 803's stable ABI for 3.15+, which serves 3.15
+  with or without the GIL. PyO3 0.30's modules declare they need no GIL, and HyperCast 0.9.0's
+  do too, so a free-threaded interpreter keeps it off after `import hypertabular`, and readers
+  on different threads run in parallel. A `Batch` and a `Workbook` can be shared by any
+  number of threads, and a column's `values` is built once whichever thread asks first. A
+  reader or a sheet is still read by one thread at a time: another thread calling into one
+  meanwhile gets `RuntimeError`, never a race on its buffers. Nothing needed changing for
+  that, and new tests hold it on 3.14t and 3.15t. PyPI gets 25 wheels per release where it
+  got 9. CI installs each wheel on its own interpreters and checks the GIL stays off, and runs
+  the whole suite on free-threaded 3.15 on every platform. A build from a checkout needs
+  maturin 1.15 or newer. *(PyPI)*
+
+### Changed
+
+- **Breaking — HyperCast 0.9.0 is the floor in every package**: `hypercast = "0.9.0"` for the
+  crate, `hypercast>=0.9.0,<0.10` on PyPI, `HyperCast` 0.9.0 on NuGet, `hypercast` 0.9.0 on
+  Maven Central, `~> 0.9.0` for the gem, `^0.9.0` on Packagist, `from: "0.9.0"` for the Swift
+  package and `v0.9.0` for the Go module. The format layout below is 0.9.0's, and the crate's
+  `python-values` is built on PyO3 0.30, which the Python binding needs for free-threading
+  (Cargo links one PyO3 per build). The types this crate re-exports from HyperCast
+  (`Decimal`, `NumFormat`, `Fault`, the temporal types and the rest) are therefore HyperCast
+  0.9's, so a crate that names them through its own `hypercast` dependency moves to 0.9 with
+  this one. *(every package)*
+- **Breaking — `ColumnSpec` carries HyperCast 0.9.0's `RawNumFormat`, so it is 104 bytes where
+  it was 44.** The spec's ordinal, door and parameter are followed by the format as 0.9.0 lays
+  it out: a size word, then the `NumFormat` in place, 92 bytes, 4-aligned (HyperCast's
+  `rust/src/abi.rs` has the offset table). All zeros, a size of `0`, is still the invariant
+  notation, and a size the core does not read is a contract violation, as a format HyperCast's
+  doors would refuse always was. Every binding restates the layout where it builds a spec: the
+  C header, the C# `RawColumnSpec`, Go's cgo preamble, Java's `SPEC_BYTES`, PHP's FFI
+  declarations, Ruby's packed spec and the Magnus and Python extensions; each writes the format
+  through HyperCast's own `ToRaw`, `Raw`, `writeFormat`, `packed` or `rawFormat`, so no bridge
+  lays a byte of it out itself. In Rust, `NumFormat`'s separators are `Symbol<8>` where they
+  were `char`, so a format is built with `NumFormat::new` and its `with_*` methods rather than
+  a struct literal; `Symbol` and `NativeDigits` are re-exported beside `CurrencySymbol`. The
+  corpus replays are byte-identical in all eight languages. *(core, every binding)*
+- **C# — the browser-wasm archive is at `runtimes/browser-wasm/nativeassets/net11.0/`**, the
+  path the forge stages, where the package's targets named `net10.0/`: a Blazor WebAssembly
+  link against a package packed by the current forge would not have found the archive. The
+  targets now live in `build/net11.0/HyperTabular.targets`, with `buildTransitive/` importing
+  them, as HyperCast's do, so a project that reaches the package through a class library gets
+  the same wiring. *(C#)*
+
+### Fixed
+
+- **C# — the browser-wasm archive carries build provenance, and the package checks it.**
+  0.8.0's release notes said every artifact was attested; the archive a Blazor WebAssembly app
+  links, `runtimes/browser-wasm/nativeassets/net10.0/libhypertabular.a`, was built in CI but
+  never attested, the same gap HyperCast's 0.8.0 package had. The forge now attests it where
+  it is built and `hyper-pack-nuget.yml` verifies every native it packs, failing the release
+  on one without provenance. The v0.8.0 release notes are corrected. *(C#)*
+- **C# README — the Blazor WebAssembly section says what the link costs and needs.** The
+  archive is linked even when the trimmer drops `HyperTabular` from the app, since the targets
+  run before the trimmer and export all 14 entry points regardless, and the link needs the
+  `wasm-tools` workload (`HYPERTABULAR002` above). *(C#)*
+- **README examples.** Every README example was compiled and run against the local build, the
+  root README's C# and Rust ones included. *(all)*
+
 ## [0.8.0] — 2026-10-09
 
 ### Added
@@ -429,6 +511,7 @@ cells through. *(every package)*
   using trusted publishing (OIDC) wherever the registry offers it. Packagist, SwiftPM and
   the Go module (`go/v0.7.0`) resolve from the tags. *(every package)*
 
-[Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/SkunkWerkx/HyperTabular/releases/tag/v0.7.0

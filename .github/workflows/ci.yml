@@ -85,9 +85,10 @@ jobs:
       go_tinygo_smoke: go/internal/tinygosmoke
       ruby_wasm_smoke: ruby/wasm-smoke
 
-  # The nine PyPI wheels — eight native, and Pyodide's, whose job runs the whole suite in
-  # Pyodide under Node and in headless Chrome — built, installed and attested here, and
-  # published unchanged by release.yml.
+  # The 25 PyPI wheels — three for each of the eight native platforms (abi3, cp314t and
+  # abi3t, each installed on the interpreters it serves, free-threaded ones included), and
+  # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
+  # built, installed and attested here, and published unchanged by release.yml.
   build-wheels:
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
     permissions:
@@ -313,7 +314,10 @@ jobs:
     needs: build-native
     # 28 minutes of simulators, behind the slowest build-native leg: release mode only.
     if: github.event_name != 'pull_request'
-    runs-on: macos-latest
+    # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) refuse any Xcode below 27.0, and
+    # macos-latest (macOS 26) tops out at Xcode 26.6. The xcode-27 image is macOS 27 with
+    # Xcode 27.0 as its default; .NET 11 GA will want Xcode 27 as well.
+    runs-on: xcode-27
     env:
       APP_ID: io.github.skunkwerkx.hypertabular.applesmoketest
       SMOKE_PROJECT: csharp/HyperTabular.AppleSmokeTest/HyperTabular.AppleSmokeTest.csproj

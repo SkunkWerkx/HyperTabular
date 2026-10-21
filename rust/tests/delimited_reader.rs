@@ -12,8 +12,7 @@
 //! caller's bug.
 
 use hypertabular::{
-    Column, CurrencySymbol, DelimitedReader, Dialect, Error, FailureKind, NumFormat, Reason,
-    Timestamp,
+    Column, DelimitedReader, Dialect, Error, FailureKind, NumFormat, Reason, Timestamp,
 };
 use std::borrow::Cow;
 
@@ -199,12 +198,7 @@ x2,7,not a time,\n\
 
 #[test]
 fn a_batch_is_columns_verdicts_and_text_lent_by_the_reader() {
-    let continental = NumFormat {
-        decimal_sep: ',',
-        group_sep: '.',
-        flags: NumFormat::ALL,
-        currency: CurrencySymbol::NONE,
-    };
+    let continental = NumFormat::new(',', '.', NumFormat::ALL);
     let plan = [
         Column::i64(0),
         Column::f64(1).format(continental),
@@ -279,22 +273,13 @@ fn what_the_caller_declared_wrong_is_an_error_before_any_read() {
             Err(Error::Separator(found)) if found == separator
         ));
     }
-    let same = NumFormat {
-        decimal_sep: ',',
-        group_sep: ',',
-        ..NumFormat::INVARIANT
-    };
-    let none = NumFormat {
-        decimal_sep: '\0',
-        ..NumFormat::INVARIANT
-    };
-    for format in [same, none] {
-        let plan = [Column::text(0), Column::f64(1).format(format)];
-        assert!(matches!(
-            DelimitedReader::from_slice(b"a,b\n", Dialect::CSV, &plan),
-            Err(Error::Plan { column: 1 })
-        ));
-    }
+    // Equal separators: a format HyperCast's own doors refuse, said before any read.
+    let same = NumFormat::new(',', ',', NumFormat::ALL);
+    let plan = [Column::text(0), Column::f64(1).format(same)];
+    assert!(matches!(
+        DelimitedReader::from_slice(b"a,b\n", Dialect::CSV, &plan),
+        Err(Error::Plan { column: 1 })
+    ));
     assert!(matches!(
         DelimitedReader::open("/no/such/file.csv", Dialect::CSV, &plan),
         Err(Error::Io(_))

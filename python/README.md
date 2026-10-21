@@ -137,15 +137,36 @@ Python call per cell.
 
 ## Platforms
 
-One abi3 wheel per platform serves every CPython from 3.11 up, so nothing is compiled on
-install: Linux (glibc and musl) on x86-64 and arm64, macOS on Apple silicon and Intel, and
-Windows on x86-64 and arm64. The free-threaded build (`python3.14t`) is not one of them: an
-abi3 wheel serves only the GIL build, and there is no source distribution to compile.
+Each platform gets three wheels, which between them cover every CPython from the 3.11 floor
+up, with the GIL or without it, so nothing is compiled on install:
+
+| Wheel | Interpreters |
+| --- | --- |
+| `cp311-abi3` | CPython 3.11 and newer, with the GIL |
+| `cp314-cp314t` | free-threaded CPython 3.14 |
+| `cp315-abi3.abi3t` | CPython 3.15 and newer, free-threaded or not ([PEP 803](https://peps.python.org/pep-0803/)) |
+
+The platforms are Linux (glibc and musl) on x86-64 and arm64, macOS on Apple silicon and
+Intel, and Windows on x86-64 and arm64: 24 wheels, and a twenty-fifth for Pyodide
+([below](#in-the-browser-pyodide)). There is no source distribution, so an interpreter none
+of them matches (free-threaded 3.13, PyPy) gets `No matching distribution found` from pip.
+
+**Free-threaded CPython runs it without the GIL.** The extension declares it needs no GIL, and
+so does HyperCast's, so a free-threaded interpreter keeps the GIL off after
+`import hypertabular` (no `RuntimeWarning`), and readers on different threads run truly in
+parallel. A `Batch`, its columns and rows, and a `Workbook` are immutable once made and can be
+shared by any number of threads; a column's `values` is built once, whichever thread asks
+first. A `DelimitedReader` or a `Sheet` is read by one thread at a time, as everywhere: a
+second thread calling into one while another is inside a read gets `RuntimeError` (PyO3's
+"Already borrowed") and nothing else, never a race on its buffers. The bindings are written
+once, for free-threading; a GIL build runs the same code. CI runs the whole suite on
+free-threaded 3.15 on every platform, and installs each wheel on its own interpreters before
+it is published.
 
 ## In the browser (Pyodide)
 
 The same PyO3 extension, compiled for Pyodide's Emscripten target, is published to PyPI as a
-ninth wheel, `hypertabular-X.Y.Z-cp311-abi3-pyemscripten_2026_0_wasm32.whl`, so micropip
+twenty-fifth wheel, `hypertabular-X.Y.Z-cp311-abi3-pyemscripten_2026_0_wasm32.whl`, so micropip
 finds it the way pip finds the native wheels, and HyperCast's beside it:
 
 ```python

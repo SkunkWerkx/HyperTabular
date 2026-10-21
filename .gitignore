@@ -10,12 +10,16 @@ corpus/generate/out/
 **/.pytest_cache/
 **/.mypy_cache/
 # The staged PyO3 extension for local dev/test — nested at hypertabular._native (the maturin
-# module-name), built from the core crate's python feature. abi3 wheels carry one build per
-# platform regardless of Python version (hence the plain and .abi3 spellings, not a
-# per-version-tagged glob); .pyd covers Windows.
+# module-name), built from the core crate's python feature. The abi3 and abi3t builds carry
+# one file per platform regardless of Python version (the plain, .abi3 and .abi3t
+# spellings); a free-threaded 3.14 build is tagged per version (`maturin develop` names it
+# _native.cpython-314t-<platform>.so), hence the glob; .pyd covers Windows.
 python/src/hypertabular/_native.so
 python/src/hypertabular/_native.abi3.so
+python/src/hypertabular/_native.abi3t.so
+python/src/hypertabular/_native.cpython-*t-*.so
 python/src/hypertabular/_native.pyd
+python/src/hypertabular/_native.*.pyd
 
 # .NET
 **/bin/

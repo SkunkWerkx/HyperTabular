@@ -121,7 +121,7 @@ func TestAPlanIsAProjection(t *testing.T) {
 // and the fault have to be the ones it gives. Both cores are in this binary — this
 // module's archive and the one the hypercast package links — and this is them agreeing.
 func TestEveryDoorSaysWhatHyperCastSays(t *testing.T) {
-	euro := hypercast.NumFormat{DecimalSep: ',', GroupSep: '.', Styles: hypercast.AllStyles, Currency: "€"}
+	euro := hypercast.NumFormat{DecimalSep: ",", GroupSep: ".", Styles: hypercast.AllStyles, Currency: "€"}
 	type door struct {
 		column Column
 		direct func(text string) (any, *hypercast.Fault)
@@ -310,16 +310,19 @@ func TestACallersMistakeIsTheConstructorsError(t *testing.T) {
 			return NewDelimitedReaderBytes(nil, CSV, []Column{I32(0, hypercast.NumFormat{})})
 		},
 		"equal separators": func() (*DelimitedReader, error) {
-			return NewDelimitedReaderBytes(nil, CSV, []Column{F64(0, hypercast.NumFormat{DecimalSep: '.', GroupSep: '.'})})
+			return NewDelimitedReaderBytes(nil, CSV, []Column{F64(0, hypercast.NumFormat{DecimalSep: ".", GroupSep: "."})})
 		},
-		"a separator that is no scalar value": func() (*DelimitedReader, error) {
-			return NewDelimitedReaderBytes(nil, CSV, []Column{F64(0, hypercast.NumFormat{DecimalSep: '.', GroupSep: 0xD800})})
+		"a separator that is no symbol": func() (*DelimitedReader, error) {
+			return NewDelimitedReaderBytes(nil, CSV, []Column{F64(0, hypercast.NumFormat{DecimalSep: ".", GroupSep: "\xed\xa0\x80"})})
+		},
+		"a separator too long": func() (*DelimitedReader, error) {
+			return NewDelimitedReaderBytes(nil, CSV, []Column{F64(0, hypercast.NumFormat{DecimalSep: ".", GroupSep: strings.Repeat("€", 3)})})
 		},
 		"a currency symbol with a digit in it": func() (*DelimitedReader, error) {
-			return NewDelimitedReaderBytes(nil, CSV, []Column{Exact(0, hypercast.NumFormat{DecimalSep: '.', GroupSep: ',', Currency: "A1"})})
+			return NewDelimitedReaderBytes(nil, CSV, []Column{Exact(0, hypercast.NumFormat{DecimalSep: ".", GroupSep: ",", Currency: "A1"})})
 		},
 		"a currency symbol too long": func() (*DelimitedReader, error) {
-			return NewDelimitedReaderBytes(nil, CSV, []Column{Exact(0, hypercast.NumFormat{DecimalSep: '.', GroupSep: ',', Currency: strings.Repeat("€", 6)})})
+			return NewDelimitedReaderBytes(nil, CSV, []Column{Exact(0, hypercast.NumFormat{DecimalSep: ".", GroupSep: ",", Currency: strings.Repeat("€", 6)})})
 		},
 		"an undefined precision": func() (*DelimitedReader, error) {
 			return NewDelimitedReaderBytes(nil, CSV, []Column{Unix(0, 9)})

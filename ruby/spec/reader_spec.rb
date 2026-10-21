@@ -137,7 +137,7 @@ RSpec.describe HyperTabular do
       expect(columns.keys).to match_array(HyperTabular::DOORS.keys)
       columns.each do |door, built|
         expect(built.door).to eq(door)
-        expect(built.packed.bytesize).to eq(44)
+        expect(built.packed.bytesize).to eq(104)
         expect(built.packed.unpack("L<3")).to eq([0, HyperTabular::DOORS.fetch(door), built.packed.unpack("L<3").last])
         expect(built.value_bytes).to be_between(1, 16)
       end
@@ -146,9 +146,9 @@ RSpec.describe HyperTabular do
     it "declares the invariant notation for a numeric door unless told another, and none for the rest" do
       expect(described_class.i32(3).format).to equal(HyperCast::NumFormat::INVARIANT)
       expect(described_class.decimal(3, eurozone).format).to equal(eurozone)
-      expect(described_class.decimal(3, eurozone).packed[12, 32]).to eq(eurozone.packed)
+      expect(described_class.decimal(3, eurozone).packed[12, 92]).to eq(eurozone.packed)
       expect(described_class.text(3).format).to be_nil
-      expect(described_class.text(3).packed[12, 32]).to eq("\0".b * 32)
+      expect(described_class.text(3).packed[12, 92]).to eq("\0".b * 92)
     end
 
     it "numbers what a door declares as HyperCast numbers it" do

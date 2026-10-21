@@ -10,7 +10,7 @@
 //! agree on. (Both are lenient past that, in different ways; what this crate does with a
 //! stray quote is pinned by hand in `corpus/delimited.json`.)
 
-use hypercast::{Fault, NumFormat};
+use hypercast::{Fault, NumFormat, RawNumFormat};
 use hypertabular::Door;
 use hypertabular::kernel::abi::{
     CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE,
@@ -582,9 +582,15 @@ fn caller_bugs_are_contract_violations_and_room_is_asked_for_by_size() {
         assert_eq!((code, out.consumed), (ERR_CONTRACT, 0));
     }
     let mut colliding = ColumnSpec::new(0, 11, 0);
-    colliding.format.decimal_sep = u32::from(',');
-    colliding.format.group_sep = u32::from(',');
+    colliding.format = RawNumFormat::from(NumFormat::new(',', ',', NumFormat::ALL));
     let (code, ..) = call(&mut state, b"1\n", true, &[colliding], 10);
+    assert_eq!(code, ERR_CONTRACT);
+    // A layout whose size the core does not read is a contract violation too (a size of
+    // zero, as `ColumnSpec::new` builds, is the invariant notation, not one).
+    let mut sized = ColumnSpec::new(0, 11, 0);
+    sized.format = RawNumFormat::from(NumFormat::INVARIANT);
+    sized.format.size = 12;
+    let (code, ..) = call(&mut state, b"1\n", true, &[sized], 10);
     assert_eq!(code, ERR_CONTRACT);
 
     // No rows asked for: nothing done, nothing wrong.
