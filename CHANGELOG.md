@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+The next release is **1.0.0**, and with it every package's public API and the platforms in
+the README's [Platform support](README.md#platform-support) table become a commitment under
+Semantic Versioning: breaking or dropping either takes a new major version. Until then a
+minor release can still break both, as 0.9.0 did.
+
 ## [0.9.0] — 2026-10-21
 
 Built on HyperCast 0.9.0: its culture-fidelity sweep reaches every plan column's format, and

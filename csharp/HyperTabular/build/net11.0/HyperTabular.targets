@@ -49,7 +49,7 @@
        stops the build. An app that gates on Tabular.IsAvailable and keeps a managed fallback
        can set HyperTabularRequireWasmWorkload to false. HyperCast's package carries the same
        check as HYPERCAST002 and HyperUuid's as HYPERUUID002; the code is numbered to match
-       them, and HYPERTABULAR001 is left unused for the same reason HYPERCAST001 is. -->
+       them, and 001 is unused in all three packages. -->
   <Target Name="_HyperTabularErrorWasmWorkloadMissing"
           BeforeTargets="BeforeBuild"
           Condition="'$(RuntimeIdentifier)' == 'browser-wasm' And '$(WasmNativeWorkloadAvailable)' != 'true' And '$(HyperTabularRequireWasmWorkload)' != 'false'">

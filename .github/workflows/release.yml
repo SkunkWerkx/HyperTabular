@@ -126,6 +126,7 @@ jobs:
       csproj_path: csharp/HyperTabular/HyperTabular.csproj
       runtimes_dir: csharp/HyperTabular/runtimes
       dotnet_version: "11.0.x"
+      dotnet_quality: "preview"
       android: true
       source_run_id: ${{ needs.find-ci-run.outputs.run_id }}
 
