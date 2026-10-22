@@ -1,0 +1,113 @@
+name: CodeQL
+
+# Advanced setup rather than GitHub's default setup, for two reasons: default setup has no path
+# filters, and test code is out of scope for the security queries (the excluding is done by
+# .github/codeql/codeql-config.yml, which explains why); and its Swift autobuild builds the wrong
+# package (see the matrix). Default setup must stay disabled in the repository settings: while it
+# is on, GitHub rejects every upload from this workflow.
+#
+# Everything else mirrors what default setup ran — the same nine languages, the same default
+# query suite, the same weekly cadence — and `category` is spelled out below so alerts keep the
+# `/language:<lang>` identity they had under default setup instead of being re-raised from
+# scratch as new ones.
+#
+# The cost of the switch is that this file now owns what default setup owned: a language added
+# to the repository is unscanned until it is added to the matrix.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Weekly, off the hour and off CI's Monday board.
+    - cron: "27 4 * * 2"
+  workflow_dispatch:
+
+# A new push supersedes the run for that ref, except on master, where a run to completion is
+# what keeps the code scanning dashboard current.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      # What the CodeQL job needs and nothing more: SARIF upload, the workflow's own metadata, and
+      # the default read-only access to the repository.
+      security-events: write
+      actions: read
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # No build to trace.
+          - language: actions
+            build-mode: none
+            runner: ubuntu-latest
+          - language: javascript-typescript
+            build-mode: none
+            runner: ubuntu-latest
+          - language: python
+            build-mode: none
+            runner: ubuntu-latest
+          - language: ruby
+            build-mode: none
+            runner: ubuntu-latest
+          # Compiled, with a database built without a build. There is no Kotlin in this
+          # repository, so `none` is valid for java-kotlin; the Rust and C# extractors are built
+          # for it.
+          - language: csharp
+            build-mode: none
+            runner: ubuntu-latest
+          - language: java-kotlin
+            build-mode: none
+            runner: ubuntu-latest
+          - language: rust
+            build-mode: none
+            runner: ubuntu-latest
+          # Go and Swift have no no-build mode. Go's autobuild finds go/go.mod and is right.
+          - language: go
+            build-mode: autobuild
+            runner: ubuntu-latest
+          # Swift's autobuild picks swift/Benchmarks and spends 10-20 minutes on the benchmark
+          # package's dependency tree, reaching the library only through it. The build step
+          # below compiles the library alone.
+          - language: swift
+            build-mode: manual
+            runner: macos-latest
+          # Not scanned: C/C++, whose only files are hypertabular.h in the CI-built Swift bundles
+          # (nothing to compile; the C ABI is Rust's, rust/src/ffi.rs), and PHP, which CodeQL
+          # does not support.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # From the root Package.swift, the one consumers resolve; its HyperTabular target is the
+      # same sources as swift/Package.swift's. Under the tracer, SwiftPM's setup takes several
+      # minutes before the first source file compiles. Loading the manifest before init does not
+      # help: the traced build does not reuse that cache.
+      - name: Build the Swift library
+        if: matrix.build-mode == 'manual'
+        run: swift build --target HyperTabular
+
+      # Builds the autobuild languages and uploads every language's SARIF, once each, under the
+      # same `/language:<lang>` category default setup used.
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

@@ -1,0 +1,30 @@
+# CodeQL configuration for this repository, read by .github/workflows/codeql.yml.
+#
+# GitHub's default setup cannot filter paths, which is why this repository uses advanced setup:
+# the only way to keep test code out of the analysis is a config file like this one.
+
+name: "HyperTabular CodeQL config"
+
+# Test code is out of scope for the security queries. It ships in no artifact and runs against no
+# input but its own fixtures, so a value a test writes to a log is the test doing its job, not a
+# leak.
+#
+# A path filter excludes whole files, so a test module inline in a file that also ships would
+# still be analyzed. The crate has none: its tests are all under rust/tests.
+paths-ignore:
+  # rust/tests, python/tests, php/tests, java/src/test/java
+  - "**/tests/**"
+  - "**/Tests/**"
+  - "**/test/**"
+  # ruby/spec
+  - "**/spec/**"
+  # csharp/HyperTabular.Tests
+  - "**/*.Tests/**"
+  # go: the Go extractor already skips _test.go, listed so the intent is explicit
+  - "**/*_test.go"
+  # csharp/HyperTabular.*SmokeTest, java/aot-smoke-test, swift/StaticSmokeTest, ruby/wasm-smoke
+  - "**/*SmokeTest*/**"
+  - "**/*smoke-test*/**"
+  - "**/wasm-smoke/**"
+  # Fixtures and golden files
+  - "**/testdata/**"
