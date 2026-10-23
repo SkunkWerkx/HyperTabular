@@ -1,0 +1,10 @@
+{
+  "crate": "hypertabular",
+  "project": "HyperTabular",
+  "exports": {
+    "sources": ["rust/src/kernel/exports.rs"],
+    "patterns": ["\\bfn (hypertabular_\\w+)\\("],
+    "exclude": ["hypertabular_canary"],
+    "prefixes": ["hypertabular_"]
+  }
+}

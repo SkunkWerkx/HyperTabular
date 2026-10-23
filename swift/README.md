@@ -152,13 +152,32 @@ executable in headless Chrome.
 
 ## Verifying provenance
 
-SwiftPM resolves from the git tag, so the archives committed in the bundle are what a
-consumer links. Each was attested when the forge built it and verified again before it was
-committed:
+SwiftPM resolves a git tag directly against this repo, so there is no separate package registry
+to attest: what it fetches is the tree at that tag, the static libraries under
+`swift/HyperTabularCore.artifactbundle/` and `swift/HyperTabularCoreApple.xcframework/`
+included. Each verifies from the release tag alone: the release attestation, signed by this
+repository's `release.yml` at the tag, names every one of them, with the release inventory as
+its predicate.
 
 ```sh
-gh attestation verify HyperTabularCore.artifactbundle/x86_64-unknown-linux-gnu/libhypertabular.a --owner SkunkWerkx
+gh attestation verify swift/HyperTabularCore.artifactbundle/arm64-apple-macosx/libhypertabular.a \
+  --repo SkunkWerkx/HyperTabular --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
 ```
+
+Each archive also carries build provenance from `hyper-build-static.yml` in
+`SkunkWerkx/.github`, at the preparation commit the tagged commit was staged from
+(`stage-native-binaries.yml` verifies that before committing a byte), so that check needs
+`--signer-repo` beside `--repo`:
+
+```sh
+gh attestation verify swift/HyperTabularCore.artifactbundle/x86_64-unknown-linux-gnu/libhypertabular.a \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+```
+
+Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
+reads like a bad signature but is only an identity mismatch. The root README's
+[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
+artifacts are signed from where, and the gates every byte passes before publication.
 
 ## License
 

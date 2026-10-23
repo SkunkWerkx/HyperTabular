@@ -170,9 +170,13 @@ wasm module and `"__Internal"` for iOS and Mac Catalyst — picked at the call s
 `wasm32-unknown-emscripten` archive on every pull request, the release pack stages it under
 `runtimes/browser-wasm/nativeassets/`, and the package's `build/net11.0/HyperTabular.targets`
 wires it into a Blazor WebAssembly project with no configuration: a `NativeFileReference`
-hands the archive to the linker beside HyperCast's (the two share no symbols), an
-`EmccExportedFunction` per export makes each resolvable through `"*"`, and the
-exception-handling translation .NET 11 needs is applied. The archive reaches the linker by
+hands the archive to the linker beside HyperCast's (the two share no symbols), the SDK's
+generated pinvoke table calls each export by symbol so `"*"` resolves every one (with the
+archive missing, `wasm-ld` reports an undefined symbol per export), and the
+exception-handling translation .NET 11 needs is applied. The file used to list an
+`EmccExportedFunction` per export as well, on the belief that `"*"` resolution needed the
+Emscripten export; the smoke test reaches all fourteen with the list removed on .NET SDK
+11.0.100-rc.2 and fails at the link with the archive unlinked, so the list is gone. The archive reaches the linker by
 that path and nowhere else: the same targets file takes it back out of restore's copy-local
 list, so a consumer's output carries only the linked `dotnet.native.wasm`.
 
@@ -196,3 +200,41 @@ pull request: a Blazor app that reads delimited text and a workbook through the 
 and renders `PASS` or `FAIL` into the page. One of the files it reads is one it serves,
 fetched with `HttpClient` as a streamed response — a stream the browser only reads
 asynchronously — and read through `OpenAsync` and `ReadAsync`.
+
+## Native binary provenance
+
+The `.nupkg` carries compiled native code, which is a real thing to ask questions about before adopting it inside a trust boundary. Nothing under `csharp/HyperTabular/runtimes/` is committed: the native libraries are built from `rust/` by CI and staged into the package at pack time, so what ships is produced by the same workflow run that built and tested the source. The core is a normal Rust crate with no build-time codegen (`cd rust && cargo cdylib`), so you never have to take the shipped binary at all, but a rebuild is not bit-reproducible across machines, and the mechanism that does work is a cryptographic attestation binding each artifact to the workflow run and commit that produced it. Two kinds cover the package.
+
+The *release attestation* is one statement, signed by this repository's `release.yml` at the release tag, whose subjects are every file the release ships — the `.nupkg` as packed and as nuget.org serves it, every other registry package, and every native library committed for Go, Swift and PHP — and whose predicate is the release inventory (`inventory.json`: every file's size, SHA-256 and the commit it was built from). One command verifies any of them from the tag alone:
+
+```shell
+gh attestation verify HyperTabular.<version>.nupkg --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
+```
+
+*Build provenance* ([SLSA](https://github.com/actions/attest-build-provenance)) is the second layer, emitted where the bytes are made, which for this package is four places, because it is not the same bytes at every stage of its life:
+
+| Attested artifact | Where | Signer |
+| --- | --- | --- |
+| Each native library, as built | `hyper-build-native.yml` | `SkunkWerkx/.github` |
+| The browser-wasm archive, as built | `hyper-build-wasm.yml` | `SkunkWerkx/.github` |
+| The `.nupkg` as packed, pre-push | `hyper-pack-nuget.yml` | `SkunkWerkx/.github` |
+| The `.nupkg` as published | `release.yml`, after the push | `SkunkWerkx/HyperTabular` |
+
+The reason for the last two rows: **nuget.org adds its repository signature as a `.signature.p7s` entry inside the `.nupkg` zip during validation**, which changes the file's SHA-256. So the package you download is not the package that was built, and one attestation cannot cover both. The pipeline takes both, and the release attestation is made for both: once in the publication gate over the packed bytes, once after the push over the served bytes, with the same inventory as predicate. The signer column is the flag that changes: an artifact signed by a reusable workflow in `SkunkWerkx/.github` needs `--signer-repo SkunkWerkx/.github` beside `--repo` (or `--owner SkunkWerkx` in place of both); one signed by this repository's `release.yml` verifies with `--repo` alone. Get it wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which reads like a bad signature but is only an identity mismatch.
+
+```shell
+# the published bytes, signed by release.yml
+gh attestation verify HyperTabular.<version>.nupkg --repo SkunkWerkx/HyperTabular
+
+# the as-built package, recovered by removing nuget.org's one added entry; signed by the Forge
+zip -d HyperTabular.<version>.nupkg .signature.p7s
+gh attestation verify HyperTabular.<version>.nupkg \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+```
+
+The release run downloads the package nuget.org serves, runs `dotnet nuget verify` on it, and requires every entry but `.signature.p7s` to match the packed package before attesting it. That claim is checked on every release rather than asserted here, so if nuget.org ever changes how it finalizes packages, the run says so instead of the README quietly going stale.
+
+Attestations are produced by every release-mode build — the release's own run and the weekly one. Pull requests build in `pr` mode, which ships nothing and so signs nothing. The release itself is two acts at one tag: the tag push packs, attests and preserves everything without uploading, and a dispatch of `release.yml` publishes from those preserved bytes, waiting up to 20 minutes for nuget.org to serve the package before attesting the served bytes; the Go tag and GitHub Release wait on it. A slower validation is recovered by dispatching again with `publication_run_id`, which pushes nothing twice (see [RELEASING.md](../.github/RELEASING.md)). The root README's [Provenance](../README.md#provenance) section has the whole picture across the eight bindings.
+
+**Not currently done: NuGet author signing.** The package carries nuget.org's repository signature but no author signature of our own, which would need an X.509 code-signing certificate registered to the account. An author signature is verified automatically by every consumer's SDK at restore time, whereas an attestation is only checked by someone who deliberately runs `gh attestation verify`; if you want the automatic restore-time check, this is the gap.

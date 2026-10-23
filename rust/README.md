@@ -60,3 +60,31 @@ suite passes under wasmtime on `wasm32-wasip1`. CI runs `browser-test/` in headl
 on every pull request.
 
 The design record is in [`docs/`](https://github.com/SkunkWerkx/HyperTabular/tree/master/docs).
+
+## Verifying provenance
+
+The published `.crate` verifies from the release tag alone: the release attestation, signed by
+this repository's `release.yml` at the tag, names it among every file the release ships, with
+the release inventory as its predicate.
+
+```sh
+curl -LO https://static.crates.io/crates/hypertabular/hypertabular-<version>.crate
+gh attestation verify hypertabular-<version>.crate --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
+```
+
+Its build provenance is the second check. The crate is packed by `hyper-pack-crate.yml`, a
+reusable workflow that lives in `SkunkWerkx/.github`, and that is the identity Fulcio records
+as the signer, so `--repo` alone is not enough there: add `--signer-repo`, or use `--owner` in
+place of both.
+
+```sh
+gh attestation verify hypertabular-<version>.crate \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+# or: gh attestation verify hypertabular-<version>.crate --owner SkunkWerkx
+```
+
+Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
+reads like a bad signature but is only an identity mismatch. The root README's
+[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
+artifacts are signed from where, and the gates every byte passes before publication.

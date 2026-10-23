@@ -210,7 +210,8 @@ block the readers build.
 
 **What it costs**, the 300 000-row Excel workbook (`corpus/generate/out/excel-win-300k.xlsx`,
 eight columns, the JMH suite's `read` loop, checksum 5285882 on every path), best of five on
-one linux-x64 box:
+one linux-x64 box (undated, and the CPU was not recorded; re-run `./gradlew :benchmarks:jmh`
+before relying on the figures):
 
 | Path | GraalVM CE 25.4 | Temurin 25 |
 | --- | ---: | ---: |
@@ -236,3 +237,34 @@ cd ../java; ./gradlew testWasm  # the same suite through GraalWasm
 `./gradlew :aot-smoke-test:nativeRun` under a GraalVM `JAVA_HOME` runs the same program as
 a Native Image binary; the downcall signatures and the resource glob it needs ship inside
 the jar (`META-INF/native-image/`), so a consumer's own image needs no configuration.
+
+## Verifying provenance
+
+The published jar verifies from the release tag alone, and so do the sources and javadoc jars,
+the `.pom` and their signatures: the release attestation, signed by this repository's
+`release.yml` at the tag, names every file of the Central bundle among everything the release
+ships, with the release inventory as its predicate.
+
+```sh
+curl -LO https://repo1.maven.org/maven2/io/github/skunkwerkx/hypertabular/<version>/hypertabular-<version>.jar
+gh attestation verify hypertabular-<version>.jar --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
+```
+
+Its build provenance is the second check. The bundle is assembled by `hyper-pack-maven.yml`,
+a reusable workflow that lives in `SkunkWerkx/.github`, and that is the identity Fulcio
+records as the signer, so `--repo` alone is not enough there: add `--signer-repo`, or use
+`--owner` in place of both. The native libraries and the `wasm32-wasip1` module inside the jar
+carry their own, from the Forge's build workflows at the preparation commit on master, and the
+pack job verifies each of them before it goes into the jar.
+
+```sh
+gh attestation verify hypertabular-<version>.jar \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+# or: gh attestation verify hypertabular-<version>.jar --owner SkunkWerkx
+```
+
+Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
+reads like a bad signature but is only an identity mismatch. The root README's
+[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
+artifacts are signed from where, and the gates every byte passes before publication.

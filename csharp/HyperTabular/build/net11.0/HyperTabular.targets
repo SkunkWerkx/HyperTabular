@@ -5,38 +5,25 @@
        folder is the gate: the package targets nothing older, so NuGet refuses it to an older
        project at restore (NU1202) instead of leaving the build to fail later.
 
-       Blazor WebAssembly: link the core in. Two pieces, both required, as in HyperCast's
-       package, whose copy of this file has the full account:
-
-       1. NativeFileReference. Restore never hands a plain PackageReference's
-          runtimes/browser-wasm/nativeassets/ archive to the linker, so the reference names
-          it by path. nativeassets/net11.0/ is the forge's folder for the archive
-          (hyper-pack-nuget.yml stages it there), matching the only framework that links
-          it; the path is named directly, so nothing selects on the folder name.
-
-       2. EmccExportedFunction, one per export Native.cs imports. Linking the archive in does
-          not make its functions resolvable through LibraryImport("*"); the SDK's emcc call
-          exports only what it is told to, and with this list missing the build succeeds and
-          the app throws at its first read.
+       Blazor WebAssembly: link the core in. One piece, as in HyperCast's package, whose copy
+       of this file has the full account: the NativeFileReference. Restore never hands a plain
+       PackageReference's runtimes/browser-wasm/nativeassets/ archive to the linker, so the
+       reference names it by path. nativeassets/net11.0/ is the forge's folder for the archive
+       (hyper-pack-nuget.yml stages it there), matching the only framework that links it; the
+       path is named directly, so nothing selects on the folder name. The SDK scans every
+       assembly's P/Invokes and generates a pinvoke table that calls each native function by
+       symbol, so the link itself resolves them against the archive (with it missing, wasm-ld
+       fails with an undefined symbol per export) and LibraryImport("*") reaches each one
+       through that table. An @(EmccExportedFunction) per export used to be listed here too,
+       on the belief that "*" resolution needed the Emscripten export. It does not:
+       HyperTabular.WasmSmokeTest reaches all fourteen exports with the list gone on .NET SDK
+       11.0.100-rc.2, and fails at the link with the archive unlinked, so the list was dead
+       weight and is not kept.
 
        The archive is built without Rust's standard library and carries none of HyperCast's
        cast_* symbols, so it links beside HyperCast's own browser-wasm archive. -->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
     <NativeFileReference Include="$(MSBuildThisFileDirectory)../../runtimes/browser-wasm/nativeassets/net11.0/libhypertabular.a" />
-    <EmccExportedFunction Include="_hypertabular_version" />
-    <EmccExportedFunction Include="_hypertabular_delimited_fill" />
-    <EmccExportedFunction Include="_hypertabular_delimited_header" />
-    <EmccExportedFunction Include="_hypertabular_delimited_init" />
-    <EmccExportedFunction Include="_hypertabular_delimited_state_size" />
-    <EmccExportedFunction Include="_hypertabular_delimited_unescape" />
-    <EmccExportedFunction Include="_hypertabular_workbook_fill" />
-    <EmccExportedFunction Include="_hypertabular_workbook_header" />
-    <EmccExportedFunction Include="_hypertabular_workbook_open" />
-    <EmccExportedFunction Include="_hypertabular_workbook_sheet" />
-    <EmccExportedFunction Include="_hypertabular_workbook_sheets" />
-    <EmccExportedFunction Include="_hypertabular_workbook_state_size" />
-    <EmccExportedFunction Include="_hypertabular_workbook_strings" />
-    <EmccExportedFunction Include="_hypertabular_workbook_styles" />
   </ItemGroup>
 
   <!-- The link above happens only where the wasm-tools workload is installed. Without it the
