@@ -4,7 +4,7 @@ plugins {
     `java-library`
     `maven-publish`
     id("com.vanniktech.maven.publish") version "0.37.0"
-    id("com.diffplug.spotless") version "8.10.3"
+    id("com.diffplug.spotless") version "8.10.4"
 }
 
 // io.github.skunkwerkx — the SkunkWerkx org's Central Portal namespace, the one HyperCast
@@ -51,7 +51,7 @@ dependencies {
     api("io.github.skunkwerkx:hypercast:0.9.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("com.google.code.gson:gson:2.11.0")
+    testImplementation("com.google.code.gson:gson:2.14.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

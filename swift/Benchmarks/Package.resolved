@@ -5,8 +5,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ordo-one/benchmark",
       "state" : {
-        "revision" : "1d1b7a56ade88f69c0cef1fa423b320059315f1a",
-        "version" : "1.37.0"
+        "revision" : "def9afdba446b03efbbbcecb3b892e97e8294214",
+        "version" : "1.38.0"
       }
     },
     {
@@ -23,8 +23,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SkunkWerkx/HyperCast",
       "state" : {
-        "revision" : "43d62eb695117855312a2170023203dc82989bf7",
-        "version" : "0.8.0"
+        "revision" : "4e45124e6e4c964ede82cd7a20cc91fe8c17db10",
+        "version" : "0.9.0"
       }
     },
     {
