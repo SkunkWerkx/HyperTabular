@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   build-static:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@master
     permissions:
       contents: read
       id-token: write
@@ -47,7 +47,7 @@ jobs:
       android: true
 
   build-android:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@master
     permissions:
       contents: read
       id-token: write
@@ -58,14 +58,14 @@ jobs:
 
   test-swift-static:
     needs: build-static
-    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@master
     permissions:
       contents: read
     with:
       project: HyperTabular
 
   build-native:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@master
     permissions:            # attestation signs with OIDC; a reusable workflow
       contents: read        # can never escalate beyond its caller's grant
       id-token: write
@@ -83,8 +83,6 @@ jobs:
       csharp_test_project: csharp/HyperTabular.Tests/HyperTabular.Tests.csproj
       csharp_aot_project: csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj
       csharp_runtimes_dir: csharp/HyperTabular/runtimes
-      dotnet_version: "11.0.x"
-      dotnet_quality: "preview"
       # Explicit placement, as HyperCast does it: the forge puts this leg's library at
       # src/main/resources/native/{rid}/ — where the shipped jar carries it — and the
       # Gradle dev loop, which would otherwise stage whatever rust/target/release holds
@@ -110,7 +108,7 @@ jobs:
   # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
   # (release mode only: weekly and at release, not on PRs).
   build-wasm:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
     permissions:
       contents: read
       id-token: write
@@ -130,7 +128,7 @@ jobs:
   # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
   # built, installed and attested here, and published unchanged by release.yml.
   build-wheels:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@e29701eaf94a3893b2ac7dd7d50e44b7b125456f
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
     permissions:
       contents: read
       id-token: write
@@ -144,8 +142,8 @@ jobs:
   check-exports:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
       - name: Install release-check toolchain
@@ -163,11 +161,11 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The other architecture's library is only type-checked, which needs its target
       # and nothing else: nothing is linked for it.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy, llvm-tools
           targets: thumbv7em-none-eabi, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, wasm32-unknown-unknown
@@ -205,11 +203,11 @@ jobs:
   check-msrv:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Read rust-version
         id: msrv
         run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' rust/Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - name: cargo check on rust-version
@@ -225,8 +223,8 @@ jobs:
   lint-go:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go/go.mod
           cache-dependency-path: go/go.sum
@@ -249,8 +247,8 @@ jobs:
   lint-python:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
       - run: pip install ruff==0.16.5
@@ -263,8 +261,8 @@ jobs:
   lint-php:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: "8.5"
           extensions: ffi
@@ -277,8 +275,8 @@ jobs:
   lint-ruby:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1.329.0
         with:
           ruby-version: "4.0"
           bundler-cache: true
@@ -292,11 +290,10 @@ jobs:
   format-csharp:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
-          dotnet-quality: preview
       # csharp/.editorconfig: tabs, LF, a final newline.
       - working-directory: csharp
         run: dotnet format whitespace HyperTabular.slnx --verify-no-changes
@@ -304,8 +301,8 @@ jobs:
   format-java:
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "25"
@@ -319,7 +316,7 @@ jobs:
     # matrix builds with (the forge's swift_version).
     container: swift:6.4
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # swift/.swift-format: 4-space indent, 120 columns, every lint rule off — layout only.
       - working-directory: swift
         run: >-
@@ -376,12 +373,12 @@ jobs:
       SMOKE_PROJECT: csharp/HyperTabular.AppleSmokeTest/HyperTabular.AppleSmokeTest.csproj
       SMOKE_BIN: csharp/HyperTabular.AppleSmokeTest/bin/Release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Over the checkout: the artifact is laid out by repository path, so the XCFramework
       # lands whole under swift/, the C# archives under csharp/HyperTabular/staticlibs/ and the
       # Go ones under go/staticlib/.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: static-libs
           path: .
@@ -439,7 +436,7 @@ jobs:
         working-directory: swift
         run: xcodebuild build -scheme HyperTabular -destination "generic/platform=iOS"
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: ${{ !cancelled() }}
         with:
           go-version-file: go/go.mod
@@ -481,13 +478,11 @@ jobs:
             || { echo "::error::the iOS device test binary does not define hypertabular_workbook_fill; the core was not linked in"; exit 1; }
           echo "the iOS device test binary defines the core's exports"
 
-      # .NET 11, as build-native's legs take it: HyperTabular's floor, preview until the pinned
-      # SDK in global.json goes GA.
-      - uses: actions/setup-dotnet@v6
+      # The SDK global.json names, as build-native's legs take it.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         if: ${{ !cancelled() }}
         with:
-          dotnet-version: "11.0.x"
-          dotnet-quality: "preview"
+          global-json-file: global.json
 
       - name: Install the .NET iOS and Mac Catalyst workloads
         if: ${{ !cancelled() }}
@@ -576,9 +571,9 @@ jobs:
       SMOKE_DIR: csharp/HyperTabular.AndroidSmokeTest
       APP_ID: io.github.skunkwerkx.hypertabular.androidsmoketest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: native-android-*
           path: artifacts
@@ -586,7 +581,7 @@ jobs:
       # Over the checkout, laid out by repository path: the Android archives land in
       # csharp/HyperTabular/staticlibs/android-{rid}/, go/staticlib/android_{goarch}/ and the
       # Swift bundle.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: static-libs
           path: .
@@ -601,13 +596,12 @@ jobs:
               || { echo "::error::static-libs has no csharp/HyperTabular/staticlibs/$rid/libhypertabular.a"; exit 1; }
           done
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: "11.0.x"
-          dotnet-quality: "preview"
+          global-json-file: global.json
 
       # The android workload's build tasks run on a JDK.
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
@@ -673,13 +667,13 @@ jobs:
             echo "$rid: the CoreCLR APK carries lib/$abi/libhypertabular.so; the Native AOT APK links the core in; both pass zipalign -P 16"
           done
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go/go.mod
           cache-dependency-path: go/go.sum
 
       # After the APKs: setup-swift puts its toolchain's clang first on PATH.
-      - uses: SwiftyLab/setup-swift@v1.14.1
+      - uses: SwiftyLab/setup-swift@d60245579ea3836a3f2fa65ebbe1e8891d577c76 # v1.14.2
         with:
           swift-version: "6.4"
 
@@ -699,7 +693,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run the x64 APKs and the Go and Swift suites in an emulator
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 36
           arch: x86_64
