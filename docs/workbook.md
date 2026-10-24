@@ -70,7 +70,9 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   it found): a number is the 128-bit decimal said as text and read through the one number
   grammar, or the double a currency cell carries; a date is seconds since 2001-01-01, a
   wall clock, or a time of day when its format shows no date (`suppress_date_format`, or
-  a pattern with no date letters); a duration is a span; a boolean a boolean; a text or
+  a pattern with no date letters — a custom format's pattern is looked up in the
+  document's custom-format list by the uid the cell's format names); a duration is a
+  span; a boolean a boolean; a text or
   rich-text cell is a span into the table's string or rich-text list, loaded by `strings`
   with the runs of a rich string joined; an error cell is `#VALUE!`, because the file
   records which formula failed, not which error it made; a formula's cached value is the
@@ -173,12 +175,12 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
 
 ## What holds it to the truth
 
-- `corpus/workbook.json` — 234 cases over the 26 packages in `corpus/workbook/`: every
+- `corpus/workbook.json` — 246 cases over the 27 packages in `corpus/workbook/`: every
   sheet, with and without a header, empty rows skipped and delivered, every door over
   every column. The cases for the ten synthetic XLSX and ODS packages were written by the
   std workbook reader this crate had before the core could read a workbook — a reader that
   owed the core nothing — with the core required to agree; that reader has since been
-  deleted. The cases for the fourteen files Excel, LibreOffice, Google Sheets and Numbers
+  deleted. The cases for the fifteen files Excel, LibreOffice, Google Sheets and Numbers
   wrote, and for the two generated Numbers packages, were written by the core and read
   against the application that wrote each file, by eye. **Nothing
   independent of the core reads a workbook here any more**: the corpus is the oracle's frozen word, and
@@ -197,8 +199,9 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   and each way a package can be wrong named by its failure (a storage version the core
   does not read, an object a reference names that is not there, a chunk that is not one,
   a string a cell names that the list does not have, an object 1 that is not a document).
-  `numbers-data.numbers`, which Numbers itself wrote, is read with the rest of
-  `corpus/workbook/`.
+  `numbers-data.numbers`, which Numbers itself wrote, and `numbers-data.xlsx`, its Excel
+  export, are read with the rest of `corpus/workbook/`; `corpus/README.md` lists the twelve
+  cells where the export says something else.
 - Owed: whether a Keynote or Pages package is refused at `open` or lists no sheets has not
   been checked against a file; neither has a `.numbers` file Numbers wrote before 2018.
 
@@ -220,11 +223,14 @@ thirds of zlib-rs's speed (`design.md`); measured since (below), it is not.
 
 ### Through every binding
 
-The two real-application files of `corpus/README.md` — Excel's `excel-win-300k.xlsx`
-(111 MB of sheet XML and 7.7 MB of shared strings in a 16.7 MB package) and LibreOffice's
-`libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) — read whole by each binding's
-own benchmark harness through one plan: `i64`, `f64`, text, date, time, bool, duration,
-`i64` (that last column holds 3 000 `#N/A` error cells, which fault). **open** is the package
+The three real-application files of `corpus/README.md` — Excel's `excel-win-300k.xlsx`
+(111 MB of sheet XML and 7.7 MB of shared strings in a 16.7 MB package), LibreOffice's
+`libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) and Numbers'
+`numbers-300k.numbers` (29.4 MB of Snappy-compressed IWA parts, stored in a 29.6 MB package;
+its columns are not in the table yet, see "Parked") — read whole by each binding's own
+benchmark harness through one plan: `i64`, `f64`, text, date, time, bool, duration,
+`i64` (that last column holds 3 000 `#N/A` error cells, which fault; Numbers has no `NA()`,
+so its file has 3 000 empty cells there, which fault the same). **open** is the package
 opened and nothing read; **read** is opened, then the first sheet read in batches of 4096,
 every column's verdicts looked at and every text cell's bytes. Every harness prints the
 same checksum (5 285 882: the cells that cast, plus the text column's bytes), which is what
@@ -317,8 +323,21 @@ Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DI
 - **Numbers' error kinds.** An error cell names the formula that failed and nothing of
   what error it made, in anything this core reads, so every one is `#VALUE!`. If a field
   that does carry the kind turns up, it goes here.
-- **A Numbers benchmark** against numbers-parser, on a 300 000-row `.numbers` file, on the
-  machine the tables above were measured on.
+- **The Numbers columns of the table above, and numbers-parser beside them.** The file is
+  made (`corpus/README.md`, 15) and every harness has read it since 2026-10-24, printing the
+  same checksum as over the other two. What is left is to run them on the machine the table
+  was measured on (Linux x64, WSL 2, i9-11900H), in one sitting, with `numbers-300k.numbers`
+  in `corpus/generate/out/` or `HYPERTABULAR_BENCH_DIR`: each command under "To run them",
+  then `python bench_numbers_parser.py` (python/, after `pip install numbers-parser` into
+  the venv) for the Python reader every other `.numbers` reader is held against; add the
+  two columns and a numbers-parser row. On an Apple M-series laptop, 2026-10-24, the core
+  read the file in 0.60 s (0.43 s of it the open) against numbers-parser's 21 s; not table
+  numbers, the machine differs. Where the open's time went there, sampled: about a third
+  decoding chunk prefixes again while the index walks a part's object headers
+  (`iwa::ensure` decodes the chunk in hand from its start each time more of it is needed,
+  quadratic in the objects a chunk holds, and the calculation-engine part holds thousands),
+  a sixth the walk over the string list's entries, the rest spread over the heap sort and
+  the zip directory.
 - **Performance candidates** left after the 2026-10-05 tokenizer pass (SWAR tag scan,
   single-pass attributes, `<!` before `<![CDATA[`): inflate, about a sixth of a read, which
   must stay under the no-panic proof; the bounds checks in `Attrs::next`, `trimmed` and

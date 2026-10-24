@@ -803,6 +803,9 @@ pub struct NumbersShape {
     pub raw_tile: Option<Vec<u8>>,
     /// In the first table, the storage buffer and offsets of its first row, verbatim.
     pub raw_row: Option<(Vec<u8>, Vec<u8>)>,
+    /// Keep the document's custom-format list, where the time format's pattern lives.
+    /// Without it the format names a custom format the document does not have.
+    pub custom_formats: bool,
 }
 
 impl Default for NumbersShape {
@@ -820,6 +823,7 @@ impl Default for NumbersShape {
             lose_strings: false,
             raw_tile: None,
             raw_row: None,
+            custom_formats: true,
         }
     }
 }
@@ -894,6 +898,10 @@ pub fn numbers(sheets: &[NSheet], shape: &NumbersShape) -> Vec<u8> {
     const KIND_RICH_PAYLOAD: u32 = 6218;
     const KIND_STORAGE: u32 = 2001;
     const KIND_SHAPE: u32 = 3047;
+    const KIND_CUSTOM_FORMATS: u32 = 222;
+    // The uids of the document's two custom formats: a decoy first, then the time format.
+    const DECOY_UID: (u64, u64) = (0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+    const TIME_UID: (u64, u64) = (0xF84E_26CA_C5A6_2F4A, 0x61A3_C5E4_7D3A_5EB1);
 
     let mut next = 2u64;
     let mut alloc = || {
@@ -1157,11 +1165,16 @@ pub fn numbers(sheets: &[NSheet], shape: &NumbersShape) -> Vec<u8> {
             stream.object(rich_id, KIND_LIST, &list.0);
             table_parts.push((format!("Index/Tables/DataList-{rich_id}.iwa"), stream.0));
 
-            // The formats: a date that shows a date, and one that shows only a time.
+            // The formats: a date that shows a date, and a custom one that shows only a
+            // time — which, as Numbers writes it, carries no pattern of its own, only the
+            // uid of an entry in the document's custom-format list.
             let date = Proto::new()
                 .varint(1, 261)
                 .bytes(14, b"yyyy-MM-dd 'at' HH:mm:ss");
-            let time = Proto::new().varint(1, 272).bytes(14, b"H:mm:ss");
+            let time = Proto::new().varint(1, 272).message(
+                41,
+                &Proto::new().varint(1, TIME_UID.0).varint(2, TIME_UID.1),
+            );
             let list = Proto::new()
                 .varint(1, 1)
                 .message(3, &Proto::new().varint(1, 1).message(6, &date))
@@ -1189,9 +1202,32 @@ pub fn numbers(sheets: &[NSheet], shape: &NumbersShape) -> Vec<u8> {
         }
         sheet_stream.object(sheet_id, KIND_SHEET, &archive.0);
     }
+    // The custom formats, as a `TSK.CustomFormatListArchive` the document names through
+    // its `TSA.DocumentArchive` (field 8, field 12): the uids in field 1 and the formats in
+    // field 2 match by position, and each format's default (field 3) carries the pattern
+    // in field 18. The decoy comes first, so the position has to be matched, not assumed.
+    let custom_id = alloc();
+    if shape.custom_formats {
+        document = document.message(8, &Proto::new().reference(12, custom_id));
+    }
+    let custom_format = |name: &[u8], pattern: &[u8]| {
+        Proto::new()
+            .bytes(1, name)
+            .message(3, &Proto::new().varint(1, 272).bytes(18, pattern))
+            .varint(5, 272)
+    };
+    let custom = Proto::new()
+        .message(
+            1,
+            &Proto::new().varint(1, DECOY_UID.0).varint(2, DECOY_UID.1),
+        )
+        .message(1, &Proto::new().varint(1, TIME_UID.0).varint(2, TIME_UID.1))
+        .message(2, &custom_format(b"decoy", b"yyyy"))
+        .message(2, &custom_format(b"time", b"H:mm:ss"));
     let mut document_stream = Stream::default();
     document_stream.object(1, shape.document_kind, &document.0);
     document_stream.0.extend_from_slice(&sheet_stream.0);
+    document_stream.object(custom_id, KIND_CUSTOM_FORMATS, &custom.0);
     let mut metadata = Stream::default();
     metadata.object(alloc(), 11006, &Proto::new().varint(1, 1).0);
     let mut view = Stream::default();

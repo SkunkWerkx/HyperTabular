@@ -2,14 +2,14 @@ import Benchmark
 import Foundation
 import HyperTabular
 
-// The workbook reader over the two real-application files of corpus/README.md — Excel's
-// excel-win-300k.xlsx and LibreOffice's libreoffice-300k.ods, 300 000 rows × 8 columns each —
-// read whole through the plan rust/benches/workbook_benchmarks.rs reads them through, so that
-// this binding's number sits beside the core's: "open" is the package opened and nothing
-// read; "read" is opened, then the first sheet read in batches of 4096, every column's
-// verdicts looked at and every text cell's bytes — the checksum every binding's benchmark
-// arrives at, which says they all did the same work. "read strings" is "read" with the text
-// column made into Strings.
+// The workbook reader over the three real-application files of corpus/README.md — Excel's
+// excel-win-300k.xlsx, LibreOffice's libreoffice-300k.ods and Numbers' numbers-300k.numbers,
+// 300 000 rows × 8 columns each — read whole through the plan
+// rust/benches/workbook_benchmarks.rs reads them through, so that this binding's number sits
+// beside the core's: "open" is the package opened and nothing read; "read" is opened, then
+// the first sheet read in batches of 4096, every column's verdicts looked at and every text
+// cell's bytes — the checksum every binding's benchmark arrives at, which says they all did
+// the same work. "read strings" is "read" with the text column made into Strings.
 //
 // The files stay out of the tree (corpus/generate/out/, sha256 in the README's table);
 // HYPERTABULAR_BENCH_DIR names another directory holding them. A file that is not there is
@@ -49,7 +49,7 @@ let benchmarks: @Sendable () -> Void = {
     let directory =
         ProcessInfo.processInfo.environment["HYPERTABULAR_BENCH_DIR"].map { URL(fileURLWithPath: $0) }
         ?? here.appending(path: "../../../../../corpus/generate/out").standardized
-    for name in ["excel-win-300k.xlsx", "libreoffice-300k.ods"] {
+    for name in ["excel-win-300k.xlsx", "libreoffice-300k.ods", "numbers-300k.numbers"] {
         guard let container = try? Data(contentsOf: directory.appending(path: name)) else {
             print("\(name): not in \(directory.path), skipped")
             continue

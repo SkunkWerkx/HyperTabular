@@ -351,6 +351,23 @@ fn numbers_cells_are_read_as_written() {
             .unwrap();
         assert!(sheet.read().unwrap().is_none());
     }
+
+    // The time format names a custom format by uid, and its pattern lives in the
+    // document's custom-format list. A document without the list leaves the format read
+    // as it stands — a date — so the same cell is a wall clock.
+    let book = Workbook::from_vec(numbers(
+        &sheets,
+        &NumbersShape {
+            custom_formats: false,
+            ..NumbersShape::default()
+        },
+    ))
+    .unwrap();
+    let plan = [Column::text(3)];
+    let mut sheet = book.sheet(0, SheetOptions::default(), &plan).unwrap();
+    let batch = sheet.read().unwrap().unwrap();
+    assert_eq!(batch.text_str(0, 0).unwrap(), "2024-01-31T10:30:00");
+    assert_eq!(batch.text_str(0, 1).unwrap(), "2001-01-01T10:30:00");
 }
 
 /// What a Numbers package that is not what it says comes back as.

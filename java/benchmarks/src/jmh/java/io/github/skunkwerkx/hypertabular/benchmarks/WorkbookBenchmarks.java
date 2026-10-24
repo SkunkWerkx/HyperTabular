@@ -21,9 +21,10 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 
 /**
- * The workbook reader over the two real-application files of {@code corpus/README.md} —
- * Excel's {@code excel-win-300k.xlsx} and LibreOffice's {@code libreoffice-300k.ods}, 300 000
- * rows × 8 columns each — read whole through the plan {@code rust/benches/workbook_benchmarks.rs}
+ * The workbook reader over the three real-application files of {@code corpus/README.md} —
+ * Excel's {@code excel-win-300k.xlsx}, LibreOffice's {@code libreoffice-300k.ods} and Numbers'
+ * {@code numbers-300k.numbers}, 300 000 rows × 8 columns each — read whole through the plan
+ * {@code rust/benches/workbook_benchmarks.rs}
  * reads them through, so that this binding's number sits beside the core's: {@code open} is
  * the package opened and nothing read; {@code read} is opened, then the first sheet read in
  * batches of 4096, every column's verdicts looked at and every text cell's bytes — the
@@ -47,7 +48,7 @@ public class WorkbookBenchmarks {
             Column.duration(6),
             Column.i64(7));
 
-    @Param({"excel-win-300k.xlsx", "libreoffice-300k.ods"})
+    @Param({"excel-win-300k.xlsx", "libreoffice-300k.ods", "numbers-300k.numbers"})
     public String file;
 
     private byte[] container;

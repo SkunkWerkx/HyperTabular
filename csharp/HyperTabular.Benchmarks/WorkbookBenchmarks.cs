@@ -4,10 +4,11 @@ using HyperCast;
 namespace HyperTabular.Benchmarks;
 
 /// <summary>
-/// The workbook reader over the two real-application files of <c>corpus/README.md</c> —
-/// Excel's <c>excel-win-300k.xlsx</c> and LibreOffice's <c>libreoffice-300k.ods</c>, 300 000
-/// rows × 8 columns each — read whole through the plan <c>rust/benches/workbook_benchmarks.rs</c>
-/// reads them through, so that this binding's number sits beside the core's: <c>Open</c> is
+/// The workbook reader over the three real-application files of <c>corpus/README.md</c> —
+/// Excel's <c>excel-win-300k.xlsx</c>, LibreOffice's <c>libreoffice-300k.ods</c> and Numbers'
+/// <c>numbers-300k.numbers</c>, 300 000 rows × 8 columns each — read whole through the plan
+/// <c>rust/benches/workbook_benchmarks.rs</c> reads them through, so that this binding's
+/// number sits beside the core's: <c>Open</c> is
 /// the package opened and nothing read; <c>Read</c> is opened, then the first sheet read in
 /// batches of 4096, every column's verdicts looked at and every text cell's bytes — the
 /// checksum every binding's benchmark arrives at, which says they all did the same work.
@@ -35,7 +36,7 @@ public class WorkbookBenchmarks
 
 	byte[] _container = [];
 
-	[Params("excel-win-300k.xlsx", "libreoffice-300k.ods")]
+	[Params("excel-win-300k.xlsx", "libreoffice-300k.ods", "numbers-300k.numbers")]
 	public string File { get; set; } = "";
 
 	[GlobalSetup]

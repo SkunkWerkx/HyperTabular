@@ -31,11 +31,13 @@ use super::sort::{heap_sort, partition_point};
 use super::styles;
 use super::{Memory, State, failure, room};
 use crate::kernel::abi::{Failure, Opened, Slot, Span};
+use core::ops::Range;
 use hypercast::{Duration, Timestamp};
 
 // Message types.
 const DOCUMENT: u32 = 1;
 const SHEET: u32 = 2;
+const CUSTOM_FORMATS: u32 = 222;
 const TABLE_INFO: u32 = 6000;
 const TABLE_MODEL: u32 = 6001;
 const TILE: u32 = 6002;
@@ -158,30 +160,71 @@ impl Package<'_> {
         Ok(proto::reference(tile.bytes, 2).map(|reference| (id, reference)))
     }
 
-    /// Entry `n` of a data list (or a segment of one): its key, the rich-text payload it
-    /// names, and the kind of its format if that is a date format.
-    fn entry_at(&mut self, at: u64, offset: u64, n: usize) -> Result<(u32, Option<u64>, u8), Stop> {
+    /// The next entry of a data list (or a segment of one) from byte `pos` of its message
+    /// on, and where that entry's bytes lie in the message; `pos` moves past it, so that a
+    /// walk over a list of three hundred thousand strings reads each byte once rather than
+    /// scanning from the start for every entry. An entry is its key, the rich-text payload
+    /// it names, the kind of its format if that is a date format, and the uid of the custom
+    /// format its format names, if it names one.
+    fn entry_at(
+        &mut self,
+        at: u64,
+        offset: u64,
+        pos: &mut usize,
+    ) -> Result<(Entry, Range<usize>), Stop> {
         let object = self.object(at, offset)?;
-        let Some(entry) = nth(object.payload, 3, n) else {
+        let mut fields = Fields::from(object.payload, *pos);
+        let Some(entry) = fields.find(|field| field.number == 3) else {
             return Err(broken(offset));
         };
+        *pos = fields.position();
         if !proto::well_formed(entry.bytes) {
             return Err(broken(offset));
         }
+        let format = proto::bytes(entry.bytes, 6);
         Ok((
-            proto::integer(entry.bytes, 1, 0) as u32,
-            proto::reference(entry.bytes, 9),
-            date_kind(proto::bytes(entry.bytes, 6)),
+            Entry {
+                id: proto::integer(entry.bytes, 1, 0) as u32,
+                payload: proto::reference(entry.bytes, 9),
+                date: date_kind(format),
+                custom: proto::first(format, 41).map(|uid| uuid(uid.bytes)),
+            },
+            *pos - entry.bytes.len()..*pos,
         ))
     }
 
+    /// Where the document keeps its custom formats: `TN.DocumentArchive` field 8 is its
+    /// `TSA.DocumentArchive`, whose field 12 names the `TSK.CustomFormatListArchive`.
+    fn custom_formats(&mut self, at: u64, offset: u64) -> Result<Option<u64>, Stop> {
+        let object = self.object(at, offset)?;
+        Ok(proto::reference(proto::bytes(object.payload, 8), 12))
+    }
+
+    /// The kind of the custom format `uid` names in the list at `(at, offset)`: the uuids
+    /// (field 1) and the formats (field 2) are two lists matched by position, and the
+    /// format's default (field 3) is the struct that carries its pattern. `None` for a uid
+    /// the list does not have.
+    fn custom_kind(&mut self, at: u64, offset: u64, uid: (u64, u64)) -> Result<Option<u8>, Stop> {
+        let object = self.object(at, offset)?;
+        if object.kind != CUSTOM_FORMATS || !proto::well_formed(object.payload) {
+            return Err(broken(offset));
+        }
+        let Some(n) = Fields::of(object.payload)
+            .filter(|field| field.number == 1)
+            .position(|field| uuid(field.bytes) == uid)
+        else {
+            return Ok(None);
+        };
+        Ok(nth(object.payload, 2, n).map(|format| date_kind(proto::bytes(format.bytes, 3))))
+    }
+
     /// Appends to the arena every field numbered `number` of the object at `place` (a
-    /// part and a stream offset) — of entry `n` of its list when `entry` says so — and
-    /// returns the run appended.
+    /// part and a stream offset) — of the list entry whose bytes `entry` locates in the
+    /// message, when it names one — and returns the run appended.
     fn copy_at(
         &mut self,
         place: (u64, u64),
-        entry: Option<usize>,
+        entry: Option<Range<usize>>,
         number: u32,
         arena: &mut [u8],
         used: &mut u64,
@@ -189,7 +232,7 @@ impl Package<'_> {
     ) -> Result<Span, Stop> {
         let object = self.object(place.0, place.1)?;
         let message = match entry {
-            Some(n) => nth(object.payload, 3, n).map_or(&[][..], |field| field.bytes),
+            Some(range) => object.payload.get(range).unwrap_or(&[]),
             None => object.payload,
         };
         let start = *used;
@@ -207,8 +250,23 @@ impl Package<'_> {
     }
 }
 
+/// One entry of a data list, as [`Package::entry_at`] reads it.
+struct Entry {
+    id: u32,
+    payload: Option<u64>,
+    date: u8,
+    custom: Option<(u64, u64)>,
+}
+
+/// A `TSP.UUID`: its two halves.
+fn uuid(message: &[u8]) -> (u64, u64) {
+    (proto::integer(message, 1, 0), proto::integer(message, 2, 0))
+}
+
 /// The kind a cell with this format reads its seconds as: a time of day when the format
 /// shows no date, a wall clock otherwise; a plain number for a format that is not a date's.
+/// A format that names a custom format by uid carries no pattern of its own and reads as
+/// a date here; the caller looks the pattern up in the document's list.
 fn date_kind(format: &[u8]) -> u8 {
     let kind = proto::integer(format, 1, 0);
     if kind != FORMAT_DATE && kind != FORMAT_CUSTOM_DATE {
@@ -217,9 +275,13 @@ fn date_kind(format: &[u8]) -> u8 {
     if proto::integer(format, 12, 0) != 0 {
         return styles::TIME;
     }
-    // The pattern is Unicode's (`yyyy-MM-dd H:mm:ss`): any date letter outside a quoted
-    // literal shows a date; only time letters, a time; neither, a date by default.
-    let pattern = proto::bytes(format, 14);
+    // The pattern is Unicode's (`yyyy-MM-dd H:mm:ss`), in field 14 for a built-in format
+    // and field 18 for a custom one: any date letter outside a quoted literal shows a date;
+    // only time letters, a time; neither, a date by default.
+    let mut pattern = proto::bytes(format, 14);
+    if pattern.is_empty() {
+        pattern = proto::bytes(format, 18);
+    }
     let mut quoted = false;
     let mut timed = false;
     for &byte in pattern {
@@ -493,6 +555,7 @@ pub fn strings(state: &mut State, container: &[u8], memory: &mut Memory<'_>) -> 
     let base = objects * 2;
     let (mut count, mut used) = (0usize, 0u64);
     let (index_cells, records) = cells.split_at_mut(base.min(cells.len()));
+    let document = resolve(index_cells, objects, 1).ok_or(iwa::missing(1))?;
     each_table(
         &mut package,
         index_cells,
@@ -556,12 +619,34 @@ pub fn strings(state: &mut State, container: &[u8], memory: &mut Memory<'_>) -> 
                         resolve(index_cells, objects, identifier).ok_or(iwa::missing(identifier))?
                     };
                     let entries = package.count_at(at, offset, 3)?;
-                    for n in 0..entries {
-                        let (id, payload, date) = package.entry_at(at, offset, n)?;
+                    let mut pos = 0usize;
+                    for _ in 0..entries {
+                        let (
+                            Entry {
+                                id,
+                                payload,
+                                mut date,
+                                custom,
+                            },
+                            range,
+                        ) = package.entry_at(at, offset, &mut pos)?;
+                        // A custom format's pattern lives in the document's list, under
+                        // the uid the format names; a uid the list does not have, or a
+                        // document without a list, leaves the format read as it stands.
+                        if kind == KIND_FORMAT
+                            && let Some(uid) = custom
+                            && let Some(list) = package.custom_formats(document.0, document.1)?
+                        {
+                            let (list_at, list_offset) =
+                                resolve(index_cells, objects, list).ok_or(iwa::missing(list))?;
+                            if let Some(found) = package.custom_kind(list_at, list_offset, uid)? {
+                                date = found;
+                            }
+                        }
                         let value = match kind {
                             KIND_STRING => package.copy_at(
                                 (at, offset),
-                                Some(n),
+                                Some(range),
                                 3,
                                 arena,
                                 &mut used,

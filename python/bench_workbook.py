@@ -1,15 +1,15 @@
-"""pyperf benchmarks: the workbook reader over the two 300 000-row files of corpus/README.md.
+"""pyperf benchmarks: the workbook reader over the three 300 000-row files of corpus/README.md.
 
 Run with: python bench_workbook.py --fast -q
 
-Excel's excel-win-300k.xlsx and LibreOffice's libreoffice-300k.ods, 300 000 rows x 8 columns
-each, read whole through the plan rust/benches/workbook_benchmarks.rs reads them through, so
-that this binding's number sits beside the core's. "open" is the package opened and nothing
-read. "read" is opened, then the first sheet read in batches of 4096, every column's faults
-counted and the text column's values made into strs: the checksum every binding's benchmark
-arrives at, which says they all did the same work. "values" is "read" with every column's
-values made too, the dates, times and timedeltas included: what a caller that wants Python
-objects for the whole sheet pays.
+Excel's excel-win-300k.xlsx, LibreOffice's libreoffice-300k.ods and Numbers' numbers-300k.numbers,
+300 000 rows x 8 columns each, read whole through the plan rust/benches/workbook_benchmarks.rs
+reads them through, so that this binding's number sits beside the core's. "open" is the package
+opened and nothing read. "read" is opened, then the first sheet read in batches of 4096, every
+column's faults counted and the text column's values made into strs: the checksum every
+binding's benchmark arrives at, which says they all did the same work. "values" is "read" with
+every column's values made too, the dates, times and timedeltas included: what a caller that
+wants Python objects for the whole sheet pays.
 
 The files stay out of the tree (corpus/generate/out/, sha256 in the README's table);
 HYPERTABULAR_BENCH_DIR names another directory holding them. A file that is not there is
@@ -39,7 +39,7 @@ PLAN = [
     Column.i64(7),
 ]
 OPTIONS = SheetOptions()
-FILES = ["excel-win-300k.xlsx", "libreoffice-300k.ods"]
+FILES = ["excel-win-300k.xlsx", "libreoffice-300k.ods", "numbers-300k.numbers"]
 
 
 def read(container: bytes, every: bool) -> int:
