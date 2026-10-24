@@ -95,9 +95,6 @@ jobs:
       # CoreCLR loads out of its APK), and in static-libs their archives for C#'s Native AOT,
       # Go's go/staticlib and Swift's bundle. test-android, below, is what runs them.
       android: true
-      # The core as a wasm32-wasip1 module too, on every leg: the Java suite runs a second
-      # time through its in-process GraalWasm backend (`./gradlew testWasm`).
-      wasip1_module: true
       # A second Ruby minor the Magnus extension is built and tested against, so each
       # platform gem carries two ABIs (3.4 and the forge's 4.0), as HyperCast's do.
       ruby_compat_version: "3.4"

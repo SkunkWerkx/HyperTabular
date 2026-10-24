@@ -73,6 +73,17 @@ minor release can still break both, as 0.9.0 did.
   export check on every RID. Dependabot bumps every ecosystem in one monthly pull request,
   every third-party action is pinned to a commit, and CodeQL runs weekly. *(repository only)*
 
+### Removed
+
+- **Java — the GraalWasm backend.** The jar no longer carries the core a second time as a
+  `wasm32-wasip1` module, and `Tabular.backend()`, the `hypertabular.backend` property and the
+  fall-back to the module on a platform without a native build are gone: the binding is FFM
+  downcalls into the library it bundles. The module served a platform nobody had asked for,
+  and replaying the suite through it in interpreter mode on five CI legs cost more than every
+  other step of a leg together once the Numbers reader was in it (23 minutes against 15 on
+  linux-x64). `cargo wasm-module` and the `wasm32-wasip1` export flags leave
+  `rust/.cargo/config.toml` with it. *(Java)*
+
 ## [0.9.0] — 2026-10-21
 
 Built on HyperCast 0.9.0: its culture-fidelity sweep reaches every plan column's format, and

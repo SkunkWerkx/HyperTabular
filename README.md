@@ -150,7 +150,7 @@ The binding is compiled to WebAssembly and the core is linked into that build by
 ecosystem's own toolchain — the same archive as everywhere else, built for `wasm32`. The
 core imports nothing (no clock, no entropy, no allocator: the caller's buffers are all the
 memory it touches), so a page loads one module and needs no shim beyond what the language
-already brings. Every browser row below runs in headless Chrome in CI: on every pull request, except Ruby's, whose ruby.wasm interpreter build per Ruby minor runs in the weekly and release builds instead. Java goes the other way: the core runs as wasm inside the JVM.
+already brings. Every browser row below runs in headless Chrome in CI: on every pull request, except Ruby's, whose ruby.wasm interpreter build per Ruby minor runs in the weekly and release builds instead.
 
 | Binding | WebAssembly |
 | --- | --- |
@@ -160,7 +160,7 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |
 | Python | **Yes, on [Pyodide](https://pyodide.org/) 314.x.** `await micropip.install("hypertabular")` installs the twenty-fifth wheel (`pyemscripten_2026_0_wasm32`) and `hypercast`'s; CI runs the whole pytest suite in Pyodide under Node and in Chrome. |
 | Ruby | **Yes, through `rbwasm build`.** List `hypertabular-wasm` instead of `hypertabular` in the Gemfile handed to ruby.wasm 2.10+ (Ruby 3.4 or 4.0): it carries the Magnus extension prebuilt for `wasm32-wasip1` and shares the interpreter with `hypercast-wasm`. |
-| Java | **In process, through [GraalWasm](https://www.graalvm.org/webassembly/).** The jar bundles the core as a `wasm32-wasip1` module; `-Dhypertabular.backend=wasm` selects it, and it is the automatic fallback where the jar has no native build. On GraalVM's JIT it reads the 300 000-row workbook in 1.9 s against 0.72 s native; on a stock JDK it runs interpreted. CI runs the whole suite through it on every leg. Compiling the binding itself to wasm is blocked: no Java-to-wasm compiler supports the Foreign Function & Memory API. |
+| Java | **No.** The jar reaches the core through FFM downcalls into the native library it bundles for the platform; the JVM has no browser target, and the core does not run inside a wasm engine. |
 | PHP | Not built. There is no maintained wasm engine PHP can embed, and HyperCast's `ext-php-rs` spike for WordPress Playground is not shipped. |
 
 Arguments are kept to twelve integers or fewer on every export, because Mono's interpreter
@@ -185,11 +185,11 @@ Underneath it, every artifact also carries GitHub build provenance from the run 
 and there the flags depend on where the signing workflow lives, not on the registry. The gems,
 `inventory.json` and the published NuGet package are signed inside this repository's
 `release.yml` and verify with plain `--repo SkunkWerkx/HyperTabular`. The crate, the jar, the
-wheels, the pre-push NuGet package, every native library (the whole story for Go, Swift and
-PHP, which have no package of their own) and the `wasm32-wasip1` module inside the jar are
-signed by reusable workflows in `SkunkWerkx/.github`: the crate and the Maven files at the
-tagged commit, the wheels, the natives and the module at the preparation commit on master they
-were built from. Add `--signer-repo SkunkWerkx/.github` (and `--source-digest <commit>` to pin
+wheels, the pre-push NuGet package and every native library (the whole story for Go, Swift
+and PHP, which have no package of their own) are signed by reusable workflows in
+`SkunkWerkx/.github`: the crate and the Maven files at the tagged commit, the wheels and the
+natives at the preparation commit on master they were built from. Add
+`--signer-repo SkunkWerkx/.github` (and `--source-digest <commit>` to pin
 either), or `--owner SkunkWerkx` in place of both. Get the signer wrong and `gh` reports a bare
 `verifying with issuer "sigstore.dev"`, which reads like a bad signature but is only an
 identity mismatch. PyPI additionally holds a [PEP 740](https://peps.python.org/pep-0740/)
