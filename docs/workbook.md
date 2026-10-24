@@ -226,30 +226,36 @@ thirds of zlib-rs's speed (`design.md`); measured since (below), it is not.
 The three real-application files of `corpus/README.md` — Excel's `excel-win-300k.xlsx`
 (111 MB of sheet XML and 7.7 MB of shared strings in a 16.7 MB package), LibreOffice's
 `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) and Numbers'
-`numbers-300k.numbers` (29.4 MB of Snappy-compressed IWA parts, stored in a 29.6 MB package;
-its columns are not in the table yet, see "Parked") — read whole by each binding's own
-benchmark harness through one plan: `i64`, `f64`, text, date, time, bool, duration,
-`i64` (that last column holds 3 000 `#N/A` error cells, which fault; Numbers has no `NA()`,
-so its file has 3 000 empty cells there, which fault the same). **open** is the package
+`numbers-300k.numbers` (29.4 MB of Snappy-compressed IWA parts, stored in a 29.6 MB
+package) — read whole by each binding's own benchmark harness through one plan: `i64`,
+`f64`, text, date, time, bool, duration, `i64` (that last column holds 3 000 `#N/A` error
+cells, which fault; Numbers has no `NA()`, so its file has 3 000 empty cells there, which
+fault the same). **open** is the package
 opened and nothing read; **read** is opened, then the first sheet read in batches of 4096,
 every column's verdicts looked at and every text cell's bytes. Every harness prints the
 same checksum (5 285 882: the cells that cast, plus the text column's bytes), which is what
-says they did the same work. Linux x64 (WSL 2), i9-11900H, 2026-10-07: the 0.7.0 core and
-HyperCast 0.7.0; Rust 1.99, .NET 11 RC 1, JDK 25.0.4 (Temurin), Go 1.27.1, Swift 6.3.3,
-CPython 3.14.8, Ruby 4.0.7, PHP 8.5.10 with no `php.ini`. Best of the harness's own runs
-where it reports them (Go, Ruby), its mean or median otherwise.
+says they did the same work. Linux x64 (WSL 2), i9-11900H, 2026-10-24, one sitting: the
+core at `00a511d` (0.9.0, unreleased), built from the checkout for every binding, and
+HyperCast 0.9.0; Rust 1.99.1, .NET 11 RC 2, JDK 25.0.4.1 (Temurin), Go 1.27.3, Swift 6.3.3,
+CPython 3.15.0, Ruby 4.0.7, PHP 8.5.11 with no `php.ini`. Best of the harness's own runs
+where it reports them (Go, five runs); otherwise its mean (JMH, BenchmarkDotNet, pyperf,
+benchmark-ips), median (Criterion, package-benchmark) or mode (phpbench). The last row is
+numbers-parser 4.22.0, the Python reader every other reader of `.numbers` is held against,
+doing the Python harness's **values** work on the same file (`python/bench_numbers_parser.py`,
+best of five); it decodes the whole document at open, so its read is its open.
 
-| Binding (harness) | xlsx open | xlsx read | ods open | ods read |
-| --- | ---: | ---: | ---: | ---: |
-| Rust (Criterion) | 34 ms | 601 ms | 337 ms | 1.20 s |
-| C# (BenchmarkDotNet) | 32 ms | 591 ms | 334 ms | 1.21 s |
-| Java (JMH) | 41 ms | 600 ms | 346 ms | 1.23 s |
-| Go (`go test -bench`) | 30 ms | 590 ms | 328 ms | 1.20 s |
-| Swift (package-benchmark) | 37 ms | 617 ms | 336 ms | 1.20 s |
-| Python (pyperf) | 39 ms | 630 ms | 344 ms | 1.24 s |
-| Ruby (benchmark-ips), Magnus | 30 ms | 1.01 s | 330 ms | 1.61 s |
-| Ruby (benchmark-ips), Fiddle | 36 ms | 1.04 s | 343 ms | 1.65 s |
-| PHP (phpbench) | 44 ms | 776 ms | 346 ms | 1.34 s |
+| Binding (harness) | xlsx open | xlsx read | ods open | ods read | numbers open | numbers read |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Rust (Criterion) | 32 ms | 565 ms | 322 ms | 1.19 s | 820 ms | 1.16 s |
+| C# (BenchmarkDotNet) | 31 ms | 586 ms | 332 ms | 1.23 s | 873 ms | 1.22 s |
+| Java (JMH) | 39 ms | 606 ms | 343 ms | 1.25 s | 884 ms | 1.25 s |
+| Go (`go test -bench`) | 30 ms | 593 ms | 329 ms | 1.20 s | 842 ms | 1.21 s |
+| Swift (package-benchmark) | 31 ms | 617 ms | 341 ms | 1.24 s | 942 ms | 1.32 s |
+| Python (pyperf) | 39 ms | 625 ms | 337 ms | 1.24 s | 845 ms | 1.22 s |
+| Ruby (benchmark-ips), Magnus | 29 ms | 1.00 s | 341 ms | 1.64 s | 827 ms | 1.62 s |
+| Ruby (benchmark-ips), Fiddle | 34 ms | 995 ms | 343 ms | 1.68 s | 885 ms | 1.69 s |
+| PHP (phpbench) | 41 ms | 775 ms | 345 ms | 1.42 s | 890 ms | 1.44 s |
+| numbers-parser 4.22.0 (Python) | | | | | 66.8 s | 68.1 s |
 
 C#, Java, Go and Swift hand out views of the reader's buffers, so their read is the core's.
 The build is layout-sensitive: when this table was first taken, Criterion's binary read the
@@ -260,19 +266,28 @@ the two within 2% of each other. A difference of under about 10% between two row
 table is not a finding until it survives runs alternated in one sitting.
 Python's read makes the text column's `str`s and counts faults from
 `fault_count`; its **values** scope, which makes every column's Python objects — `date`,
-`time` and `timedelta` included — is 717 ms and 1.34 s. Ruby and PHP have no way to ask
-whether a cell cast short of decoding its column, so their row is the **values** scope:
+`time` and `timedelta` included — is 698 ms, 1.35 s and 1.29 s. Ruby and PHP have no way to
+ask whether a cell cast short of decoding its column, so their row is the **values** scope:
 every column made into the gem's or package's carriers (Date, Rational, DateTimeImmutable,
 HyperCast's Duration), the cells that cast counted from them. Their **verdicts** scope —
 a HyperCast `Success` or `Fault` built for every cell, what a caller who matches each cell
-pays — is 1.92 s and 2.48 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to make,
-however it is made) and 929 ms and 1.50 s in PHP. Ruby's two backends are within a few
-percent of each other: the crossing was already once per batch, so the Magnus extension
-buys platform gems with no shared library to find, and ruby.wasm, not speed.
+pays — is 1.95 s, 2.54 s and 2.55 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to
+make, however it is made) and 926 ms, 1.55 s and 1.60 s in PHP. Ruby's two backends are
+within a few percent of each other: the crossing was already once per batch, so the Magnus
+extension buys platform gems with no shared library to find, and ruby.wasm, not speed.
 
 ODS's **open** is most of a second because a package has no listing of its sheets outside
 `content.xml`, so opening one reads the whole part; the sheet's read then reads it again.
 XLSX lists its sheets in a small part of their own.
+
+Numbers' **open** is most of its read: opening a package walks the document's objects to
+list its tables and loads every list a cell indexes — 2.1 MB of string list in this file —
+so the read that follows has only the tiles left, about 340 ms of the 1.16 s. Where the
+open's time went, sampled, is under "Parked"; it is the next candidate. Swift's Numbers open,
+942 ms against the core's 820, is the one cell of the table more than 10% from its column in
+this sitting, and has not been run alternated. On an Apple M-series laptop, 2026-10-24, the
+core read the file in 0.60 s (0.43 s of it the open) against numbers-parser's 21 s: not table
+numbers, the machine differs, but the same ratio.
 
 Where a read's time went (Rust, best of three, measured before the tokenizer fixes that
 brought the table above to its numbers): the core's inflate alone takes 117 ms over
@@ -308,8 +323,17 @@ To run them: `cargo bench --bench workbook_benchmarks` (rust/), `dotnet run -c R
 --project HyperTabular.Benchmarks` (csharp/), `./gradlew :benchmarks:jmh` (java/),
 `go test -run '^$' -bench Workbook -benchmem` (go/), `swift package benchmark`
 (swift/Benchmarks/), `python bench_workbook.py --fast` (python/), `ruby
-benchmark/workbook_benchmark.rb` (ruby/), `vendor/bin/phpbench run --report=aggregate` (php/).
-Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DIR`.
+benchmark/workbook_benchmark.rb` (ruby/), `vendor/bin/phpbench run --report=aggregate` (php/);
+`python bench_numbers_parser.py` (python/, `pip install numbers-parser` first) is the
+numbers-parser row. Each reads the files from `corpus/generate/out/`, or from
+`HYPERTABULAR_BENCH_DIR`. For a table taken on one core, build it from the checkout for the
+three bindings that otherwise link or load a committed binary
+(`.github/scripts/local-core.sh`, then Go with `-tags hypertabular_local`, Swift with
+`HYPERTABULAR_LOCAL_CORE=1` and PHP with `HYPERTABULAR_NATIVE_LIBRARY` naming
+`rust/target/release/libhypertabular.so`), and clear any library staged earlier under
+`csharp/HyperTabular/runtimes/`, `java/src/main/resources/native/` or
+`ruby/lib/hypertabular/native/`: those are git-ignored, loaded in preference to
+`rust/target/release/`, and a stale one reads as a core that does not know the newest format.
 
 ## Parked
 
@@ -323,21 +347,12 @@ Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DI
 - **Numbers' error kinds.** An error cell names the formula that failed and nothing of
   what error it made, in anything this core reads, so every one is `#VALUE!`. If a field
   that does carry the kind turns up, it goes here.
-- **The Numbers columns of the table above, and numbers-parser beside them.** The file is
-  made (`corpus/README.md`, 15) and every harness has read it since 2026-10-24, printing the
-  same checksum as over the other two. What is left is to run them on the machine the table
-  was measured on (Linux x64, WSL 2, i9-11900H), in one sitting, with `numbers-300k.numbers`
-  in `corpus/generate/out/` or `HYPERTABULAR_BENCH_DIR`: each command under "To run them",
-  then `python bench_numbers_parser.py` (python/, after `pip install numbers-parser` into
-  the venv) for the Python reader every other `.numbers` reader is held against; add the
-  two columns and a numbers-parser row. On an Apple M-series laptop, 2026-10-24, the core
-  read the file in 0.60 s (0.43 s of it the open) against numbers-parser's 21 s; not table
-  numbers, the machine differs. Where the open's time went there, sampled: about a third
-  decoding chunk prefixes again while the index walks a part's object headers
-  (`iwa::ensure` decodes the chunk in hand from its start each time more of it is needed,
-  quadratic in the objects a chunk holds, and the calculation-engine part holds thousands),
-  a sixth the walk over the string list's entries, the rest spread over the heap sort and
-  the zip directory.
+- **Numbers' open.** Most of a `.numbers` read (820 ms of the table's 1.16 s). Where its
+  time went, sampled on an Apple M-series laptop, 2026-10-24: about a third decoding chunk
+  prefixes again while the index walks a part's object headers (`iwa::ensure` decodes the
+  chunk in hand from its start each time more of it is needed, quadratic in the objects a
+  chunk holds, and the calculation-engine part holds thousands), a sixth the walk over the
+  string list's entries, the rest spread over the heap sort and the zip directory.
 - **Performance candidates** left after the 2026-10-05 tokenizer pass (SWAR tag scan,
   single-pass attributes, `<!` before `<![CDATA[`): inflate, about a sixth of a read, which
   must stay under the no-panic proof; the bounds checks in `Attrs::next`, `trimmed` and
