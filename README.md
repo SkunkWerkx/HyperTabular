@@ -142,7 +142,7 @@ Swift and Go link the core into the consumer's executable on every platform, so 
 
 **Android**, arm64 and x86_64, is reached by the same three bindings, so that a .NET MAUI app has the core on every platform MAUI targets and a Go or Swift Android build links it as on any other platform. C# carries a shared library cross-built with the NDK at API level 21, its segments aligned to the 16 KB pages Android 15 devices may use and Google Play requires: an app on CoreCLR, .NET 11's Android runtime, loads it out of the APK like any Linux library, and a Native AOT publish links it in from a static archive like every other RID. Go links its own pair of archives under `GOOS=android` with the NDK's clang, and Swift links them from its artifact bundle with the [Swift SDK for Android](https://www.swift.org/documentation/articles/swift-sdk-for-android-getting-started.html) (Swift 6.3+, API 28+). HyperCast reaches Android the same three ways, and its libraries sit beside these in the same app. CI's `test-android` job builds the C# app both ways for both RIDs from a package packed in that run, cross-builds the Go and Swift suites, runs everything x86_64 in an emulator whose image uses 16 KB pages, and links or inspects the arm64 builds. See [`csharp/README.md`](csharp/README.md#android), [`go/README.md`](go/README.md#android) and [`swift/README.md`](swift/README.md#linking-and-deployment).
 
-**Runtime floors** follow upstream support and match HyperCast's: .NET 11, JDK 25, Go 1.26, Swift 6.2, Python 3.11, Ruby 3.3 and PHP 8.2. The crate's floor is Rust 1.88, HyperCast's own.
+**Runtime floors** follow upstream support: a version that has reached end of life is not a floor. Today that is .NET 11, JDK 25, Go 1.26, Python 3.11, Ruby 3.3 and PHP 8.2, the same floors as HyperCast and HyperUuid. Swift's floor is 6.2 for a different reason: it is the first release whose package manager can link a static library, which is how the binding reaches musl and WebAssembly at all. The crate's own floor is Rust 1.88 (`rust-version` in its manifest, HyperCast's own), and CI builds the library and the `no_std` shared library on exactly that toolchain.
 
 ## WebAssembly
 
@@ -169,7 +169,44 @@ travel in one `hypertabular_buffers` struct instead.
 
 ## Provenance
 
-Every native library carries a GitHub build-provenance attestation from the forge's build, checked again before it is committed for Go, Swift and PHP (`stage-native-binaries.yml`) and before it is packed into a gem (`release.yml`). Packages signed inside this repository's own `release.yml` — the gem and the published NuGet package — verify with `gh attestation verify <file> --repo SkunkWerkx/HyperTabular`; everything signed by the forge's reusable workflows — the crate, the jar, the wheels, the pre-push NuGet package and every native library — needs `--signer-repo SkunkWerkx/.github` as well, or `--owner SkunkWerkx` in place of both.
+Every file a release ships verifies from the tag alone. One release attestation, signed by
+this repository's own `release.yml` at the tag, names every registry package (the `.nupkg` as
+packed and as nuget.org serves it, the gems, the wheels, the crate, the Maven files) and every
+native library committed for Go, Swift and PHP, and its predicate is the release inventory:
+every file's path, size, SHA-256, the commit it was built from and the repository that signed
+its build provenance. One command, any file:
+
+```sh
+gh attestation verify <file> --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
+```
+
+Underneath it, every artifact also carries GitHub build provenance from the run that made it,
+and there the flags depend on where the signing workflow lives, not on the registry. The gems,
+`inventory.json` and the published NuGet package are signed inside this repository's
+`release.yml` and verify with plain `--repo SkunkWerkx/HyperTabular`. The crate, the jar, the
+wheels, the pre-push NuGet package, every native library (the whole story for Go, Swift and
+PHP, which have no package of their own) and the `wasm32-wasip1` module inside the jar are
+signed by reusable workflows in `SkunkWerkx/.github`: the crate and the Maven files at the
+tagged commit, the wheels, the natives and the module at the preparation commit on master they
+were built from. Add `--signer-repo SkunkWerkx/.github` (and `--source-digest <commit>` to pin
+either), or `--owner SkunkWerkx` in place of both. Get the signer wrong and `gh` reports a bare
+`verifying with issuer "sigstore.dev"`, which reads like a bad signature but is only an
+identity mismatch. PyPI additionally holds a [PEP 740](https://peps.python.org/pep-0740/)
+publish attestation for every wheel, filed by the publish action and shown on each file's PyPI
+page.
+
+The gates run on the way in, not just on the way out: `stage-native-binaries.yml` verifies each
+native library's attestation before committing it for the Go, Swift and PHP consumers, the gem
+job verifies every native artifact it packs before building a gem, every package is attested
+and preserved before anything is uploaded, and the upload itself is a second, deliberate
+dispatch of `release.yml` from those preserved bytes ([RELEASING.md](.github/RELEASING.md)), so
+a failed check stops the release while nothing is yet irreversible. Each binding's README shows
+the command on its own artifact: [Rust](rust/#verifying-provenance),
+[C#](csharp/#native-binary-provenance), [Java](java/#verifying-provenance),
+[Ruby](ruby/#verifying-provenance), [Python](python/#verifying-provenance),
+[PHP](php/#verifying-provenance), [Swift](swift/#verifying-provenance),
+[Go](go/#verifying-build-provenance).
 
 ## Layout
 

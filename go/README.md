@@ -9,7 +9,7 @@ go get github.com/SkunkWerkx/HyperTabular/go@latest
 ```
 
 The module lives in a subdirectory of the repository, so its tags are prefixed
-(`go/vX.Y.Z`).
+(`go/v<version>`).
 
 ```go
 import (
@@ -219,13 +219,33 @@ WebAssembly (`GOOS=wasip1`, `GOOS=js`) links Go code only, so it is a compile er
 
 ## Verifying build provenance
 
-Go has no package registry to attest; `go get` resolves straight from the `go/vX.Y.Z` tag.
-Each committed archive was attested when the forge built it and verified again before it was
-committed, and can be checked against the build that made it:
+Go has no package registry to attest: `go get` resolves straight from the `go/v<version>` git
+tag against this repo, and what it fetches is the tree at that tag, the static libraries under
+`go/staticlib/` included. Each of them verifies from the release tag alone: the release
+attestation, signed by this repository's `release.yml` at the root tag, names every one of
+them, with the release inventory as its predicate. The same file sits in the module cache at
+`$(go env GOMODCACHE)/github.com/!skunk!werkx/!hyper!tabular/go@v<version>/staticlib/`.
 
 ```sh
-gh attestation verify staticlib/linux_amd64/libhypertabular.a --owner SkunkWerkx
+gh attestation verify go/staticlib/linux_amd64/libhypertabular.a --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
 ```
+
+Each archive also carries build provenance from `hyper-build-static.yml` in
+`SkunkWerkx/.github`, at the preparation commit the tagged commit was staged from
+(`stage-native-binaries.yml` verifies that before committing a byte, and the staging commit's
+`Release-Source-SHA` and `Release-CI-Run-ID` trailers name the commit and the run), so that
+check needs `--signer-repo` beside `--repo`:
+
+```sh
+gh attestation verify go/staticlib/linux_amd64/libhypertabular.a \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+```
+
+Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
+reads like a bad signature but is only an identity mismatch. The root README's
+[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
+artifacts are signed from where, and the gates every byte passes before publication.
 
 ## License
 

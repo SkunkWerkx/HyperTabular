@@ -215,3 +215,37 @@ bundle exec rake native:dev             # builds the Magnus extension for this R
 bundle exec rspec                       # the extension, and its agreement with Fiddle
 bundle exec rake docs:check
 ```
+
+## Verifying provenance
+
+Every gem RubyGems.org serves — the universal fallback, each of the seven precompiled platform
+gems and `hypertabular-wasm` — verifies from the release tag alone: the release attestation,
+signed by this repository's `release.yml` at the tag, names every one of them, with the
+release inventory as its predicate.
+
+```sh
+gem fetch hypertabular -v <version> --platform <platform>   # or omit --platform for the universal gem
+gh attestation verify hypertabular-<version>-<platform>.gem --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
+```
+
+Each gem's build provenance is this repository's too: the `ruby-pack` job attests
+`ruby/pkg/*.gem` as soon as they are built and `rubygems-publish` pushes those preserved
+bytes, so plain `--repo` verifies it:
+
+```sh
+gh attestation verify hypertabular-<version>-<platform>.gem --repo SkunkWerkx/HyperTabular
+```
+
+That is the release's second layer of checking, not the only one: before any gem is built, the
+same job verifies every native binary it packs — the Fiddle libraries, the Magnus extensions
+(one per Ruby ABI per platform), the `wasm32-wasip1` archives — against *their own* build
+provenance, signed from `SkunkWerkx/.github` by `hyper-build-native.yml` and
+`hyper-build-wasm.yml` (so that check needs `--signer-repo SkunkWerkx/.github` added), and
+refuses to proceed on an unverified one. RubyGems.org has no unpublish and no
+duplicate-version overwrite, so all of this happens while a bad artifact is still reversible,
+and the push itself is a separate dispatch from the preserved bytes. The release run then
+re-fetches every gem from rubygems.org and fails unless each matches the attested bytes
+exactly, turning "rubygems.org stores an upload verbatim" into a per-release check rather than
+an assumption. The root README's [Provenance](../README.md#provenance) section has the whole
+picture.

@@ -118,12 +118,33 @@ libraries committed under `php/src/native/` are what a consumer loads.
 
 ## Verifying provenance
 
-Each committed library was attested when the forge built it and verified again before it
-was committed:
+Packagist has nothing of its own to attest: there is no packed artifact, just a git tag it
+resolves against this repo. What is worth checking is the native libraries committed under
+`php/src/native/`, and each verifies from the release tag alone: the release attestation,
+signed by this repository's `release.yml` at the tag, names every one of them, with the
+release inventory as its predicate.
 
+```sh
+composer require skunkwerkx/hypertabular:<version>
+gh attestation verify vendor/skunkwerkx/hypertabular/php/src/native/linux-x64/libhypertabular.so \
+  --repo SkunkWerkx/HyperTabular --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
 ```
-gh attestation verify src/native/linux-x64/libhypertabular.so --owner SkunkWerkx
+
+Each library also carries build provenance from `hyper-build-native.yml` in
+`SkunkWerkx/.github`, at the preparation commit the tagged commit was staged from
+(`stage-native-binaries.yml` verifies that before committing a byte, and the staging commit's
+`Release-Source-SHA` and `Release-CI-Run-ID` trailers name the commit and the run), so that
+check needs `--signer-repo` beside `--repo`:
+
+```sh
+gh attestation verify vendor/skunkwerkx/hypertabular/php/src/native/linux-x64/libhypertabular.so \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
 ```
+
+Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
+reads like a bad signature but is only an identity mismatch. The root README's
+[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
+artifacts are signed from where, and the gates every byte passes before publication.
 
 ## License
 

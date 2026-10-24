@@ -14,6 +14,35 @@ the README's [Platform support](README.md#platform-support) table become a commi
 Semantic Versioning: breaking or dropping either takes a new major version. Until then a
 minor release can still break both, as 0.9.0 did.
 
+### Changed
+
+- **C# — `HyperTabular.targets` no longer lists an `EmccExportedFunction` per export.** The
+  `NativeFileReference` is the whole Blazor WebAssembly wiring: the SDK's generated pinvoke
+  table calls each native function by symbol, so the link resolves them against the archive
+  and `LibraryImport("*")` reaches them through that table. The smoke test reaches all
+  fourteen exports with the list gone (on SDK 11.0.100-rc.2) and fails at the link with the
+  archive unlinked, so the list was dead weight. *(C#)*
+- **The release is two acts at one tag, and every shipped file verifies from the tag.**
+  Pushing `vX.Y.Z` packs every registry input, attests each package and the release as a
+  whole, preserves the bytes and plans every upload without publishing; a dispatch of
+  `release.yml` with `prepared_run_id` publishes from the preserved bytes through what was
+  the recovery path. The release attestation is one statement signed at the tag whose
+  subjects are every registry package and every native library committed for Go, Swift and
+  PHP, and whose predicate is the release inventory, so
+  `gh attestation verify <file> --repo SkunkWerkx/HyperTabular --source-ref refs/tags/vX.Y.Z
+  --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1` answers for
+  any of them, including the wheels and the committed natives that build provenance alone
+  tied to the preparation commit on master (SkunkWerkx/HyperUuid#35). The GitHub Release
+  notes come from this file's section for the version plus the verification commands, and a
+  tag whose CHANGELOG lacks the section is refused before anything publishes. The job bodies
+  of `release.yml`, `prepare-release.yml`, `stage-native-binaries.yml` and every static check
+  in `ci.yml` moved to the Forge (`SkunkWerkx/.github`, called at master, composite actions
+  where the repository's own identity signs or publishes), with this repository described to
+  it by `.github/hyper.json` and `.github/scripts/abi_probe.c`; CI gained `check-semver`
+  against the last crates.io release, the no_std consumer build and the shared library's
+  export check on every RID. Dependabot bumps every ecosystem in one monthly pull request,
+  every third-party action is pinned to a commit, and CodeQL runs weekly. *(repository only)*
+
 ## [0.9.0] — 2026-10-21
 
 Built on HyperCast 0.9.0: its culture-fidelity sweep reaches every plan column's format, and

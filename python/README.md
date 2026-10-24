@@ -166,7 +166,7 @@ it is published.
 ## In the browser (Pyodide)
 
 The same PyO3 extension, compiled for Pyodide's Emscripten target, is published to PyPI as a
-twenty-fifth wheel, `hypertabular-X.Y.Z-cp311-abi3-pyemscripten_2026_0_wasm32.whl`, so micropip
+twenty-fifth wheel, `hypertabular-<version>-cp311-abi3-pyemscripten_2026_0_wasm32.whl`, so micropip
 finds it the way pip finds the native wheels, and HyperCast's beside it:
 
 ```python
@@ -186,11 +186,33 @@ Pyodide cannot. The wheel is for **Pyodide 314.x** (Python 3.14, platform
 
 ## Verifying provenance
 
-Every wheel is built and attested by the SkunkWerkx forge's reusable workflow:
+Every wheel PyPI serves, the Pyodide one included, verifies from the release tag alone: the
+release attestation, signed by this repository's `release.yml` at the tag, names every one of
+them, with the release inventory as its predicate.
 
+```sh
+pip download hypertabular==<version> --no-deps -d .
+gh attestation verify hypertabular-<version>-*.whl --repo SkunkWerkx/HyperTabular \
+  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
 ```
-gh attestation verify hypertabular-<version>-*.whl --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+
+Each wheel also carries build provenance from where it was built, installed and attested:
+`hyper-build-wheels.yml` in `SkunkWerkx/.github`, at the preparation commit on master the
+release was prepared from (`release.yml` verifies each wheel against it before publishing it
+unchanged). That check names the signer, or uses `--owner` for both:
+
+```sh
+gh attestation verify hypertabular-<version>-*.whl \
+  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
+# or: gh attestation verify hypertabular-<version>-*.whl --owner SkunkWerkx
 ```
+
+Both are the GitHub/Sigstore transparency-log route, checked with `gh attestation verify`, the
+same route every other artifact in this project uses. Separately, PyPI itself holds a
+[PEP 740](https://peps.python.org/pep-0740/) publish attestation for every wheel, filed by
+`gh-action-pypi-publish` at publication and shown on each file's PyPI page, which PyPI-side
+tooling checks on its own. The root README's [Provenance](../README.md#provenance) section has
+the whole picture.
 
 ## License
 

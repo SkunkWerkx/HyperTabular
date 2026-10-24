@@ -15,7 +15,7 @@ languages:
 
 - Two provider archives each carried Rust's standard library, and two such archives cannot
   be linked into one program (`duplicate symbol: rust_eh_personality`). Each also carried
-  HyperCast's 22 C symbols, so neither linked beside `libhypercast.a` either
+  HyperCast's C symbols (22 of them at the time), so neither linked beside `libhypercast.a` either
   (`multiple definition of cast_bool`). That is every binding that links the core rather
   than loads it: Go, Swift, C# Native AOT.
 - The code a binding needs to read a batch — the plan, the verdicts, the column buffers —
