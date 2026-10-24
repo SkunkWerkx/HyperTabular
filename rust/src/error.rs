@@ -65,8 +65,13 @@ pub struct Failure {
 }
 
 /// What a structural failure is. The numbers are the core's failure codes.
+///
+/// A code the core gains later is a new variant, and until this binding knows it the code
+/// reads as [`Container`](FailureKind::Container), the most general refusal; a match outside
+/// this crate names a wildcard arm.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FailureKind {
     /// The input ended inside a quoted cell.
     UnclosedQuote = 1,

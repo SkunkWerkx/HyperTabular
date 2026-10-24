@@ -699,6 +699,7 @@ pub fn workbook_cases() -> Vec<Value> {
                         Format::Xlsx => "xlsx",
                         Format::Ods => "ods",
                         Format::Numbers => "numbers",
+                        other => panic!("format {other:?} has no corpus name"),
                     },
                     "epoch": book.date_system() as u32,
                     "sheets": sheets,

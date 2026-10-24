@@ -42,6 +42,10 @@ minor release can still break both, as 0.9.0 did.
 
 ### Changed
 
+- **`Format` and `FailureKind` are `#[non_exhaustive]`.** A format the core learns to read, or
+  a failure code it gains, is a new variant without a new major version once 1.0.0 is out; a
+  match outside the crate names a wildcard arm, and a code this binding does not know reads
+  as `Container`, as it already did. *(Rust)*
 - **C# — `HyperTabular.targets` no longer lists an `EmccExportedFunction` per export.** The
   `NativeFileReference` is the whole Blazor WebAssembly wiring: the SDK's generated pinvoke
   table calls each native function by symbol, so the link resolves them against the archive

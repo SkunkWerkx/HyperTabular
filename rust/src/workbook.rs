@@ -24,7 +24,11 @@ use std::borrow::Cow;
 use std::path::Path;
 
 /// Which kind of workbook a container holds — told by what is in it, never by its name.
+///
+/// A format the core learns to read later is a new variant, so a match outside this crate
+/// names a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     /// Office Open XML (`.xlsx`).
     Xlsx,
