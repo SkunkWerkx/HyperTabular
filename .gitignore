@@ -120,6 +120,8 @@ go/staticlib/*/*.a
 
 # What Windows attaches to a downloaded file, when the file is copied into WSL.
 *:Zone.Identifier
+# What Finder writes into any folder it opens.
+.DS_Store
 
 # The corpus copy test-apple-mobile stages for the Go suite in the iOS simulator
 # (go_ios_exec carries only the module's testdata), if made by hand.
