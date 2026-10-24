@@ -1889,7 +1889,7 @@ impl SheetInfo {
     }
 }
 
-/// An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
+/// An XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared strings and
 /// styles loaded: what a :class:`Sheet` reads from.
 ///
 /// ``Workbook(data)`` opens ``bytes``, or reads a binary file object — anything with
@@ -1997,6 +1997,7 @@ impl Workbook {
         let code = match self.book.format() {
             crate::Format::Xlsx => 1,
             crate::Format::Ods => 2,
+            crate::Format::Numbers => 3,
         };
         companions(py)?.workbook_format.bind(py).call1((code,))
     }

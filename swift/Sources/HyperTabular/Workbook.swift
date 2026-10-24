@@ -7,6 +7,8 @@ public enum WorkbookFormat: Equatable, Sendable {
     case xlsx
     /// OpenDocument: `.ods`.
     case ods
+    /// Apple Numbers: `.numbers`, each table a sheet.
+    case numbers
 }
 
 /// One sheet of a workbook, as ``Workbook/sheets`` lists it.
@@ -16,7 +18,7 @@ public struct SheetInfo: Equatable, Sendable {
     /// Whether the workbook hides the sheet.
     public let hidden: Bool
 
-    // What the core is given back to open it: the XLSX part, or the ODS table's index.
+    // What the core is given back to open it: the XLSX part, or the ODS or Numbers table's index.
     let part: [UInt8]
     let index: UInt32
 }
@@ -57,7 +59,7 @@ public struct NoSuchSheet: Error, Equatable, Sendable, CustomStringConvertible, 
     public var errorDescription: String? { description }
 }
 
-/// An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
+/// An XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared strings and
 /// styles loaded: what a ``Sheet`` reads from.
 ///
 /// ```swift
@@ -268,7 +270,12 @@ public final class Workbook {
                     preconditionFailure(Self.contractViolation)
                 }
             }
-            format = opened.format == 2 ? .ods : .xlsx
+            format =
+                switch opened.format {
+                case 2: .ods
+                case 3: .numbers
+                default: .xlsx
+                }
             guard let epoch = ExcelEpoch(rawValue: opened.epoch) else {
                 preconditionFailure(Self.contractViolation)
             }

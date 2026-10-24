@@ -139,7 +139,7 @@ module HyperTabular
           styles: :hypertabular_workbook_styles
         }.freeze
 
-        # :xlsx or :ods; the date system's code (1 for 1900, 2 for 1904); the sheets as
+        # :xlsx, :ods or :numbers; the date system's code (1 for 1900, 2 for 1904); the sheets as
         # [name, hidden, part, index]; the shared strings' bytes; the state template every
         # sheet copies; and the tables a sheet's calls are handed.
         attr_reader :format, :epoch, :sheets, :strings, :state, :tables, :container, :length
@@ -175,7 +175,7 @@ module HyperTabular
             format, epoch, strings_bytes, _count, needed, *failure = @out[0, OPENED_BYTES].unpack(OPENED)
             case code
             when OK
-              @format = format == 2 ? :ods : :xlsx
+              @format = { 2 => :ods, 3 => :numbers }.fetch(format, :xlsx)
               @epoch = epoch
               return strings_bytes
             when ERR_WINDOW then scratch.grow_window(needed)

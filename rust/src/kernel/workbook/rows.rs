@@ -1,4 +1,4 @@
-//! One sheet, read forward: the row readers of the two formats, the cursor that turns
+//! One sheet, read forward: the row readers of the three formats, the cursor that turns
 //! what they read into deliveries (empty rows, gaps in the row numbers, ODS's repeated
 //! rows), the header, and the fill that casts a batch of rows through the caller's plan.
 //!
@@ -11,6 +11,10 @@
 //! no style lookup — and the repeat discipline is calamine's: repeated *empty* cells and
 //! rows are never materialised beyond what the cursor is asked to deliver.
 //!
+//! **Numbers** is read by [`numbers::read_row`]: a table's tiles in order, each tile's
+//! rows as its storage holds them, each cell by its type and flags; a row the tile leaves
+//! out is a gap in the row numbers, as an XLSX row with no `<row>` is.
+//!
 //! Both readers are written a token at a time, with everything they know between tokens
 //! in the state block: a token is looked at, acted on, and only then stepped past, so a
 //! call that has to stop for room — in the window, the arena, the span table — stops with
@@ -18,20 +22,25 @@
 
 use super::book::is_table;
 use super::cell::{self, Cell, Stores, cast, error_code, parse_f64, render, wall_from_iso};
+use super::iwa::{self, Package};
+use super::numbers;
 use super::part::{Part, Reader, Stop};
 use super::xml::{self, Kind, Tag, Token, parse_u32, slice, unescape_into};
 use super::zip;
+use super::zip::Directory;
 use super::{
-    FORMAT_ODS, FORMAT_XLSX, Memory, OP_ROWS, OPENED, State, begin, failure, refuse, room, styles,
+    FORMAT_NUMBERS, FORMAT_ODS, FORMAT_XLSX, Memory, OP_ROWS, OPENED, State, begin, failure,
+    refuse, room, styles,
 };
 use crate::kernel::abi::{
     ColumnBuffer, ColumnSpec, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE, Failure, Filled, OK, Slot,
     Span,
 };
 use crate::kernel::door::Door;
+use crate::kernel::inflate::Inflate;
 use hypercast::ExcelEpoch;
 
-/// The widest sheet either format allows; an ODS repeat count is believed no further.
+/// The widest sheet any of the formats allows; an ODS repeat count is believed no further.
 const MAX_COLUMNS: u64 = 16_384;
 
 /// A header name that is not there: a column the header row has no cell in.
@@ -52,6 +61,8 @@ const O_SEEK: u32 = 10;
 const O_ROWS: u32 = 11;
 const O_CELLS: u32 = 12;
 const O_TEXT: u32 = 13;
+// Numbers: tiles, read by [`numbers::read_row`].
+const N_TILES: u32 = 20;
 
 // XLSX cell types (`t`).
 const T_NUMBER: u32 = 0;
@@ -80,11 +91,12 @@ const IN_STRING: u32 = 10;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Sheet {
-    /// Where the row reader is (`X_*`, `O_*`), and how deep in the element it is reading.
+    /// Where the row reader is (`X_*`, `O_*`, `N_*`), and how deep in the element it is
+    /// reading.
     mode: u32,
     depth: u32,
-    /// ODS: which table this sheet is, and how many have been passed.
-    table: u32,
+    /// ODS and Numbers: which table this sheet is; ODS, how many have been passed.
+    pub(super) table: u32,
     seen: u32,
     skip_empty: u32,
     header_pending: u32,
@@ -98,10 +110,10 @@ pub struct Sheet {
     /// A cell lies past the slots the caller gave.
     beyond: u32,
     // Row numbering, as the cursor keeps it.
-    next_number: u32,
-    number: u32,
-    gap: u32,
-    repeat: u32,
+    pub(super) next_number: u32,
+    pub(super) number: u32,
+    pub(super) gap: u32,
+    pub(super) repeat: u32,
     gap_left: u32,
     repeat_left: u32,
     current: u32,
@@ -111,7 +123,7 @@ pub struct Sheet {
     value_type: u32,
     value_present: u32,
     paragraphs: u32,
-    col: u64,
+    pub(super) col: u64,
     next_col: u64,
     cell_repeat: u64,
     pending: Slot,
@@ -133,6 +145,18 @@ pub struct Sheet {
     /// Rows written in the batch in progress.
     rows: u64,
     failure: Failure,
+    // Numbers: the tile being read — its ordinal among the table's, whether it has been
+    // found, its id and the rows a tile holds — where its object is, where in it the next
+    // row's info starts, and whether a row is half placed.
+    pub(super) n_tile: u32,
+    pub(super) n_located: u32,
+    pub(super) n_tileid: u32,
+    pub(super) n_tile_size: u32,
+    pub(super) n_mid: u32,
+    n_pad: u32,
+    pub(super) n_at: u64,
+    pub(super) n_offset: u64,
+    pub(super) n_pos: u64,
 }
 
 /// What to do with the token just handled.
@@ -148,17 +172,33 @@ enum Step {
 }
 
 /// A sheet read in progress: the state, and the caller's memory for this call.
-struct Run<'a> {
-    sheet: &'a mut Sheet,
+pub(super) struct Run<'a> {
+    pub(super) sheet: &'a mut Sheet,
     arena: &'a mut [u8],
     row: &'a mut [Slot],
     /// The header's names, when a header is what is being read.
     names: Option<&'a mut [Span]>,
     strings: &'a [u8],
-    table: &'a [Span],
+    pub(super) table: &'a [Span],
     kinds: &'a [u8],
     system: ExcelEpoch,
     xlsx: bool,
+}
+
+/// Where the rows come from: a part's XML, tokenized, or a Numbers package's objects.
+pub(super) enum Source<'a> {
+    Xml(Reader<'a>),
+    Iwa(Package<'a>, Part),
+}
+
+impl Source<'_> {
+    /// The part a failure is placed in.
+    fn part(&self) -> &Part {
+        match self {
+            Source::Xml(reader) => reader.part,
+            Source::Iwa(_, part) => part,
+        }
+    }
 }
 
 fn broken(part: &Part, inside: u32) -> Stop {
@@ -167,7 +207,7 @@ fn broken(part: &Part, inside: u32) -> Stop {
 
 impl Run<'_> {
     /// Starts a row: no cells, and its text begins where the arena now ends.
-    fn clear_row(&mut self) {
+    pub(super) fn clear_row(&mut self) {
         let extent = usize::try_from(self.sheet.extent).unwrap_or(usize::MAX);
         for slot in self.row.iter_mut().take(extent) {
             *slot = Slot::EMPTY;
@@ -181,7 +221,13 @@ impl Run<'_> {
 
     /// Puts `slot` in `count` columns from `col`: in the row's slots as far as the caller
     /// gave any, and — when a header is being read — as text in the name table.
-    fn place(&mut self, col: u64, count: u64, slot: Slot, part: &Part) -> Result<(), Stop> {
+    pub(super) fn place(
+        &mut self,
+        col: u64,
+        count: u64,
+        slot: Slot,
+        part: &Part,
+    ) -> Result<(), Stop> {
         let end = col.saturating_add(count);
         let empty = slot.is_empty();
         if let Some(names) = self.names.as_deref_mut() {
@@ -739,7 +785,11 @@ impl Run<'_> {
     }
 
     /// Reads the next row into the slots. False when the sheet has no more.
-    fn read_row(&mut self, reader: &mut Reader<'_>) -> Result<bool, Stop> {
+    fn read_row(&mut self, source: &mut Source<'_>) -> Result<bool, Stop> {
+        let reader = match source {
+            Source::Xml(reader) => reader,
+            Source::Iwa(package, part) => return numbers::read_row(self, package, part),
+        };
         loop {
             let token = reader.peek()?;
             let step = if self.xlsx {
@@ -761,7 +811,7 @@ impl Run<'_> {
 
     /// Moves to the next row to deliver: an empty one out of a gap, the stored row once
     /// more out of a repeat, or a row newly read. False at the end of the sheet.
-    fn deliver(&mut self, reader: &mut Reader<'_>) -> Result<bool, Stop> {
+    fn deliver(&mut self, source: &mut Source<'_>) -> Result<bool, Stop> {
         loop {
             let sheet = &mut *self.sheet;
             if sheet.gap_left > 0 || sheet.repeat_left > 0 {
@@ -777,7 +827,7 @@ impl Run<'_> {
             if sheet.done != 0 {
                 return Ok(false);
             }
-            if !self.read_row(reader)? {
+            if !self.read_row(source)? {
                 self.sheet.done = 1;
                 return Ok(false);
             }
@@ -893,8 +943,39 @@ fn fail(sheet: &mut Sheet, stop: Stop) -> Stop {
     stop
 }
 
+/// The source of a sheet's rows, over the state's decoder and the caller's window: the
+/// state's parts that the source and the row reader each want, kept apart.
+struct Parts<'a> {
+    part: &'a mut Part,
+    inflate: &'a mut Inflate,
+    cache: &'a mut iwa::Cache,
+    directory: Directory,
+    format: u32,
+}
+
+fn source<'a>(parts: Parts<'a>, container: &'a [u8], window: &'a mut [u8]) -> Source<'a> {
+    if parts.format == FORMAT_NUMBERS {
+        return Source::Iwa(
+            Package {
+                container,
+                directory: parts.directory,
+                inflate: parts.inflate,
+                window,
+                cache: parts.cache,
+            },
+            *parts.part,
+        );
+    }
+    Source::Xml(Reader {
+        part: parts.part,
+        inflate: parts.inflate,
+        container,
+        window,
+    })
+}
+
 /// Positions a read at the start of a sheet: for XLSX the part `sheets` named it by, for
-/// ODS the table at `index`. `has_header` makes the first row delivered the header, which
+/// ODS the table at `index`, for Numbers the table at `index` of its listing. `has_header` makes the first row delivered the header, which
 /// [`header`] then has to be asked for before any [`fill`]; `skip_empty_rows` leaves out
 /// rows with no cell in them, and the rows a gap in the numbering stands for.
 ///
@@ -915,15 +996,23 @@ pub fn sheet(
     }
     state.op = OP_ROWS;
     state.phase = 0;
-    let xlsx = state.format == FORMAT_XLSX;
     state.rows = Sheet {
-        mode: if xlsx { X_PREAMBLE } else { O_SEEK },
+        mode: match state.format {
+            FORMAT_XLSX => X_PREAMBLE,
+            FORMAT_NUMBERS => N_TILES,
+            _ => O_SEEK,
+        },
         table: index,
         skip_empty: u32::from(skip_empty_rows),
         header_pending: u32::from(has_header),
         next_number: 1,
         ..Sheet::default()
     };
+    if state.format == FORMAT_NUMBERS {
+        // The tiles are found through the strings table when the rows are read.
+        state.part.begin_empty(Failure::PART_IWA);
+        return OK;
+    }
     let directory = state.directory;
     let mut reader = Reader {
         part: &mut state.part,
@@ -984,12 +1073,14 @@ pub fn header(
     if state.rows.header_pending == 0 {
         return OK;
     }
-    let mut reader = Reader {
+    let parts = Parts {
         part: &mut state.part,
         inflate: &mut state.inflate,
-        container,
-        window: &mut *memory.window,
+        cache: &mut state.cache,
+        directory: state.directory,
+        format: state.format,
     };
+    let mut source = source(parts, container, memory.window);
     let mut run = Run {
         sheet: &mut state.rows,
         arena: &mut *memory.arena,
@@ -1004,7 +1095,7 @@ pub fn header(
         },
         xlsx: state.format == FORMAT_XLSX,
     };
-    let delivered = run.deliver(&mut reader);
+    let delivered = run.deliver(&mut source);
     let sheet = &mut state.rows;
     out.arena_used = sheet.used;
     match delivered {
@@ -1086,12 +1177,15 @@ pub unsafe fn fill(
         return ERR_CELLS;
     }
     let system = state.system();
-    let mut reader = Reader {
+    let parts = Parts {
         part: &mut state.part,
         inflate: &mut state.inflate,
-        container,
-        window: &mut *memory.window,
+        cache: &mut state.cache,
+        directory: state.directory,
+        format: state.format,
     };
+    let xlsx = state.format == FORMAT_XLSX;
+    let mut source = source(parts, container, memory.window);
     let sheet = &mut state.rows;
     if sheet.mid == 0 {
         // A new batch: the arena starts over, but for the text of a row that is still to
@@ -1131,14 +1225,14 @@ pub unsafe fn fill(
         table: memory.table,
         kinds: memory.kinds,
         system,
-        xlsx: state.format == FORMAT_XLSX,
+        xlsx,
     };
     let result = loop {
         if run.sheet.rows as usize >= max_rows {
             break Ok(());
         }
         if run.sheet.writing == 0 {
-            match run.deliver(&mut reader) {
+            match run.deliver(&mut source) {
                 Ok(true) => {
                     run.sheet.writing = 1;
                     run.sheet.mark = run.sheet.used;
@@ -1151,7 +1245,7 @@ pub unsafe fn fill(
             run.sheet.used = run.sheet.mark;
         }
         // SAFETY: the caller's contract; `rows` is below `max_rows`.
-        match unsafe { run.write(specs, columns, memory.cells, reader.part) } {
+        match unsafe { run.write(specs, columns, memory.cells, source.part()) } {
             Ok(()) => {
                 run.sheet.writing = 0;
                 run.sheet.rows += 1;

@@ -133,9 +133,11 @@ final class WorkbookCorpusTest {
             for (Map.Entry<String, Supplier<Workbook>> opening : openings.entrySet()) {
                 try (Workbook book = opening.getValue().get()) {
                     assertEquals(
-                            vector.get("format").getAsString().equals("xlsx")
-                                    ? WorkbookFormat.XLSX
-                                    : WorkbookFormat.ODS,
+                            switch (vector.get("format").getAsString()) {
+                                case "xlsx" -> WorkbookFormat.XLSX;
+                                case "numbers" -> WorkbookFormat.NUMBERS;
+                                default -> WorkbookFormat.ODS;
+                            },
                             book.format(),
                             name);
                     assertEquals(ExcelEpoch.values()[vector.get("epoch").getAsInt() - 1], book.dateSystem(), name);

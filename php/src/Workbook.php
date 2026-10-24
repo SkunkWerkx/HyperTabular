@@ -9,7 +9,7 @@ use FFI\CData;
 use HyperCast\ExcelEpoch;
 
 /**
- * An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
+ * An XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared strings and
  * styles loaded: what a {@see Sheet} reads from.
  *
  * ```php
@@ -229,7 +229,7 @@ final class Workbook
     /**
      * Which kind of workbook this is.
      *
-     * @return WorkbookFormat XLSX or ODS
+     * @return WorkbookFormat XLSX, ODS or Numbers
      */
     public function format(): WorkbookFormat
     {

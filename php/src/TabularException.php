@@ -56,10 +56,12 @@ final class TabularException extends \RuntimeException
             TabularFailure::MissingPart => "Part {$record}, which the workbook cannot be read without, is missing.",
             TabularFailure::Xml => "Part {$record} of the workbook ends inside an XML construct (byte {$byte}).",
             TabularFailure::Deflate => "Part {$record} of the workbook is not a whole deflate stream (byte {$byte}).",
-            TabularFailure::NotAWorkbook => 'The zip is neither an XLSX nor an ODS workbook.',
+            TabularFailure::NotAWorkbook => 'The zip is not an XLSX, ODS or Numbers workbook.',
             TabularFailure::SharedString =>
                 "Row {$recordLine} names shared string {$found}; the table has {$expected}.",
             TabularFailure::TooLarge => 'The workbook holds more text than a batch can address.',
+            TabularFailure::Iwa =>
+                "Part {$record} of the Numbers document is not what the IWA packaging says (byte {$byte}, detail {$found}).",
         });
     }
 

@@ -23,7 +23,7 @@ module HyperTabular
     KINDS = {
       1 => :unclosed_quote, 2 => :column_count, 3 => :row_too_long, 16 => :not_a_zip, 17 => :container,
       18 => :encrypted, 19 => :method, 20 => :missing_part, 21 => :xml, 22 => :deflate,
-      23 => :not_a_workbook, 24 => :shared_string, 25 => :too_large
+      23 => :not_a_workbook, 24 => :shared_string, 25 => :too_large, 26 => :iwa
     }.freeze
 
     # What is wrong: :unclosed_quote (the input ended inside a quoted cell), :column_count
@@ -32,7 +32,11 @@ module HyperTabular
     # :container (the zip's own structure is broken), :encrypted, :method (a part is
     # compressed by neither stored nor deflate), :missing_part, :xml (a part ends inside an
     # XML construct), :deflate (a part is not a whole deflate stream), :not_a_workbook,
-    # :shared_string (a cell names a shared string the table does not have) or :too_large.
+    # :shared_string (a cell names a shared string the table does not have), :too_large or
+    # :iwa (a Numbers part is not what the IWA packaging says: found is 1 for a broken chunk
+    # or Snappy block, 2 for a malformed message, 3 for an object a reference names that is
+    # not there, expected its identifier, 4 for cell storage of a version the core does not
+    # read, expected the version).
     attr_reader :kind
 
     # Zero-based index of the offending record — the header and skipped blank lines
@@ -89,9 +93,11 @@ module HyperTabular
       when :missing_part then "Part #{record}, which the workbook cannot be read without, is missing."
       when :xml then "Part #{record} of the workbook ends inside an XML construct (byte #{byte})."
       when :deflate then "Part #{record} of the workbook is not a whole deflate stream (byte #{byte})."
-      when :not_a_workbook then "The zip is neither an XLSX nor an ODS workbook."
+      when :not_a_workbook then "The zip is not an XLSX, ODS or Numbers workbook."
       when :shared_string then "Row #{line} names shared string #{found}; the table has #{expected}."
       when :too_large then "The workbook holds more text than a batch can address."
+      when :iwa
+        "Part #{record} of the Numbers document is not what the IWA packaging says (byte #{byte}, detail #{found})."
       else "The workbook's zip structure is broken."
       end
     end

@@ -27,13 +27,18 @@ const (
 	XML FailureKind = 21
 	// Deflate means a part's bytes are not a deflate stream, or stop before the stream does.
 	Deflate FailureKind = 22
-	// NotAWorkbook means the zip is neither an XLSX nor an ODS workbook.
+	// NotAWorkbook means the zip is not an XLSX, ODS or Numbers workbook.
 	NotAWorkbook FailureKind = 23
 	// SharedString means a cell names a shared string the table does not have.
 	SharedString FailureKind = 24
 	// TooLarge means more text than can be addressed: over 4 GiB in a batch or in the
 	// shared strings, or 2 GiB in a cell.
 	TooLarge FailureKind = 25
+	// IWA means a Numbers part is not what the IWA packaging says: Found is 1 for a broken
+	// chunk or Snappy block, 2 for a malformed message, 3 for an object a reference names
+	// that is not there (Expected is its identifier), 4 for cell storage of a version the
+	// core does not read (Expected is the version).
+	IWA FailureKind = 26
 )
 
 var failureNames = map[FailureKind]string{
@@ -50,6 +55,7 @@ var failureNames = map[FailureKind]string{
 	NotAWorkbook:  "not a workbook",
 	SharedString:  "shared string",
 	TooLarge:      "too large",
+	IWA:           "iwa",
 }
 
 // String names the kind in lower case — "unclosed quote", "column count", "not a zip".
@@ -112,11 +118,14 @@ func (f *Failure) Error() string {
 	case Deflate:
 		return fmt.Sprintf("hypertabular: part %d of the workbook is not a whole deflate stream (byte %d)", f.Record, f.Byte)
 	case NotAWorkbook:
-		return "hypertabular: the zip is neither an XLSX nor an ODS workbook"
+		return "hypertabular: the zip is not an XLSX, ODS or Numbers workbook"
 	case SharedString:
 		return fmt.Sprintf("hypertabular: row %d names shared string %d; the table has %d", f.Line, f.Found, f.Expected)
 	case TooLarge:
 		return "hypertabular: the workbook holds more text than a batch can address"
+	case IWA:
+		return fmt.Sprintf("hypertabular: part %d of the Numbers document is not what the IWA packaging says (byte %d, detail %d)",
+			f.Record, f.Byte, f.Found)
 	default:
 		return "hypertabular: the workbook's zip structure is broken"
 	}

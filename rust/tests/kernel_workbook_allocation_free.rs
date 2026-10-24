@@ -1,5 +1,5 @@
 //! The workbook core's allocation story, which is the delimited core's: it has none. A
-//! counting allocator watches whole workbooks go through it — XLSX and ODS, deflated,
+//! counting allocator watches whole workbooks go through it — XLSX, ODS and Numbers, deflated,
 //! opened, their sheets listed, their strings and styles loaded, every sheet read through
 //! every door, and one that breaks part-way — and the count is nothing at all: every byte
 //! the core touched was handed to it.
@@ -186,6 +186,7 @@ fn allocation_free() {
     let xlsx = packages::xlsx_generated(5, 400, u64::from(WIDTH), true);
     let stored = packages::xlsx_generated(6, 400, u64::from(WIDTH), false);
     let ods = packages::ods_generated(5, 300, u64::from(WIDTH), true);
+    let numbers = packages::numbers_generated(5, 300, u64::from(WIDTH), true);
     let mut sheet = packages::xlsx_sheet(9, 200, u64::from(WIDTH));
     sheet.push_str("<row><c t=\"s\"><v>99</v></c></row>");
     let broken = packages::xlsx(&[("Data", &sheet)], packages::SHARED, false, true);
@@ -216,12 +217,16 @@ fn allocation_free() {
     let (xlsx_rows, xlsx_failure) = room.read(&xlsx, &specs, &columns);
     let (stored_rows, stored_failure) = room.read(&stored, &specs, &columns);
     let (ods_rows, ods_failure) = room.read(&ods, &specs, &columns);
+    let (numbers_rows, numbers_failure) = room.read(&numbers, &specs, &columns);
     let (broken_rows, broken_failure) = room.read(&broken, &specs, &columns);
     let allocations = ALLOC_COUNT.load(Ordering::SeqCst) - before;
 
     assert_eq!(allocations, 0, "the workbook core allocated");
-    assert!(xlsx_rows > 400 && stored_rows > 400 && ods_rows > 300);
-    assert_eq!((xlsx_failure, stored_failure, ods_failure), (0, 0, 0));
+    assert!(xlsx_rows > 400 && stored_rows > 400 && ods_rows > 300 && numbers_rows > 300);
+    assert_eq!(
+        (xlsx_failure, stored_failure, ods_failure, numbers_failure),
+        (0, 0, 0, 0)
+    );
     assert!(broken_rows > 100);
     assert_eq!(broken_failure, Failure::SHARED_STRING);
 }

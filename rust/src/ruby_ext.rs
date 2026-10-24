@@ -36,7 +36,7 @@ use crate::kernel::abi::{
 use crate::kernel::delimited::fill::{self, RawDialect, State};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
-use crate::kernel::workbook::{FORMAT_ODS, Memory, State as Book, book, rows};
+use crate::kernel::workbook::{FORMAT_NUMBERS, FORMAT_ODS, Memory, State as Book, book, rows};
 use hypercast::{CivilDateTime, Date, Decimal, Duration, RawNumFormat, Timestamp};
 
 // The gem unpacks every array this extension hands it with little-endian directives (`L<`,
@@ -707,7 +707,7 @@ fn settle(ruby: &Ruby, code: i32, out: &Filled) -> Result<(), Error> {
 struct Opened {
     container: Opaque<RString>,
     state: Box<Book>,
-    ods: bool,
+    format: u32,
     epoch: u32,
     sheets: Opaque<RArray>,
     strings: Opaque<RString>,
@@ -805,7 +805,7 @@ impl Opened {
         Ok(ruby.obj_wrap(Opened {
             container: Opaque::from(container),
             state,
-            ods: found.format == FORMAT_ODS,
+            format: found.format,
             epoch: found.epoch,
             sheets: Opaque::from(sheets),
             strings: Opaque::from(utf8_frozen(ruby, &strings_bytes)),
@@ -836,7 +836,11 @@ impl Opened {
     }
 
     fn format(ruby: &Ruby, rb_self: &Self) -> magnus::Symbol {
-        ruby.to_symbol(if rb_self.ods { "ods" } else { "xlsx" })
+        ruby.to_symbol(match rb_self.format {
+            FORMAT_ODS => "ods",
+            FORMAT_NUMBERS => "numbers",
+            _ => "xlsx",
+        })
     }
 
     fn epoch(&self) -> u32 {

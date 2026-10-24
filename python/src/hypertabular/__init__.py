@@ -1,5 +1,5 @@
-"""Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and
-ODS — read a batch at a time into typed columns, with a
+"""Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX, ODS
+and Numbers — read a batch at a time into typed columns, with a
 `HyperCast <https://github.com/SkunkWerkx/HyperCast>`_ verdict for every cell.
 
 The native core owns no memory and reads no files. It is linked straight into a CPython
@@ -181,12 +181,17 @@ class TabularFailure(IntEnum):
     DEFLATE = 22
     """A part's bytes are not a deflate stream, or stop before the stream does."""
     NOT_A_WORKBOOK = 23
-    """The zip is neither an XLSX nor an ODS workbook."""
+    """The zip is not an XLSX, ODS or Numbers workbook."""
     SHARED_STRING = 24
     """A cell names a shared string the table does not have."""
     TOO_LARGE = 25
     """More text than can be addressed: over 4 GiB in a batch or in the shared strings, or
     2 GiB in a cell."""
+    IWA = 26
+    """A Numbers part is not what the IWA packaging says: ``found`` is 1 for a broken chunk
+    or Snappy block, 2 for a malformed message, 3 for an object a reference names that is
+    not there (``expected`` is its identifier), 4 for cell storage of a version the core
+    does not read (``expected`` is the version)."""
 
 
 class WorkbookFormat(IntEnum):
@@ -196,6 +201,8 @@ class WorkbookFormat(IntEnum):
     """Office Open XML: ``.xlsx``, ``.xlsm``."""
     ODS = 2
     """OpenDocument: ``.ods``."""
+    NUMBERS = 3
+    """Apple Numbers: ``.numbers``, each table a sheet."""
 
 
 class TabularError(Exception):
@@ -266,11 +273,16 @@ class TabularError(Exception):
             case TabularFailure.DEFLATE:
                 return f"{part} is not a whole deflate stream (byte {self.byte})"
             case TabularFailure.NOT_A_WORKBOOK:
-                return "the zip is neither an XLSX nor an ODS workbook"
+                return "the zip is not an XLSX, ODS or Numbers workbook"
             case TabularFailure.SHARED_STRING:
                 return f"row {self.line} names shared string {self.found}; the table has {self.expected}"
             case TabularFailure.TOO_LARGE:
                 return "the workbook holds more text than a batch can address"
+            case TabularFailure.IWA:
+                return (
+                    f"{part} of the Numbers document is not what the IWA packaging says"
+                    f" (byte {self.byte}, detail {self.found})"
+                )
             case _:
                 return "the workbook's zip structure is broken"
 

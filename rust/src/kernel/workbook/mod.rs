@@ -1,4 +1,4 @@
-//! The workbook core: XLSX and ODS read out of a container the caller holds, into memory
+//! The workbook core: XLSX, ODS and Numbers read out of a container the caller holds, into memory
 //! the caller holds.
 //!
 //! The container is bytes — a file the binding read or mapped. The core walks its zip
@@ -28,9 +28,13 @@
 
 pub mod book;
 pub mod cell;
+pub mod iwa;
 pub mod number;
+pub mod numbers;
 pub mod part;
+pub mod proto;
 pub mod rows;
+pub mod snappy;
 pub mod sort;
 pub mod styles;
 pub mod xml;
@@ -48,6 +52,8 @@ use zip::Directory;
 pub const FORMAT_XLSX: u32 = 1;
 /// An ODS workbook.
 pub const FORMAT_ODS: u32 = 2;
+/// An Apple Numbers document.
+pub const FORMAT_NUMBERS: u32 = 3;
 
 /// What a state block that [`book::open`] finished carries; anything else is not a
 /// workbook's state.
@@ -87,6 +93,8 @@ pub struct State {
     extra: u64,
     used: u64,
     mark: u64,
+    /// Numbers: which chunks of which part the window holds.
+    cache: iwa::Cache,
     rows: rows::Sheet,
 }
 
@@ -122,6 +130,7 @@ impl State {
             extra: 0,
             used: 0,
             mark: 0,
+            cache: iwa::Cache::default(),
             rows: rows::Sheet::default(),
         }
     }

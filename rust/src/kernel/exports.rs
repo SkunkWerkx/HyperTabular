@@ -374,8 +374,8 @@ export! {
 
 export! {
     /// Positions the state on one sheet: the XLSX part named by the `part_len` bytes at
-    /// `part`, or the ODS table at `index` — both as `hypertabular_workbook_sheets` listed
-    /// them. See [`rows::sheet`].
+    /// `part`, or the ODS or Numbers table at `index` — both as `hypertabular_workbook_sheets`
+    /// listed them. See [`rows::sheet`].
     ///
     /// # Safety
     /// `state` was opened by `hypertabular_workbook_open` over these same `container`

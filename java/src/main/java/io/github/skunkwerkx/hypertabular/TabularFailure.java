@@ -22,12 +22,18 @@ public enum TabularFailure {
     XML(21),
     /** A part's bytes are not a deflate stream, or stop before the stream does. */
     DEFLATE(22),
-    /** The container is a zip but neither an XLSX nor an ODS workbook. */
+    /** The container is a zip but not an XLSX, ODS or Numbers workbook. */
     NOT_A_WORKBOOK(23),
     /** A cell names a shared string that is not in the table. */
     SHARED_STRING(24),
     /** More text than can be addressed: over 4 GiB in a batch or in the shared strings, or 2 GiB in a cell. */
-    TOO_LARGE(25);
+    TOO_LARGE(25),
+    /**
+     * A Numbers part is not what the IWA packaging says: {@code found} is 1 for a broken chunk or Snappy block, 2 for a
+     * malformed message, 3 for an object a reference names that is not there ({@code expected} is its identifier), 4
+     * for cell storage of a version the core does not read ({@code expected} is the version).
+     */
+    IWA(26);
 
     private final int code;
 

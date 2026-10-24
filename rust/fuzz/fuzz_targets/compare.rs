@@ -35,7 +35,7 @@ pub fn compare(container: &[u8], options: SheetOptions, width: u32, max_rows: us
         }
         (ours, theirs) => panic!("stingy says {ours:?} and roomy says {theirs:?}"),
     };
-    assert!(opened.format == 1 || opened.format == 2);
+    assert!((1..=3).contains(&opened.format), "format {}", opened.format);
     assert_eq!(
         (&stingy.strings, &stingy.table, &stingy.kinds),
         (&roomy.strings, &roomy.table, &roomy.kinds)

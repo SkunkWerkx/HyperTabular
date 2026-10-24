@@ -1,4 +1,4 @@
-//! A workbook container, any bytes: XLSX or ODS, through the zip directory, inflate, the
+//! A workbook container, any bytes: XLSX, ODS or Numbers, through the zip directory, inflate, the
 //! package's relationships, the shared strings, the styles and every sheet, every door
 //! over every source column. The core must never panic, never stall, never ask for room
 //! it does not need, and must read the same with buffers that start empty as with room to

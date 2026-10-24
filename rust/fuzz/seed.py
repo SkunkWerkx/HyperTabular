@@ -9,6 +9,7 @@ import base64
 import hashlib
 import json
 import pathlib
+import struct
 import zlib
 
 here = pathlib.Path(__file__).resolve().parent
@@ -36,7 +37,7 @@ for case in json.loads((repo / "corpus/delimited.json").read_text()):
 
 # Workbooks: every package under 20 KB, whole, behind the two selector bytes.
 for path in sorted((repo / "corpus/workbook").iterdir()):
-    if path.suffix in (".xlsx", ".xlsm", ".ods") and path.stat().st_size < 20_000:
+    if path.suffix in (".xlsx", ".xlsm", ".ods", ".numbers") and path.stat().st_size < 20_000:
         write("workbook", bytes([0x01, 0x47]) + path.read_bytes())
         write("workbook", bytes([0x02, 0xA0]) + path.read_bytes())
 
@@ -66,3 +67,20 @@ for text in [b"", b"a", b"abc" * 1000, (repo / "corpus/delimited.json").read_byt
         compressor = zlib.compressobj(level, zlib.DEFLATED, -15)
         stream = compressor.compress(text) + compressor.flush()
         write("inflate", bytes([0x13]) + stream)
+
+# IWA: a tile row's cells in v5 storage — a number as a 128-bit decimal, a text, a date —
+# with their offsets, and the same row as a whole tile payload.
+def cell(kind, flags, payload):
+    return bytes([5, kind, 0, 0, 0, 0, 0, 0]) + flags.to_bytes(4, "little") + payload
+
+number = cell(2, 0x1, (15).to_bytes(14, "little") + bytes([0x40, 0x30]))  # 15, exponent 0
+text = cell(3, 0x8, (1).to_bytes(4, "little"))
+date = cell(5, 0x4 | 0x8000, struct.pack("<d", 728389800.0) + (1).to_bytes(4, "little"))
+storage = number + text + date
+offsets = b"".join(n.to_bytes(2, "little", signed=True) for n in (0, len(number), len(number) + len(text)))
+for sel in (0x01, 0x03, 0x05, 0x19, 0x61):
+    write("iwa", bytes([sel]) + storage + b"\x00" + offsets)
+row = b"\x08\x00\x10\x03\x28\x05\x32" + bytes([len(storage)]) + storage + b"\x3a" + bytes([len(offsets)]) + offsets
+tile = b"\x2a" + bytes([len(row)]) + row
+for sel in (0x00, 0x02, 0x04, 0x18, 0x60):
+    write("iwa", bytes([sel]) + tile)

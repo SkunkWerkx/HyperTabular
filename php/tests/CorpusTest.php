@@ -277,7 +277,11 @@ final class CorpusTest extends TestCase
         $name = $case['sheets'][$index]['name'];
         foreach ($openings as $source => $open) {
             $book = $open();
-            $this->assertSame(WorkbookFormat::from($case['format'] === 'xlsx' ? 1 : 2), $book->format());
+            $this->assertSame(match ($case['format']) {
+                'xlsx' => WorkbookFormat::Xlsx,
+                'numbers' => WorkbookFormat::Numbers,
+                default => WorkbookFormat::Ods,
+            }, $book->format());
             $this->assertSame(ExcelEpoch::from($case['epoch']), $book->dateSystem());
             $this->assertSame(
                 array_map(static fn (array $sheet): array => [$sheet['name'], $sheet['hidden']], $case['sheets']),

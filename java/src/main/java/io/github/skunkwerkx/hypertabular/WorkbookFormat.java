@@ -5,5 +5,7 @@ public enum WorkbookFormat {
     /** Office Open XML ({@code .xlsx}). */
     XLSX,
     /** OpenDocument ({@code .ods}). */
-    ODS
+    ODS,
+    /** Apple Numbers ({@code .numbers}), each table a sheet. */
+    NUMBERS
 }

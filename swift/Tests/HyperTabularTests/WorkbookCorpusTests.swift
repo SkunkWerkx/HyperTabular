@@ -100,7 +100,13 @@ extension CorpusTests {
                 cells += rows.count * plan.count
                 for (source, open) in openings {
                     let book = try open()
-                    XCTAssertEqual(book.format, vector.format == "xlsx" ? .xlsx : .ods, vector.name)
+                    let format: WorkbookFormat =
+                        switch vector.format {
+                        case "xlsx": .xlsx
+                        case "numbers": .numbers
+                        default: .ods
+                        }
+                    XCTAssertEqual(book.format, format, vector.name)
                     XCTAssertEqual(book.dateSystem, vector.epoch == 2 ? .y1904 : .y1900, vector.name)
                     XCTAssertEqual(book.sheets.map(\.name), sheets.map(\.name), vector.name)
                     XCTAssertEqual(book.sheets.map(\.hidden), sheets.map(\.hidden), vector.name)

@@ -19,7 +19,7 @@ module HyperTabular
   # A header, empty rows skipped, DelimitedReader::DEFAULT_BATCH_ROWS rows a batch.
   SheetOptions::DEFAULT = SheetOptions.new
 
-  # An XLSX or ODS workbook held in memory, its sheets listed and its shared strings and
+  # An XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared strings and
   # styles loaded: what a Sheet reads from.
   #
   #   book = HyperTabular::Workbook.open("orders.xlsx")
@@ -64,7 +64,7 @@ module HyperTabular
     # (chart sheets, macro sheets) are not among them.
     attr_reader :sheets
 
-    # Which kind of workbook this is: :xlsx or :ods.
+    # Which kind of workbook this is: :xlsx, :ods or :numbers.
     def format
       @book.format
     end

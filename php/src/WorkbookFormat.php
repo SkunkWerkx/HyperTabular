@@ -14,4 +14,7 @@ enum WorkbookFormat: int
 
     /** OpenDocument: .ods. */
     case Ods = 2;
+
+    /** Apple Numbers: .numbers, each table a sheet. */
+    case Numbers = 3;
 }

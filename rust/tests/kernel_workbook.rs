@@ -15,10 +15,14 @@ mod packages;
 mod support;
 
 use hypertabular::kernel::abi::{ColumnSpec, Failure};
+use hypertabular::kernel::workbook::iwa::{BROKEN_CHUNK, MISSING_OBJECT, STORAGE_VERSION};
 use hypertabular::kernel::workbook::number::{Text, parse_f64};
 use hypertabular::kernel::workbook::part::WINDOW_MIN;
 use hypertabular::workbook::SheetOptions;
-use packages::{Rng, build, ods, ods_generated, ods_table, xlsx, xlsx_generated, xlsx_sheet};
+use packages::{
+    NCell, NSheet, NTable, NumbersShape, Rng, build, numbers, numbers_generated, ods,
+    ods_generated, ods_table, xlsx, xlsx_generated, xlsx_sheet,
+};
 use std::path::PathBuf;
 use support::{Harness, Sizing, compare, compare_plan, every_door};
 
@@ -87,7 +91,7 @@ fn the_corpus_packages_read_the_same_however_little_room_they_have() {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
-        if !matches!(extension, "xlsx" | "xlsm" | "ods") {
+        if !matches!(extension, "xlsx" | "xlsm" | "ods" | "numbers") {
             continue;
         }
         let name = path
@@ -115,6 +119,364 @@ fn the_corpus_packages_read_the_same_however_little_room_they_have() {
         seen += 1;
     }
     assert!(seen >= 3, "{seen} fixtures read");
+}
+
+#[test]
+fn generated_numbers_reads_the_same_however_little_room_it_has() {
+    let mut refusals = 0;
+    let mut rows = 0;
+    // The seed picks the layout: every one of them, deflated and stored.
+    for seed in 1..=12u64 {
+        for deflate in [false, true] {
+            let package = numbers_generated(seed, 40, 5, deflate);
+            for (index, options) in options().into_iter().enumerate() {
+                let max_rows = [1, 7, 1000][(seed as usize + index) % 3];
+                let stingy = compare(&package, options, 5, max_rows);
+                refusals += stingy.0;
+                rows += stingy.1;
+            }
+        }
+    }
+    assert!(
+        refusals > 1_000,
+        "the stingy reads were refused {refusals} times"
+    );
+    assert!(rows > 5_000, "{rows} rows compared");
+}
+
+/// The cells of a Numbers table, as the Rust binding reads them, whatever the package's
+/// layout: the same text out of a stored package in one chunk, a deflated one in chunks of
+/// a few bytes with wide offsets and a segmented string list, and one of two-row tiles that
+/// leaves its empty rows out. A text cell whose string is empty is an empty cell, as an
+/// empty inline string is in XLSX.
+#[test]
+fn numbers_cells_are_read_as_written() {
+    use NCell::{Bool, Currency, Date, Duration, Empty, Error, Merged, Number, Rich, Text};
+    use hypertabular::{Column, Workbook};
+    let text = |s: &str| Text(s.to_string());
+    // 2024-01-31T10:30:00Z and 2024-01-31T00:00:00Z, in seconds since 2001-01-01.
+    let (morning, midnight) = (728_389_800.0, 728_352_000.0);
+    let rows = vec![
+        vec![
+            text("id"),
+            text("num"),
+            text("txt"),
+            text("when"),
+            text("flag"),
+            text("span"),
+            text("odd"),
+        ],
+        vec![
+            Number(1.0),
+            Number(2.5),
+            text("alice"),
+            Date(morning, false),
+            Bool(true),
+            Duration(90.5),
+            Error,
+        ],
+        vec![
+            Number(2.0),
+            Number(-7.0),
+            Rich("plain bold tail".to_string()),
+            Date(37_800.0, true),
+            Bool(false),
+            Duration(-3661.0),
+            Merged,
+        ],
+        vec![
+            Number(3.0),
+            Number(1e15),
+            text("日本語 é 🙂"),
+            Date(midnight, false),
+            Empty,
+            Currency(12.34),
+            Empty,
+        ],
+        vec![Empty; 7],
+        vec![
+            Number(4.0),
+            Number(1e-7),
+            text(""),
+            Date(-1.0, false),
+            Bool(true),
+            Duration(0.0),
+            text("x <&> \"y\""),
+        ],
+    ];
+    let sheets = vec![
+        NSheet {
+            name: "Data".to_string(),
+            hidden: false,
+            tables: vec![NTable {
+                name: "Table 1".to_string(),
+                header_rows: 1,
+                rows,
+            }],
+        },
+        NSheet {
+            name: "Two".to_string(),
+            hidden: true,
+            tables: vec![
+                NTable {
+                    name: "A".to_string(),
+                    header_rows: 0,
+                    rows: vec![vec![Number(1.0)]],
+                },
+                NTable {
+                    name: "B".to_string(),
+                    header_rows: 0,
+                    rows: vec![],
+                },
+            ],
+        },
+    ];
+    let shapes = [
+        NumbersShape::default(),
+        NumbersShape {
+            deflate: true,
+            chunk: 23,
+            wide: true,
+            segments: true,
+            ..NumbersShape::default()
+        },
+        NumbersShape {
+            tile_size: 2,
+            sparse: true,
+            ..NumbersShape::default()
+        },
+    ];
+    for shape in shapes {
+        let book = Workbook::from_vec(numbers(&sheets, &shape)).unwrap();
+        assert_eq!(book.format(), hypertabular::Format::Numbers);
+        let names: Vec<(&str, bool)> = book
+            .sheets()
+            .iter()
+            .map(|sheet| (sheet.name.as_str(), sheet.hidden))
+            .collect();
+        assert_eq!(
+            names,
+            [("Data", false), ("Two - A", true), ("Two - B", true)]
+        );
+
+        let plan: Vec<Column> = (0..7).map(Column::text).collect();
+        let options = SheetOptions::default().with_empty_rows_skipped(false);
+        let mut sheet = book.sheet(0, options, &plan).unwrap();
+        let header: Vec<String> = sheet
+            .header()
+            .unwrap()
+            .names()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .collect();
+        assert_eq!(header, ["id", "num", "txt", "when", "flag", "span", "odd"]);
+        let mut seen: Vec<(u32, Vec<String>)> = Vec::new();
+        while let Some(batch) = sheet.read().unwrap() {
+            for row in &batch {
+                let cells = (0..7)
+                    .map(|column| match row.text_str(column) {
+                        Ok(text) => text.into_owned(),
+                        Err(fault) => format!("<{:?}>", fault.reason),
+                    })
+                    .collect();
+                seen.push((row.line(), cells));
+            }
+        }
+        let expected: Vec<(u32, Vec<&str>)> = vec![
+            (
+                2,
+                vec![
+                    "1",
+                    "2.5",
+                    "alice",
+                    "2024-01-31T10:30:00",
+                    "true",
+                    "PT1M30.5S",
+                    "#VALUE!",
+                ],
+            ),
+            (
+                3,
+                vec![
+                    "2",
+                    "-7",
+                    "plain bold tail",
+                    "10:30:00",
+                    "false",
+                    "-PT1H1M1S",
+                    "<Empty>",
+                ],
+            ),
+            (
+                4,
+                vec![
+                    "3",
+                    "1000000000000000",
+                    "日本語 é 🙂",
+                    "2024-01-31T00:00:00",
+                    "<Empty>",
+                    "12.34",
+                    "<Empty>",
+                ],
+            ),
+            (5, vec!["<Empty>"; 7]),
+            (
+                6,
+                vec![
+                    "4",
+                    "1e-7",
+                    "<Empty>",
+                    "2000-12-31T23:59:59",
+                    "true",
+                    "PT0S",
+                    "x <&> \"y\"",
+                ],
+            ),
+        ];
+        let expected: Vec<(u32, Vec<String>)> = expected
+            .into_iter()
+            .map(|(line, cells)| (line, cells.into_iter().map(str::to_string).collect()))
+            .collect();
+        assert_eq!(seen, expected, "shape {shape:?}");
+
+        // The hidden sheet's tables: one cell, and nothing.
+        let plan = [Column::f64(0)];
+        let mut sheet = book
+            .sheet(1, SheetOptions::default().with_header(false), &plan)
+            .unwrap();
+        let batch = sheet.read().unwrap().unwrap();
+        assert_eq!((batch.rows(), batch.get::<f64>(0, 0).unwrap()), (1, 1.0));
+        assert!(sheet.read().unwrap().is_none());
+        let mut sheet = book
+            .sheet(2, SheetOptions::default().with_header(false), &plan)
+            .unwrap();
+        assert!(sheet.read().unwrap().is_none());
+    }
+}
+
+/// What a Numbers package that is not what it says comes back as.
+#[test]
+fn numbers_failures_name_what_they_found() {
+    let read = |package: &[u8]| -> Result<usize, Failure> {
+        let mut harness = Harness::new(package, Sizing::Stingy);
+        harness.open()?;
+        let sheets = harness.sheets()?;
+        harness.load()?;
+        let mut rows = 0;
+        for sheet in &sheets {
+            let read = harness.read(sheet, SheetOptions::default(), &every_door(3), 64);
+            if read.failed {
+                return Err(harness.last_failure);
+            }
+            rows += read.rows.len();
+        }
+        Ok(rows)
+    };
+    let sheets = vec![NSheet {
+        name: "S".to_string(),
+        hidden: false,
+        tables: vec![NTable {
+            name: "T".to_string(),
+            header_rows: 1,
+            rows: vec![
+                vec![
+                    NCell::Text("a".to_string()),
+                    NCell::Number(1.0),
+                    NCell::Bool(true),
+                ],
+                vec![
+                    NCell::Text("b".to_string()),
+                    NCell::Number(2.0),
+                    NCell::Date(0.0, false),
+                ],
+            ],
+        }],
+    }];
+    let shape = NumbersShape::default();
+    assert_eq!(read(&numbers(&sheets, &shape)), Ok(1));
+
+    // Cells saved by a Numbers older than the storage the core reads.
+    let old = numbers(
+        &sheets,
+        &NumbersShape {
+            storage_version: 4,
+            ..shape.clone()
+        },
+    );
+    let failure = read(&old).unwrap_err();
+    assert_eq!(
+        (
+            failure.code,
+            failure.record,
+            failure.found,
+            failure.expected
+        ),
+        (
+            Failure::IWA,
+            u64::from(Failure::PART_IWA),
+            STORAGE_VERSION,
+            4
+        )
+    );
+
+    // Object 1 is not a document: a Keynote or Pages file, or none of Apple's.
+    let other = numbers(
+        &sheets,
+        &NumbersShape {
+            document_kind: 2,
+            ..shape.clone()
+        },
+    );
+    assert_eq!(read(&other).unwrap_err().code, Failure::NOT_A_WORKBOOK);
+
+    // A tile the table names is not in the package.
+    let lost = numbers(
+        &sheets,
+        &NumbersShape {
+            drop_tiles: true,
+            ..shape.clone()
+        },
+    );
+    let failure = read(&lost).unwrap_err();
+    assert_eq!(
+        (failure.code, failure.found),
+        (Failure::IWA, MISSING_OBJECT)
+    );
+    assert_ne!(failure.expected, 0, "the identifier is named");
+
+    // A text cell names a string the list does not have: the cell's row is not delivered,
+    // the rows before it are.
+    let unstrung = numbers(
+        &sheets,
+        &NumbersShape {
+            lose_strings: true,
+            ..shape.clone()
+        },
+    );
+    let failure = read(&unstrung).unwrap_err();
+    assert_eq!((failure.code, failure.found), (Failure::SHARED_STRING, 1));
+
+    // A tile part whose first chunk header is not one.
+    let mut torn = numbers(&sheets, &shape);
+    let needle = b"Index/Tables/Tile-";
+    let at = (0..torn.len() - needle.len())
+        .find(|&at| {
+            &torn[at..at + needle.len()] == needle && &torn[at - 30..at - 26] == b"PK\x03\x04"
+        })
+        .expect("a tile's local header");
+    let name_len = usize::from(u16::from_le_bytes([torn[at - 4], torn[at - 3]]));
+    let extra_len = usize::from(u16::from_le_bytes([torn[at - 2], torn[at - 1]]));
+    torn[at + name_len + extra_len] = 1;
+    let failure = read(&torn).unwrap_err();
+    assert_eq!(
+        (failure.code, failure.found, failure.byte),
+        (Failure::IWA, BROKEN_CHUNK, 0)
+    );
+
+    // A chunk that declares more than its block decodes to.
+    let mut short = numbers(&sheets, &shape);
+    short[at + name_len + extra_len + 4] = 0x7F;
+    let failure = read(&short).unwrap_err();
+    assert_eq!((failure.code, failure.found), (Failure::IWA, BROKEN_CHUNK));
 }
 
 /// A sheet large enough that its part is read through a window that slides many times,
@@ -212,6 +574,7 @@ fn broken_containers_come_back_as_codes() {
         for (name, package) in [
             ("xlsx", xlsx_generated(3, 30, 4, deflate)),
             ("ods", ods_generated(3, 30, 4, deflate)),
+            ("numbers", numbers_generated(3, 30, 4, deflate)),
         ] {
             let whole = read(&package).unwrap_or_else(|code| panic!("{name}: code {code}"));
             assert!(whole > 20);

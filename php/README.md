@@ -1,6 +1,6 @@
 # HyperTabular for PHP
 
-Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and ODS —
+Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX, ODS and Numbers —
 read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell.
 

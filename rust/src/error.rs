@@ -44,10 +44,10 @@ pub struct Failure {
     pub kind: FailureKind,
     /// Delimited text: the zero-based index of the offending record, the header among
     /// those counted — which is how many records were read whole before it. A workbook:
-    /// the part of the
-    /// package being read (`1` `_rels/.rels`, `2` the workbook, `3` its relationships,
-    /// `4` the styles, `5` the shared strings, `6` a worksheet, `7` `content.xml`, `8`
-    /// `mimetype`, `9` the manifest), or `0` for the container itself.
+    /// the part of the package being read (`1` `_rels/.rels`, `2` the workbook, `3` its
+    /// relationships, `4` the styles, `5` the shared strings, `6` a worksheet, `7`
+    /// `content.xml`, `8` `mimetype`, `9` the manifest, `10` a Numbers document's `.iwa`
+    /// parts), or `0` for the container itself.
     pub record: u64,
     /// Delimited text: the 1-based line the record starts on. A workbook: the sheet row
     /// being read, where there is one.
@@ -56,10 +56,11 @@ pub struct Failure {
     /// into the part's inflated bytes the read had got.
     pub byte: u64,
     /// What was expected, for the kinds that say (the first record's cell count; the
-    /// length of the shared-string table).
+    /// length of the shared-string table; the identifier or version an IWA failure names).
     pub expected: u32,
     /// What was found, for the kinds that say (this record's cell count; the compression
-    /// method; the shared-string index; which XML construct the part ends inside).
+    /// method; the shared-string index; which XML construct the part ends inside; what is
+    /// wrong with an IWA part).
     pub found: u32,
 }
 
@@ -87,12 +88,17 @@ pub enum FailureKind {
     Xml = 21,
     /// A part's bytes are not a deflate stream, or stop before the stream does.
     Deflate = 22,
-    /// The container is a zip but neither an XLSX nor an ODS workbook.
+    /// The container is a zip but not an XLSX, ODS or Numbers workbook.
     NotAWorkbook = 23,
     /// A cell names a shared string that is not in the table.
     SharedString = 24,
     /// More text than can be addressed: over 4 GiB in a batch, or 2 GiB in a cell.
     TooLarge = 25,
+    /// A Numbers part is not what the IWA packaging says: a broken chunk or Snappy block
+    /// (`found` 1), a malformed message (2), an object a reference names that is not there
+    /// (3, `expected` its identifier), cell storage of a version the core does not read
+    /// (4, `expected` the version).
+    Iwa = 26,
 }
 
 impl FailureKind {
@@ -112,6 +118,7 @@ impl FailureKind {
             FailureKind::NotAWorkbook => "not_a_workbook",
             FailureKind::SharedString => "shared_string",
             FailureKind::TooLarge => "too_large",
+            FailureKind::Iwa => "iwa",
         }
     }
 
@@ -129,6 +136,7 @@ impl FailureKind {
             abi::Failure::NOT_A_WORKBOOK => FailureKind::NotAWorkbook,
             abi::Failure::SHARED_STRING => FailureKind::SharedString,
             abi::Failure::TOO_LARGE => FailureKind::TooLarge,
+            abi::Failure::IWA => FailureKind::Iwa,
             // The one code left, and the reading of any the core has yet to be given.
             _ => FailureKind::Container,
         }
@@ -185,7 +193,7 @@ impl fmt::Display for Failure {
             ),
             FailureKind::NotAZip => f.write_str("the container is not a zip file"),
             FailureKind::NotAWorkbook => {
-                f.write_str("the container is neither an XLSX nor an ODS workbook")
+                f.write_str("the container is not an XLSX, ODS or Numbers workbook")
             }
             FailureKind::SharedString => write!(
                 f,

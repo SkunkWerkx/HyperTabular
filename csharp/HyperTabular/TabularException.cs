@@ -25,12 +25,18 @@ public enum TabularFailure
 	Xml = 21,
 	/// <summary>A part's bytes are not a deflate stream, or stop before the stream does.</summary>
 	Deflate = 22,
-	/// <summary>The container is a zip but neither an XLSX nor an ODS workbook.</summary>
+	/// <summary>The container is a zip but not an XLSX, ODS or Numbers workbook.</summary>
 	NotAWorkbook = 23,
 	/// <summary>A cell names a shared string that is not in the table.</summary>
 	SharedString = 24,
 	/// <summary>More text than can be addressed: over 4 GiB in a batch or in the shared strings, or 2 GiB in a cell.</summary>
-	TooLarge = 25
+	TooLarge = 25,
+	/// <summary>
+	/// A Numbers part is not what the IWA packaging says: <c>Found</c> is 1 for a broken chunk or Snappy block, 2 for a
+	/// malformed message, 3 for an object a reference names that is not there (<c>Expected</c> is its identifier), 4 for
+	/// cell storage of a version the core does not read (<c>Expected</c> is the version).
+	/// </summary>
+	Iwa = 26
 }
 
 /// <summary>
@@ -64,7 +70,7 @@ public sealed class TabularException : Exception
 			1 => TabularFailure.UnclosedQuote,
 			2 => TabularFailure.ColumnCount,
 			3 => TabularFailure.RowTooLong,
-			>= 16 and <= 25 => (TabularFailure)failure.Code,
+			>= 16 and <= 26 => (TabularFailure)failure.Code,
 			// The one code left, and the reading of any the core has yet to be given.
 			_ => TabularFailure.Container,
 		}, (long)failure.Record, (int)failure.Line, (long)failure.Byte, (int)failure.Expected, (int)failure.Found);
@@ -109,10 +115,12 @@ public sealed class TabularException : Exception
 			TabularFailure.MissingPart => $"Part {record}, which the workbook cannot be read without, is missing.",
 			TabularFailure.Xml => $"Part {record} of the workbook ends inside an XML construct (byte {@byte}).",
 			TabularFailure.Deflate => $"Part {record} of the workbook is not a whole deflate stream (byte {@byte}).",
-			TabularFailure.NotAWorkbook => "The zip is neither an XLSX nor an ODS workbook.",
+			TabularFailure.NotAWorkbook => "The zip is not an XLSX, ODS or Numbers workbook.",
 			TabularFailure.SharedString =>
 				$"Row {line} names shared string {found}; the table has {expected}.",
 			TabularFailure.TooLarge => "The workbook holds more text than a batch can address.",
+			TabularFailure.Iwa =>
+				$"Part {record} of the Numbers document is not what the IWA packaging says (byte {@byte}, detail {found}).",
 			_ => $"The input is structurally broken ({failure}).",
 		};
 }

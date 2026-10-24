@@ -11,7 +11,7 @@
 [![Gem](https://img.shields.io/gem/v/hypertabular.svg)](https://rubygems.org/gems/hypertabular)
 [![Packagist](https://img.shields.io/packagist/v/skunkwerkx/hypertabular.svg)](https://packagist.org/packages/skunkwerkx/hypertabular)
 
-**Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and ODS — read a batch at a time into typed columns, with a [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell. Written once in Rust as a core with no standard library, no allocation and no panic, called directly from C#, Java, Go, Swift, Python, Ruby and PHP, with a shared conformance corpus so every binding agrees byte for byte.**
+**Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX, ODS and Numbers — read a batch at a time into typed columns, with a [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell. Written once in Rust as a core with no standard library, no allocation and no panic, called directly from C#, Java, Go, Swift, Python, Ruby and PHP, with a shared conformance corpus so every binding agrees byte for byte.**
 
 Reading a spreadsheet or a CSV into typed values usually means one of two things: a library that guesses (the separator, the header, whether `1/7/2026` is January or July, whether `12.185` is a thousand or twelve) and throws on the first cell it cannot read, or a string per cell and a parser per cell in the host language. HyperTabular does neither. The dialect and the plan — which source column, through which HyperCast door, in which notation — are declared, and nothing is sniffed. A cell that does not cast is a verdict in its column, `Empty`, `Malformed` or `OutOfRange` with the span of the offending text, and the read goes on. And the work happens in one native call per batch: the binding allocates the column buffers once, the core fills them, and the boundary is crossed once per few thousand rows, not once per cell.
 
@@ -38,7 +38,7 @@ while (reader.Read() is { } batch)
     }
 }
 
-using var book = Workbook.Open("orders.xlsx");             // XLSX or ODS, told by what is in it
+using var book = Workbook.Open("orders.xlsx");             // XLSX, ODS or Numbers, told by what is in it
 var sheet = book.Sheet("Orders", SheetOptions.Default, plan);
 while (sheet.Read() is { } batch) { /* the same batch */ }
 ```
@@ -99,7 +99,7 @@ The design record — why one repository, how the scanner and the workbook reade
 
 ## Receipts
 
-- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (198 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
+- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (234 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
 - **Delimited text:** every cell located and handed out as text at 1.05 GiB/s, against 978 MiB/s for the `csv` crate splitting the same records; ten typed columns cast into the caller's buffers at 654 MiB/s; the structural scan alone at 2.18 GiB/s on AVX2. Linux x64, a 26 MB 200 000 × 10 file ([`docs/delimited.md`](docs/delimited.md#numbers)).
 - **Workbooks, through every binding.** Two real-application files, read whole by each binding's own benchmark harness through one eight-column plan, every verdict looked at and every text cell's bytes, each harness printing the same checksum. Excel's `excel-win-300k.xlsx` (111 MB of sheet XML in a 16.7 MB package) and LibreOffice's `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB); linux-x64, an Intel Core i9-11900H:
 
@@ -115,7 +115,7 @@ The design record — why one repository, how the scanner and the workbook reade
   | Ruby (benchmark-ips), Fiddle | 36 ms | 1.04 s | 343 ms | 1.65 s |
   | PHP (phpbench) | 44 ms | 776 ms | 346 ms | 1.34 s |
 
-  2026-10-07, every binding on the 0.7.0 core. [`docs/workbook.md`](docs/workbook.md#numbers) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
+  2026-10-07, every binding on the 0.7.0 core. [`docs/workbook.md`](docs/workbook.md#figures) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
 - **AOT on both managed platforms.** The C# AOT smoke test publishes under `PublishAot` with the core linked in from the package's static archive, and runs, on every CI leg. The Java smoke test (`java/aot-smoke-test`) builds a GraalVM Native Image on the jar's own reachability metadata and reads through every door; it is run by hand, not in CI.
 
 ## Platform support
