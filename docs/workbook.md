@@ -331,9 +331,10 @@ three bindings that otherwise link or load a committed binary
 (`.github/scripts/local-core.sh`, then Go with `-tags hypertabular_local`, Swift with
 `HYPERTABULAR_LOCAL_CORE=1` and PHP with `HYPERTABULAR_NATIVE_LIBRARY` naming
 `rust/target/release/libhypertabular.so`), and clear any library staged earlier under
-`csharp/HyperTabular/runtimes/`, `java/src/main/resources/native/` or
-`ruby/lib/hypertabular/native/`: those are git-ignored, loaded in preference to
-`rust/target/release/`, and a stale one reads as a core that does not know the newest format.
+`csharp/HyperTabular/runtimes/`, `java/src/main/resources/native/`, `ruby/lib/hypertabular/native/`
+or `ruby/lib/hypertabular/<minor>/` (the Magnus extension `rake native:dev` stages): those are
+git-ignored, loaded in preference to `rust/target/release/`, and a stale one reads as a core
+that does not know the newest format.
 
 ## Parked
 

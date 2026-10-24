@@ -134,6 +134,10 @@ namespace :native do
     built = File.join(rust, "target/ruby/release", library)
     staged = "lib/hypertabular/#{RUBY_VERSION[/\d+\.\d+/]}/hypertabular_native.#{RbConfig::CONFIG['DLEXT']}"
     mkdir_p File.dirname(staged)
+    # A new file, not the old one overwritten: macOS caches a loaded library's code signature
+    # by inode, and a copy over the file it already knows is killed on its next load ("Code
+    # Signature Invalid") although codesign calls the file on disk valid.
+    rm_f staged
     cp built, staged
     puts "staged #{staged} for Ruby #{RUBY_VERSION} — HyperTabular::BACKEND is now :native under this Ruby"
   end
