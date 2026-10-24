@@ -60,8 +60,8 @@ final class TabularException extends \RuntimeException
             TabularFailure::SharedString =>
                 "Row {$recordLine} names shared string {$found}; the table has {$expected}.",
             TabularFailure::TooLarge => 'The workbook holds more text than a batch can address.',
-            TabularFailure::Iwa =>
-                "Part {$record} of the Numbers document is not what the IWA packaging says (byte {$byte}, detail {$found}).",
+            TabularFailure::Iwa => "Part {$record} of the Numbers document is not what the IWA packaging says "
+                . "(byte {$byte}, detail {$found}).",
         });
     }
 
