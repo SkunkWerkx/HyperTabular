@@ -16,7 +16,7 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 
 /**
- * A workbook — XLSX or ODS — opened for reading through a plan into the batches delimited
+ * A workbook — XLSX, ODS or Numbers — opened for reading through a plan into the batches delimited
  * text is read into.
  *
  * <p>A workbook holds its container's bytes and what every sheet reads its cells against: the
@@ -205,9 +205,11 @@ public final class Workbook implements AutoCloseable {
         Scratch scratch = stingy ? new Scratch(arena, 1, 1, 1, 0) : new Scratch(arena, Native.WINDOW_MIN, 1024, 64, 0);
         try {
             MemorySegment opened = open(scratch);
-            format = opened.get(ValueLayout.JAVA_INT, Native.OPENED_FORMAT) == 1
-                    ? WorkbookFormat.XLSX
-                    : WorkbookFormat.ODS;
+            format = switch (opened.get(ValueLayout.JAVA_INT, Native.OPENED_FORMAT)) {
+                case 1 -> WorkbookFormat.XLSX;
+                case 3 -> WorkbookFormat.NUMBERS;
+                default -> WorkbookFormat.ODS;
+            };
             dateSystem = ExcelEpoch.fromCode(opened.get(ValueLayout.JAVA_INT, Native.OPENED_EPOCH))
                     .orElseThrow(() -> new IllegalStateException(CONTRACT_VIOLATION));
 

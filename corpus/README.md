@@ -46,19 +46,23 @@ a binding should replay each case more than one way.
 
 ## `workbook.json` and `workbook/` — the contract for workbooks
 
-`workbook/` holds ten small packages, and beside them the thirteen files real applications
-wrote (the table at the bottom lists them). The ten: five fixtures (`basic.xlsx`,
-`basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and `basic.ods` from the ODF schema by hand —
-`make_fixtures.py` writes them) and five generated ones — two XLSX and two ODS, one of
-each deflated and one stored, the XLSX pair one in each date system, and `broken.xlsx`,
-whose sheet names a shared string that is not there. Between them the generated packages
-hold every kind of cell either format has: shared, inline and rich strings, numbers under
-date, time and elapsed formats, booleans, errors, ISO dates, CDATA, prefixed elements,
-sparse rows, empty rows in both spellings, gaps in the row numbers, and ODS's repeated
-rows and columns, nested tables, annotations and paragraphs.
+`workbook/` holds twelve small packages, and beside them the fourteen files real
+applications wrote (the table at the bottom lists them). The twelve: five fixtures
+(`basic.xlsx`, `basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and
+`basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and seven
+generated ones — two XLSX, two ODS and two Numbers, one of each deflated and one stored,
+the XLSX pair one in each date system, and `broken.xlsx`, whose sheet names a shared
+string that is not there. Between them the generated packages hold every kind of cell
+each format has: shared, inline and rich strings, numbers under date, time and elapsed
+formats, booleans, errors, ISO dates, CDATA, prefixed elements, sparse rows, empty rows in
+both spellings, gaps in the row numbers, ODS's repeated rows and columns, nested tables,
+annotations and paragraphs, and Numbers' decimals, currencies, rich text, dates and times
+of day, durations, error and merged cells, in layouts Numbers itself never writes small:
+chunks of a few bytes, tiles of seven rows, wide cell offsets, a segmented string list,
+rows left out of their tile.
 
-`workbook.json` is 198 cases over those 23 packages — every sheet of every package, read
-several ways, and the two encrypted files refused — 765 rows and 39,548 cells. A case:
+`workbook.json` is 234 cases over those 26 packages — every sheet of every package, read
+several ways, and the two encrypted files refused — 973 rows and 45,371 cells. A case:
 
 ```json
 {
@@ -79,7 +83,7 @@ several ways, and the two encrypted files refused — 765 rows and 39,548 cells.
 }
 ```
 
-- `file` is relative to this directory. `format` is `xlsx` or `ods`; `epoch` is the
+- `file` is relative to this directory. `format` is `xlsx`, `ods` or `numbers`; `epoch` is the
   workbook's date system as HyperCast numbers `ExcelEpoch` (`1` 1900, `2` 1904).
 - `sheets` is the workbook's whole listing; `sheet` is the index of the one this case
   reads. A binding should open it by index and, where the name is unique, by name.
@@ -94,9 +98,9 @@ several ways, and the two encrypted files refused — 765 rows and 39,548 cells.
   encrypted files', cases of nothing but `name`, `file` and the failure), ends the sheet
   after the rows listed: `kind` is one of
   `not_a_zip`, `container`, `encrypted`, `method`, `missing_part`, `xml`, `deflate`,
-  `not_a_workbook`, `shared_string`, `too_large`; `record` is the part of the package
-  being read (`6` a worksheet), `line` the sheet row, `byte` the offset in the part's
-  inflated bytes.
+  `not_a_workbook`, `shared_string`, `too_large`, `iwa`; `record` is the part of the
+  package being read (`6` a worksheet, `10` a Numbers part), `line` the sheet row, `byte`
+  the offset in the part's inflated bytes (for a Numbers part, in its decoded stream).
 - `basic.ods` is not read with empty rows delivered: a real ODS sheet ends in a million
   empty rows, and they would be most of the file.
 
@@ -303,12 +307,26 @@ Data → Calculate → *Formula to Value*; save as .ods.
 relationship targets its own way; the design's "third-party writers root parts
 inconsistently" line has never been checked against it.
 
-## Apple Numbers, without a Mac
+## Apple Numbers
 
-**13. `numbers-data.xlsx`** — if you have an Apple ID: iCloud.com → Numbers → upload
-`excel-win-data.xlsx`, open it, then the *…* / tools menu → **Download a Copy** →
-*Excel*. Numbers is the writer most often cited for oddly rooted parts. Skip if no Apple
-ID; nothing else depends on it.
+**13. `numbers-data.numbers`** — the dataset, typed into Numbers on a Mac and saved in
+its own format (every other reader of `.numbers` is a reverse engineering of this file
+format; this is the first file the core's IWA reader was held to). Numbers specifics:
+
+- A new blank spreadsheet; delete the table Numbers puts on it and add one named `Data`
+  with the dataset's columns, so that the sheet lists as `Data` alone. Turn off
+  Auto-Correction (Settings → Auto-Correction: spelling, capitalisation, smart quotes and
+  dashes, link detection) before typing, or `x <&> "y"` and `bob, jr` arrive changed.
+- Numbers has no 1900 date system and refuses the phantom `1900-02-29` (G3): it keeps
+  reverting the cell to *Automatic* and stores the text, which is the right answer — the
+  core reads that cell as text, as it does F3.
+- Format column F as Text before typing, as for every other writer. B4 typed as
+  `1000000000000000` is stored as text by Numbers unless typed `1E+15`.
+- The second sheet `Ünïcödé sheet` with `1` in A1; the third, `Hidden`, hidden from the
+  sheet tab's menu (Numbers 26 can hide a sheet).
+
+**`numbers-data.xlsx`** — the same document, File → Export To → Excel, one worksheet per
+table. Numbers is the writer most often cited for oddly rooted parts.
 
 ## Optional: Excel for the web
 
@@ -334,5 +352,6 @@ path from the desktop writer, cheap to collect.
 | `libreoffice-300k.ods` (out of tree) | LibreOffice 26.2.6.3 | Linux x86-64 | `74db9cf843bac6961c5962fe0a435313ea3c3c1c1bc1172013ec6929bd75df0c` |
 | `google-data.xlsx` | Google Sheets, downloaded 2026-10-04 | web | |
 | `google-data.ods` | Google Sheets, downloaded 2026-10-04 (generator: LibreOfficeDev 6.0.5.2) | web | |
+| `numbers-data.numbers` | Numbers 26.3.1 | macOS | |
 | `numbers-data.xlsx` | | | |
 | `excel-web-data.xlsx` | Microsoft Excel Online (AppVersion 16.0300) | web | |

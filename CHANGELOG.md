@@ -14,8 +14,38 @@ the README's [Platform support](README.md#platform-support) table become a commi
 Semantic Versioning: breaking or dropping either takes a new major version. Until then a
 minor release can still break both, as 0.9.0 did.
 
+### Added
+
+- **Apple Numbers.** Every binding reads a `.numbers` document — Apple's IWA packaging:
+  Snappy-compressed chunks of Protocol Buffers objects — the way it reads XLSX and ODS,
+  told by what the container holds, never by its name. Each table is a sheet, listed
+  under its sheet's name (`<sheet> - <table>` when a sheet holds several, as Numbers'
+  own Excel export names them) and hidden when its sheet is; cells are read from the
+  v5 storage Numbers has written since 2018 — decimals and currencies as numbers, dates
+  as wall clocks or, under a format that shows no date, times of day, durations as
+  spans, booleans, text and rich text with the runs joined, error cells as `#VALUE!`
+  (the file does not record which error), the cells a merge covers as empty — and a
+  row a tile leaves out is an empty row. The core's new `kernel/workbook/{iwa,snappy,
+  proto,numbers}.rs` stay inside the no-panic, no-allocation proofs; the window holds
+  only the chunks of the object in hand, and a deflated part is inflated into its far
+  end. `WorkbookFormat` gains `Numbers` (`3`), `Opened.strings_bytes` is what the
+  data-list parts decode to, and a new failure kind **`iwa`** (`26`, part `10`) names
+  a Numbers part that is not what the packaging says — `found` 1 a broken chunk, 2 a
+  malformed message, 3 an object a reference names that is not there (`expected` its
+  identifier), 4 cell storage of a version the core does not read (`expected` the
+  version). The `not_a_workbook` message now says "not an XLSX, ODS or Numbers
+  workbook". The corpus gains `numbers-data.numbers`, written by Numbers 26.3.1 on
+  macOS, and two generated Numbers packages in the layouts Numbers never writes small
+  (chunks of a few bytes, seven-row tiles, wide offsets, a segmented string list, rows
+  left out of their tile); `workbook.json` grows from 198 to 234 cases, every one of
+  them new. *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
+
 ### Changed
 
+- **`Format` and `FailureKind` are `#[non_exhaustive]`.** A format the core learns to read, or
+  a failure code it gains, is a new variant without a new major version once 1.0.0 is out; a
+  match outside the crate names a wildcard arm, and a code this binding does not know reads
+  as `Container`, as it already did. *(Rust)*
 - **C# — `HyperTabular.targets` no longer lists an `EmccExportedFunction` per export.** The
   `NativeFileReference` is the whole Blazor WebAssembly wiring: the SDK's generated pinvoke
   table calls each native function by symbol, so the link resolves them against the archive
@@ -42,6 +72,17 @@ minor release can still break both, as 0.9.0 did.
   against the last crates.io release, the no_std consumer build and the shared library's
   export check on every RID. Dependabot bumps every ecosystem in one monthly pull request,
   every third-party action is pinned to a commit, and CodeQL runs weekly. *(repository only)*
+
+### Removed
+
+- **Java — the GraalWasm backend.** The jar no longer carries the core a second time as a
+  `wasm32-wasip1` module, and `Tabular.backend()`, the `hypertabular.backend` property and the
+  fall-back to the module on a platform without a native build are gone: the binding is FFM
+  downcalls into the library it bundles. The module served a platform nobody had asked for,
+  and replaying the suite through it in interpreter mode on five CI legs cost more than every
+  other step of a leg together once the Numbers reader was in it (23 minutes against 15 on
+  linux-x64). `cargo wasm-module` and the `wasm32-wasip1` export flags leave
+  `rust/.cargo/config.toml` with it. *(Java)*
 
 ## [0.9.0] — 2026-10-21
 

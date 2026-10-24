@@ -44,6 +44,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "iwa"
+path = "fuzz_targets/iwa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "inflate"
 path = "fuzz_targets/inflate.rs"
 test = false

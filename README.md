@@ -11,7 +11,7 @@
 [![Gem](https://img.shields.io/gem/v/hypertabular.svg)](https://rubygems.org/gems/hypertabular)
 [![Packagist](https://img.shields.io/packagist/v/skunkwerkx/hypertabular.svg)](https://packagist.org/packages/skunkwerkx/hypertabular)
 
-**Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX and ODS — read a batch at a time into typed columns, with a [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell. Written once in Rust as a core with no standard library, no allocation and no panic, called directly from C#, Java, Go, Swift, Python, Ruby and PHP, with a shared conformance corpus so every binding agrees byte for byte.**
+**Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX, ODS and Numbers — read a batch at a time into typed columns, with a [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell. Written once in Rust as a core with no standard library, no allocation and no panic, called directly from C#, Java, Go, Swift, Python, Ruby and PHP, with a shared conformance corpus so every binding agrees byte for byte.**
 
 Reading a spreadsheet or a CSV into typed values usually means one of two things: a library that guesses (the separator, the header, whether `1/7/2026` is January or July, whether `12.185` is a thousand or twelve) and throws on the first cell it cannot read, or a string per cell and a parser per cell in the host language. HyperTabular does neither. The dialect and the plan — which source column, through which HyperCast door, in which notation — are declared, and nothing is sniffed. A cell that does not cast is a verdict in its column, `Empty`, `Malformed` or `OutOfRange` with the span of the offending text, and the read goes on. And the work happens in one native call per batch: the binding allocates the column buffers once, the core fills them, and the boundary is crossed once per few thousand rows, not once per cell.
 
@@ -38,7 +38,7 @@ while (reader.Read() is { } batch)
     }
 }
 
-using var book = Workbook.Open("orders.xlsx");             // XLSX or ODS, told by what is in it
+using var book = Workbook.Open("orders.xlsx");             // XLSX, ODS or Numbers, told by what is in it
 var sheet = book.Sheet("Orders", SheetOptions.Default, plan);
 while (sheet.Read() is { } batch) { /* the same batch */ }
 ```
@@ -99,7 +99,7 @@ The design record — why one repository, how the scanner and the workbook reade
 
 ## Receipts
 
-- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (198 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
+- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (234 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
 - **Delimited text:** every cell located and handed out as text at 1.05 GiB/s, against 978 MiB/s for the `csv` crate splitting the same records; ten typed columns cast into the caller's buffers at 654 MiB/s; the structural scan alone at 2.18 GiB/s on AVX2. Linux x64, a 26 MB 200 000 × 10 file ([`docs/delimited.md`](docs/delimited.md#numbers)).
 - **Workbooks, through every binding.** Two real-application files, read whole by each binding's own benchmark harness through one eight-column plan, every verdict looked at and every text cell's bytes, each harness printing the same checksum. Excel's `excel-win-300k.xlsx` (111 MB of sheet XML in a 16.7 MB package) and LibreOffice's `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB); linux-x64, an Intel Core i9-11900H:
 
@@ -115,7 +115,7 @@ The design record — why one repository, how the scanner and the workbook reade
   | Ruby (benchmark-ips), Fiddle | 36 ms | 1.04 s | 343 ms | 1.65 s |
   | PHP (phpbench) | 44 ms | 776 ms | 346 ms | 1.34 s |
 
-  2026-10-07, every binding on the 0.7.0 core. [`docs/workbook.md`](docs/workbook.md#numbers) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
+  2026-10-07, every binding on the 0.7.0 core. [`docs/workbook.md`](docs/workbook.md#figures) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
 - **AOT on both managed platforms.** The C# AOT smoke test publishes under `PublishAot` with the core linked in from the package's static archive, and runs, on every CI leg. The Java smoke test (`java/aot-smoke-test`) builds a GraalVM Native Image on the jar's own reachability metadata and reads through every door; it is run by hand, not in CI.
 
 ## Platform support
@@ -150,7 +150,7 @@ The binding is compiled to WebAssembly and the core is linked into that build by
 ecosystem's own toolchain — the same archive as everywhere else, built for `wasm32`. The
 core imports nothing (no clock, no entropy, no allocator: the caller's buffers are all the
 memory it touches), so a page loads one module and needs no shim beyond what the language
-already brings. Every browser row below runs in headless Chrome in CI: on every pull request, except Ruby's, whose ruby.wasm interpreter build per Ruby minor runs in the weekly and release builds instead. Java goes the other way: the core runs as wasm inside the JVM.
+already brings. Every browser row below runs in headless Chrome in CI: on every pull request, except Ruby's, whose ruby.wasm interpreter build per Ruby minor runs in the weekly and release builds instead.
 
 | Binding | WebAssembly |
 | --- | --- |
@@ -160,7 +160,7 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |
 | Python | **Yes, on [Pyodide](https://pyodide.org/) 314.x.** `await micropip.install("hypertabular")` installs the twenty-fifth wheel (`pyemscripten_2026_0_wasm32`) and `hypercast`'s; CI runs the whole pytest suite in Pyodide under Node and in Chrome. |
 | Ruby | **Yes, through `rbwasm build`.** List `hypertabular-wasm` instead of `hypertabular` in the Gemfile handed to ruby.wasm 2.10+ (Ruby 3.4 or 4.0): it carries the Magnus extension prebuilt for `wasm32-wasip1` and shares the interpreter with `hypercast-wasm`. |
-| Java | **In process, through [GraalWasm](https://www.graalvm.org/webassembly/).** The jar bundles the core as a `wasm32-wasip1` module; `-Dhypertabular.backend=wasm` selects it, and it is the automatic fallback where the jar has no native build. On GraalVM's JIT it reads the 300 000-row workbook in 1.9 s against 0.72 s native; on a stock JDK it runs interpreted. CI runs the whole suite through it on every leg. Compiling the binding itself to wasm is blocked: no Java-to-wasm compiler supports the Foreign Function & Memory API. |
+| Java | **No.** The jar reaches the core through FFM downcalls into the native library it bundles for the platform; the JVM has no browser target, and the core does not run inside a wasm engine. |
 | PHP | Not built. There is no maintained wasm engine PHP can embed, and HyperCast's `ext-php-rs` spike for WordPress Playground is not shipped. |
 
 Arguments are kept to twelve integers or fewer on every export, because Mono's interpreter
@@ -185,11 +185,11 @@ Underneath it, every artifact also carries GitHub build provenance from the run 
 and there the flags depend on where the signing workflow lives, not on the registry. The gems,
 `inventory.json` and the published NuGet package are signed inside this repository's
 `release.yml` and verify with plain `--repo SkunkWerkx/HyperTabular`. The crate, the jar, the
-wheels, the pre-push NuGet package, every native library (the whole story for Go, Swift and
-PHP, which have no package of their own) and the `wasm32-wasip1` module inside the jar are
-signed by reusable workflows in `SkunkWerkx/.github`: the crate and the Maven files at the
-tagged commit, the wheels, the natives and the module at the preparation commit on master they
-were built from. Add `--signer-repo SkunkWerkx/.github` (and `--source-digest <commit>` to pin
+wheels, the pre-push NuGet package and every native library (the whole story for Go, Swift
+and PHP, which have no package of their own) are signed by reusable workflows in
+`SkunkWerkx/.github`: the crate and the Maven files at the tagged commit, the wheels and the
+natives at the preparation commit on master they were built from. Add
+`--signer-repo SkunkWerkx/.github` (and `--source-digest <commit>` to pin
 either), or `--owner SkunkWerkx` in place of both. Get the signer wrong and `gh` reports a bare
 `verifying with issuer "sigstore.dev"`, which reads like a bad signature but is only an
 identity mismatch. PyPI additionally holds a [PEP 740](https://peps.python.org/pep-0740/)

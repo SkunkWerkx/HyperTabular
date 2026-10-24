@@ -13,7 +13,9 @@ public enum WorkbookFormat
 	/// <summary>Office Open XML (<c>.xlsx</c>).</summary>
 	Xlsx = 1,
 	/// <summary>OpenDocument (<c>.ods</c>).</summary>
-	Ods = 2
+	Ods = 2,
+	/// <summary>Apple Numbers (<c>.numbers</c>), each table a sheet.</summary>
+	Numbers = 3
 }
 
 /// <summary>One sheet of a workbook, as its listing names it.</summary>
@@ -33,10 +35,10 @@ public sealed class SheetInfo
 	/// <summary>Whether the workbook hides the sheet. A hidden sheet reads like any other.</summary>
 	public bool Hidden { get; }
 
-	/// <summary>What the core is given to position on the sheet: the XLSX part that holds it.</summary>
+	/// <summary>What the core is given to position on the sheet: the XLSX part that holds it; empty for ODS and Numbers.</summary>
 	internal byte[] Part { get; }
 
-	/// <summary>The sheet's place among an ODS document's tables.</summary>
+	/// <summary>The sheet's place among an ODS document's tables, or a Numbers document's.</summary>
 	internal uint Index { get; }
 
 	/// <inheritdoc/>
@@ -57,7 +59,7 @@ public readonly record struct SheetOptions(bool HasHeader = true, bool SkipEmpty
 }
 
 /// <summary>
-/// A workbook — XLSX or ODS — opened for reading through a plan into the batches delimited
+/// A workbook — XLSX, ODS or Numbers — opened for reading through a plan into the batches delimited
 /// text is read into.
 /// </summary>
 /// <remarks>
@@ -120,7 +122,12 @@ public sealed unsafe class Workbook : IDisposable
 			_state = GC.AllocateArray<ulong>((size + 7) / 8, pinned: true);
 			var scratch = Stingy ? new Scratch(1, 1, 1) : new Scratch(WindowMin, 1024, 64);
 			var opened = Open(scratch);
-			Format = opened.Format == 1 ? WorkbookFormat.Xlsx : WorkbookFormat.Ods;
+			Format = opened.Format switch
+			{
+				1 => WorkbookFormat.Xlsx,
+				3 => WorkbookFormat.Numbers,
+				_ => WorkbookFormat.Ods,
+			};
 			DateSystem = Abi.ExcelEpochFrom(opened.Epoch) ?? throw new InvalidOperationException(ContractViolation);
 
 			var filled = Settle(scratch.Drive(this, _state, null, Call.Sheets));

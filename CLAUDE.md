@@ -110,9 +110,17 @@ HyperCast and move together.
 
 ## Local loop
 
-`cd rust && ./check-core.sh && cargo test`. Bindings need `cargo cdylib` first (or
-`cargo wasm-module` for Java's wasm tests); each binding README has its own steps. Large
-benchmark inputs come from the ignored `corpus/generate/out/`.
+`cd rust && ./check-core.sh && cargo test`. Bindings need `cargo cdylib` first; each binding
+README has its own steps. Large benchmark inputs come from the ignored
+`corpus/generate/out/`.
+
+`check-core.sh` is Linux-only (`.so`, `nm -D`, `readelf`): on a Mac run it in Docker
+(`rust:latest`, the three `cargo check` targets and `llvm-tools` added). `cargo no-panic`
+passes vacuously on Darwin, because `.cargo/config.toml` links Darwin targets with
+`-undefined,dynamic_lookup`; the honest Mac proof is the same `cargo rustc` with
+`RUSTFLAGS=""` (the env overrides the config) into its own `--target-dir`, and its
+negative control is `RUSTFLAGS="--cfg hypertabular_canary"` failing on `hypertabular_canary`
+alone.
 
 ## Working with the owner
 

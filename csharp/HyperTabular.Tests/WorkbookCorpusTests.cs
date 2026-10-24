@@ -140,7 +140,12 @@ public sealed class WorkbookCorpusTests
 			{
 				using var book = Now(open());
 				check($"{name} ({source})");
-				book.Format.ShouldBe(@case.GetProperty("format").GetString() == "xlsx" ? WorkbookFormat.Xlsx : WorkbookFormat.Ods, name);
+				book.Format.ShouldBe(@case.GetProperty("format").GetString() switch
+				{
+					"xlsx" => WorkbookFormat.Xlsx,
+					"numbers" => WorkbookFormat.Numbers,
+					_ => WorkbookFormat.Ods,
+				}, name);
 				book.DateSystem.ShouldBe((ExcelEpoch)@case.GetProperty("epoch").GetInt32(), name);
 				book.Sheets.Select(sheet => (sheet.Name, sheet.Hidden)).ShouldBe(
 					@case.GetProperty("sheets").EnumerateArray()

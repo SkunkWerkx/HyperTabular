@@ -128,7 +128,7 @@ func replayWorkbookCorpus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s (%s): %v", c.Name, opening.source, err)
 			}
-			if want := map[string]WorkbookFormat{"xlsx": XLSX, "ods": ODS}[c.Format]; book.Format() != want {
+			if want := map[string]WorkbookFormat{"xlsx": XLSX, "ods": ODS, "numbers": Numbers}[c.Format]; book.Format() != want {
 				t.Errorf("%s: format %v, want %v", c.Name, book.Format(), want)
 			}
 			if book.DateSystem() != hypercast.ExcelEpoch(c.Epoch) {
@@ -310,7 +310,7 @@ func TestWhatIsNotThereIsAnErrorOfItsOwn(t *testing.T) {
 	if first.Header() == nil || second.Header() != nil || len(first.Plan()) != 1 || first.Options() != DefaultSheetOptions {
 		t.Errorf("header %q and %q, plan %v, options %+v", first.Header(), second.Header(), first.Plan(), first.Options())
 	}
-	if got := fmt.Sprint(XLSX, ODS, WorkbookFormat(0)); got != "XLSX ODS WorkbookFormat(0)" {
+	if got := fmt.Sprint(XLSX, ODS, Numbers, WorkbookFormat(0)); got != "XLSX ODS Numbers WorkbookFormat(0)" {
 		t.Errorf("formats: %s", got)
 	}
 }

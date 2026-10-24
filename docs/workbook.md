@@ -3,10 +3,10 @@
 The shared architecture — the core and what holds it, doors and columns, the cast matrix,
 verdicts, the batch, the C ABI, and the prior art — is recorded once in
 [`design.md`](design.md) and [`prior-art.md`](prior-art.md). This file holds what is
-specific to XLSX and ODS.
+specific to XLSX, ODS and Numbers.
 
 Two layers read a workbook. The core (`rust/src/kernel/workbook`) reads the container's
-bytes — zip, inflate, XML, cells, casts — into memory its caller owns, and is what
+bytes — zip, inflate, XML or Apple's IWA objects, cells, casts — into memory its caller owns, and is what
 `libhypertabular` exports. `Workbook` and `Sheet` (`rust/src/workbook.rs`) are the Rust
 binding over it — the same thing each language's binding is: they hold the container,
 own the buffers, grow one when the core asks, and lend out what the core wrote.
@@ -15,8 +15,10 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
 
 - **Format detection is by container, not extension.** A zip with `[Content_Types].xml`
   or `xl/workbook.xml` is XLSX; one whose `mimetype` entry says
-  `application/vnd.oasis.opendocument.spreadsheet` is ODS; anything else is
-  `FailureKind::NotAWorkbook`. Nothing about the *data* is sniffed.
+  `application/vnd.oasis.opendocument.spreadsheet` is ODS; one with neither whose
+  `Index/Document.iwa` holds an object 1 that is a `TN.DocumentArchive` naming
+  `TN.SheetArchive`s is Numbers; anything else is `FailureKind::NotAWorkbook`. Nothing
+  about the *data* is sniffed.
 - **Cells are read as what the file stores, then cast.** A numeric `<v>` is a number;
   under a temporal number format it is a wall clock, a time of day or a span, by the
   serial rules; `t="b"` is a boolean; `t="e"` an error; `t="d"` an ISO wall clock; shared,
@@ -57,6 +59,25 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   parse and (by default) zero deliveries, so LibreOffice's million-row padding costs
   nothing. ODS sheet hidden state lives in styles this reader does not read; it is always
   reported as not hidden.
+- **Numbers** (`kernel/workbook/numbers.rs`, over `iwa.rs`, `snappy.rs` and `proto.rs`) is
+  Apple's IWA packaging: `.iwa` parts of Snappy-compressed chunks whose decoded stream is a
+  sequence of Protocol Buffers objects — the document, its sheets, each sheet's tables,
+  each table's model, data lists and tiles. A sheet here is one Numbers *table*, which is
+  what has rows and columns and what Numbers itself makes a worksheet of when it exports
+  to Excel: it is listed under its sheet's name, or `<sheet> - <table>` when the sheet
+  holds more than one, hidden when the sheet is. Cells are the v5 storage Numbers has
+  written since 2018 (an older file is `FailureKind::Iwa` with `found` 4 and the version
+  it found): a number is the 128-bit decimal said as text and read through the one number
+  grammar, or the double a currency cell carries; a date is seconds since 2001-01-01, a
+  wall clock, or a time of day when its format shows no date (`suppress_date_format`, or
+  a pattern with no date letters); a duration is a span; a boolean a boolean; a text or
+  rich-text cell is a span into the table's string or rich-text list, loaded by `strings`
+  with the runs of a rich string joined; an error cell is `#VALUE!`, because the file
+  records which formula failed, not which error it made; a formula's cached value is the
+  value, and the cells a merged cell covers are empty. Rows are the tile's rows: a row the
+  tile leaves out is an empty row, delivered with its number when empty rows are, and a
+  tile holds 256 rows unless the table's storage says otherwise. Width is capped at
+  Excel's 16 384 columns.
 
 ## The core's calls
 
@@ -73,7 +94,10 @@ progress has got). The state is offsets and counters and never a pointer.
 3. `strings` and `styles` (XLSX) — the shared strings, unescaped, rich-text runs joined
    and phonetic runs left out, with a span for each; and one number-format kind per cell
    format. Loaded once into buffers of the caller's, which it hands back, read-only, to
-   every later call.
+   every later call. For Numbers, `strings` loads every table's lists — its strings, its
+   rich text with the runs joined, which of its date formats show no date, and where each
+   of its tiles is — as sorted records a cell finds by search, and `styles` loads nothing;
+   `open`'s `strings_bytes` is what the data-list parts decode to.
 4. `sheet` — position a state block on one sheet, with its options. Then `header`, and
    `fill`: up to `max_rows` rows cast through the caller's plan into the caller's
    columns, in the layout a delimited batch has — the same `ColumnSpec`, `ColumnBuffer`,
@@ -87,7 +111,10 @@ back to where the call began the way a read of delimited text can. So when a cal
 the read stopped. The caller makes the buffer the code names at least as large as the
 result's `needed`, *keeping what it held*, and makes the same call again; the read goes on
 from the token it stopped at. (`open` alone starts over.) Each row reader is written a
-token at a time for this: a token is looked at, acted on, and only then stepped past.
+token at a time for this: a token is looked at, acted on, and only then stepped past. A
+Numbers listing or loading starts over instead — nothing it wrote was read before it was
+done, and the chunks already decoded stay in the window — while `fill` resumes at the cell
+it stopped at.
 
 ## Container and streaming
 
@@ -110,9 +137,18 @@ token at a time for this: a token is looked at, acted on, and only then stepped 
   doctypes stepped over; namespace prefixes ignored. Tag scanning is quote-aware; text
   scanning is an eight-bytes-at-a-time search. Entities are decoded only when a `&` is
   present.
+- `iwa.rs`: Apple's IWA packaging. Every `.iwa` part is chunks — a zero byte, a three-byte
+  length, a Snappy block — whose decoded stream is varint-prefixed `TSP.ArchiveInfo`
+  headers each followed by its messages. The loader finds an object by its identifier and
+  hands its first message over as bytes, keeping in the window only the chunks that hold
+  the object asked for last (a tile's while a tile is read, never a whole part) and in the
+  state block where they came from. A deflated part is inflated whole into the window's
+  far end first. `snappy.rs` decodes a block, every offset and length believed only as far
+  as the block and the buffer allow; `proto.rs` walks a message's fields in place.
 - Lookups that a hostile file could make quadratic — a sheet's part by its relationship
-  id, a cell format's number format by its id — are a sort and a search in the caller's
-  scratch, not a walk.
+  id, a cell format's number format by its id, a Numbers object by its identifier, a
+  Numbers cell's string by its key — are a sort and a search in the caller's scratch, not
+  a walk.
 
 ## Opening, and the plan
 
@@ -128,7 +164,7 @@ token at a time for this: a token is looked at, acted on, and only then stepped 
 
 ## Allocation story
 
-The core allocates nothing: `tests/kernel_workbook_allocation_free.rs` watches four
+The core allocates nothing: `tests/kernel_workbook_allocation_free.rs` watches five
 workbooks go through it end to end with a counting allocator, and the shipped library
 imports no allocator. The binding allocates: the container (unless the caller holds it),
 the shared strings and format kinds once per workbook, and per sheet a state block, a
@@ -137,13 +173,14 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
 
 ## What holds it to the truth
 
-- `corpus/workbook.json` — 198 cases over the 23 packages in `corpus/workbook/`: every
+- `corpus/workbook.json` — 234 cases over the 26 packages in `corpus/workbook/`: every
   sheet, with and without a header, empty rows skipped and delivered, every door over
-  every column. The cases for the ten synthetic packages were written by the std workbook
-  reader this crate had before the core could read a workbook — a reader that owed the
-  core nothing — with the core required to agree; that reader has since been deleted. The
-  cases for the thirteen files Excel, LibreOffice and Google Sheets wrote were written by
-  the core and read against the application that wrote each file, by eye. **Nothing
+  every column. The cases for the ten synthetic XLSX and ODS packages were written by the
+  std workbook reader this crate had before the core could read a workbook — a reader that
+  owed the core nothing — with the core required to agree; that reader has since been
+  deleted. The cases for the fourteen files Excel, LibreOffice, Google Sheets and Numbers
+  wrote, and for the two generated Numbers packages, were written by the core and read
+  against the application that wrote each file, by eye. **Nothing
   independent of the core reads a workbook here any more**: the corpus is the oracle's frozen word, and
   `tests/corpus_workbook.rs` holds the core to it. Every binding replays the same file.
 - The core against itself (`tests/kernel_workbook.rs`): generated packages that reach for
@@ -151,16 +188,26 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   grow only as asked, and with room to spare — the two must agree.
 - Hostile input: truncation, flipped bits, noise, a garbage directory, sizes that lie, a
   deflate bomb. Each comes back as a code.
-- Numbers: the core says and reads a double exactly as Rust's own formatter and parser do,
-  checked over hundreds of thousands of values.
-- What is still owed: a file Apple Numbers wrote. `corpus/README.md` has the list.
+- Doubles: the core says and reads a double exactly as Rust's own formatter and parser
+  do, checked over hundreds of thousands of values.
+- Numbers: generated packages in every layout the reader has to be indifferent to —
+  deflated or stored parts, chunks of a few bytes or one, tiles of seven rows or 256,
+  narrow or wide offsets, a segmented string list, rows left out — read stingy against
+  roomy; a table of every kind of cell read back as written through the Rust binding;
+  and each way a package can be wrong named by its failure (a storage version the core
+  does not read, an object a reference names that is not there, a chunk that is not one,
+  a string a cell names that the list does not have, an object 1 that is not a document).
+  `numbers-data.numbers`, which Numbers itself wrote, is read with the rest of
+  `corpus/workbook/`.
+- Owed: whether a Keynote or Pages package is refused at `open` or lists no sheets has not
+  been checked against a file; neither has a `.numbers` file Numbers wrote before 2018.
 
 ## Exports
 
 `hypertabular_workbook_state_size`, `_open`, `_sheets`, `_strings`, `_styles`, `_sheet`,
 `_header`, `_fill`, over the `#[repr(C)]` shapes in `kernel/abi.rs`.
 
-## Numbers
+## Figures
 
 Linux x64, 300 000 rows × 8 columns, 100.8 MB of sheet XML in a 15.1 MB deflated package,
 one plan, batches of 4096: 604 ms through the core (167 MB/s of sheet XML, 0.50 M rows/s).
@@ -267,6 +314,11 @@ Each reads the files from `corpus/generate/out/`, or from `HYPERTABULAR_BENCH_DI
   small read ever makes the preload the wrong trade.
 - **Cell-level styles beyond the number-format kind**, hidden rows/columns, merged
   ranges: not consulted; this reader delivers values.
+- **Numbers' error kinds.** An error cell names the formula that failed and nothing of
+  what error it made, in anything this core reads, so every one is `#VALUE!`. If a field
+  that does carry the kind turns up, it goes here.
+- **A Numbers benchmark** against numbers-parser, on a 300 000-row `.numbers` file, on the
+  machine the tables above were measured on.
 - **Performance candidates** left after the 2026-10-05 tokenizer pass (SWAR tag scan,
   single-pass attributes, `<!` before `<![CDATA[`): inflate, about a sixth of a read, which
   must stay under the no-panic proof; the bounds checks in `Attrs::next`, `trimmed` and

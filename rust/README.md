@@ -33,7 +33,7 @@ while let Some(batch) = reader.read()? {
     }
 }
 
-let book = Workbook::open("data.xlsx")?;         // XLSX or ODS, told by what is in it
+let book = Workbook::open("data.xlsx")?;         // XLSX, ODS or Numbers, told by what is in it
 let mut sheet = book.sheet_unbound("Data", SheetOptions::default())?;
 sheet.bind(&plan)?;                              // or book.sheet("Data", options, &plan)
 while let Some(batch) = sheet.read()? {

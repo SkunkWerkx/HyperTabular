@@ -1,5 +1,5 @@
-//! Workbooks — XLSX and ODS — read through a plan into the batches delimited text is
-//! read into.
+//! Workbooks — XLSX, ODS and Numbers — read through a plan into the batches delimited text
+//! is read into.
 //!
 //! This is the Rust binding over the workbook core ([`crate::kernel::workbook`]), built
 //! the way [`crate::delimited`] is over its own: the core is handed the container's bytes
@@ -17,19 +17,25 @@ use crate::kernel::abi::{
     ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened, Slot, Span,
 };
 use crate::kernel::workbook::part::WINDOW_MIN;
-use crate::kernel::workbook::{FORMAT_XLSX, Memory, State, book, rows};
+use crate::kernel::workbook::{FORMAT_NUMBERS, FORMAT_XLSX, Memory, State, book, rows};
 use crate::{Column, Error, Header};
 use hypercast::ExcelEpoch;
 use std::borrow::Cow;
 use std::path::Path;
 
 /// Which kind of workbook a container holds — told by what is in it, never by its name.
+///
+/// A format the core learns to read later is a new variant, so a match outside this crate
+/// names a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     /// Office Open XML (`.xlsx`).
     Xlsx,
     /// OpenDocument (`.ods`).
     Ods,
+    /// Apple Numbers (`.numbers`), where each table is a sheet.
+    Numbers,
 }
 
 /// One sheet of a workbook, as its listing names it.
@@ -295,10 +301,10 @@ impl<'a> Workbook<'a> {
                 other => unreachable!("the workbook core refused to open: {other}"),
             }
         };
-        let format = if opened.format == FORMAT_XLSX {
-            Format::Xlsx
-        } else {
-            Format::Ods
+        let format = match opened.format {
+            FORMAT_XLSX => Format::Xlsx,
+            FORMAT_NUMBERS => Format::Numbers,
+            _ => Format::Ods,
         };
         let epoch = ExcelEpoch::from_code(opened.epoch).unwrap_or(ExcelEpoch::Y1900);
 

@@ -18,15 +18,19 @@ const (
 	XLSX WorkbookFormat = 1
 	// ODS is OpenDocument: .ods.
 	ODS WorkbookFormat = 2
+	// Numbers is Apple Numbers: .numbers, each table a sheet.
+	Numbers WorkbookFormat = 3
 )
 
-// String names the format: "XLSX" or "ODS".
+// String names the format: "XLSX", "ODS" or "Numbers".
 func (f WorkbookFormat) String() string {
 	switch f {
 	case XLSX:
 		return "XLSX"
 	case ODS:
 		return "ODS"
+	case Numbers:
+		return "Numbers"
 	default:
 		return fmt.Sprintf("WorkbookFormat(%d)", int(f))
 	}
@@ -39,7 +43,7 @@ type SheetInfo struct {
 	// Hidden says whether the workbook hides the sheet.
 	Hidden bool
 
-	// What the core is given back to open it: the XLSX part, or the ODS table's index.
+	// What the core is given back to open it: the XLSX part, or the ODS or Numbers table's index.
 	part  []byte
 	index uint32
 }
@@ -187,7 +191,7 @@ func settled(code int32, filled *rawFilled) error {
 	}
 }
 
-// Workbook is an XLSX or ODS workbook held in memory, its sheets listed and its shared
+// Workbook is an XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared
 // strings and styles loaded: what a Sheet reads from.
 //
 // A workbook is read in place and holds nothing that needs releasing — every buffer is
@@ -248,9 +252,13 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.format = XLSX
-	if opened.format == 2 {
+	switch opened.format {
+	case 2:
 		w.format = ODS
+	case 3:
+		w.format = Numbers
+	default:
+		w.format = XLSX
 	}
 	epoch, ok := hypercast.ExcelEpochFromCode(opened.epoch)
 	if !ok {

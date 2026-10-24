@@ -23,13 +23,18 @@ public enum TabularFailure: Int32, Equatable, Sendable {
     case xml = 21
     /// A part's bytes are not a deflate stream, or stop before the stream does.
     case deflate = 22
-    /// The zip is neither an XLSX nor an ODS workbook.
+    /// The zip is not an XLSX, ODS or Numbers workbook.
     case notAWorkbook = 23
     /// A cell names a shared string the table does not have.
     case sharedString = 24
     /// More text than can be addressed: over 4 GiB in a batch or in the shared strings, or
     /// 2 GiB in a cell.
     case tooLarge = 25
+    /// A Numbers part is not what the IWA packaging says: `found` is 1 for a broken chunk or
+    /// Snappy block, 2 for a malformed message, 3 for an object a reference names that is not
+    /// there (`expected` is its identifier), 4 for cell storage of a version the core does
+    /// not read (`expected` is the version).
+    case iwa = 26
 }
 
 /// A structural failure: the input is not rows of cells — a record of the wrong width,
@@ -99,11 +104,13 @@ public struct TabularError: Error, Equatable, Sendable, CustomStringConvertible,
         case .deflate:
             "Part \(record) of the workbook is not a whole deflate stream (byte \(byte))."
         case .notAWorkbook:
-            "The zip is neither an XLSX nor an ODS workbook."
+            "The zip is not an XLSX, ODS or Numbers workbook."
         case .sharedString:
             "Row \(line) names shared string \(found); the table has \(expected)."
         case .tooLarge:
             "The workbook holds more text than a batch can address."
+        case .iwa:
+            "Part \(record) of the Numbers document is not what the IWA packaging says (byte \(byte), detail \(found))."
         }
     }
 

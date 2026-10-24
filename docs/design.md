@@ -161,13 +161,13 @@ doors. A workbook has typed cells: the workbook core reads each into one of thes
 | Variant | Produced by | Meaning |
 | --- | --- | --- |
 | `Empty` | all | no value (missing cell, sparse-row gap) |
-| `Text(&[u8])` | string cells (shared, inline, formula-string) | UTF-8 bytes, untrimmed — the HyperCast doors trim |
-| `Number(f64)` | workbook numeric cells with a non-temporal number format | the IEEE double the file stores |
-| `Bool(bool)` | workbook `t="b"` / `office:boolean-value` | |
-| `Wall { date, nanos }` | date-formatted Excel serials ≥ 1; ODS `office:date-value`; XLSX `t="d"` | a zoneless wall-clock instant: calendar date + nanoseconds since midnight |
-| `Clock(nanos)` | time-formatted Excel serials in `[0, 1)` | a time of day with no date |
-| `Span(Duration)` | Excel elapsed formats (`[h]:mm:ss`); ODS `office:time-value` | a signed duration |
-| `Error(code)` | `t="e"` / `calcext:value-type="error"` | `#N/A`, `#DIV/0!`, …, by BIFF code |
+| `Text(&[u8])` | string cells (shared, inline, formula-string); Numbers text and rich-text cells | UTF-8 bytes, untrimmed — the HyperCast doors trim |
+| `Number(f64)` | workbook numeric cells with a non-temporal number format; Numbers decimals and currencies | the IEEE double the file stores (the double nearest a Numbers decimal) |
+| `Bool(bool)` | workbook `t="b"` / `office:boolean-value`; Numbers booleans | |
+| `Wall { date, nanos }` | date-formatted Excel serials ≥ 1; ODS `office:date-value`; XLSX `t="d"`; Numbers dates | a zoneless wall-clock instant: calendar date + nanoseconds since midnight |
+| `Clock(nanos)` | time-formatted Excel serials in `[0, 1)`; Numbers dates under a format that shows no date | a time of day with no date |
+| `Span(Duration)` | Excel elapsed formats (`[h]:mm:ss`); ODS `office:time-value`; Numbers durations | a signed duration |
+| `Error(code)` | `t="e"` / `calcext:value-type="error"`; every Numbers error cell, as `#VALUE!` | `#N/A`, `#DIV/0!`, …, by BIFF code |
 
 ### `Door` and `Column` — what the caller declares
 
@@ -228,7 +228,7 @@ same code, replayed against the same corpus.
   date in it — and an elapsed-formatted serial is a `Span` of days.
 
 Reading `Wall` as UTC is the one interpretive act in the matrix, and it is unavoidable:
-neither Excel serials nor ODS date-values carry a zone. It is stated here, and bindings
+neither Excel serials, ODS date-values nor Numbers' seconds since 2001 carry a zone. It is stated here, and bindings
 present the resulting `Timestamp` as their zone-aware instant with that caveat.
 
 ### Verdicts and fault spans
@@ -352,6 +352,16 @@ handling. The decisions specific to it are in `docs/workbook.md`.
   skip `office:annotation`/`draw:frame`. `number-columns-repeated` on empty cells only
   advances the column; `number-rows-repeated` on empty rows is never materialised.
   `calcext:value-type="error"` is honoured.
+- **Numbers (IWA).** `Index/Document.iwa` checked: its object 1 a `TN.DocumentArchive`
+  whose sheets are `TN.SheetArchive`s. Every `.iwa` part is Snappy-compressed chunks of a
+  stream of Protocol Buffers objects, found by identifier through a sorted index built
+  in the caller's cell table; the window holds only the chunks of the object in hand. A
+  sheet is one table (`<sheet> - <table>` when a sheet holds several), hidden when its
+  sheet is. Cells are v5 storage, read by their type and flags: decimal or double →
+  number; seconds since 2001 → wall clock, or a time of day under a format that shows no
+  date; double → boolean, duration; string and rich-text keys → spans into the table's
+  lists, loaded once by `strings`; error → `#VALUE!`; the cells a merge covers → empty.
+  Tiles of 256 rows (or the storage's size); a row a tile leaves out is empty.
 
 ## FFI shape
 

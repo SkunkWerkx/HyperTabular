@@ -605,7 +605,7 @@ pub fn workbook_cases() -> Vec<Value> {
                 .expect("a name")
         })
         .filter(|name| {
-            [".xlsx", ".xlsm", ".ods"]
+            [".xlsx", ".xlsm", ".ods", ".numbers"]
                 .iter()
                 .any(|ext| name.ends_with(ext))
         })
@@ -698,6 +698,8 @@ pub fn workbook_cases() -> Vec<Value> {
                     "format": match book.format() {
                         Format::Xlsx => "xlsx",
                         Format::Ods => "ods",
+                        Format::Numbers => "numbers",
+                        other => panic!("format {other:?} has no corpus name"),
                     },
                     "epoch": book.date_system() as u32,
                     "sheets": sheets,

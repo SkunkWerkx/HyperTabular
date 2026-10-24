@@ -40,7 +40,7 @@ enum TabularFailure: int
     /** A part's bytes are not a deflate stream, or stop before the stream does. */
     case Deflate = 22;
 
-    /** The zip is neither an XLSX nor an ODS workbook. */
+    /** The zip is not an XLSX, ODS or Numbers workbook. */
     case NotAWorkbook = 23;
 
     /** A cell names a shared string the table does not have. */
@@ -48,4 +48,11 @@ enum TabularFailure: int
 
     /** More text than can be addressed: over 4 GiB in a batch or in the shared strings, or 2 GiB in a cell. */
     case TooLarge = 25;
+
+    /**
+     * A Numbers part is not what the IWA packaging says: found is 1 for a broken chunk or Snappy block, 2 for a
+     * malformed message, 3 for an object a reference names that is not there (expected is its identifier), 4 for
+     * cell storage of a version the core does not read (expected is the version).
+     */
+    case Iwa = 26;
 }

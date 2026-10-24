@@ -211,7 +211,7 @@ impl Failure {
     /// The part's bytes are not a deflate stream (`found` `0`), or stop before the stream
     /// does (`found` `1`).
     pub const DEFLATE: u32 = 22;
-    /// The container is a zip but neither an XLSX nor an ODS workbook.
+    /// The container is a zip but not an XLSX, ODS or Numbers workbook.
     pub const NOT_A_WORKBOOK: u32 = 23;
     /// A cell names a shared string by something that is not a number (`found` `0`,
     /// `expected` `0`), or by an index past the table (`found` the index, `expected` the
@@ -220,6 +220,12 @@ impl Failure {
     /// More text than a span can address: over 4 GiB in one batch or in the shared
     /// strings, or 2 GiB in one cell.
     pub const TOO_LARGE: u32 = 25;
+    /// A Numbers part is not what the IWA packaging says: `found` is `1` for a chunk or
+    /// Snappy block that is broken, `2` for a Protocol Buffers message that is malformed,
+    /// `3` for an object a reference names that is not in the package (`expected` is its
+    /// identifier), `4` for cell storage of a version the core does not read (`expected`
+    /// is the version). `byte` is the object's offset in the part's decoded stream.
+    pub const IWA: u32 = 26;
 
     /// `_rels/.rels`.
     pub const PART_ROOT_RELS: u32 = 1;
@@ -239,6 +245,8 @@ impl Failure {
     pub const PART_MIMETYPE: u32 = 8;
     /// An ODS document's `META-INF/manifest.xml`.
     pub const PART_MANIFEST: u32 = 9;
+    /// A Numbers document's `.iwa` parts, as one.
+    pub const PART_IWA: u32 = 10;
 }
 
 /// What a call did.
@@ -322,14 +330,16 @@ pub struct Buffers {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Opened {
-    /// `1` XLSX, `2` ODS.
+    /// `1` XLSX, `2` ODS, `3` Numbers.
     pub format: u32,
     /// The workbook's date system: HyperCast's `ExcelEpoch` code (`1` 1900, `2` 1904).
     pub epoch: u32,
     /// An upper bound on the bytes the shared strings take: the size their part inflates
-    /// to. Zero if the workbook has none.
+    /// to (Numbers: the size the parts that hold its tables' strings decode to). Zero if the
+    /// workbook has none.
     pub strings_bytes: u64,
-    /// How many shared strings the part says it has. A hint: the file's word, unchecked.
+    /// How many shared strings the part says it has. A hint: the file's word, unchecked;
+    /// Numbers says nothing, and it is zero.
     pub strings_count: u64,
     /// On [`ERR_WINDOW`] or [`ERR_ARENA`], the size that buffer needs.
     pub needed: u64,
@@ -344,10 +354,11 @@ pub struct SheetInfo {
     /// The sheet's name, in the arena.
     pub name: Span,
     /// The part that holds it, in the arena: what `hypertabular_workbook_sheet` is given
-    /// to open it. Empty for ODS, where every sheet is in one part.
+    /// to open it. Empty for ODS and Numbers, where every sheet is reached another way.
     pub part: Span,
     /// Bit 0: the sheet is hidden.
     pub flags: u32,
-    /// The sheet's position among the document's tables (ODS), given back likewise.
+    /// The sheet's position among the document's tables (ODS, Numbers), given back
+    /// likewise.
     pub index: u32,
 }

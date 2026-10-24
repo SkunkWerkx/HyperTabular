@@ -84,6 +84,8 @@ fn every_case_reads_as_the_corpus_says() {
             let format = match book.format() {
                 Format::Xlsx => "xlsx",
                 Format::Ods => "ods",
+                Format::Numbers => "numbers",
+                other => panic!("{name}: format {other:?} has no corpus name"),
             };
             assert_eq!(case["format"], format, "{name}");
             let epoch = match book.date_system() {

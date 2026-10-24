@@ -6,13 +6,15 @@
 //! relationships name the sheets, the style table and the shared strings. ODS has one
 //! part, `content.xml`, and its sheets are that part's tables.
 
+use super::iwa::Package;
+use super::numbers;
 use super::part::{Reader, Stop};
 use super::sort::{heap_sort, partition_point};
 use super::xml::{self, Kind, Tag, parse_u32, slice, unescape_into};
 use super::zip::{self, Directory, Entry, unrooted};
 use super::{
-    DONE, FORMAT_ODS, FORMAT_XLSX, Memory, OP_NONE, OP_SHEETS, OP_STRINGS, OP_STYLES, OPENED,
-    State, begin, failure, refuse, room, styles,
+    DONE, FORMAT_NUMBERS, FORMAT_ODS, FORMAT_XLSX, Memory, OP_NONE, OP_SHEETS, OP_STRINGS,
+    OP_STYLES, OPENED, State, begin, failure, refuse, room, styles,
 };
 use crate::kernel::abi::{ERR_CONTRACT, Failure, Filled, OK, Opened, Span};
 use hypercast::ExcelEpoch;
@@ -173,9 +175,10 @@ fn start(reader: &mut Reader<'_>, entry: &Entry<'_>, id: u32) -> Result<(), Stop
     Ok(())
 }
 
-/// What [`open`] learns about an XLSX package.
+/// What [`open`] learns about a package: an XLSX one's parts, or (`content`) the one part
+/// an ODS or Numbers document is read from.
 #[derive(Default)]
-struct Package {
+struct Found {
     workbook: u64,
     rels: u64,
     styles: u64,
@@ -184,7 +187,7 @@ struct Package {
     epoch: u32,
 }
 
-/// Opens a workbook: checks the container, tells XLSX from ODS by what the container holds
+/// Opens a workbook: checks the container, tells XLSX, ODS and Numbers apart by what the container holds
 /// (never by a file name), and finds the parts every later call reads. Writes a fresh
 /// state; any earlier one in the block is gone.
 ///
@@ -207,26 +210,45 @@ pub fn open(state: &mut State, container: &[u8], memory: &mut Memory<'_>, out: &
         Err(code) => return refuse(failure(code, 0, 0), &mut out.needed, &mut out.failure),
     };
     state.directory = directory;
-    let mut reader = Reader {
-        part: &mut state.part,
-        inflate: &mut state.inflate,
-        container,
-        window: memory.window,
-    };
-    let mut scratch = Scratch {
-        bytes: memory.arena,
-        used: 0,
-    };
     let is_xlsx = directory.find(container, b"[Content_Types].xml").is_some()
         || directory.find(container, DEFAULT_WORKBOOK).is_some();
-    let opened = if is_xlsx {
-        open_xlsx(&mut reader, &directory, &mut scratch, out)
-    } else {
-        open_ods(&mut reader, &directory).map(|content| Package {
+    let is_numbers = !is_xlsx && directory.find(container, b"Index/Document.iwa").is_some();
+    let opened = if is_numbers {
+        // Numbers: the objects are read through the loader, never tokenized.
+        state.cache = Default::default();
+        state.part.begin_empty(Failure::PART_IWA);
+        let mut package = Package {
+            container,
+            directory,
+            inflate: &mut state.inflate,
+            window: memory.window,
+            cache: &mut state.cache,
+        };
+        numbers::open(&mut package, out).map(|content| Found {
             content,
             epoch: ExcelEpoch::Y1900 as u32,
-            ..Package::default()
+            ..Found::default()
         })
+    } else {
+        let mut reader = Reader {
+            part: &mut state.part,
+            inflate: &mut state.inflate,
+            container,
+            window: memory.window,
+        };
+        let mut scratch = Scratch {
+            bytes: memory.arena,
+            used: 0,
+        };
+        if is_xlsx {
+            open_xlsx(&mut reader, &directory, &mut scratch, out)
+        } else {
+            open_ods(&mut reader, &directory).map(|content| Found {
+                content,
+                epoch: ExcelEpoch::Y1900 as u32,
+                ..Found::default()
+            })
+        }
     };
     match opened {
         Ok(package) => {
@@ -236,7 +258,13 @@ pub fn open(state: &mut State, container: &[u8], memory: &mut Memory<'_>, out: &
             state.strings = package.strings;
             state.content = package.content;
             state.epoch = package.epoch;
-            state.format = if is_xlsx { FORMAT_XLSX } else { FORMAT_ODS };
+            state.format = if is_xlsx {
+                FORMAT_XLSX
+            } else if is_numbers {
+                FORMAT_NUMBERS
+            } else {
+                FORMAT_ODS
+            };
             state.opened = OPENED;
             out.format = state.format;
             out.epoch = state.epoch;
@@ -251,7 +279,7 @@ fn open_xlsx(
     directory: &Directory,
     scratch: &mut Scratch<'_>,
     out: &mut Opened,
-) -> Result<Package, Stop> {
+) -> Result<Found, Stop> {
     let container = reader.container;
     // The workbook part is whatever the package's own relationships call the office
     // document, and `xl/workbook.xml` if they do not say.
@@ -286,9 +314,9 @@ fn open_xlsx(
     let base: Run = (workbook.0 + dir_len, base_len);
 
     // Its relationships: where the styles and the shared strings are.
-    let mut package = Package {
+    let mut package = Found {
         epoch: ExcelEpoch::Y1900 as u32,
-        ..Package::default()
+        ..Found::default()
     };
     let (mut styles, mut strings): (Option<Run>, Option<Run>) = (None, None);
     let name = {
@@ -447,7 +475,11 @@ pub fn sheets(
         return ERR_CONTRACT;
     }
     let fresh = state.enter(OP_SHEETS);
-    let result = sheets_inner(state, container, memory, fresh);
+    let result = if state.format == FORMAT_NUMBERS {
+        numbers::sheets(state, container, memory)
+    } else {
+        sheets_inner(state, container, memory, fresh)
+    };
     out.arena_used = state.used;
     match result {
         Ok(()) => {
@@ -803,7 +835,11 @@ pub fn strings(
         return ERR_CONTRACT;
     }
     let fresh = state.enter(OP_STRINGS);
-    let result = strings_inner(state, container, memory, fresh);
+    let result = if state.format == FORMAT_NUMBERS {
+        numbers::strings(state, container, memory)
+    } else {
+        strings_inner(state, container, memory, fresh)
+    };
     out.arena_used = state.used;
     match result {
         Ok(()) => {
@@ -941,7 +977,12 @@ pub fn styles(
         return ERR_CONTRACT;
     }
     let fresh = state.enter(OP_STYLES);
-    let result = styles_inner(state, container, memory, fresh);
+    // Numbers has no style table a cell indexes: its date formats travel with the strings.
+    let result = if state.format == FORMAT_NUMBERS {
+        Ok(())
+    } else {
+        styles_inner(state, container, memory, fresh)
+    };
     match result {
         Ok(()) => {
             state.phase = DONE;

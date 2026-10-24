@@ -104,8 +104,10 @@ ruby = ["dep:magnus", "dep:rb-sys", "std"]
 # The comparison baseline for the delimited conformance suite and bench — never linked.
 csv = "1.4"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-# The corpus is JSON: the example that writes it and the test that replays it.
-serde_json = "1"
+# The corpus is JSON: the example that writes it and the test that replays it. Without
+# `float_roundtrip`, serde_json reads a 17-digit double one unit off, and a cell's f32 said
+# as a double (61.909000396728516) would not be what the file says.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Deflate for the tests, which build their workbook packages in memory and hold the core's
 # own inflate to another's. The crate itself inflates with the core and links neither.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

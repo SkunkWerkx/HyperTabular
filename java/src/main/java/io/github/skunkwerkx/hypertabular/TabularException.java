@@ -90,7 +90,8 @@ public final class TabularException extends RuntimeException {
     /**
      * What was expected, for the kinds that say: the first record's cell count for
      * {@link TabularFailure#COLUMN_COUNT}, the shared-string table's length for
-     * {@link TabularFailure#SHARED_STRING}; {@code 0} otherwise.
+     * {@link TabularFailure#SHARED_STRING}, the identifier or version an
+     * {@link TabularFailure#IWA} failure names; {@code 0} otherwise.
      *
      * @return the expected cell count
      */
@@ -131,9 +132,12 @@ public final class TabularException extends RuntimeException {
             case XML -> "Part " + record + " of the workbook ends inside an XML construct (byte " + byteOffset + ").";
             case DEFLATE ->
                 "Part " + record + " of the workbook is not a whole deflate stream (byte " + byteOffset + ").";
-            case NOT_A_WORKBOOK -> "The zip is neither an XLSX nor an ODS workbook.";
+            case NOT_A_WORKBOOK -> "The zip is not an XLSX, ODS or Numbers workbook.";
             case SHARED_STRING -> "Row " + line + " names shared string " + found + "; the table has " + expected + ".";
             case TOO_LARGE -> "The workbook holds more text than a batch can address.";
+            case IWA ->
+                "Part " + record + " of the Numbers document is not what the IWA packaging says (byte " + byteOffset
+                        + ", detail " + found + ").";
         };
     }
 }
