@@ -130,9 +130,11 @@ class CiTests(unittest.TestCase):
 
     def test_native_suites_preserved_and_mobile_dependencies_narrow(self):
         build = self.jobs['build-native']
-        for flag in ('static_libs_artifact: false', 'swift_static_tests: false',
-                     'android_shared_artifact: false', 'php_extension_schedule: parallel'):
-            self.assertIn(flag, build)
+        # The Forge has none of these inputs: the static, Android and swift-static work is
+        # its own workflows', called below, and the PHP extension builds inline.
+        for gone in ('static_libs_artifact', 'swift_static_tests', 'android_shared_artifact',
+                     'php_extension_schedule', 'apple_mobile', 'android:'):
+            self.assertNotIn(gone, build)
         self.assertIn('needs: build-static', self.jobs['test-apple-mobile'])
         self.assertIn('needs: [build-static, build-android]', self.jobs['test-android'])
         self.assertIn('needs: build-static', self.jobs['test-swift-static'])
@@ -141,8 +143,9 @@ class CiTests(unittest.TestCase):
         core = self.jobs['check-core']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-check-core.yml@master', core)
         for setting in ('core_script: rust/check-core.sh', 'extra_features: async', 'no_panic: false',
-                        'exports: false', 'corpus_oracle: ""', 'lint_swift: false'):
+                        'exports: false', 'corpus_oracle: ""'):
             self.assertIn(setting, core)
+        self.assertNotIn('lint_swift', core, 'swift/.swiftlint.yml is there to be linted')
         inline = [name for name in self.jobs if re.match(r'(check|lint|format)-', name) and name != 'check-core']
         self.assertEqual(inline, [], 'static checks live in hyper-check-core.yml, once')
 

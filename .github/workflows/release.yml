@@ -143,6 +143,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
     steps:
@@ -165,6 +166,7 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: read
     steps:
@@ -307,8 +309,9 @@ jobs:
           publish: ${{ github.event_name == 'workflow_dispatch' }}
           token: ${{ github.token }}
 
-  # crates.io Trusted Publishing is registered against hyper-publish-crate.yml's publish job,
-  # and package_preparation.py matches this job's name in run history: don't rename it.
+  # crates.io Trusted Publishing is registered against this workflow, release.yml: crates.io
+  # matches the token's workflow_ref, the calling workflow, not the reusable one it calls.
+  # package_preparation.py matches this job's name in run history: don't rename it.
   pack-crates:
     needs: [find-ci-run, publication-gate]
     if: >-

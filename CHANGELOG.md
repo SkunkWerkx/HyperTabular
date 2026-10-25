@@ -7,12 +7,17 @@ all of them. Each entry marks which packages it actually affects.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-10-25
 
-The next release is **1.0.0**, and with it every package's public API and the platforms in
-the README's [Platform support](README.md#platform-support) table become a commitment under
-Semantic Versioning: breaking or dropping either takes a new major version. Until then a
-minor release can still break both, as 0.9.0 did.
+The first stable release. Every package's public API and the platforms in the README's
+[Platform support](README.md#platform-support) table are now a commitment under Semantic
+Versioning: breaking or dropping either takes a new major version. Every binding reads Apple
+Numbers beside XLSX and ODS; a live stream hands over each header and batch as it arrives,
+in Rust, Python and Swift; a plan can no longer ask for unbounded memory, with one ordinal
+cap, 2^20, in every binding; the Rust API is fixed at what a 1.0 can promise
+(`#[non_exhaustive]`, a kernel surface of only what a binding calls); what was never used
+goes (Java's GraalWasm backend, Python's `BACKEND`); and every shipped file verifies from
+the release tag alone.
 
 ### Added
 
@@ -21,6 +26,16 @@ minor release can still break both, as 0.9.0 did.
   the primitives had accessors (`batch.i64(col)` and its siblings, which it now underlies).
   The slice borrows the reader as theirs do, and a cell that did not cast holds the door's
   zero beside its verdict, as theirs does. *(Rust)*
+- **C#, Java and Swift lend more columns whole.** C#'s `Batch.Values<T>` lends a decimal
+  column as HyperCast's `RawDecimal`, a timestamp, Unix or Excel-serial column as
+  `RawTimestamp`, a date column as `RawDate`, a date-time column as `RawCivil` and a
+  duration column as `RawDuration`, zero-copy, and a time column as `ulong` nanoseconds; a
+  UUID column is still read with `Get<Guid>`, since the core's RFC 9562 bytes are not a
+  `Guid`'s layout. Java's `values(column)` returns the column segment for every door but
+  text, read with HyperCast's `NativeValues` readers at their `*_BYTES` stride. Swift's
+  `values(_:as: UInt64.self)` lends a time column's nanoseconds; HyperCast's Swift package
+  has no value types with the core's layout, so the other doors stay a cell at a time.
+  *(C#, Java, Swift)*
 - **Apple Numbers.** Every binding reads a `.numbers` document — Apple's IWA packaging:
   Snappy-compressed chunks of Protocol Buffers objects — the way it reads XLSX and ODS,
   told by what the container holds, never by its name. Each table is a sheet, listed
@@ -45,9 +60,20 @@ minor release can still break both, as 0.9.0 did.
   layouts Numbers never writes small (chunks of a few bytes, seven-row tiles, wide
   offsets, a segmented string list, rows left out of their tile); `workbook.json` grows
   from 198 to 246 cases, every one of them new. *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
+- **A core freshness check for the suites that link committed binaries.** Go's, Swift's
+  and PHP's suites refuse to run against `go/staticlib`, the Swift artifact bundle or
+  `php/src/native` when `rust/src`, `rust/Cargo.toml` or `rust/Cargo.lock` differ from the
+  commit those binaries were staged from, and name the local-core command to run instead
+  (Go and PHP stop before any test; Swift fails `CoreFreshnessTests`). CI, the local core,
+  shallow clones and a checkout with fresh binaries written into the tree skip it.
+  `.github/scripts/local-core.sh` finds a Forge checkout at `../HyperForge` as well as
+  `../.github`. *(repository only)*
 
 ### Changed
 
+- **Swift — on HyperCast 1.0.0, whose doors do not throw.** HyperCast's Swift doors and
+  `Cast.nativeVersion()` dropped `throws` (bad data was always the verdict's `Fault`), so a
+  call needs no `try`; one left in place compiles with a warning. *(Swift)*
 - **Breaking — Rust: the kernel's public surface is what a binding calls, and no more.**
   `kernel::abi`, `kernel::door`, `kernel::exports`, `kernel::delimited::fill`, and
   `kernel::workbook`'s state, memory, format constants and `book` and `rows` modules stay
@@ -88,7 +114,10 @@ minor release can still break both, as 0.9.0 did.
   it by `.github/hyper.json` and `.github/scripts/abi_probe.c`; CI gained `check-semver`
   against the last crates.io release, the no_std consumer build and the shared library's
   export check on every RID. Dependabot bumps every ecosystem in one monthly pull request,
-  every third-party action is pinned to a commit, and CodeQL runs weekly. *(repository only)*
+  every third-party action is pinned to a commit, and CodeQL runs weekly. CI also runs the
+  Rust suite under wasmtime on `wasm32-wasip1` (`test-wasi`) and SwiftLint's `missing_docs`
+  over the Swift package's public API (`swift/.swiftlint.yml`), on every pull request.
+  *(repository only)*
 
 ### Removed
 
@@ -100,6 +129,9 @@ minor release can still break both, as 0.9.0 did.
   other step of a leg together once the Numbers reader was in it (23 minutes against 15 on
   linux-x64). `cargo wasm-module` and the `wasm32-wasip1` export flags leave
   `rust/.cargo/config.toml` with it. *(Java)*
+- **Python — `hypertabular.BACKEND`.** It was always `"native"` once the PyO3 extension
+  became the only backend, so it named no choice. `hypertabular.native_version()` still
+  reports the core the extension was built from. *(PyPI)*
 
 ### Fixed
 
@@ -109,6 +141,61 @@ minor release can still break both, as 0.9.0 did.
   records held them back; it now goes back to parsing after any read that returns bytes.
   Interrupted reads, records split across reads, cancellation and terminal errors behave
   as before. *(Rust)*
+- **Python — the same, for a file and a file object.** A file `DelimitedReader.open` opened
+  (a FIFO, say) was read until the buffer was full, and a buffered file object's
+  `read(size)` over a pipe or a socket waits for all of `size`. The reader now parses after
+  any read that returns bytes, calls a file object's `read1(size)` where it has one, and
+  opens the path with the interpreter released, so a FIFO whose writer is another Python
+  thread no longer deadlocks the open. *(PyPI)*
+- **Rust — a slice of 2 GiB or more is read.** `from_slice` handed the core the whole slice
+  in one call, and the core takes under 2 GiB a call (its offsets are 31 bits), so a larger
+  slice failed at once as `Error::Separator`. It is handed over in windows under 2 GiB now,
+  as Python already hands over `bytes`, and only a single record that long is
+  `FailureKind::RowTooLong`. *(Rust)*
+- **Swift — a live asynchronous sequence is read as it arrives, in whole batches.** A reader
+  opened from an `AsyncSequence` awaited its bytes until the read buffer filled or the
+  sequence ended, so a header or row that had arrived from a live source (`URLSession.bytes`)
+  was held back. A task owned by the reader now awaits the sequence, up to `bufferBytes`
+  ahead, and a read takes everything that has arrived, waiting only when nothing has: a
+  batch is `batchRows` rows when that many are in, and a row from a paused source is read
+  within 200 µs. A cancelled read still loses nothing, a sequence's error still follows
+  every byte before it, and the task stops when the reader is released. The sequence is
+  passed `sending`. *(Swift)*
+- **Swift — a FIFO or pipe opened by path is read as it is written.**
+  `DelimitedReader(contentsOfFile:)` read through `FileHandle.read(upToCount:)`, which on a
+  FIFO waits for the whole count; off Windows it makes one `read(2)` per refill. *(Swift)*
+- **Every binding refuses a plan ordinal of 2^20 (1,048,576) or more, as its own plan
+  error.** No workbook format has that many columns (XLSX and ODS stop at 16,384, Numbers
+  at 1,000), and at the cap one row of cell table is at most 8 MiB and a sheet's row slots
+  at most 16 MiB, so no plan can ask for more. Before, the bounds differed and some broke:
+  Rust took any ordinal that fit a `u32`, so on `wasm32` `Column::text(usize::MAX)`
+  overflowed and panicked and on a 64-bit host an ordinal near `u32::MAX` sized a cell table
+  of tens of terabytes and aborted on the allocation; Swift crashed on a precondition for an
+  ordinal of 2³¹ − 1 or more; C# overflowed `Ordinal + 1` at `int.MaxValue` and bound a
+  corrupt width; Java took every `int`; Python, Ruby, Go and PHP stopped at 2³¹ − 1. Now an
+  ordinal of 2^20 or more is refused for a delimited plan and a sheet's alike, before
+  anything is allocated: Rust `Error::Plan`, C# `ArgumentException`, Java
+  `IllegalArgumentException`, Swift the new `PlanError.outOfReach(column:)`, Python
+  `ValueError`, Ruby `ArgumentError`, PHP `InvalidArgumentException`, Go's plan error.
+  *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
+- **A plan column's ordinal no longer sizes a batch of cell table.** A delimited reader's
+  cell table took the plan's widest ordinal plus two entries for every row of a batch, and
+  blanked them all on every row, so on a two-row file `Column::i64(100_000)` took 3.2 GB,
+  2 000 000 took 8 GB, and 1 000 000 000 was killed past 10 GB with nothing read. Now,
+  once a header has fixed the width every record has, `bind` — or a constructor given the
+  plan, as soon as it has read the header — refuses a column at or past that width as the
+  binding's own plan error naming it (Rust `Error::Plan`, C# `ArgumentException`, Java
+  `IllegalArgumentException`, Swift `PlanError.outOfReach(column:)`, Python `ValueError`,
+  Ruby `ArgumentError`, PHP `InvalidArgumentException`, Go's plan error): such a column
+  could only ever be empty. Without a header, where the width is not known at bind, the
+  table holds as many rows as 4096 × 257 entries (8 MiB, a default batch of a plan
+  reaching 256 source columns) allow, and never less than one: a plan reaching further
+  reads shorter batches, and its far columns read as empty in the memory one row's reach
+  takes, at most 8 MiB under the 2^20 cap. An ordinary plan's batches are full as before, and a sheet is unchanged — its cell
+  table is a batch of plan columns, not of reach, and its header does not fix the width of
+  the rows below. The corpus case "a plan is a projection, in its own order", which read
+  ordinal 9 behind a four-name header as empty, reads the same record without a header.
+  *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
 
 ## [0.9.0] — 2026-10-21
 
@@ -612,7 +699,36 @@ cells through. *(every package)*
   using trusted publishing (OIDC) wherever the registry offers it. Packagist, SwiftPM and
   the Go module (`go/v0.7.0`) resolve from the tags. *(every package)*
 
-[Unreleased]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.9.0...HEAD
+### Notes
+
+- **The workbook read before this release, measured.** The std workbook reader the core
+  replaced, inflating with zlib-rs, read the 300 000-row workbook in 505 ms against the
+  core's 604 ms (`tests/kernel_workbook.rs`, `throughput`, measured before that reader was
+  deleted). The difference was long guessed to be the inflate, since the core's runs at
+  about two thirds of zlib-rs's speed; measured (Rust, best of three, before the tokenizer
+  pass below), it was not: the core's inflate alone took 117 ms over the xlsx sheet's
+  111 MB and 93 ms over the ODS part's 360 MB, and casting was not it either (an empty plan
+  read the xlsx in 689 ms against the full plan's 705 ms, ODS 1.66 s and 1.72 s). The rest
+  was the XML — tokenizing the parts and assembling rows — about 570 ms for the xlsx sheet
+  (195 MB/s) and, for ODS, about 380 ms of the open's scan and 1.1 s of the read
+  (330 MB/s). The text door was the one plan that cost more: all eight columns through it
+  read in 1.03 s and 2.01 s. *(crate, every binding)*
+- **The tokenizer pass, 2026-10-05.** Profiled (samply, the ODS read), the XML was most of
+  it in two places. `tag()` found a tag's `>` a byte at a time, minding quotes, over ODS's
+  long cell tags; it now jumps from one `>` or quote to the next eight bytes at a time, as
+  `find_byte` finds one byte. Every attribute lookup walked the tag's attributes from the
+  start — four or five a cell for ODS, three (`r`, `s`, `t`) for XLSX; each cell's are now
+  gathered in one pass, each the first of its name as the lookups found it. And the
+  nine-byte `<![CDATA[` comparison, a `memcmp` call, ran for every ordinary tag until `<!`
+  was asked first. Best of several runs, Rust, before and after the three: XLSX read
+  710 → 580 ms, ODS read 1.88 → 1.19 s, ODS open 530 → 320 ms. *(crate, every binding)*
+- **What the first cross-binding table changed.** Ruby and PHP each ran a scan over every
+  span of a batch, in the host language, to find how much of the arena to copy, where the
+  core's own `arena_used` already says (Ruby's read went from 1.05 s to 0.68 s before any
+  values were made); and PHP decoded its record doors with an `unpack()` a cell, now one a
+  column (0.28 s to 0.14 s of decoding for the xlsx file). *(Ruby, PHP)*
+
+[1.0.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/SkunkWerkx/HyperTabular/releases/tag/v0.7.0

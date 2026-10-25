@@ -1,5 +1,13 @@
 import Foundation
 import XCTest
+
+#if canImport(Android)
+    import Android
+#elseif canImport(Glibc)
+    import Glibc
+#elseif canImport(Musl)
+    import Musl
+#endif
 @testable import HyperTabular
 
 /// What the corpus does not reach: the binding's own surface. Nothing here but the file
@@ -72,56 +80,56 @@ final class ReaderTests: XCTestCase {
         func raw(_ column: Int) -> UnsafeRawBufferPointer { batch.raw(column, row: 0) }
 
         XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), .success(true))
-        XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), try Cast.bool(raw(0)))
+        XCTAssertEqual(batch.get(0, row: 0, as: Bool.self), Cast.bool(raw(0)))
         XCTAssertEqual(batch.get(1, row: 0, as: Int8.self), .success(-128))
-        XCTAssertEqual(batch.get(1, row: 0, as: Int8.self), try Cast.i8(raw(1), format: .invariant))
+        XCTAssertEqual(batch.get(1, row: 0, as: Int8.self), Cast.i8(raw(1), format: .invariant))
         XCTAssertEqual(batch.get(2, row: 0, as: Int16.self), .success(32767))
-        XCTAssertEqual(batch.get(2, row: 0, as: Int16.self), try Cast.i16(raw(2), format: .invariant))
+        XCTAssertEqual(batch.get(2, row: 0, as: Int16.self), Cast.i16(raw(2), format: .invariant))
         XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), .success(-1234))
-        XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), try Cast.i32(raw(3), format: .invariant))
+        XCTAssertEqual(batch.get(3, row: 0, as: Int32.self), Cast.i32(raw(3), format: .invariant))
         XCTAssertEqual(batch.get(4, row: 0, as: Int64.self), .success(.max))
-        XCTAssertEqual(batch.get(4, row: 0, as: Int64.self), try Cast.i64(raw(4), format: .invariant))
+        XCTAssertEqual(batch.get(4, row: 0, as: Int64.self), Cast.i64(raw(4), format: .invariant))
         XCTAssertEqual(batch.get(5, row: 0, as: UInt8.self), .success(255))
-        XCTAssertEqual(batch.get(5, row: 0, as: UInt8.self), try Cast.u8(raw(5), format: .invariant))
+        XCTAssertEqual(batch.get(5, row: 0, as: UInt8.self), Cast.u8(raw(5), format: .invariant))
         XCTAssertEqual(batch.get(6, row: 0, as: UInt16.self), .success(65535))
-        XCTAssertEqual(batch.get(6, row: 0, as: UInt16.self), try Cast.u16(raw(6), format: .invariant))
+        XCTAssertEqual(batch.get(6, row: 0, as: UInt16.self), Cast.u16(raw(6), format: .invariant))
         XCTAssertEqual(batch.get(7, row: 0, as: UInt32.self), .success(4_294_967_295))
-        XCTAssertEqual(batch.get(7, row: 0, as: UInt32.self), try Cast.u32(raw(7), format: .invariant))
+        XCTAssertEqual(batch.get(7, row: 0, as: UInt32.self), Cast.u32(raw(7), format: .invariant))
         XCTAssertEqual(batch.get(8, row: 0, as: UInt64.self), .success(.max))
-        XCTAssertEqual(batch.get(8, row: 0, as: UInt64.self), try Cast.u64(raw(8), format: .invariant))
+        XCTAssertEqual(batch.get(8, row: 0, as: UInt64.self), Cast.u64(raw(8), format: .invariant))
         XCTAssertEqual(batch.get(9, row: 0, as: Float.self), .success(2.5))
-        XCTAssertEqual(batch.get(9, row: 0, as: Float.self), try Cast.f32(raw(9), format: .invariant))
+        XCTAssertEqual(batch.get(9, row: 0, as: Float.self), Cast.f32(raw(9), format: .invariant))
         XCTAssertEqual(batch.get(10, row: 0, as: Double.self), .success(0.255))
-        XCTAssertEqual(batch.get(10, row: 0, as: Double.self), try Cast.f64(raw(10), format: .invariant))
+        XCTAssertEqual(batch.get(10, row: 0, as: Double.self), Cast.f64(raw(10), format: .invariant))
         // 96 bits of magnitude: the high word is in play, and nothing is rounded.
         XCTAssertEqual(
             batch.get(11, row: 0, as: Decimal.self), .success(Decimal(string: "79228162514264337593543950.335")!))
-        XCTAssertEqual(batch.get(11, row: 0, as: Decimal.self), try Cast.decimal(raw(11), format: .invariant))
+        XCTAssertEqual(batch.get(11, row: 0, as: Decimal.self), Cast.decimal(raw(11), format: .invariant))
         XCTAssertEqual(
             batch.get(12, row: 0, as: UUID.self), .success(UUID(uuidString: "6ba7b810-9dad-11d1-80b4-00c04fd430c8")!))
-        XCTAssertEqual(batch.get(12, row: 0, as: UUID.self), try Cast.uuid(raw(12)))
+        XCTAssertEqual(batch.get(12, row: 0, as: UUID.self), Cast.uuid(raw(12)))
         XCTAssertEqual(batch.get(13, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_767_348_245.25)))
-        XCTAssertEqual(batch.get(13, row: 0, as: Date.self), try Cast.timestamp(raw(13)))
+        XCTAssertEqual(batch.get(13, row: 0, as: Date.self), Cast.timestamp(raw(13)))
         XCTAssertEqual(batch.get(14, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_700_000_000.123)))
-        XCTAssertEqual(batch.get(14, row: 0, as: Date.self), try Cast.unix(raw(14), precision: .milliseconds))
+        XCTAssertEqual(batch.get(14, row: 0, as: Date.self), Cast.unix(raw(14), precision: .milliseconds))
         XCTAssertEqual(batch.get(15, row: 0, as: Date.self), .success(Date(timeIntervalSince1970: 1_704_132_000)))
-        XCTAssertEqual(batch.get(15, row: 0, as: Date.self), try Cast.excelSerial(raw(15), epoch: .y1900))
+        XCTAssertEqual(batch.get(15, row: 0, as: Date.self), Cast.excelSerial(raw(15), epoch: .y1900))
         XCTAssertEqual(
             batch.get(16, row: 0, as: DateComponents.self), .success(DateComponents(year: 2024, month: 1, day: 31)))
-        XCTAssertEqual(batch.get(16, row: 0, as: DateComponents.self), try Cast.date(raw(16)))
+        XCTAssertEqual(batch.get(16, row: 0, as: DateComponents.self), Cast.date(raw(16)))
         XCTAssertEqual(
             batch.get(17, row: 0, as: DateComponents.self), .success(DateComponents(year: 2026, month: 1, day: 7)))
-        XCTAssertEqual(batch.get(17, row: 0, as: DateComponents.self), try Cast.date(raw(17), order: .monthDayYear))
+        XCTAssertEqual(batch.get(17, row: 0, as: DateComponents.self), Cast.date(raw(17), order: .monthDayYear))
         XCTAssertEqual(
             batch.get(18, row: 0, as: DateComponents.self),
             .success(DateComponents(year: 2026, month: 1, day: 7, hour: 15, minute: 4, second: 5, nanosecond: 7)))
-        XCTAssertEqual(batch.get(18, row: 0, as: DateComponents.self), try Cast.dateTime(raw(18), order: .monthDayYear))
+        XCTAssertEqual(batch.get(18, row: 0, as: DateComponents.self), Cast.dateTime(raw(18), order: .monthDayYear))
         XCTAssertEqual(
             batch.get(19, row: 0, as: DateComponents.self),
             .success(DateComponents(hour: 15, minute: 4, second: 5, nanosecond: 500_000_000)))
-        XCTAssertEqual(batch.get(19, row: 0, as: DateComponents.self), try Cast.time(raw(19)))
+        XCTAssertEqual(batch.get(19, row: 0, as: DateComponents.self), Cast.time(raw(19)))
         XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), .success(.seconds(-5400) - .nanoseconds(1)))
-        XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), try Cast.duration(raw(20)))
+        XCTAssertEqual(batch.get(20, row: 0, as: Duration.self), Cast.duration(raw(20)))
         XCTAssertEqual(batch.string(21, row: 0), "a \"quoted\" cell")
         XCTAssertEqual(string(raw(21)), "a \"quoted\" cell")
         XCTAssertNil(try reader.read())
@@ -173,12 +181,12 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(reader.plan[0].format, euro)
         let batch = try XCTUnwrap(reader.read())
         XCTAssertEqual(batch.get(0, row: 0, as: Decimal.self), .success(Decimal(string: "1234.5")!))
-        XCTAssertEqual(batch.get(0, row: 0, as: Decimal.self), try Cast.decimal(batch.raw(0, row: 0), format: euro))
+        XCTAssertEqual(batch.get(0, row: 0, as: Decimal.self), Cast.decimal(batch.raw(0, row: 0), format: euro))
         XCTAssertEqual(batch.get(1, row: 0, as: Int32.self), .success(7))
-        XCTAssertEqual(batch.get(2, row: 0, as: Int32.self), try Cast.i32(batch.raw(2, row: 0), format: wide))
+        XCTAssertEqual(batch.get(2, row: 0, as: Int32.self), Cast.i32(batch.raw(2, row: 0), format: wide))
         XCTAssertEqual(batch.verdict(2, row: 0).reason, .malformed)
         // The same source column through the invariant notation is a different verdict.
-        XCTAssertEqual(batch.get(3, row: 0, as: Double.self), try Cast.f64(batch.raw(3, row: 0), format: .invariant))
+        XCTAssertEqual(batch.get(3, row: 0, as: Double.self), Cast.f64(batch.raw(3, row: 0), format: .invariant))
         XCTAssertEqual(batch.verdict(3, row: 0).reason, .malformed)
     }
 
@@ -211,8 +219,11 @@ final class ReaderTests: XCTestCase {
 
     func testAPlanIsAProjection() throws {
         let input = Array("a,b,c\n1,2,3\n4,5,6\n".utf8)
-        // In its own order, one source column twice, and one past the record's last cell.
-        let reader = try DelimitedReader(bytes: input, dialect: .csv, plan: [.i32(2), .text(0), .u8(2), .i32(7)])
+        // In its own order, one source column twice, and one past the record's last cell —
+        // headerless, as a header would refuse that one at bind.
+        let reader = try DelimitedReader(
+            bytes: Array(input.dropFirst(6)), dialect: Dialect(separator: ",", hasHeader: false),
+            plan: [.i32(2), .text(0), .u8(2), .i32(7)])
         let batch = try XCTUnwrap(reader.read())
         XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [3, 6])
         XCTAssertEqual(Array(batch.values(2, as: UInt8.self)), [3, 6])
@@ -376,6 +387,50 @@ final class ReaderTests: XCTestCase {
         #endif
     }
 
+    /// A file that is a FIFO hands over what its writer has written: a complete header and
+    /// row are read while the writer is still open, not once the buffer fills or it closes.
+    func testAFIFOIsReadAsItIsWritten() throws {
+        #if os(WASI) || os(Windows)
+            throw XCTSkip("no mkfifo here")
+        #else
+            final class Writer: @unchecked Sendable {
+                let more = DispatchSemaphore(value: 0)
+                let done = DispatchSemaphore(value: 0)
+                var waitedInVain = false
+            }
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("hypertabular-\(UUID().uuidString).fifo").path
+            // Android's shell user may not make one (SELinux), and the suite runs there as it.
+            guard mkfifo(path, 0o600) == 0 else {
+                throw XCTSkip("mkfifo is refused here (errno \(errno))")
+            }
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let writer = Writer()
+            Thread.detachNewThread {
+                // Opening a FIFO to write waits for its reader.
+                let handle = FileHandle(forWritingAtPath: path)!
+                handle.write(Data("n\n1\n".utf8))
+                // A reader that waits for the writer to close never signals; the writer gives
+                // up after long enough that only waiting can reach it, and closes.
+                writer.waitedInVain = writer.more.wait(timeout: .now() + 5) == .timedOut
+                handle.write(Data("2\n".utf8))
+                try? handle.close()
+                writer.done.signal()
+            }
+
+            let reader = try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: [.i32(0)])
+            XCTAssertEqual(reader.header, ["n"])
+            let first = try XCTUnwrap(reader.read())
+            XCTAssertEqual(Array(first.values(0, as: Int32.self)), [1])
+            writer.more.signal()
+            var rest = [Int32]()
+            while let batch = try reader.read() { rest += batch.values(0, as: Int32.self) }
+            XCTAssertEqual(rest, [2])
+            writer.done.wait()
+            XCTAssertFalse(writer.waitedInVain, "the reader waited for the writer to close")
+        #endif
+    }
+
     /// The core ends a batch early when its arena fills; the batch after one that did starts
     /// with the arena doubled, so twenty thousand escaped rows are a handful of batches.
     func testAnArenaThatCrampsABatchIsGrown() throws {
@@ -408,6 +463,80 @@ final class ReaderTests: XCTestCase {
         009,Oceania,24,dup
 
         """.utf8)
+
+    /// 2²⁰ − 1 is the widest ordinal a plan may name, delimited or sheet; 2²⁰ and past, more
+    /// columns than any workbook format has, are refused at bind, and the plan is not bound.
+    func testAnOrdinalPastTheCapIsRefusedAtBind() throws {
+        let widest = (1 << 20) - 1
+        let headerless = Dialect(separator: ",", hasHeader: false)
+        // Headerless, so that it is the cap and not a header's width that decides.
+        let reader = try DelimitedReader(bytes: Array("a,b\n".utf8), dialect: headerless)
+        try reader.bind([.text(0), .text(widest)])
+        let batch = try XCTUnwrap(try reader.read())
+        XCTAssertEqual(batch.verdict(1, row: 0).reason, .empty)
+        for ordinal in [1 << 20, Int(Int32.max), Int.max] {
+            let reader = try DelimitedReader(bytes: Array("a,b\n".utf8), dialect: headerless)
+            XCTAssertThrowsError(try reader.bind([.text(0), .text(ordinal)])) {
+                XCTAssertEqual($0 as? PlanError, .outOfReach(column: 1))
+            }
+            XCTAssertFalse(reader.isBound)
+            try reader.bind([.text(0)])
+        }
+        guard let directory = CorpusTests.corpusDirectory else {
+            throw XCTSkip("the conformance corpus is not reachable from a WASI sandbox")
+        }
+        let book = try Workbook(contentsOfFile: directory.appendingPathComponent("workbook/basic.xlsx").path)
+        let sheet = try book.sheet(0)
+        XCTAssertThrowsError(try sheet.bind([.text(0), .text(1 << 20)])) {
+            XCTAssertEqual($0 as? PlanError, .outOfReach(column: 1))
+        }
+        XCTAssertFalse(sheet.isBound)
+        try sheet.bind([.text(0), .text(widest)])
+        XCTAssertTrue(sheet.isBound)
+    }
+
+    /// The header fixes the width every record must have, so a column at or past it could
+    /// only ever be empty: refused at bind, whether the plan came before the header or after.
+    func testAnOrdinalPastTheHeadersWidthIsRefused() throws {
+        let text = Array("a,b\n1,2\n".utf8)
+        let reader = try DelimitedReader(bytes: text, dialect: .csv)
+        XCTAssertThrowsError(try reader.bind([.i64(0), .i64(2)])) {
+            XCTAssertEqual($0 as? PlanError, .outOfReach(column: 1))
+        }
+        XCTAssertFalse(reader.isBound)
+        try reader.bind([.i64(0), .i64(1)])
+        XCTAssertEqual(try reader.read()?.get(1, row: 0, as: Int64.self), .success(2))
+
+        XCTAssertThrowsError(try DelimitedReader(bytes: text, dialect: .csv, plan: [.i64(2), .i64(0)])) {
+            XCTAssertEqual($0 as? PlanError, .outOfReach(column: 0))
+        }
+        let planned = try DelimitedReader(bytes: text, dialect: .csv, plan: [.i64(1)])
+        XCTAssertEqual(try planned.read()?.get(0, row: 0, as: Int64.self), .success(2))
+    }
+
+    /// Headerless, the width is not known at bind: a far ordinal is read, as empty cells, with
+    /// a cell table bounded by the budget — a row at a time — rather than sized for a batch.
+    func testAFarOrdinalWithoutAHeaderReadsInBoundedMemory() throws {
+        let reader = try DelimitedReader(
+            bytes: Array("a,b\n1,2\n".utf8), dialect: Dialect(separator: ",", hasHeader: false),
+            plan: [.i64(0), .i64((1 << 20) - 1)])
+        // One row of 2²⁰ + 1 entries: a batch of them would be some 34 GB.
+        XCTAssertEqual(reader.cells.count, (1 << 20) + 1)
+        var rows = 0
+        while let batch = try reader.read() {
+            for row in 0..<batch.rows {
+                XCTAssertEqual(batch.verdict(1, row: row).reason, .empty)
+            }
+            rows += batch.rows
+        }
+        XCTAssertEqual(rows, 2)
+        XCTAssertLessThanOrEqual(reader.cells.count, (1 << 20) + 1)
+
+        // An ordinary plan is untouched: 256 source columns still take a full default batch.
+        let wide = try DelimitedReader(
+            bytes: Array("a\n".utf8), dialect: Dialect(separator: ",", hasHeader: false), plan: [.text(255)])
+        XCTAssertEqual(wide.cells.count, 4096 * 257)
+    }
 
     func testAPlanIsBuiltFromTheHeaderAndBoundOnce() throws {
         let reader = try DelimitedReader(bytes: Self.regions, dialect: .csv)
@@ -550,6 +679,26 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(visited, 3)
     }
 
+    /// A time column is lent whole as the nanoseconds the core wrote; no other door lends what
+    /// it is not, and the doors whose presented type is not the core's layout lend nothing.
+    func testATimeColumnIsLentWholeAsNanoseconds() throws {
+        let reader = try DelimitedReader(
+            bytes: Array("15:04:05.5,x\nx,1\n".utf8), dialect: Dialect(separator: ",", hasHeader: false),
+            plan: [.time(0), .u64(1)])
+        let batch = try XCTUnwrap(reader.read())
+        XCTAssertEqual(Array(batch.values(0, as: UInt64.self)), [54_245_500_000_000, 0])
+        XCTAssertEqual(batch.verdict(0, row: 1).reason, .malformed)
+        XCTAssertEqual(Array(batch.values(1, as: UInt64.self)), [0, 1])
+
+        XCTAssertTrue(Batch.lends(UInt64.self, .u64))
+        XCTAssertFalse(Batch.lends(Int64.self, .time))
+        XCTAssertFalse(Batch.lends(UInt32.self, .time))
+        for door in [Door.decimal, .uuid, .timestamp, .unix, .excelSerial, .date, .dateOrdered, .dateTime, .duration] {
+            XCTAssertFalse(Batch.lends(UInt64.self, door), "\(door)")
+            XCTAssertFalse(Batch.lends(Int64.self, door), "\(door)")
+        }
+    }
+
     // MARK: - asynchronous
 
     func testAnAsyncSequenceIsReadAsItArrives() async throws {
@@ -576,6 +725,160 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(memoryRows, total)
     }
 
+    /// A live sequence need not fill the read buffer or end before a complete header or row
+    /// is read: each is read once its line has arrived, while the sequence waits for more.
+    func testALiveSequenceIsNotAwaitedPastACompleteRecord() async throws {
+        /// Hands over what has been sent and no more, waiting for the rest as a live sequence
+        /// does — and failing once it has waited five seconds, which only a reader that holds
+        /// a complete record back for more makes it do.
+        final class Live: AsyncSequence, AsyncIteratorProtocol, @unchecked Sendable {
+            typealias Element = UInt8
+            struct Starved: Error {}
+            private let lock = NSLock()
+            private var pending: [UInt8] = []
+            private var ended = false
+            func send(_ text: String) { lock.withLock { pending += text.utf8 } }
+            func finish() { lock.withLock { ended = true } }
+            private func poll() -> UInt8?? {
+                lock.withLock {
+                    if !pending.isEmpty { return pending.removeFirst() }
+                    return ended ? .some(nil) : nil
+                }
+            }
+            func next() async throws -> UInt8? {
+                // Polled, yielding between polls, so that it waits under WASI's one-thread
+                // executor as well.
+                let deadline = ContinuousClock.now + .seconds(5)
+                while true {
+                    if let byte = poll() { return byte }
+                    guard ContinuousClock.now < deadline else { throw Starved() }
+                    await Task.yield()
+                }
+            }
+            func makeAsyncIterator() -> Live { self }
+        }
+        let live = Live()
+        live.send("n,s\n1,a\n")
+        let reader = try await DelimitedReader(bytes: live, dialect: .csv)
+        XCTAssertEqual(reader.header, ["n", "s"])
+        try reader.bind([.i32(0), .text(1)])
+        func next() async throws -> Batch {
+            let read = try await reader.readAsync()
+            return try XCTUnwrap(read)
+        }
+        var batch = try await next()
+        XCTAssertEqual(Array(batch.values(0, as: Int32.self)), [1])
+
+        // A newline inside quotes ends no record, and a CR is told from a CRLF by the byte
+        // after it: one that ends the stream, or the next record's first.
+        live.send("2,\"b\nc\"\r\n3,d\r")
+        batch = try await next()
+        XCTAssertEqual(batch.string(1, row: 0), "b\nc")
+        live.send("4")
+        batch = try await next()
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(3))
+        live.send(",e\n")
+        batch = try await next()
+        XCTAssertEqual(batch.string(1, row: 0), "e")
+
+        live.send("5,f")
+        live.finish()
+        batch = try await next()
+        XCTAssertEqual(batch.get(0, row: 0, as: Int32.self), .success(5))
+        let end = try await reader.readAsync()
+        XCTAssertNil(end)
+    }
+
+    /// A read takes everything that has arrived, so a sequence that is ahead of the reader is
+    /// read in batches of `batchRows`, not a row at a time.
+    func testASequenceAheadOfTheReaderIsReadInWholeBatches() async throws {
+        /// Never suspends, and says when it has handed over every byte up to `at`.
+        struct Instant: AsyncSequence, Sendable {
+            typealias Element = UInt8
+            let bytes: [UInt8]
+            let at: Int
+            let reached: AsyncStream<Void>.Continuation
+            struct AsyncIterator: AsyncIteratorProtocol {
+                let source: Instant
+                var position = 0
+                mutating func next() async -> UInt8? {
+                    if position == source.at {
+                        source.reached.yield()
+                        source.reached.finish()
+                    }
+                    guard position < source.bytes.count else { return nil }
+                    defer { position += 1 }
+                    return source.bytes[position]
+                }
+            }
+            func makeAsyncIterator() -> AsyncIterator { AsyncIterator(source: self) }
+        }
+        let total = 20_000
+        let batchRows = 500
+        var text = ""
+        var ahead = 0
+        for row in 1...total {
+            text += "\(row)\n"
+            if row == 2 * batchRows { ahead = text.utf8.count }
+        }
+        var signal: AsyncStream<Void>.Continuation?
+        let reached = AsyncStream<Void> { signal = $0 }
+        let reader = try await DelimitedReader(
+            bytes: Instant(bytes: Array(text.utf8), at: ahead, reached: try XCTUnwrap(signal)),
+            dialect: Dialect(separator: ",", hasHeader: false), plan: [.i64(0)], batchRows: batchRows,
+            bufferBytes: 64 * 1024)
+        // Two batches' rows have arrived before the first read.
+        for await _ in reached {}
+        var sizes: [Int] = []
+        var sum: Int64 = 0
+        while let batch = try await reader.readAsync() {
+            sizes.append(batch.rows)
+            sum += batch.values(0, as: Int64.self).reduce(0, +)
+        }
+        XCTAssertEqual(Array(sizes.prefix(2)), [batchRows, batchRows])
+        XCTAssertEqual(sizes.reduce(0, +), total)
+        XCTAssertEqual(sum, Int64(total) * Int64(total + 1) / 2)
+    }
+
+    /// The task that awaits a sequence ends with the reader: it lets go of the sequence's
+    /// iterator once the reader is released, though the sequence never ends.
+    func testAReleasedReaderStopsAwaitingItsSequence() async throws {
+        final class Token: @unchecked Sendable {
+            private let lock = NSLock()
+            private var released = false
+            var isReleased: Bool { lock.withLock { released } }
+            func release() { lock.withLock { released = true } }
+        }
+        /// "1\n" forever, telling `token` when its iterator is gone.
+        struct Endless: AsyncSequence, Sendable {
+            typealias Element = UInt8
+            let token: Token
+            final class AsyncIterator: AsyncIteratorProtocol {
+                let token: Token
+                var odd = false
+                init(_ token: Token) { self.token = token }
+                deinit { token.release() }
+                func next() async -> UInt8? {
+                    odd.toggle()
+                    return odd ? UInt8(ascii: "1") : UInt8(ascii: "\n")
+                }
+            }
+            func makeAsyncIterator() -> AsyncIterator { AsyncIterator(token) }
+        }
+        let token = Token()
+        var reader: DelimitedReader? = try await DelimitedReader(
+            bytes: Endless(token: token), dialect: Dialect(separator: ",", hasHeader: false), plan: [.i32(0)],
+            bufferBytes: 1024)
+        let read = try await reader?.readAsync()
+        XCTAssertGreaterThan(try XCTUnwrap(read).rows, 0)
+        reader = nil
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !token.isReleased && ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        XCTAssertTrue(token.isReleased, "the sequence is still awaited")
+    }
+
     /// A read the sequence's cancellation interrupts loses nothing: every byte that arrived
     /// stays buffered, and the next read goes on from it.
     func testACancelledReadIsResumable() async throws {
@@ -583,7 +886,7 @@ final class ReaderTests: XCTestCase {
         var text = "n\n"
         for row in 1...total { text += "\(row)\n" }
         let bytes = Array(text.utf8)
-        // Past the first 64 bytes, which the opening awaits for the header.
+        // Past the header, which the opening awaits.
         for failAt in [64, 100, 1_000, bytes.count - 1] {
             let reader = try await DelimitedReader(
                 bytes: CorpusTests.ShortReads(bytes, chunk: 5, failAt: failAt), dialect: .csv, plan: [.i64(0)],

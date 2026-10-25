@@ -1,5 +1,5 @@
-"""Pins what the forge and a consumer probe before the first read: which backend loaded,
-which core answered, and that everything public answers ``help()``."""
+"""Pins what the forge and a consumer probe before the first read: which core answered, and
+that everything public answers ``help()``."""
 
 from __future__ import annotations
 
@@ -33,11 +33,6 @@ def _expected_version() -> str:
     raise FileNotFoundError("rust/Cargo.toml not found")
 
 
-def test_the_native_backend_loaded():
-    """What the forge's wheel workflow asserts of every wheel it builds."""
-    assert hypertabular.BACKEND == "native"
-
-
 def test_native_version_names_the_loaded_core():
     """native_version reports the core this package was built from."""
     assert hypertabular.native_version() == _expected_version()
@@ -52,9 +47,7 @@ def test_everything_exported_is_there():
     assert hypertabular.ColumnData.__module__ == "hypertabular"
 
 
-@pytest.mark.parametrize(
-    "name", [name for name in hypertabular.__all__ if name not in ("BACKEND", "Verdict")]
-)
+@pytest.mark.parametrize("name", [name for name in hypertabular.__all__ if name != "Verdict"])
 def test_everything_exported_has_a_docstring(name: str):
     """Every exported name carries the docstring help() prints."""
     doc = getattr(hypertabular, name).__doc__

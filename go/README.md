@@ -111,7 +111,10 @@ rows, not once per cell.
   `Get[T](batch, column, row)` (a free function, since a Go method cannot take type
   parameters) — or `io.EOF` once there are no more rows. It is a view of the reader's
   buffers, valid until the next `Read()`, and the same type for delimited text and for a
-  sheet.
+  sheet. The integer, float and bool slices, `Exact`, `Uuid`, `TimeOfDay` and `Span` are the
+  column as the core wrote it; `Timestamp`, `DateOnly` and `DateTime` are converted from it
+  into a slice the reader keeps, and `Text` is sliced out of the input, each the first time
+  a batch's column is asked for.
 - **Header first, or plan first.** `OpenDelimitedUnbound`, `NewDelimitedReaderUnbound`,
   `NewDelimitedReaderBytesUnbound`, `Workbook.SheetUnbound` and `Workbook.SheetNamedUnbound`
   read the header and leave the plan to `Bind(plan)`, once, before the first `Read()` —
@@ -120,7 +123,12 @@ rows, not once per cell.
   first column of that exact name (case and spaces included) or return a `*NoColumnError`
   naming it (`errors.Is(err, ErrNoColumn)`), and whose `Find` / `FindBytes` answer with an
   `ok` instead. `ColumnCount()` is a record's width: the header's, or the first record's once
-  read.
+  read. Once a header has fixed that width, a plan column reading at or past it is refused —
+  by `Bind`, or by a constructor given the plan as soon as the header is read — with an
+  error naming the plan column, since every record has exactly the header's cells. Any plan,
+  delimited or a sheet's, is refused the same way for an ordinal of 2^20 (1,048,576) or more:
+  no workbook format has that many columns, and the cap keeps one row of cell table within
+  8 MiB.
 - **Rows, when that is the shape.** `batch.All()` is an `iter.Seq[Row]` over the batch, and
   `reader.All()` / `sheet.All()` an `iter.Seq2[Row, error]` that reads batch after batch.
   A `Row` — `Index()`, `Line()`, `Verdict(column)`, `Fault(column)`, `Text(column)`,

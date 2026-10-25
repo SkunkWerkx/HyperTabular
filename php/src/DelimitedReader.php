@@ -56,6 +56,15 @@ final class DelimitedReader
     private const CONTRACT_VIOLATION =
         'hypertabular: libhypertabular reported a contract violation — a binding bug, please report it';
 
+    /**
+     * The most spans a cell table is given: what the default batch of 4096 rows takes for a
+     * plan that reaches 256 source columns (257 entries a row). A plan that reaches further
+     * gets a table of fewer rows — never fewer than one — and its batches come up short,
+     * so that an ordinal far past the source's last column costs one row of table, not a
+     * batch of them.
+     */
+    private const CELL_BUDGET = 4096 * 257;
+
     private FFI $ffi;
 
     private Dialect $dialect;
@@ -214,7 +223,8 @@ final class DelimitedReader
     /**
      * Allocates what the header is read with, starts the core's state for the dialect, and
      * binds the plan when there is one — before the header is read, so a plan that cannot
-     * be honoured is refused first.
+     * be honoured is refused first. A column past the header's width is refused once the
+     * header has been read ({@see begin()}).
      *
      * @param Dialect $dialect the declared dialect
      * @param array<mixed>|null $plan the output columns, in output order, or null for none yet
@@ -294,7 +304,9 @@ final class DelimitedReader
     /**
      * Declares the plan a reader opened without one reads through — once, before the first
      * read. Every column array and the cell table are sized here, by the plan and the
-     * reader's batch size. A plan that is refused leaves the reader as it was, unbound.
+     * reader's batch size. Once a header has given the source its width, a column that reads
+     * at or past it is refused: no record has a cell there. A plan that is refused leaves the
+     * reader as it was, unbound.
      *
      * @param list<Column> $plan the output columns, in output order
      * @return void
@@ -307,10 +319,50 @@ final class DelimitedReader
             throw new \LogicException('The reader already has a plan; a plan is bound once');
         }
         $columns = new Columns($plan, $this->batchRows);
+        // Before the constructor has started the state there is no header yet; begin()
+        // checks the plan against it once it has been read.
+        if (isset($this->state)) {
+            self::checkWidth($columns->plan, $this->columnCount());
+        }
         $this->perRow = $columns->width + 1;
-        $this->cellsCap = $this->perRow * $this->batchRows;
+        $this->cellsCap = $this->perRow * self::tableRows($this->perRow, $this->batchRows);
         $this->cells = Native::ffi()->new("ht_span[{$this->cellsCap}]");
         $this->columns = $columns;
+    }
+
+    /**
+     * Refuses the first plan column that reads at or past the width the header gives every
+     * record: no record has a cell there, so such a column could only ever be empty.
+     *
+     * @param list<Column> $plan the output columns, in output order
+     * @param int|null $width the header's cell count, or null while it is not known
+     * @return void
+     * @throws \InvalidArgumentException naming the first column past the width
+     */
+    private static function checkWidth(array $plan, ?int $width): void
+    {
+        if ($width === null) {
+            return;
+        }
+        foreach ($plan as $index => $column) {
+            if ($column->ordinal >= $width) {
+                throw new \InvalidArgumentException("Plan column {$index} reads source column "
+                    . "{$column->ordinal}, past the {$width} columns the header gives every record.");
+            }
+        }
+    }
+
+    /**
+     * The rows a cell table of `$perRow` entries a row is sized for: a batch of them, as
+     * far as {@see CELL_BUDGET} allows, and at least one.
+     *
+     * @param int $perRow cell-table entries one row takes
+     * @param int $batchRows rows per batch
+     * @return int the rows
+     */
+    private static function tableRows(int $perRow, int $batchRows): int
+    {
+        return max(1, min(intdiv(self::CELL_BUDGET, $perRow), $batchRows));
     }
 
     /**
@@ -419,7 +471,10 @@ final class DelimitedReader
                     $consumed = $filled->consumed;
                     $rows = $filled->rows;
                     if ($rows > 0) {
-                        $this->cramped = $rows < $columns->batchRows && $filled->arena_used * 2 >= $this->arenaCap;
+                        // Short of what the cell table holds, not of the batch size: a table
+                        // sized below a batch is not the arena's doing.
+                        $held = min($columns->batchRows, intdiv($this->cellsCap, $this->perRow));
+                        $this->cramped = $rows < $held && $filled->arena_used * 2 >= $this->arenaCap;
                         $batch = new Batch(
                             $columns->plan,
                             $rows,
@@ -444,7 +499,7 @@ final class DelimitedReader
                     break;
                 case Native::ERR_CELLS:
                     $this->perRow = max($this->perRow, $filled->needed);
-                    $this->cellsCap = $this->perRow * $columns->batchRows;
+                    $this->cellsCap = $this->perRow * self::tableRows($this->perRow, $columns->batchRows);
                     $this->cells = $ffi->new("ht_span[{$this->cellsCap}]");
                     break;
                 case Native::ERR_ARENA:
@@ -517,6 +572,9 @@ final class DelimitedReader
         }
         if ($dialect->hasHeader) {
             $this->readHeader();
+            if ($this->columns !== null) {
+                self::checkWidth($this->columns->plan, $this->columnCount());
+            }
         }
     }
 

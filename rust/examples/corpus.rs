@@ -331,18 +331,17 @@ fn cases() -> Vec<Case> {
             .plan(&[(0, Door::I32)])
             .header(&[])
             .rows(&[]),
-        Case::csv(
-            "a plan is a projection, in its own order",
-            "a,b,c,d\n1,2,3,4\n",
-        )
-        .plan(&[
-            (3, Door::I32),
-            (0, Door::I32),
-            (3, Door::Text),
-            (9, Door::I32),
-        ])
-        .header(&["a", "b", "c", "d"])
-        .rows(&[&["1", "2", "3", "4"]]),
+        // Without a header, whose width would refuse ordinal 9 at bind: past the record's
+        // last cell, the column is empty.
+        Case::csv("a plan is a projection, in its own order", "1,2,3,4\n")
+            .no_header()
+            .plan(&[
+                (3, Door::I32),
+                (0, Door::I32),
+                (3, Door::Text),
+                (9, Door::I32),
+            ])
+            .rows(&[&["1", "2", "3", "4"]]),
         Case::csv(
             "the doors trim; text is the bytes as they are",
             "n,t\n 7 ,  padded  \n",

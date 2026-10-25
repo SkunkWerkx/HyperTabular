@@ -168,9 +168,13 @@ RSpec.describe HyperTabular do
     end
 
     it "refuses an ordinal, a format or a declaration that cannot be meant" do
-      [-1, 1 << 31, 1.0, "0", nil].each do |ordinal|
+      [-1, 1 << 20, 1 << 31, 1.0, "0", nil].each do |ordinal|
         expect { described_class.i32(ordinal) }.to raise_error(ArgumentError, /ordinal/)
       end
+      # 2^20 − 1, the widest ordinal a plan may name, is read, as empty.
+      widest = described_class.text((1 << 20) - 1)
+      headerless = HyperTabular::Dialect.new(separator: ",", has_header: false)
+      expect(HyperTabular::DelimitedReader.new("1\n", headerless, [widest]).each_row.to_a).to eq([[fault(:empty)]])
       expect { described_class.i32(0, ",") }.to raise_error(ArgumentError, /NumFormat/)
       expect { described_class.new(ordinal: 0, door: :text, format: eurozone) }.to raise_error(ArgumentError)
       expect { described_class.new(ordinal: 0, door: :bool, declared: :seconds) }.to raise_error(ArgumentError)
@@ -281,9 +285,34 @@ RSpec.describe HyperTabular do
     end
 
     it "projects: any source column, in any order, through more than one door, and past the end as empty" do
-      reader = described_class.new("a,b,c\n1,x,2\n", csv,
+      # Without a header, whose width would refuse ordinal 7 at bind.
+      headerless = HyperTabular::Dialect.new(separator: ",", has_header: false)
+      reader = described_class.new("1,x,2\n", headerless,
                                    [column.text(2), column.i32(0), column.text(0), column.i32(7)])
       expect(drain(reader)).to eq([[success("2"), success(1), success("1"), fault(:empty)]])
+    end
+
+    it "refuses a column at or past the width the header gives every record" do
+      reader = described_class.new("a,b\n1,2\n", csv)
+      expect { reader.bind([column.i64(0), column.i64(2)]) }
+        .to raise_error(ArgumentError, /\Aplan column 1 reads source column 2, past the 2 columns/)
+      expect(reader.bound?).to be(false)
+      expect(drain(reader.bind([column.i64(1)]))).to eq([[success(2)]])
+      # A plan handed over before the header is read is held to it as soon as it is.
+      expect { described_class.new("a,b\n1,2\n", csv, [column.i64(2)]) }
+        .to raise_error(ArgumentError, /\Aplan column 0 reads source column 2/)
+      expect(drain(described_class.new("a,b\n1,2\n", csv, [column.i64(1)]))).to eq([[success(2)]])
+    end
+
+    it "reads a column far past a headerless record as empty, in one row's cell table" do
+      headerless = HyperTabular::Dialect.new(separator: ",", has_header: false)
+      reader = described_class.new("a,b\n1,2\n", headerless, [column.i64(0), column.i64((1 << 20) - 1)])
+      # One row of entries: a batch of them would be 34 GB.
+      expect(reader.instance_variable_get(:@kernel).cell_entries).to eq((1 << 20) + 1)
+      expect(drain(reader)).to eq([[fault(:malformed, 0, 1), fault(:empty)], [success(1), fault(:empty)]])
+      # A plan reaching 256 source columns keeps a whole batch of rows.
+      wide = described_class.new("1\n", headerless, [column.text(255)])
+      expect(wide.instance_variable_get(:@kernel).cell_entries).to eq(4096 * 257)
     end
 
     it "counts rows through an empty plan" do

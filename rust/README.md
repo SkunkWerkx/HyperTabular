@@ -48,7 +48,11 @@ while let Some(batch) = sheet.read()? {
 ```
 
 A reader that already knows its columns by position takes the plan when it opens
-(`DelimitedReader::open(path, dialect, &plan)`). A workbook opens from a path, from bytes,
+(`DelimitedReader::open(path, dialect, &plan)`). Once a header has fixed the width every
+record has, a plan column at or past it could only ever be empty, so it is `Error::Plan`
+naming the column — from `bind`, or from the constructor as soon as it has read the header.
+Without a header such a column reads as empty, and a plan reaching past 256 source columns
+reads shorter batches, as many rows as about 8 MiB of cell table holds. A workbook opens from a path, from bytes,
 or from any `Read` (`Workbook::from_reader`). With the `async` feature, a reader and a
 workbook open from a
 [`futures_io::AsyncRead`](https://docs.rs/futures-io/0.3/futures_io/trait.AsyncRead.html)
@@ -67,9 +71,9 @@ read. A cell that did not cast holds the door's zero, so read `batch.verdicts(co
 beside the values. A text cell is `batch.text` or `batch.text_str`.
 
 `Column`, `Dialect` and `SheetOptions` are built with their constructors, constants and
-builder methods (`Column::format`, `Dialect::with_quoting`, …), and are `#[non_exhaustive]` so a minor release can add a setting; `Door`,
-`Error`, `Format` and `FailureKind` are too, so a `match` on one outside the crate needs a
-wildcard arm. Below the Rust API, the core is reached through `kernel::abi`,
+builder methods (`Column::format`, `Dialect::with_quoting`, …), and are
+`#[non_exhaustive]` so a minor release can add a setting; `Door`, `Error`, `Format` and
+`FailureKind` are too, so a `match` on one outside the crate needs a wildcard arm. Below the Rust API, the core is reached through `kernel::abi`,
 `kernel::door`, `kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s
 state, memory, format constants and `book` and `rows` operations — what the C ABI exports;
 the parsing, compression and SIMD modules behind them are private.
@@ -81,8 +85,9 @@ returned once every intact row before them has been delivered.
 
 **WebAssembly.** The crate needs nothing from its host — no clock, no entropy, no
 allocator in the core — so it builds for `wasm32-unknown-unknown` as it is, and its whole
-suite passes under wasmtime on `wasm32-wasip1`. CI runs `browser-test/` in headless Chrome
-on every pull request.
+suite passes under wasmtime on `wasm32-wasip1` (all but its three `should_panic` tests,
+which libtest skips where a panic aborts). CI runs that suite in its `test-wasi` job and
+`browser-test/` in headless Chrome, on every pull request.
 
 The design record is in [`docs/`](https://github.com/SkunkWerkx/HyperTabular/tree/master/docs).
 

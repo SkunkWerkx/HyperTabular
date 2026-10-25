@@ -61,6 +61,47 @@ public sealed class ReaderTests
 	}
 
 	[Fact]
+	void A_decimal_or_temporal_column_is_lent_whole_as_HyperCasts_layout()
+	{
+		Column[] plan =
+		[
+			Column.Decimal(0), Column.Timestamp(1), Column.Date(2), Column.DateTime(3, DateOrder.MonthDayYear),
+			Column.Time(4), Column.Duration(5), Column.Uuid(6),
+		];
+		using var reader = new DelimitedReader(
+			Encoding.UTF8.GetBytes(
+				"1234.50,2024-01-31T10:30:00.5Z,2024-01-31,1/7/2026 3:04 PM,15:04:05.5,PT1H30M,6ba7b810-9dad-11d1-80b4-00c04fd430c8\n"
+				+ "x,x,x,x,x,x,x\n").AsMemory(),
+			Dialect.Csv with { HasHeader = false }, plan);
+		var batch = reader.Read().ShouldNotBeNull();
+
+		var amounts = batch.Values<HyperCast.Interop.RawDecimal>(0);
+		amounts.Length.ShouldBe(2);
+		amounts[0].ToDecimal().ShouldBe(1234.5m);
+		var instants = batch.Values<HyperCast.Interop.RawTimestamp>(1);
+		(instants[0].Seconds, instants[0].Nanos).ShouldBe((1_706_697_000L, 500_000_000));
+		batch.Values<HyperCast.Interop.RawDate>(2)[0].ToDateOnly().ShouldBe(new DateOnly(2024, 1, 31));
+		batch.Values<HyperCast.Interop.RawCivil>(3)[0].ToDateTime().ShouldBe(new System.DateTime(2026, 1, 7, 15, 4, 0));
+		batch.Values<ulong>(4)[0].ShouldBe(54_245_500_000_000UL);
+		batch.Values<HyperCast.Interop.RawDuration>(5)[0].ToTimeSpan().ShouldBe(TimeSpan.FromMinutes(90));
+		// Each converts to what Get makes of the same cell; a row whose verdict is not ok is zero.
+		for (var column = 0; column < 6; column++)
+			batch.Verdicts(column)[1].Reason.ShouldBe(CastFailure.Malformed);
+		(amounts[1].Lo, instants[1].Seconds, batch.Values<ulong>(4)[1]).ShouldBe((0UL, 0L, 0UL));
+
+		// A door's own layout only: a UUID's RFC 9562 bytes are not a Guid's, and no door
+		// lends another's.
+		Should.Throw<InvalidOperationException>(() => batch.Values<Guid>(6));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawTimestamp>(0));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawDecimal>(1));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawCivil>(2));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawDate>(3));
+		Should.Throw<InvalidOperationException>(() => batch.Values<long>(4));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawTimestamp>(5));
+		Should.Throw<InvalidOperationException>(() => batch.Values<HyperCast.Interop.RawDuration>(6));
+	}
+
+	[Fact]
 	void A_plan_or_a_dialect_the_core_cannot_honour_is_refused_up_front()
 	{
 		var colliding = new NumFormat(',', ',', NumStyles.All);

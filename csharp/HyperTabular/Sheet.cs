@@ -91,7 +91,7 @@ public sealed unsafe class Sheet : IBatchSource
 	/// </summary>
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <exception cref="InvalidOperationException">The sheet already has a plan.</exception>
-	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured; the sheet is left without a plan.</exception>
+	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, or a column's ordinal is 2²⁰ or more; the sheet is left without a plan.</exception>
 	/// <exception cref="ObjectDisposedException">The workbook has been disposed.</exception>
 	public void Bind(ReadOnlySpan<Column> plan)
 	{

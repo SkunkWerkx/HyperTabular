@@ -71,10 +71,6 @@ jobs:
       id-token: write
       attestations: write
     with:
-      static_libs_artifact: false
-      swift_static_tests: false
-      android_shared_artifact: false
-      php_extension_schedule: parallel
       # pr: every leg and suite, nothing only a release needs (see the forge's README).
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       project: HyperTabular
@@ -88,13 +84,6 @@ jobs:
       # Gradle dev loop, which would otherwise stage whatever rust/target/release holds
       # by then, stands down.
       java_resources_dir: java/src/main/resources/native
-      # Four more static libraries in the static-libs artifact: iOS, the iOS simulator and
-      # Mac Catalyst (test-apple-mobile, below, is what links and runs them).
-      apple_mobile: true
-      # Android: the shared library for android-arm64 and android-x64 (what a C# app on
-      # CoreCLR loads out of its APK), and in static-libs their archives for C#'s Native AOT,
-      # Go's go/staticlib and Swift's bundle. test-android, below, is what runs them.
-      android: true
       # A second Ruby minor the Magnus extension is built and tested against, so each
       # platform gem carries two ABIs (3.4 and the forge's 4.0), as HyperCast's do.
       ruby_compat_version: "3.4"
@@ -144,9 +133,9 @@ jobs:
   # and clippy, the MSRV, cargo-semver-checks against the last crates.io release, and
   # actionlint over this directory. Off: check_exports.py (no binding here declares the C ABI
   # by a pattern the script could read; the Forge's export check is the cdylib one), the
-  # conformance oracle (the corpus is generated, not derived) and SwiftLint (swift/ has no
-  # .swiftlint.yml yet; swift-format still runs). Static analysis only, so none of it waits
-  # on build-native.
+  # conformance oracle (the corpus is generated, not derived). SwiftLint holds swift/'s
+  # public API to its doc comments (missing_docs, swift/.swiftlint.yml) as in HyperCast and
+  # HyperUuid. Static analysis only, so none of it waits on build-native.
   check-core:
     uses: SkunkWerkx/.github/.github/workflows/hyper-check-core.yml@master
     permissions:
@@ -157,13 +146,10 @@ jobs:
       no_panic: false
       exports: false
       corpus_oracle: ""
-      lint_swift: false
-
-
 
   # iOS and Mac Catalyst, for the three bindings that reach them. Neither platform loads a
-  # library: the core is linked into the app, from the static libraries build-native's
-  # build-static-libs job cross-compiles and attests (the forge's apple_mobile input), which
+  # library: the core is linked into the app, from the static libraries build-static
+  # cross-compiles and attests (the forge's apple_mobile input), which
   # are the bytes stage-native-binaries.yml commits for Swift and Go and release.yml packs for
   # C#. This job is the one place they are linked into something and run, and it needs what
   # no build-native leg carries: Xcode, a simulator, and the .NET ios and maccatalyst
@@ -201,8 +187,8 @@ jobs:
     if: github.event_name != 'pull_request'
     # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) are built against Xcode 27.0 and
     # refuse any other version; macos-latest (macOS 26) tops out at Xcode 26.6. The xcode-27
-    # image tracks the Xcode 27 major, not a point release: since 2026-10-22 it ships 27.1 as
-    # its default and no longer carries 27.0, so the three dotnet builds below pass
+    # image tracks the Xcode 27 major, not a point release: it ships 27.1 as its default and
+    # does not carry 27.0, so the three dotnet builds below pass
     # ValidateXcodeVersion=false (dotnet/macios, docs/building-apps/build-properties.md) and
     # the smoke tests themselves prove the 27.0 to 27.1 skip is harmless. Drop the property
     # once a .NET 11 workload accepts the image's Xcode.
@@ -385,7 +371,7 @@ jobs:
   # publish its archive), not a project reference's. HyperCast arrives from nuget.org as the
   # package's own dependency, as it does for every consumer.
   #
-  # Four APKs: CoreCLR (.NET 11's Android runtime; Mono is no longer supported there) and
+  # Four APKs: CoreCLR (.NET 11's Android runtime; Mono is not supported there) and
   # Native AOT, each for android-x64 and android-arm64. The x64 pair runs in an x86_64
   # emulator whose image uses 16 KB pages, as Android 15 devices may, so a library aligned
   # for 4 KB would fail to load there; nothing hosted runs arm64 Android, so the arm64 pair is
@@ -443,22 +429,17 @@ jobs:
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       - name: Install the .NET android workload
         run: dotnet workload install android
 
-      # The restore also reads the .NET 11 daily feed: the android workload this SDK resolves
-      # (37.0.0-rc.1) was built against runtime 11.0.0-rc.1.26428.117, a build newer than the
-      # RC1 on nuget.org, and a Native AOT publish restores that runtime's NativeAOT and
-      # ILCompiler packs by exact version. Drop it once the workload and the SDK agree again
-      # (by .NET 11 GA at the latest).
       - name: Pack HyperTabular into a local feed
         run: |
           set -euo pipefail
           version="0.0.0-android.${{ github.run_id }}"
           echo "HYPERTABULAR_VERSION=$version" >> "$GITHUB_ENV"
-          echo "HYPERTABULAR_FEED=$RUNNER_TEMP/feed%3Bhttps://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet11/nuget/v3/index.json" >> "$GITHUB_ENV"
+          echo "HYPERTABULAR_FEED=$RUNNER_TEMP/feed" >> "$GITHUB_ENV"
           dotnet pack csharp/HyperTabular/HyperTabular.csproj -c Release -o "$RUNNER_TEMP/feed" -p:Version="$version"
           unzip -l "$RUNNER_TEMP/feed/HyperTabular.$version.nupkg" | tee "$RUNNER_TEMP/nupkg.txt"
           for path in runtimes/android-arm64/native/libhypertabular.so runtimes/android-x64/native/libhypertabular.so \

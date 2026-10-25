@@ -582,17 +582,22 @@ impl<'w> Sheet<'w> {
         if self.columns.is_some() {
             return Err(Error::AlreadyBound);
         }
-        let (specs, width) = column::specs(plan)?;
+        let (specs, width, widest) = column::specs(plan)?;
         let batch_rows = self.options.batch_rows.max(1);
-        self.per_row = plan.len() + 1;
-        let cells = batch_rows * self.per_row;
+        let per_row = plan.len() + 1;
+        let cells = batch_rows * per_row;
         if self.scratch.cells.len() < cells {
             self.scratch.cells.resize(cells, Span::default());
         }
         // What the slots hold — a header row still to be repeated — is kept.
         if self.row.len() < width {
+            let more = width - self.row.len();
+            self.row
+                .try_reserve_exact(more)
+                .map_err(|_| Error::Plan { column: widest })?;
             self.row.resize(width, Slot::default());
         }
+        self.per_row = per_row;
         self.columns = Some(Columns::new(plan, specs, batch_rows));
         Ok(())
     }

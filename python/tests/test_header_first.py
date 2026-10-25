@@ -289,6 +289,25 @@ def test_a_reader_over_an_async_stream_is_not_read_synchronously():
     _run(main())
 
 
+def test_an_async_stream_holds_a_plan_to_the_width_of_its_header():
+    """A plan handed to open_async is refused once the header it reads is narrower."""
+
+    async def main() -> None:
+        with pytest.raises(
+            ValueError, match=r"^plan\[0\] reads source column 2, past the 2 columns"
+        ):
+            await DelimitedReader.open_async(
+                _AsyncDribble(b"a,b\n1,2\n"), Dialect.CSV, [Column.i64(2)]
+            )
+        reader = await DelimitedReader.open_async(
+            _AsyncDribble(b"a,b\n1,2\n"), Dialect.CSV, [Column.i64(1)]
+        )
+        batch = await reader.read_async()
+        assert batch is not None and batch.column(0).values.tolist() == [2]
+
+    _run(main())
+
+
 def test_an_in_memory_reader_reads_asynchronously_without_waiting():
     """read_async and async for work over bytes and file objects, completing at once."""
 

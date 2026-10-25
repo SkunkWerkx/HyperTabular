@@ -152,7 +152,7 @@ impl DelimitedOptions {
         dialect: Dialect,
         plan: &[Column],
     ) -> Result<DelimitedReader<'a>, Error> {
-        DelimitedReader::build(Source::Slice { bytes, at: 0 }, dialect, Some(plan), self)
+        DelimitedReader::build(Source::slice(bytes), dialect, Some(plan), self)
     }
 
     /// Reads from any byte source through `plan`.
@@ -182,7 +182,7 @@ impl DelimitedOptions {
         bytes: &[u8],
         dialect: Dialect,
     ) -> Result<DelimitedReader<'_>, Error> {
-        DelimitedReader::build(Source::Slice { bytes, at: 0 }, dialect, None, self)
+        DelimitedReader::build(Source::slice(bytes), dialect, None, self)
     }
 
     /// [`DelimitedOptions::from_reader`], with the plan bound later: see
@@ -219,6 +219,7 @@ impl DelimitedOptions {
                 reader.refill_async().await?;
             }
         }
+        reader.within_header()?;
         Ok(reader)
     }
 
@@ -234,8 +235,12 @@ impl DelimitedOptions {
 
 /// Where the bytes come from.
 enum Source<'a> {
-    /// The whole input, in memory.
-    Slice { bytes: &'a [u8], at: usize },
+    /// The whole input, in memory, handed to the core at most `window` bytes a call.
+    Slice {
+        bytes: &'a [u8],
+        at: usize,
+        window: usize,
+    },
     /// A stream, read through a buffer that holds what the core has not consumed.
     Stream {
         buf: Vec<u8>,
@@ -266,11 +271,28 @@ enum Step {
     Input,
 }
 
-impl Source<'_> {
+/// The most input the core takes in one call: its offsets are 31 bits.
+const WINDOW: usize = i32::MAX as usize;
+
+impl<'a> Source<'a> {
+    fn slice(bytes: &'a [u8]) -> Source<'a> {
+        Source::Slice {
+            bytes,
+            at: 0,
+            window: WINDOW,
+        }
+    }
+
     /// The unconsumed input, and whether it is the last of it.
     fn window(&self) -> (&[u8], bool) {
         match self {
-            Source::Slice { bytes, at } => (&bytes[*at..], true),
+            Source::Slice { bytes, at, window } => {
+                let rest = &bytes[*at..];
+                match rest.get(..*window) {
+                    Some(part) if rest.len() > *window => (part, false),
+                    _ => (rest, true),
+                }
+            }
             Source::Stream { buf, at, eof, .. } => (&buf[*at..], *eof),
             #[cfg(feature = "async")]
             Source::Async {
@@ -297,7 +319,8 @@ impl Source<'_> {
     }
 
     /// Moves the unconsumed tail to the front of the buffer and reads more behind it,
-    /// growing the buffer if the tail fills it.
+    /// growing the buffer if the tail fills it. A slice is read in place, so there is
+    /// nothing to make room in: one record is larger than the core takes in a call.
     fn refill(&mut self, state: &State) -> Result<(), Error> {
         let Source::Stream {
             buf,
@@ -306,7 +329,10 @@ impl Source<'_> {
             eof,
         } = self
         else {
-            return Ok(());
+            return match self {
+                Source::Slice { .. } => Err(row_too_long(state)),
+                _ => Ok(()),
+            };
         };
         buf.drain(..*at);
         *at = 0;
@@ -380,7 +406,24 @@ impl Source<'_> {
     }
 }
 
-/// The failure of a record longer than a stream is buffered for.
+#[cfg(test)]
+impl DelimitedReader<'_> {
+    /// Hands a slice to the core at most `bytes` a call from here on, as the reader does a
+    /// slice of 2 GiB or more.
+    pub(crate) fn limit_window(&mut self, bytes: usize) {
+        if let Source::Slice { window, .. } = &mut self.source {
+            *window = bytes;
+        }
+    }
+
+    /// The cell-table entries the reader holds.
+    pub(crate) fn cell_entries(&self) -> usize {
+        self.cells.len()
+    }
+}
+
+/// The failure of a record longer than a stream is buffered for, or than the core takes in
+/// one call from a slice.
 fn row_too_long(state: &State) -> Error {
     Error::Structure(Failure {
         kind: FailureKind::RowTooLong,
@@ -544,7 +587,14 @@ impl<'a> DelimitedReader<'a> {
                 reader.refill()?;
             }
         }
+        reader.within_header()?;
         Ok(reader)
+    }
+
+    /// A plan bound before the header was read, held to the width the header gives every
+    /// record, as [`DelimitedReader::bind`] holds a plan bound after it.
+    fn within_header(&self) -> Result<(), Error> {
+        column::within(self.plan(), self.column_count())
     }
 
     /// Declares the plan a reader opened without one reads through — once, before the
@@ -553,15 +603,19 @@ impl<'a> DelimitedReader<'a> {
     ///
     /// # Errors
     /// [`Error::AlreadyBound`] if the reader has a plan; [`Error::Plan`] if a column cannot
-    /// be honoured.
+    /// be honoured — among them a column at or past the width a header has given every
+    /// record.
     pub fn bind(&mut self, plan: &[Column]) -> Result<(), Error> {
         if self.columns.is_some() {
             return Err(Error::AlreadyBound);
         }
-        let (specs, width) = column::specs(plan)?;
+        let (specs, width, widest) = column::specs(plan)?;
+        column::within(plan, self.column_count())?;
         let batch_rows = self.options.batch_rows;
-        self.per_row = width + 1;
-        self.cells = vec![Span::default(); self.per_row * batch_rows];
+        let per_row = width + 1;
+        let rows = column::cell_rows(per_row, batch_rows);
+        self.cells = column::table(per_row.checked_mul(rows), widest)?;
+        self.per_row = per_row;
         self.columns = Some(Columns::new(plan, specs, batch_rows));
         Ok(())
     }
@@ -715,8 +769,10 @@ impl<'a> DelimitedReader<'a> {
                     // The batch's text is the input it was read from, which stays where it
                     // is until the next read.
                     self.pending = out.consumed as usize;
-                    self.cramped =
-                        rows < max_rows && out.arena_used as usize * 2 >= self.arena.len();
+                    // A batch the cell table ends early (see `column::CELL_BUDGET`) is no
+                    // reason to grow the arena.
+                    let held = max_rows.min(self.cells.len() / self.per_row);
+                    self.cramped = rows < held && out.arena_used as usize * 2 >= self.arena.len();
                     return Ok(Step::Rows(rows));
                 }
                 OK => {
@@ -729,11 +785,13 @@ impl<'a> DelimitedReader<'a> {
                         return Ok(Step::Input);
                     }
                 }
-                // The core says how much one row takes; the table holds a batch of them.
+                // The core says how much one row takes; the table holds as many of them
+                // as a batch has, or as the budget allows.
                 ERR_CELLS => {
-                    self.per_row = self.per_row.max(out.needed as usize);
-                    self.cells
-                        .resize(out.needed as usize * max_rows, Span::default());
+                    let needed = out.needed as usize;
+                    self.per_row = self.per_row.max(needed);
+                    let rows = column::cell_rows(needed, max_rows);
+                    self.cells.resize(needed * rows, Span::default());
                 }
                 ERR_ARENA => {
                     let needed = (out.needed as usize).max(self.arena.len() * 2);

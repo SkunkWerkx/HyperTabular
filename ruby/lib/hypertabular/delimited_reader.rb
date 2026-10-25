@@ -114,6 +114,8 @@ module HyperTabular
       @failure = nil
       take(source)
       @header = dialect.has_header ? read_header : nil
+      # A plan bound before the header was read is held to it as soon as it is.
+      within_header(planned) if planned
     end
 
     # The header's names, when the dialect declares a header: a Header — the frozen Array of
@@ -130,13 +132,16 @@ module HyperTabular
     # Columns, in output order, typically built from the #header's ordinals — once, before
     # the first read. Returns the reader.
     #
-    # ArgumentError for a plan that is not Columns, which leaves the reader unbound;
-    # RuntimeError if the reader already has a plan; IOError on a closed reader.
+    # ArgumentError for a plan that is not Columns, or that reads a column at or past the
+    # width the header gives every record, which leaves the reader unbound; RuntimeError if
+    # the reader already has a plan; IOError on a closed reader.
     def bind(plan)
       raise IOError, "closed reader" if @closed
       raise "the reader already has a plan: a plan is bound once" if bound?
 
-      bind_kernel(Column.plan(plan))
+      plan = Column.plan(plan)
+      within_header(plan)
+      bind_kernel(plan)
       self
     end
 
@@ -242,6 +247,19 @@ module HyperTabular
     # What a read before a plan is bound says.
     UNBOUND_MESSAGE = "the reader has no plan yet: bind one before reading".freeze
     private_constant :UNBOUND, :UNBOUND_MESSAGE
+
+    # ArgumentError for the first column of +plan+ at or past the width the header has given
+    # every record: such a column could only ever be empty.
+    def within_header(plan)
+      width = @header.nil? ? nil : column_count
+      return if width.nil?
+
+      index = plan.index { |column| column.ordinal >= width }
+      return if index.nil?
+
+      raise ArgumentError, "plan column #{index} reads source column #{plan[index].ordinal}, " \
+                           "past the #{width} columns the header gives every record"
+    end
 
     # Sizes the kernel's arrays for +plan+ (already checked to be Columns) and takes it.
     def bind_kernel(plan)

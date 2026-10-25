@@ -116,10 +116,10 @@ either completing or leaving the state as it found it, which is what makes it re
 at any byte of input or output. It is held to zlib's deflate at every level, fed a byte
 at a time into a window barely larger than the dictionary, and to thousands of damaged
 streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs with its run-time
-SIMD and 599 for miniz_oxide. One thing it taught about the proof: the table builder took
-the symbol mapping as a function pointer, and a call through a pointer is one the
-compiler must assume can unwind, so the proof refused the whole inflate until the pointer
-became a value to match on. Another, from the workbook's casts: converting a double to a
+SIMD and 599 for miniz_oxide. The proof shapes it: the table builder takes the symbol
+mapping as a value to match on, not a function pointer, because a call through a pointer
+is one the compiler must assume can unwind, and the proof would refuse the whole inflate.
+The workbook's casts have a constraint of their own: converting a double to a
 128-bit integer is a call into the compiler's runtime (`__fixdfti`) that the static
 library would then have to bring along, so HyperCast's typed doors, which the core casts
 a number through, read an integral double's bits instead.
@@ -417,17 +417,16 @@ characters `String#[]` slices by, as HyperCast's own gem reports it. A helper th
 `raw` into a string for display (Java's `rawString`) does not move the span.
 
 **Header first, plan after.** Every binding opens a delimited source and a sheet without a
-plan, reads the header, and takes the plan once through `bind` — the native calls were
-always two-phase (`_init` → `_header` → `_fill`, `_sheet` → `_header` → `_fill`), so this
-moved only where a binding allocates its column buffers and cell table, from opening to
-binding. One thing has to be kept for it: the workbook core holds the header row's cells
+plan, reads the header, and takes the plan once through `bind`. The native calls are
+two-phase (`_init` → `_header` → `_fill`, `_sheet` → `_header` → `_fill`), and a binding
+allocates its column buffers and cell table when it binds, not when it opens. One thing has to be kept for it: the workbook core holds the header row's cells
 in the caller's row slots as well as naming them, and a row an ODS sheet repeats is
 delivered again from those slots. A sheet opened with a plan sizes the slots to the plan;
 one opened without has a slot for every name — the slots grow with the cell table while
 the header is read, and binding only ever grows them. The corpus replays every case header
 first in every binding, and `generated-a.ods` is the case that fails without it.
 
-**Where the language's grain differs.** The five features of 0.8.0, mapped:
+**Where the language's grain differs.** The reading surface, mapped:
 
 | | Header lookup | Plan-less open | Row view | Native text, no copy | Async |
 |---|---|---|---|---|---|
@@ -447,6 +446,17 @@ deadline). A Java reader is confined to its thread, and on virtual threads a blo
 is the idiom. Ruby's IO reads yield under a Fiber scheduler already, and PHP has no event
 loop. Where there is async, the core still never waits: only the binding's refill is
 awaited, and each one counts its bytes as they land, so a cancelled read loses nothing.
+
+**A whole column, as the core wrote it.** Rust lends every door but text as a typed slice,
+and Go every door, converting its three date-time doors once per batch. C# lends the
+primitive doors as their own type, the time door as `ulong` nanoseconds and the decimal and
+other temporal doors as HyperCast's `Raw*` layouts. Java lends every door but text as a
+`MemorySegment` that HyperCast's `NativeValues` reads. Swift lends the primitive doors and
+the time door as `UInt64` nanoseconds. A UUID column is read a cell at a time in C#, and
+everything past the primitives and time in Swift: `Guid`, Foundation's `Decimal`, `UUID`,
+`Date` and `DateComponents` and the standard library's `Duration` are not laid out as the
+core writes the value. Python, Ruby and PHP copy a column into the batch, as their own
+values (a `memoryview` of the door's item type in Python).
 
 Each binding also replays `corpus/workbook.json` with every buffer a workbook call works in
 starting at one element (C#, Java, Go, Swift, Ruby and PHP behind a test-only switch;

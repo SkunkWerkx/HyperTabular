@@ -163,6 +163,10 @@ it stopped at.
   from those slots; so a sheet without a plan gives the header call a slot for every name
   (the slots grow with the cell table), and binding only ever grows them. Every binding
   does the same, and `generated-a.ods` in the corpus is the case that holds them to it.
+- A plan's ordinals are capped as a delimited plan's are: an ordinal must be below 2^20
+  (1,048,576), more columns than any of the three formats has, so a sheet's row slots are
+  at most 16 MiB. A sheet's header does not fix the width of the rows below it — a row may
+  hold cells past the header's last name — so a sheet plan may read past it.
 
 ## Allocation story
 
@@ -179,11 +183,11 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   sheet, with and without a header, empty rows skipped and delivered, every door over
   every column. The cases for the ten synthetic XLSX and ODS packages were written by the
   std workbook reader this crate had before the core could read a workbook — a reader that
-  owed the core nothing — with the core required to agree; that reader has since been
+  owed the core nothing — with the core required to agree; that reader has been
   deleted. The cases for the fifteen files Excel, LibreOffice, Google Sheets and Numbers
   wrote, and for the two generated Numbers packages, were written by the core and read
   against the application that wrote each file, by eye. **Nothing
-  independent of the core reads a workbook here any more**: the corpus is the oracle's frozen word, and
+  independent of the core reads a workbook here**: the corpus is the oracle's frozen word, and
   `tests/corpus_workbook.rs` holds the core to it. Every binding replays the same file.
 - The core against itself (`tests/kernel_workbook.rs`): generated packages that reach for
   every shape a cell, a row and a part can take, read with buffers that start empty and
@@ -213,13 +217,9 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
 ## Figures
 
 Linux x64, 300 000 rows × 8 columns, 100.8 MB of sheet XML in a 15.1 MB deflated package,
-one plan, batches of 4096: 604 ms through the core (167 MB/s of sheet XML, 0.50 M rows/s).
-The std reader it replaced, inflating with zlib-rs, read the same file in 505 ms
-(`tests/kernel_workbook.rs`, `throughput`, measured before that reader was deleted).
-Through the Rust binding the read costs what it costs through the core called directly
-(630 ms against 627 ms, a later run of the same test). The
-difference was long guessed to be the inflate, since the core's own runs at about two
-thirds of zlib-rs's speed (`design.md`); measured since (below), it is not.
+one plan, batches of 4096: 604 ms through the core (167 MB/s of sheet XML, 0.50 M rows/s;
+`tests/kernel_workbook.rs`, `throughput`). Through the Rust binding the read costs what it
+costs through the core called directly (630 ms against 627 ms, a later run of the same test).
 
 ### Through every binding
 
@@ -258,10 +258,10 @@ best of five); it decodes the whole document at open, so its read is its open.
 | numbers-parser 4.22.0 (Python) | | | | | 66.8 s | 68.1 s |
 
 C#, Java, Go and Swift hand out views of the reader's buffers, so their read is the core's.
-The build is layout-sensitive: when this table was first taken, Criterion's binary read the
-ODS file about 10% slower than the same read in a plain release program, and compiling with
-every function and branch target aligned
-(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) brought
+The build is layout-sensitive: Criterion's binary has read the ODS file about 10% slower
+than the same read in a plain release program, and compiling with every function and branch
+target aligned
+(`-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`) brings
 the two within 2% of each other. A difference of under about 10% between two rows of this
 table is not a finding until it survives runs alternated in one sitting.
 Python's read makes the text column's `str`s and counts faults from
@@ -273,7 +273,7 @@ HyperCast's Duration), the cells that cast counted from them. Their **verdicts**
 a HyperCast `Success` or `Fault` built for every cell, what a caller who matches each cell
 pays — is 1.95 s, 2.54 s and 2.55 s in Ruby (a Ruby `Data` instance costs about 0.45 µs to
 make, however it is made) and 926 ms, 1.55 s and 1.60 s in PHP. Ruby's two backends are
-within a few percent of each other: the crossing was already once per batch, so the Magnus
+within a few percent of each other: the crossing is once per batch, so the Magnus
 extension buys platform gems with no shared library to find, and ruby.wasm, not speed.
 
 ODS's **open** is most of a second because a package has no listing of its sheets outside
@@ -289,34 +289,11 @@ this sitting, and has not been run alternated. On an Apple M-series laptop, 2026
 core read the file in 0.60 s (0.43 s of it the open) against numbers-parser's 21 s: not table
 numbers, the machine differs, but the same ratio.
 
-Where a read's time went (Rust, best of three, measured before the tokenizer fixes that
-brought the table above to its numbers): the core's inflate alone takes 117 ms over
-the xlsx sheet's 111 MB and 93 ms over the ODS part's 360 MB — it is not the cost. Casting
-is not either: with an empty plan the xlsx read is 689 ms and with the full plan 705 ms,
-the ODS read 1.66 s and 1.72 s. The rest is the XML — tokenizing the parts and assembling
-rows — about 570 ms for the xlsx sheet (195 MB/s) and, for ODS, about 380 ms of the open's
-scan and 1.1 s of the read (330 MB/s). That is where the reader is fast or slow. The text
-door is the one plan that costs more: all eight columns through it is 1.03 s and 2.01 s,
-every typed cell said as canonical text.
+Where a read's time goes, profiled (samply) on the core the table was taken on: the XML —
+tokenizing the parts and assembling rows. Inflate is about a sixth of a read, and no other
+line is more than a few percent.
 
-Profiled (samply, the ODS read), the XML was most of it in two places. `tag()` found a tag's
-`>` a byte at a time, minding quotes, over ODS's long cell tags; it now jumps from one `>`
-or quote to the next eight bytes at a time, as `find_byte` finds one byte. And every
-attribute lookup walked the tag's attributes from the start — four or five a cell for ODS,
-three (`r`, `s`, `t`) for XLSX; each cell's are now gathered in one pass, each the first of
-its name as the lookups found it. A third, smaller: the nine-byte `<![CDATA[` comparison,
-a `memcmp` call, ran for every ordinary tag until `<!` was asked first. Best of several
-runs, Rust, before and after the three: XLSX read 710 → 580 ms, ODS read 1.88 → 1.19 s, ODS
-open 530 → 320 ms. The table above was taken after them, every binding on a library rebuilt
-from the same core. What is left is spread
-thin: inflate is about a sixth of a read, and no other line is more than a few percent.
-
-What these numbers changed when they were first taken: Ruby and PHP each ran a scan over
-every span of a batch, in the host language, to find how much of the arena to copy, where
-the core's own `arena_used` already says (Ruby's read went from 1.05 s to 0.68 s before any
-values were made); and PHP decoded its record doors with an `unpack()` a cell, which is now
-one a column (0.28 s to 0.14 s of decoding for the xlsx file). PHP's numbers are taken with
-no `php.ini` (`runner.php_disable_ini` in `phpbench.json`): a development install with
+PHP's numbers are taken with no `php.ini` (`runner.php_disable_ini` in `phpbench.json`): a development install with
 Xdebug loaded runs the same benchmark at more than twice the time.
 
 To run them: `cargo bench --bench workbook_benchmarks` (rust/), `dotnet run -c Release

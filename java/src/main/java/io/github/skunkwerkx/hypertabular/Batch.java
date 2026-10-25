@@ -49,7 +49,7 @@ public final class Batch implements Iterable<Row> {
     private final boolean workbook;
     private int rows;
     private MemorySegment cells;
-    private int perRow;
+    private long perRow;
     /** Where an unflagged span's bytes are: the input, or the shared strings. Handed out read-only. */
     private MemorySegment base;
     /** Where the spans' offsets count from in {@code base}. */
@@ -85,7 +85,7 @@ public final class Batch implements Iterable<Row> {
     }
 
     /** Points the batch at what the core just wrote. */
-    Batch fill(int rows, MemorySegment cells, int perRow, MemorySegment base, long baseStart, MemorySegment arena) {
+    Batch fill(int rows, MemorySegment cells, long perRow, MemorySegment base, long baseStart, MemorySegment arena) {
         this.rows = rows;
         this.cells = cells;
         this.perRow = perRow;
@@ -238,22 +238,26 @@ public final class Batch implements Iterable<Row> {
     }
 
     /**
-     * A whole column as the core wrote it, one value per row — for the doors whose value is a
-     * primitive: {@link Door#BOOL} as one byte ({@code 0} or {@code 1}), the integer and
-     * floating-point doors as their own width, read with the matching {@link ValueLayout}
-     * ({@code values.getAtIndex(ValueLayout.JAVA_INT, row)} for {@link Door#I32} and
-     * {@link Door#U32}, and so on). The value of a row whose verdict is not ok is zero.
-     * Columns of the other doors are read a cell at a time, with {@link #get}. Read-only.
+     * A whole column as the core wrote it, one value per row, nothing copied — for every door
+     * but {@link Door#TEXT}. {@link Door#BOOL} is one byte ({@code 0} or {@code 1}), and the
+     * integer and floating-point doors are their own width, read with the matching
+     * {@link ValueLayout} ({@code values.getAtIndex(ValueLayout.JAVA_INT, row)} for
+     * {@link Door#I32} and {@link Door#U32}, and so on). Every other door's value is the layout
+     * HyperCast's {@link NativeValues} reads, whose {@code *_BYTES} constant is the stride:
+     * {@code NativeValues.decimal(values, row * NativeValues.DECIMAL_BYTES)} is what
+     * {@link #get} makes of a {@link Door#DECIMAL} cell, and likewise {@code uuid},
+     * {@code instant}, {@code date}, {@code civil}, {@code time} and {@code duration}. The value
+     * of a row whose verdict is not ok is zero. A text column is read a cell at a time, with
+     * {@link #text}. Read-only.
      *
      * @param column index into the plan
      * @return the column's value array
-     * @throws IllegalStateException if the column's door does not write a primitive
+     * @throws IllegalStateException if the column is read through {@link Door#TEXT}
      */
     public MemorySegment values(int column) {
         Door door = door(column);
-        if (!door.isPrimitive()) {
-            throw new IllegalStateException(
-                    "Column " + column + " is cast through " + door + "; it has no array of primitives.");
+        if (door == Door.TEXT) {
+            throw new IllegalStateException("Column " + column + " is cast through TEXT; it has no array of values.");
         }
         return columns.values[column]
                 .asSlice(0, (long) rows * door.valueBytes())

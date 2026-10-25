@@ -15,6 +15,7 @@ import io.github.skunkwerkx.hypercast.Fault;
 import io.github.skunkwerkx.hypercast.NumFormat;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -23,18 +24,23 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.math.BigDecimal;
 import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.OptionalInt;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -58,6 +64,87 @@ final class ReaderTest {
         @Override
         public void close() {
             closed = true;
+        }
+    }
+
+    @Test
+    void anOrdinalIsBelow2To20() {
+        // 2^20 − 1 is the widest ordinal a plan may name: headerless, it binds and reads empty,
+        // in one row of cell table.
+        byte[] text = "a,b\n1,2\n".getBytes(StandardCharsets.UTF_8);
+        int widest = (1 << 20) - 1;
+        try (DelimitedReader reader =
+                DelimitedReader.of(text, Dialect.CSV.withHeader(false), List.of(Column.text(widest)))) {
+            assertEquals((1L << 20) + 1, reader.cellEntries());
+            assertEquals(CastFailure.EMPTY, reader.read().verdict(0, 0).reason());
+        }
+        // 2^20 is the plan's IllegalArgumentException, said before anything is allocated, and
+        // the reader is left without a plan; so it is from a factory and for a sheet.
+        String said = "Plan column 1 reads source column 1048576; an ordinal must be below 2^20 (1,048,576).";
+        List<Column> plan = List.of(Column.text(0), Column.text(1 << 20));
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV.withHeader(false))) {
+            IllegalArgumentException refused = assertThrows(IllegalArgumentException.class, () -> reader.bind(plan));
+            assertEquals(said, refused.getMessage());
+            assertFalse(reader.isBound());
+            reader.bind(List.of(Column.text(0)));
+        }
+        IllegalArgumentException refused = assertThrows(
+                IllegalArgumentException.class, () -> DelimitedReader.of(text, Dialect.CSV.withHeader(false), plan));
+        assertEquals(said, refused.getMessage());
+        Path basic = CorpusTest.CORPUS_DIRECTORY.resolve("workbook").resolve("basic.xlsx");
+        try (Workbook book = Workbook.open(basic);
+                Sheet sheet = book.sheet(0, SheetOptions.DEFAULT)) {
+            refused = assertThrows(IllegalArgumentException.class, () -> sheet.bind(plan));
+            assertEquals(said, refused.getMessage());
+            assertFalse(sheet.isBound());
+            assertThrows(IllegalArgumentException.class, () -> book.sheet(0, SheetOptions.DEFAULT, plan));
+            sheet.bind(List.of(Column.text(widest)));
+            assertEquals(CastFailure.EMPTY, sheet.read().verdict(0, 0).reason());
+        }
+    }
+
+    @Test
+    void aColumnPastTheHeadersWidthIsRefused() {
+        byte[] text = "a,b\n1,2\n".getBytes(StandardCharsets.UTF_8);
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV)) {
+            IllegalArgumentException refused = assertThrows(
+                    IllegalArgumentException.class, () -> reader.bind(List.of(Column.i64(0), Column.i64(2))));
+            assertTrue(
+                    refused.getMessage().startsWith("Plan column 1 reads source column 2, past the 2 columns"),
+                    refused.getMessage());
+            assertFalse(reader.isBound());
+            reader.bind(List.of(Column.i64(0), Column.i64(1)));
+            assertEquals(2L, reader.read().values(1).get(ValueLayout.JAVA_LONG, 0));
+        }
+        // A plan given at open is held to the header as soon as it has been read.
+        IllegalArgumentException refused = assertThrows(
+                IllegalArgumentException.class, () -> DelimitedReader.of(text, Dialect.CSV, List.of(Column.i64(2))));
+        assertTrue(refused.getMessage().startsWith("Plan column 0 reads source column 2,"), refused.getMessage());
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV, List.of(Column.i64(1)))) {
+            assertEquals(1, reader.read().rows());
+        }
+    }
+
+    @Test
+    void aWideOrdinalWithoutAHeaderIsReadInBoundedMemory() {
+        // No header fixes the width, so the column is legal and every cell of it is empty;
+        // the cell table holds one row of its reach, not a batch.
+        byte[] text = "a,b\n1,2\n".getBytes(StandardCharsets.UTF_8);
+        List<Column> plan = List.of(Column.i64(0), Column.i64((1 << 20) - 1));
+        try (DelimitedReader reader = DelimitedReader.of(text, Dialect.CSV.withHeader(false), plan)) {
+            assertEquals((1L << 20) + 1, reader.cellEntries());
+            int rows = 0;
+            for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+                for (int row = 0; row < batch.rows(); row++, rows++) {
+                    assertEquals(CastFailure.EMPTY, batch.verdict(1, row).reason());
+                }
+            }
+            assertEquals(2, rows);
+        }
+        // An ordinary plan keeps the whole batch.
+        try (DelimitedReader reader =
+                DelimitedReader.of(text, Dialect.CSV.withHeader(false), List.of(Column.text(255)))) {
+            assertEquals(257L * DelimitedReader.DEFAULT_BATCH_ROWS, reader.cellEntries());
         }
     }
 
@@ -151,7 +238,6 @@ final class ReaderTest {
             Batch batch = reader.read();
             assertThrows(IllegalStateException.class, () -> batch.get(0, 0, Long.class));
             assertThrows(IllegalStateException.class, () -> batch.get(0, 0, Object.class));
-            assertThrows(IllegalStateException.class, () -> batch.values(1));
             assertThrows(IllegalStateException.class, () -> batch.get(1, 0, LocalDate.class));
             assertThrows(IllegalStateException.class, () -> batch.get(0, 0, Instant.class));
             assertThrows(IllegalStateException.class, () -> batch.text(0, 0));
@@ -161,6 +247,46 @@ final class ReaderTest {
             assertThrows(IndexOutOfBoundsException.class, () -> batch.raw(0, 1));
             assertThrows(IndexOutOfBoundsException.class, () -> batch.line(1));
             assertThrows(IndexOutOfBoundsException.class, () -> batch.isOk(2, 0));
+        }
+    }
+
+    @Test
+    void aDecimalUuidOrTemporalColumnIsLentWholeInHyperCastsLayout() {
+        List<Column> plan = List.of(
+                Column.decimal(0),
+                Column.uuid(1),
+                Column.timestamp(2),
+                Column.date(3),
+                Column.dateTime(4, DateOrder.MONTH_DAY_YEAR),
+                Column.time(5),
+                Column.duration(6),
+                Column.text(7));
+        try (DelimitedReader reader = DelimitedReader.of(
+                utf8("1234.50,6ba7b810-9dad-11d1-80b4-00c04fd430c8,2024-01-31T10:30:00.5Z,2024-01-31,"
+                        + "1/7/2026 3:04 PM,15:04:05.5,PT1H30M,plain\nx,x,x,x,x,x,x,x\n"),
+                Dialect.CSV.withHeader(false),
+                plan)) {
+            Batch batch = reader.read();
+            MemorySegment amounts = batch.values(0);
+            assertEquals(2 * NativeValues.DECIMAL_BYTES, amounts.byteSize());
+            assertEquals(new BigDecimal("1234.5"), NativeValues.decimal(amounts, 0));
+            assertEquals(
+                    UUID.fromString("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), NativeValues.uuid(batch.values(1), 0));
+            assertEquals(Instant.parse("2024-01-31T10:30:00.5Z"), NativeValues.instant(batch.values(2), 0));
+            assertEquals(LocalDate.of(2024, 1, 31), NativeValues.date(batch.values(3), 0));
+            assertEquals(LocalDateTime.of(2026, 1, 7, 15, 4), NativeValues.civil(batch.values(4), 0));
+            assertEquals(LocalTime.of(15, 4, 5, 500_000_000), NativeValues.time(batch.values(5), 0));
+            assertEquals(Duration.ofMinutes(90), NativeValues.duration(batch.values(6), 0));
+            // Each is what get makes of the same cell, and a row whose verdict is not ok is zero.
+            for (int column = 0; column < 7; column++) {
+                assertEquals(CastFailure.MALFORMED, batch.verdict(column, 1).reason());
+                MemorySegment values = batch.values(column);
+                assertEquals(0, values.get(ValueLayout.JAVA_INT, values.byteSize() / 2));
+            }
+            assertEquals(new Success<>(NativeValues.instant(batch.values(2), 0)), batch.get(2, 0, Instant.class));
+            assertTrue(batch.values(0).isReadOnly());
+            // Text has no array of values: its cells are read one at a time.
+            assertThrows(IllegalStateException.class, () -> batch.values(7));
         }
     }
 
@@ -394,18 +520,24 @@ final class ReaderTest {
 
     @Test
     void aPlanCanBeAProjectionOrNothingAtAll() {
-        // A source column read twice, out of order, and one past every record's end.
-        List<Column> plan = List.of(Column.f64(2), Column.text(0), Column.i32(0), Column.text(7));
+        // A source column read twice, out of order.
+        List<Column> plan = List.of(Column.f64(2), Column.text(0), Column.i32(0));
         try (DelimitedReader reader = DelimitedReader.of(ORDERS, Dialect.CSV, plan, 2)) {
             Batch batch = reader.read();
             assertEquals(2, batch.rows());
             assertEquals(new Success<>(2.5), batch.get(0, 0, Double.class));
             assertEquals("2", batch.string(1, 1));
             assertEquals(new Success<>(2), batch.get(2, 1, Integer.class));
-            assertNull(batch.string(3, 0));
-            assertEquals("", batch.rawString(3, 0));
             assertEquals(1, reader.read().rows());
             assertNull(reader.read());
+        }
+        // Without a header to fix the width, a column past every record's end is empty.
+        try (DelimitedReader reader =
+                DelimitedReader.of(ORDERS, Dialect.CSV.withHeader(false), List.of(Column.text(7)))) {
+            Batch batch = reader.read();
+            assertEquals(4, batch.rows());
+            assertNull(batch.string(0, 1));
+            assertEquals("", batch.rawString(0, 1));
         }
         // No columns at all: the rows are still counted, and the structure still checked.
         try (DelimitedReader reader = DelimitedReader.of(ORDERS, Dialect.CSV, List.of())) {

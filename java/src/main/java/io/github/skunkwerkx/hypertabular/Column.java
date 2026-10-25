@@ -42,7 +42,8 @@ public final class Column {
     }
 
     /**
-     * Zero-based ordinal of the source column. Past a record's last cell reads as empty.
+     * Zero-based ordinal of the source column. Past a record's last cell reads as empty; 2^20
+     * and past, a plan is refused at bind.
      *
      * @return the source column's ordinal
      */

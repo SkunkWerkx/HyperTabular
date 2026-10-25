@@ -48,10 +48,16 @@ core fills them in one native call per batch: the boundary is crossed once per f
 rows, not once per cell.
 
 - **One batch type.** `read()` returns a `Batch` — `rows()`, `columns()`, `line(row)`,
-  `verdicts(column)`, `values(column)` for a whole primitive column, `get(column, row, type)`
-  for any one cell, `text`/`string`/`chars` for text, and `raw` for the text a cell was cast
-  from — or `null` when there are no more rows. It is a view of the reader's buffers, valid
-  until the next `read()`, and the same type for delimited text and for a sheet.
+  `verdicts(column)`, `values(column)` for a whole column, `get(column, row, type)` for any
+  one cell, `text`/`string`/`chars` for text, and `raw` for the text a cell was cast from —
+  or `null` when there are no more rows. It is a view of the reader's buffers, valid until
+  the next `read()`, and the same type for delimited text and for a sheet.
+- **Whole columns as the core wrote them.** `values(column)` is a read-only `MemorySegment`
+  over any column but a text one: the primitive doors at their own width, read with the
+  matching `ValueLayout`, and every other door in the layout HyperCast's
+  `io.github.skunkwerkx.hypercast.interop.NativeValues` reads, a `*_BYTES` stride a row —
+  `NativeValues.decimal(values, row * NativeValues.DECIMAL_BYTES)` is the `BigDecimal` that
+  `get` would make, and likewise `uuid`, `instant`, `date`, `civil`, `time` and `duration`.
 - **Rows, when that is how the code thinks.** A `Batch` is `Iterable<Row>` (and `row(i)`
   picks one): a `Row` is the batch's accessors with the row chosen — `index()`, `line()`,
   `get(column, type)`, `verdict`, `text`, `string`, `chars`, `raw` — a view, valid as long
@@ -116,6 +122,14 @@ a `NoSuchElementException` naming a missing one), `findOrdinal(name)` → `Optio
 both again for the name's UTF-8 bytes (`byte[]` or `MemorySegment`). `columnCount()` is how
 many cells a record has — the header's count, or the first record's once read — as an
 `OptionalInt`; `isBound()` says whether a plan is in place.
+
+Once a header has fixed the width every record has, a plan column reading at or past it
+could only ever be empty: the factory or `bind` refuses it with an `IllegalArgumentException`
+naming the plan column. Without a header, such a column reads as `EMPTY`, and a plan reaching
+past 256 source columns is read in batches shorter than `batchRows`, so that the cell table
+stays near 8 MiB. An ordinal must be below 2^20 (1,048,576), for a delimited reader and a sheet
+alike: no workbook format has that many columns (XLSX and ODS stop at 16,384, Numbers at
+1,000), and at the cap one row of cell table is at most 8 MiB.
 
 A failure of the stream or file is an `UncheckedIOException`, from the factory or from
 `read()`.

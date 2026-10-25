@@ -19,11 +19,19 @@
 # run on an emulator or device.
 #
 # usage: .github/scripts/local-core.sh    (FORGE=<path> if the SkunkWerkx/.github checkout
-#                                          is not ../.github beside this repository)
+#                                          is neither ../.github nor ../HyperForge beside
+#                                          this repository)
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-forge="${FORGE:-$repo/../.github}/.github/actions/static-libs/build-static-libs.sh"
+script=.github/actions/static-libs/build-static-libs.sh
+if [ -n "${FORGE:-}" ]; then
+  forge="$FORGE/$script"
+elif [ -f "$repo/../.github/$script" ]; then
+  forge="$repo/../.github/$script"
+else
+  forge="$repo/../HyperForge/$script"
+fi
 [ -f "$forge" ] || { echo "error: $forge not found; set FORGE to the SkunkWerkx/.github checkout" >&2; exit 1; }
 
 case "$(uname -s)-$(uname -m)" in

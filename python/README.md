@@ -55,6 +55,11 @@ dialect)`, `book.sheet(which, options)` — reads the header and waits: `bind(pl
 plan once, before the first read. A read before it raises `RuntimeError` (and a later `bind`
 puts that right); so does a second `bind`. `is_bound` says which it is, and a delimited
 reader's `column_count` is the header's width, or the first record's once it has been read.
+Once a delimited header has fixed that width, a plan column at or past it could only ever be
+empty, so it is a `ValueError` naming the column — from `bind`, or from the constructor (and
+`open_async`) as soon as the header is read. Without a header such a column reads as empty,
+and a plan reaching past 256 source columns reads shorter batches, as many rows as about
+8 MiB of cell table holds.
 
 The header is a `Header`: a tuple of `str`, with `ordinal(name)` — the first
 column with exactly that name, case and spaces included, or a `KeyError` naming it — and
@@ -84,7 +89,10 @@ with DelimitedReader.open("orders.csv", Dialect.CSV, plan) as reader:
 `DelimitedReader(source, …)` takes `bytes` or a binary file object (anything with
 `read(size)`), and so does `Workbook(data)`: a workbook is read to the end into memory it owns,
 since a zip is read from its directory at the end back. Either way the format is read from the
-bytes. A file object is the caller's to close.
+bytes. A file object is the caller's to close. A delimited reader calls the object's
+`read1(size)` where it has one and parses whatever each read returns, so over a pipe, a socket
+or a FIFO opened with `DelimitedReader.open` the header and every complete record arrive
+without waiting for the buffer to fill.
 
 An asynchronous stream — an `asyncio.StreamReader`, or anything with `async read(size)` — is
 read with asyncio:
@@ -174,7 +182,6 @@ import micropip
 await micropip.install("hypertabular")
 
 import hypertabular
-hypertabular.BACKEND            # "native"
 hypertabular.native_version()   # the linked core's version
 ```
 

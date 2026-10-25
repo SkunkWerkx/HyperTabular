@@ -32,8 +32,10 @@ pub enum Error {
     /// other than `"`.
     Separator(u8),
     /// Plan column `column` cannot be honoured: its numeric format declares the same
-    /// decimal and group separator (or no decimal separator at all), or its ordinal is
-    /// past what a source can hold.
+    /// decimal and group separator (or no decimal separator at all), its ordinal is 2^20
+    /// (1,048,576) or more — past any workbook format's columns — or, in delimited text, at
+    /// or past the width a header has given every record, or the row slots its reach takes
+    /// cannot be allocated.
     Plan {
         /// The column's place in the plan.
         column: usize,
@@ -92,7 +94,8 @@ pub enum FailureKind {
     UnclosedQuote = 1,
     /// A record's cell count disagrees with the first record's.
     ColumnCount = 2,
-    /// One record is larger than the reader will buffer (1 GiB).
+    /// One record is larger than the reader will buffer (1 GiB), or, read in place from a
+    /// slice, than the core takes in one call (2 GiB).
     RowTooLong = 3,
     /// The container is not a zip file.
     NotAZip = 16,

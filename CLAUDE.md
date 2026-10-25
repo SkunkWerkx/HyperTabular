@@ -83,18 +83,20 @@ HyperCast and move together.
 - The Forge is called at master, deliberately unpinned: a Forge merge reaches every consumer
   at once, and breakage it causes is fixed forward. `release.yml` resolves master to one
   commit per run (`find-ci-run`'s `forge_sha`), checks the Forge out at it as `.hyperforge`
-  and runs every job body as a composite action from there (`release-guard`, `pack-gems`,
-  `verify-wheels`, `release-gate`, `publish-*`, `finalize-release`); the inventory records
-  the commit and recovery requires it unchanged. Don't merge Forge changes while a release
+  and runs its composite actions from there (`release-guard`, `pack-gems`, `verify-wheels`,
+  `release-gate`, `publish-nuget`, `publish-rubygems`, `publish-pypi`, `finalize-release`);
+  the five reusable workflows (NuGet, crate and Maven packing; crate and Maven publishing)
+  are called at master and resolved when the run is queued. The inventory records the
+  commit and recovery requires it unchanged. Don't merge Forge changes while a release
   is in flight.
 - `prepare-release.yml`, `stage-native-binaries.yml` and ci.yml's `check-core` are one
   `uses:` each of a Forge reusable workflow; this repo keeps triggers, permissions and gates.
   `.github/hyper.json` is what the Forge knows about this project (crate and project names,
-  the export rule, the ABI probe; every other name is derived in the Forge's
-  `hyper_config.py`). `check-core` runs `rust/check-core.sh` and turns the Forge's own
-  no-panic job, `check_exports.py` and SwiftLint off (see its comment). `.github/scripts/tests`
-  holds the workflow shape contracts and the probe tests; the generic release-guard tests
-  live in the Forge.
+  the export rule; the ABI probe is `.github/scripts/abi_probe.c`, the Forge's default path,
+  and every other name is derived in the Forge's `hyper_config.py`). `check-core` runs
+  `rust/check-core.sh` and turns the Forge's own no-panic job and `check_exports.py` off
+  (see its comment). `.github/scripts/tests` holds the workflow shape contracts and the
+  probe tests; the generic release-guard tests live in the Forge.
 - The release is two acts at one tag: the tag push packs, attests (build provenance and the
   release attestation over every shipped file) and preserves without uploading; `gh workflow
   run release.yml --ref vX.Y.Z -f prepared_run_id=<tag run>` publishes from the preserved
@@ -111,8 +113,21 @@ HyperCast and move together.
 ## Local loop
 
 `cd rust && ./check-core.sh && cargo test`. Bindings need `cargo cdylib` first; each binding
-README has its own steps. Large benchmark inputs come from the ignored
-`corpus/generate/out/`.
+README has its own steps. Go, Swift and PHP otherwise run against the committed binaries,
+which are refreshed only at release and so lag every core change: build the checkout's own
+with `.github/scripts/local-core.sh`, then `go test -tags hypertabular_local ./...`,
+`HYPERTABULAR_LOCAL_CORE=1 swift test`, and PHP with `HYPERTABULAR_NATIVE_LIBRARY`. CI
+builds each leg's core before its suites, so it never sees the committed ones. Outside CI
+the three suites refuse to run against a committed core older than `rust/` (the core
+freshness check), and `local-core.sh` finds `../HyperForge` on its own. Go caches a pass
+from before a core change; `-count=1` runs the check again. Large benchmark inputs come from the ignored `corpus/generate/out/`.
+
+The suite also runs under wasmtime: `cargo test --target wasm32-wasip1 --target-dir <target>`
+with `CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run --dir=<repo>::<repo>
+--dir=<target>::<target>"`, both mounts because the corpus is read by absolute path and
+`CARGO_TARGET_TMPDIR` is in the target dir. libtest skips the `should_panic` tests there.
+CI's `test-wasi` job (the Forge's `hyper-check-core.yml`, wasmtime pinned there) runs the
+same on every pull request.
 
 Private core tests stay in `rust/tests/`, included by `lib.rs` through `tests/internal.rs`.
 Cargo lists integration targets explicitly; register a new integration test in
@@ -162,21 +177,17 @@ alone.
 
 ## Open follow-ups (as of 2026-10-25)
 
+- Both `Package.swift` files pin HyperCast to `525ef57` (its Swift doors stopped throwing)
+  until HyperCast 1.0.0 is tagged. Move them to `from: "1.0.0"`, with
+  `swift/Benchmarks/Package.resolved`, before preparing HyperTabular's release: the Forge's
+  release guard refuses a tag whose manifests pin a revision or branch.
 - Benchmark tables were measured on the WSL2 i9-11900H box. When the dev machine changes,
   re-measure every harness there before relabelling a table; never mix machines, and say
   which tables predate a core change. A benchmarking workflow is an idea, not started.
 - 1.0.0 is the first release on the two-step flow. What only it can prove: the composite
   actions in a real job, PyPI Trusted Publishing, nuget.org's finalized bytes, the Maven
   confirmation wait, the finalizer. Afterwards the Forge drops its schema-1 inventory paths.
-- `swift/` has no `.swiftlint.yml`, so the Forge's SwiftLint job (`missing_docs`, as HyperCast
-  and HyperUuid run it) is off in `ci.yml`; add the config and turn `lint_swift` on.
 - Java does not reach Android: the binding uses FFM, which ART lacks, so it would need a
   JNI layer. Python, Ruby and PHP don't reach Android either.
 - Workbook performance candidates after the 2026-10-05 tokenizer pass, and Numbers' open
   (most of a `.numbers` read, sampled 2026-10-24): `docs/workbook.md`, "Parked".
-- Swift's `readAsync` over an `AsyncSequence` (`refillAsync`) still fills its whole room
-  before parsing: the stall the Rust reader lost in #20, so a live `URLSession.bytes`
-  stream holds back a complete header or batch until the buffer fills or the stream ends.
-  C#, Java, Go, Ruby, PHP and Python's file objects already parse after one read.
-- `Batch::values::<T>` lends decimal, UUID and temporal columns whole in Rust, as Go's typed
-  slices do; C#'s `Values<T>` and Java's `values` stop at the primitives.

@@ -71,7 +71,7 @@ public readonly record struct Column
 		Format = format;
 	}
 
-	/// <summary>Zero-based ordinal of the source column. Past a record's last cell reads as empty.</summary>
+	/// <summary>Zero-based ordinal of the source column. Past a record's last cell reads as empty; 2²⁰ or more is refused when the plan is bound.</summary>
 	public int Ordinal { get; }
 
 	/// <summary>The door.</summary>

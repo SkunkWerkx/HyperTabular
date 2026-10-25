@@ -109,8 +109,8 @@ several ways, and the two encrypted files refused — 1,018 rows and 49,394 cell
 crate had before its core could read a workbook — a second implementation, which owed the
 core nothing — and the core was required to agree with it, cell for cell, before the file
 was written. That reader has been deleted. Nothing independent of the core reads a
-workbook in this repository any more, so the file is that reader's frozen word:
-`cargo run --example corpus` now writes it from the core, through the Rust binding, and
+workbook in this repository, so the file is that reader's frozen word:
+`cargo run --example corpus` writes it from the core, through the Rust binding, and
 `rust/tests/corpus_workbook.rs` fails if what it writes is not what is committed. A diff
 in `workbook.json` is a change in what the core reads, and has to be explained, not
 regenerated away. The one thing in it that was never the oracle's is a failure's fields,
@@ -288,8 +288,8 @@ forcing zip64 — a container test, and the parts inside are Excel's own.
 - a duration: type `25:30:00`, format `[HH]:MM:SS` (`office:time-value="PT25H30M00S"`);
 - hide a sheet: right-click tab → Hide Sheet;
 - File → Save As → *ODF Spreadsheet (.ods)*, and choose **Keep current format** if asked.
-Before it, every ODS code path ran on hand-written XML; this was the first file LibreOffice
-wrote. Its million-row padding rows come free.
+It holds every ODS code path to a file LibreOffice wrote; the fixtures' ODS is
+hand-written XML. Its million-row padding rows come free.
 
 **9. `libreoffice-data.xlsx`** — the same workbook, File → Save As → *Excel 2007–365
 (.xlsx)*. A second real `styles.xml` and a second set of relationship targets.
@@ -313,7 +313,7 @@ writers root parts inconsistently" line is checked against.
 
 **13. `numbers-data.numbers`** — the dataset, typed into Numbers on a Mac and saved in
 its own format (every other reader of `.numbers` is a reverse engineering of this file
-format; this is the first file the core's IWA reader was held to). Numbers specifics:
+format; this is the file the core's IWA reader is held to). Numbers specifics:
 
 - A new blank spreadsheet with one table per sheet, each table's name hidden (Format →
   Table → Table Name): the core lists a sheet by its name, and the export writes a shown

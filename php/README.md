@@ -83,7 +83,9 @@ thousand rows, not once per cell.
   an `OutOfBoundsException` naming the column when it is missing) and `find($name)` (`null`
   instead). `bind($plan)` declares the plan once, before the first read — a second `bind`
   is a `LogicException`, and so is `read()` until a plan is bound; `isBound()` says which.
-  `columnCount()` is a record's width.
+  `columnCount()` is a record's width. Once a delimited header has been read, a plan column
+  that reads at or past its width is refused with an `InvalidArgumentException` naming the
+  column: no record has a cell there.
 - **One batch class.** `read()` returns a `Batch` — `rows()`, `columns()`, `line($row)`,
   `values($column)`, `faults($column)`, `verdicts($column)`, `get($column, $row)` and
   `raw($column, $row)` — or `null` once there are no more rows, for delimited text and a
@@ -96,8 +98,9 @@ thousand rows, not once per cell.
   `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
   the plan states each column's door and, for numbers, its `HyperCast\NumFormat`.
 - **No async API.** PHP has no event loop of its own to hand a read to; a stream is read as a
-  blocking stream, and a Fiber-based runtime (Amp, ReactPHP) drives it as it drives any other.
-  A workbook is wholly in memory once it is open.
+  blocking stream, so under an event loop (Amp, ReactPHP) a read holds the loop while it
+  waits, as any blocking `fread` does, and a non-blocking stream with nothing to give yet is
+  refused with a `RuntimeException`. A workbook is wholly in memory once it is open.
 - **HyperCast is the judge.** `Success`, `Fault`, `CastFailure`, `NumFormat`, `Decimal`,
   `Duration`, `UnixPrecision`, `DateOrder` and `ExcelEpoch` are the `skunkwerkx/hypercast`
   package's own. A text cell means exactly what `HyperCast\Cast` would say of the same text;

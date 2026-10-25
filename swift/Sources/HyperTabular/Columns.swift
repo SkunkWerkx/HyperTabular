@@ -8,6 +8,8 @@ final class Columns {
     let batchRows: Int
     /// The widest ordinal the plan reads, plus one.
     let width: Int
+    /// The place in the plan of the column that reaches furthest (the first, if several do).
+    let widest: Int
 
     // Everything the core is handed, allocated once and never moved: it is given addresses.
     let specs: UnsafeMutablePointer<hypertabular_column_spec>
@@ -15,17 +17,29 @@ final class Columns {
     let valueBase: [UnsafeMutableRawPointer]
     let verdictBase: [UnsafeMutablePointer<CellVerdict>]
 
-    init(plan: [Column], batchRows: Int) {
+    /// The widest ordinal a plan may name: 2²⁰ − 1. No workbook format has more columns
+    /// (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the cap one row of cell table
+    /// is at most 8 MiB, so a headerless plan cannot ask for ~16 GiB of it.
+    static let maxOrdinal = (1 << 20) - 1
+
+    /// - Throws: ``PlanError/outOfReach(column:)`` naming the first column past
+    ///   ``maxOrdinal``.
+    init(plan: [Column], batchRows: Int) throws {
         precondition(batchRows > 0, "batchRows must be positive; got \(batchRows)")
+        var furthest = -1
+        var reaching = 0
+        for (index, column) in plan.enumerated() {
+            guard column.ordinal <= Self.maxOrdinal else { throw PlanError.outOfReach(column: index) }
+            if column.ordinal > furthest { (furthest, reaching) = (column.ordinal, index) }
+        }
+        widest = reaching
         self.plan = plan
         self.batchRows = batchRows
         specs = .allocate(capacity: plan.count)
         buffers = .allocate(capacity: plan.count)
         var values = [UnsafeMutableRawPointer]()
         var verdicts = [UnsafeMutablePointer<CellVerdict>]()
-        var widest = -1
         for (index, column) in plan.enumerated() {
-            widest = max(widest, column.ordinal)
             // 16-aligned, the widest any value is, so every door's values sit as Swift lays
             // that type out and can be handed back as a buffer of it.
             let value = UnsafeMutableRawPointer.allocate(
@@ -42,7 +56,7 @@ final class Columns {
         }
         valueBase = values
         verdictBase = verdicts
-        width = widest + 1
+        width = furthest + 1
     }
 
     deinit {
@@ -59,7 +73,7 @@ extension UnsafeMutableBufferPointer {
     /// is released.
     func grown(toHold needed: UInt64) -> UnsafeMutableBufferPointer {
         let larger = UnsafeMutableBufferPointer.allocate(
-            capacity: max(Int(clamping: min(needed, UInt64(Int32.max))), count + 1))
+            capacity: Swift.max(Int(clamping: Swift.min(needed, UInt64(Int32.max))), count + 1))
         if let base = baseAddress, let into = larger.baseAddress {
             UnsafeMutableRawPointer(into).copyMemory(from: base, byteCount: count * MemoryLayout<Element>.stride)
         }

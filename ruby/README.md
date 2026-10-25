@@ -58,7 +58,11 @@ before the header is read.
   `header.find_ordinal(name)` answers `nil` instead.
 - **Binding** happens once, before the first read: `bind` again raises `RuntimeError`, and so
   does a `read` before `bind` — which `bind` then cures. A plan that is not Columns is an
-  `ArgumentError` and leaves the reader unbound. `bound?` says which it is. A `nil` plan
+  `ArgumentError` and leaves the reader unbound; so is, once a delimited header has fixed
+  the width every record has, a column at or past it, named in the message (a plan handed
+  to the constructor is held to the header as soon as it is read). Without a header such a
+  column reads as empty, and a plan reaching past 256 source columns reads shorter batches,
+  as many rows as about 8 MiB of cell table holds. `bound?` says which it is. A `nil` plan
   means "bind later"; `[]` is an empty plan, bound at once.
   `reader.column_count` is the header's count, or the first record's once it has been read.
 - **Rows.** `batch.each`, `reader.each` and `sheet.each` yield a `HyperTabular::Row` —
@@ -140,7 +144,7 @@ Selection happens once, at `require`, in that order. Both backends read a batch 
 call and hand back the same bytes; everything above that crossing — the readers, the
 workbook, `Batch` and every value and verdict it builds — is the same Ruby on either, and
 `spec/native_backend_spec.rb` holds the two to the same answer over every cell of both corpora.
-So the extension is not where a read gets faster (the crossing was already once per batch);
+So the extension is not where a read gets faster (either backend crosses once per batch);
 what it buys is a platform gem with no shared library for Fiddle to find, and Ruby in the
 browser, where there is no Fiddle at all.
 

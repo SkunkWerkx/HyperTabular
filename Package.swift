@@ -16,7 +16,7 @@ import PackageDescription
 // Xcode 12 and does not read a static-library artifact bundle. It carries the same no_std
 // archives, one slice each (arm64 only), with the header and module map under
 // Headers/HyperTabularCore/, so `import HyperTabularCore` finds the same module either way.
-// HyperCast's package does the same for its own core, as of 0.7.0.
+// HyperCast's package does the same for its own core.
 //
 // Only a Mac can build for those platforms, so only a Mac's manifest declares the target; on
 // Linux and Windows this file is what it was. And only when the XCFramework is there: it is
@@ -53,7 +53,10 @@ let package = Package(
         .library(name: "HyperTabular", targets: ["HyperTabular"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.9.0")
+        // Pinned to the HyperCast commit whose Swift doors stopped throwing, until HyperCast
+        // 1.0.0 is tagged; then `from: "1.0.0"`. A tagged package cannot depend on a revision
+        // (SwiftPM refuses it to every consumer), so the release guard refuses a tag with one.
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", revision: "525ef572843e7be955a94fd4b705382948adb2af")
     ],
     targets: [
         .binaryTarget(
