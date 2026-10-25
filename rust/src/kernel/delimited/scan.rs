@@ -82,19 +82,9 @@ struct Args<'a, S> {
 }
 
 impl Scanner {
-    /// A scanner with the best engine this CPU offers.
-    pub fn new(sep: u8, quoting: bool) -> Scanner {
-        Scanner::with_engine(sep, quoting, engine::detect())
-    }
-
     /// A scanner on a specific engine (the conformance suite runs every available one).
     pub fn with_engine(sep: u8, quoting: bool, kind: Kind) -> Scanner {
         Scanner { sep, quoting, kind }
-    }
-
-    /// The engine in use.
-    pub fn engine(&self) -> Kind {
-        self.kind
     }
 
     /// Scans `data[pos..]`, which must start at a row boundary, reporting every complete

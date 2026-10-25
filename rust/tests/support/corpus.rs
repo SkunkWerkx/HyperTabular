@@ -34,6 +34,7 @@ pub fn door_json(door: Door) -> Value {
         Door::Time => json!({"door": "time"}),
         Door::Duration => json!({"door": "duration"}),
         Door::Text => json!({"door": "text"}),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 
@@ -244,6 +245,7 @@ pub fn cell_json(batch: &hypertabular::Batch<'_>, column: usize, row: usize) -> 
         Door::Time => json!({"expect": "ok", "nanos": batch.get::<u64>(column, row).expect(read)}),
         Door::Duration => duration_json(batch.get::<Duration>(column, row).expect(read)),
         Door::Text => text_json(batch.text(column, row).expect(read)),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 

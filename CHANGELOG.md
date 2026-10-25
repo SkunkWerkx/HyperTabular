@@ -16,6 +16,10 @@ minor release can still break both, as 0.9.0 did.
 
 ### Added
 
+- **Rust — `Batch::values<T>`** lends a typed slice for every supported value type,
+  including decimals, UUIDs and temporal values, with the same verdicts and lifetime as
+  the existing primitive column accessors.
+
 - **Apple Numbers.** Every binding reads a `.numbers` document — Apple's IWA packaging:
   Snappy-compressed chunks of Protocol Buffers objects — the way it reads XLSX and ODS,
   told by what the container holds, never by its name. Each table is a sheet, listed
@@ -42,6 +46,16 @@ minor release can still break both, as 0.9.0 did.
   from 198 to 246 cases, every one of them new. *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
 
 ### Changed
+
+- **Rust — the supported kernel API is explicit.** ABI types and exports, doors,
+  delimited state/header/fill operations, and workbook state/buffer/book/row operations
+  remain public; parser, compression and SIMD implementation modules are private.
+  `Column`, `Dialect` and `SheetOptions` are non-exhaustive and constructed with their
+  constructors and builders; `Error` and `Door` are non-exhaustive too.
+- **Rust — live delimited streams deliver complete headers and batches promptly.**
+  Synchronous and asynchronous refills return to parsing after a successful read, rather
+  than waiting for the input buffer to fill or the source to close. Interrupted reads,
+  partial records, cancellation safety and terminal errors retain their contracts.
 
 - **`Format` and `FailureKind` are `#[non_exhaustive]`.** A format the core learns to read, or
   a failure code it gains, is a new variant without a new major version once 1.0.0 is out; a

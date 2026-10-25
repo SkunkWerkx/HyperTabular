@@ -343,6 +343,7 @@ impl<'c> Harness<'c> {
         }
     }
 
+    #[allow(unreachable_patterns)] // Also compiled inside the crate for private core tests.
     fn value(&self, door: Door, values: &[u8], row: usize) -> String {
         fn at<T: Copy + std::fmt::Debug>(values: &[u8], row: usize) -> String {
             let size = std::mem::size_of::<T>();
@@ -378,10 +379,12 @@ impl<'c> Harness<'c> {
                 let span = unsafe { bytes.as_ptr().cast::<Span>().read_unaligned() };
                 format!("{:?}", String::from_utf8_lossy(self.text(span)))
             }
+            _ => unreachable!("the fixture declares a known door"),
         }
     }
 }
 
+#[allow(unreachable_patterns)] // Also compiled inside the crate for private core tests.
 pub fn size_of_door(door: Door) -> usize {
     use std::mem::size_of;
     match door {
@@ -396,6 +399,7 @@ pub fn size_of_door(door: Door) -> usize {
         Door::Duration => size_of::<Duration>(),
         Door::Decimal => size_of::<Decimal>(),
         Door::Text => size_of::<Span>(),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 

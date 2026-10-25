@@ -187,6 +187,7 @@ fn verdict(door: Door, format: &NumFormat, text: &[u8]) -> Value {
         // The bytes themselves, untrimmed; no bytes at all is the one way to fail.
         Door::Text if text.is_empty() => json!({"expect": "empty"}),
         Door::Text => text_json(text),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 

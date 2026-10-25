@@ -60,6 +60,7 @@ fn size_of_door(door: Door) -> usize {
         Door::Duration => size_of::<Duration>(),
         Door::Decimal => size_of::<Decimal>(),
         Door::Text => size_of::<Span>(),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 
@@ -93,6 +94,7 @@ fn show(door: Door, values: &[u8], row: usize) -> String {
         Door::Duration => at::<Duration>(values, row),
         Door::Decimal => at::<Decimal>(values, row),
         Door::Text => unreachable!("text is resolved through its span"),
+        _ => unreachable!("the fixture declares a known door"),
     }
 }
 

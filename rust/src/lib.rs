@@ -29,8 +29,13 @@
 //! }
 //!
 //! let book = Workbook::open("data.xlsx")?;
-//! let mut sheet = book.sheet("Data", SheetOptions::default(), &plan)?;
-//! while let Some(batch) = sheet.read()? { /* the same batch */ }
+//! let mut sheet = book.sheet_unbound("Data", SheetOptions::default())?;
+//! let header = sheet.header().unwrap();
+//! sheet.bind(&[Column::decimal(header.require("amount")?)])?;
+//! while let Some(batch) = sheet.read()? {
+//!     let amounts = batch.values::<hypertabular::Decimal>(0);
+//!     let verdicts = batch.verdicts(0);
+//! }
 //! # Ok::<(), hypertabular::Error>(())
 //! ```
 //!
@@ -147,3 +152,10 @@ pub use error::{Error, Failure, FailureKind};
 pub use header::Header;
 #[cfg(feature = "std")]
 pub use workbook::{Format, Sheet, SheetInfo, SheetOptions, SheetRef, Workbook};
+
+// Internal tests can exercise parser machinery without publishing it to consumers.
+#[cfg(all(test, feature = "std"))]
+extern crate self as hypertabular;
+#[cfg(all(test, feature = "std"))]
+#[path = "../tests/internal.rs"]
+mod tests;

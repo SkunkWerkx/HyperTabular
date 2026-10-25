@@ -40,8 +40,6 @@ pub fn varint(buf: &[u8], pos: usize) -> Option<(u64, usize)> {
 pub struct Field<'a> {
     /// The field number.
     pub number: u32,
-    /// Its wire type (`VARINT`, `FIXED64`, `BYTES`, `FIXED32`).
-    pub wire: u8,
     /// A varint's value, or a fixed field's bits (the low 32 for a 32-bit one).
     pub bits: u64,
     /// A length-delimited field's bytes; empty for the other wire types.
@@ -54,24 +52,9 @@ impl<'a> Field<'a> {
         self.bits
     }
 
-    /// A varint or fixed field truncated to 32 bits.
-    pub const fn u32(&self) -> u32 {
-        self.bits as u32
-    }
-
-    /// A 64-bit field as the double it is.
-    pub fn f64(&self) -> f64 {
-        f64::from_bits(self.bits)
-    }
-
     /// A `TSP.Reference` message's identifier: its field 1.
     pub fn reference(&self) -> Option<u64> {
         first(self.bytes, 1).map(|field| field.u64())
-    }
-
-    /// A varint that is a boolean.
-    pub const fn boolean(&self) -> bool {
-        self.bits != 0
     }
 }
 
@@ -90,7 +73,6 @@ pub fn field(buf: &[u8], pos: usize) -> Option<(Field<'_>, usize)> {
             Some((
                 Field {
                     number,
-                    wire,
                     bits,
                     bytes: &[],
                 },
@@ -102,7 +84,6 @@ pub fn field(buf: &[u8], pos: usize) -> Option<(Field<'_>, usize)> {
             Some((
                 Field {
                     number,
-                    wire,
                     bits: u64::from_le_bytes(*bytes),
                     bytes: &[],
                 },
@@ -114,7 +95,6 @@ pub fn field(buf: &[u8], pos: usize) -> Option<(Field<'_>, usize)> {
             Some((
                 Field {
                     number,
-                    wire,
                     bits: u64::from(u32::from_le_bytes(*bytes)),
                     bytes: &[],
                 },
@@ -129,7 +109,6 @@ pub fn field(buf: &[u8], pos: usize) -> Option<(Field<'_>, usize)> {
             Some((
                 Field {
                     number,
-                    wire,
                     bits: 0,
                     bytes,
                 },

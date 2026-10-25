@@ -16,10 +16,27 @@
 //! than the two in that macro — so what the proofs say of the shipped library they say of
 //! the core wherever it is linked. Collections, files, and anything else a host language
 //! does better itself belong to the layer above.
+//!
+//! The supported Rust interface is [`abi`], [`door`], [`exports`], [`delimited::fill`]
+//! and [`workbook`]'s state, buffers and book/row operations. Parser implementation
+//! modules are private:
+//!
+//! ```compile_fail,E0603
+//! use hypertabular::kernel::inflate::Inflate;
+//! ```
+//!
+//! ```compile_fail,E0603
+//! use hypertabular::kernel::delimited::{engine, scan, unescape};
+//! ```
+//!
+//! ```compile_fail,E0603
+//! use hypertabular::kernel::workbook::{cell, iwa, number, numbers, part, proto,
+//!     snappy, sort, styles, xml, zip};
+//! ```
 
 pub mod abi;
 pub mod delimited;
 pub mod door;
 pub mod exports;
-pub mod inflate;
+pub(crate) mod inflate;
 pub mod workbook;

@@ -11,7 +11,7 @@
 //! no style lookup — and the repeat discipline is calamine's: repeated *empty* cells and
 //! rows are never materialised beyond what the cursor is asked to deliver.
 //!
-//! **Numbers** is read by [`numbers::read_row`]: a table's tiles in order, each tile's
+//! **Numbers** is read by `numbers::read_row`: a table's tiles in order, each tile's
 //! rows as its storage holds them, each cell by its type and flags; a row the tile leaves
 //! out is a gap in the row numbers, as an XLSX row with no `<row>` is.
 //!
@@ -61,7 +61,7 @@ const O_SEEK: u32 = 10;
 const O_ROWS: u32 = 11;
 const O_CELLS: u32 = 12;
 const O_TEXT: u32 = 13;
-// Numbers: tiles, read by [`numbers::read_row`].
+// Numbers: tiles, read by `numbers::read_row`.
 const N_TILES: u32 = 20;
 
 // XLSX cell types (`t`).
@@ -90,7 +90,7 @@ const IN_STRING: u32 = 10;
 /// Everything a sheet read keeps between calls. Plain integers.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Sheet {
+pub(crate) struct Sheet {
     /// Where the row reader is (`X_*`, `O_*`, `N_*`), and how deep in the element it is
     /// reading.
     mode: u32,

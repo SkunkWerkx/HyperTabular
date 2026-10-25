@@ -17,7 +17,7 @@
 //! That is what makes it resumable at any byte of input and any byte of output without a
 //! state for every place it might have stopped.
 //!
-//! The tables are two-level: a first lookup on the next [`LITLEN_ROOT`] bits of input
+//! The tables are two-level: a first lookup on the next `LITLEN_ROOT` bits of input
 //! settles any code that short, and a longer one indexes a second table by the bits that
 //! follow. Their sizes are bounded for any complete code (each second-level table is
 //! covered by at least two codes), which is what lets them be fixed arrays.

@@ -27,18 +27,18 @@
 //! [`Buffers`]: crate::kernel::abi::Buffers
 
 pub mod book;
-pub mod cell;
-pub mod iwa;
-pub mod number;
-pub mod numbers;
-pub mod part;
-pub mod proto;
+pub(crate) mod cell;
+pub(crate) mod iwa;
+pub(crate) mod number;
+pub(crate) mod numbers;
+pub(crate) mod part;
+pub(crate) mod proto;
 pub mod rows;
-pub mod snappy;
-pub mod sort;
-pub mod styles;
-pub mod xml;
-pub mod zip;
+pub(crate) mod snappy;
+pub(crate) mod sort;
+pub(crate) mod styles;
+pub(crate) mod xml;
+pub(crate) mod zip;
 
 use crate::kernel::abi::{
     ERR_ARENA, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE, ERR_WINDOW, Failure, Slot, Span,

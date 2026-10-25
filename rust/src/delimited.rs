@@ -24,7 +24,17 @@ use std::path::Path;
 /// The caller-declared dialect. The same philosophy as HyperCast's `NumFormat`: no
 /// sniffing, no guessing — the separator is stated, quoting is stated, the header is
 /// stated.
+///
+/// Start with [`Dialect::new`] or a named constant and change settings with the
+/// `with_*` methods. Additional settings may be added in a minor release.
+///
+/// ```compile_fail,E0639
+/// use hypertabular::Dialect;
+/// let dialect = Dialect { separator: b',', quoting: true,
+///     has_header: true, skip_blank_lines: true };
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Dialect {
     /// The cell separator: a tab, or printable ASCII other than `"`.
     pub separator: u8,
@@ -308,22 +318,24 @@ impl Source<'_> {
         }
         let filled = buf.len();
         buf.resize(buf.capacity(), 0);
-        let mut total = 0;
-        while filled + total < buf.len() {
-            match reader.read(&mut buf[filled + total..]) {
+        loop {
+            match reader.read(&mut buf[filled..]) {
                 Ok(0) => {
                     *eof = true;
+                    buf.truncate(filled);
                     break;
                 }
-                Ok(n) => total += n,
+                Ok(n) => {
+                    buf.truncate(filled + n);
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    buf.truncate(filled + total);
+                    buf.truncate(filled);
                     return Err(error.into());
                 }
             }
         }
-        buf.truncate(filled + total);
         Ok(())
     }
 
@@ -349,14 +361,17 @@ impl Source<'_> {
             }
             buf.resize((buf.len() * 2).max(1), 0);
         }
-        while *end < buf.len() {
+        loop {
             let read = std::future::poll_fn(|cx| reader.as_mut().poll_read(cx, &mut buf[*end..]));
             match read.await {
                 Ok(0) => {
                     *eof = true;
                     break;
                 }
-                Ok(n) => *end += n,
+                Ok(n) => {
+                    *end += n;
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -751,7 +766,7 @@ impl<'a> DelimitedReader<'a> {
     /// A structural failure is returned once every intact row before it has been
     /// delivered, and again on every call after. A reader opened without a plan returns
     /// [`Error::Unbound`] until one is bound, and one opened on an asynchronous source is
-    /// read with [`DelimitedReader::read_async`].
+    /// read with `read_async` (available with the `async` feature).
     pub fn read(&mut self) -> Result<Option<Batch<'_>>, Error> {
         if self.source.is_async() {
             return Err(Error::Io(std::sync::Arc::new(std::io::Error::new(
@@ -788,7 +803,7 @@ impl<'a> DelimitedReader<'a> {
     }
 
     /// Reads every row left, batch by batch, handing each to `f` — the row view
-    /// ([`Row`](crate::Row)) of a reader that cannot be an iterator, since each batch is
+    /// ([`Row`]) of a reader that cannot be an iterator, since each batch is
     /// over when the next is read. Stops at the first error, `f`'s or the reader's.
     pub fn for_each_row<E: From<Error>>(
         &mut self,

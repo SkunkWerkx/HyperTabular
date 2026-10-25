@@ -51,7 +51,16 @@ pub struct SheetInfo {
 }
 
 /// How a sheet is read.
+///
+/// Start with [`SheetOptions::new`] or [`SheetOptions::default`] and change settings
+/// with the `with_*` methods. Additional settings may be added in a minor release.
+///
+/// ```compile_fail,E0639
+/// use hypertabular::SheetOptions;
+/// let options = SheetOptions { has_header: true, skip_empty_rows: true, batch_rows: 4096 };
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SheetOptions {
     /// Whether the first row delivered is the header rather than data.
     pub has_header: bool,

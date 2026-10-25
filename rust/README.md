@@ -35,9 +35,15 @@ while let Some(batch) = reader.read()? {
 
 let book = Workbook::open("data.xlsx")?;         // XLSX, ODS or Numbers, told by what is in it
 let mut sheet = book.sheet_unbound("Data", SheetOptions::default())?;
-sheet.bind(&plan)?;                              // or book.sheet("Data", options, &plan)
+let header = sheet.header().unwrap();
+sheet.bind(&[
+    Column::decimal(header.require("amount")?),
+    Column::timestamp(header.require("created_at")?),
+])?;
 while let Some(batch) = sheet.read()? {
-    // the same batch
+    let amounts = batch.values::<hypertabular::Decimal>(0);
+    let created_at = batch.values::<hypertabular::Timestamp>(1);
+    // Check batch.verdicts(column) beside each slice before using its values.
 }
 ```
 
@@ -48,6 +54,25 @@ workbook open from a
 [`futures_io::AsyncRead`](https://docs.rs/futures-io/0.3/futures_io/trait.AsyncRead.html)
 — Tokio's through `tokio_util::compat` — and `read_async` awaits the source between
 batches.
+
+Each stream refill returns to parsing after a successful read. A complete header or
+batch can be delivered while the source remains open, without filling the input buffer.
+A workbook still needs its complete container before opening.
+
+`Batch::values::<T>(column)` lends a whole column for any supported value type, including
+decimals and temporal values; the primitive accessors such as `i64` remain available.
+Slices borrow the reader and cannot survive its next read. A failed cell holds the door's
+zero: read `batch.verdicts(column)` alongside values. Text uses `batch.text` or `text_str`.
+
+The supported allocation-free Rust core surface is `kernel::abi`, `kernel::door`,
+`kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s state, memory,
+format constants and `book`/`rows` operations. Parser and SIMD implementation modules
+are private. The C ABI is unchanged.
+
+Build `Column`, `Dialect`, and `SheetOptions` with their constructors, constants and
+builder methods. These configuration types are non-exhaustive so settings can be added;
+`Door`, `Error`, `Format`, and `FailureKind` likewise require wildcard arms when matched
+outside the crate.
 
 A cell that does not cast is never an error: it is a `Fault` in the batch — `Empty`,
 `Malformed` or `OutOfRange`, with the span of the offending bytes — and `batch.raw` gives

@@ -298,7 +298,26 @@ impl<'r> Batch<'r> {
         unsafe { std::slice::from_raw_parts(store.values.as_ptr().cast::<T>(), self.rows) }
     }
 
-    fn values<T: Value>(&self, column: usize) -> &'r [T] {
+    /// A whole typed column, borrowed from the reader's buffers: one value per row,
+    /// without copying. `T` must be the type the column's door produces (see [`Value`]).
+    ///
+    /// Read [`Batch::verdicts`] beside the values: a row whose verdict is not ok holds
+    /// the door's zero, not a successfully cast value. Text uses [`Batch::text`].
+    /// The slice borrows the reader for the batch's lifetime, so it cannot be retained
+    /// across another read of that reader.
+    ///
+    /// ```compile_fail,E0499
+    /// use hypertabular::{Column, DelimitedReader, Dialect};
+    /// let mut reader = DelimitedReader::from_slice(b"n\n1\n2\n", Dialect::CSV, &[Column::i32(0)]).unwrap();
+    /// let batch = reader.read().unwrap().unwrap();
+    /// let values = batch.values::<i32>(0);
+    /// reader.read().unwrap();
+    /// println!("{values:?}"); // the slice still borrows the reader
+    /// ```
+    ///
+    /// # Panics
+    /// If `column` is outside the plan or its door does not produce a `T`.
+    pub fn values<T: Value>(&self, column: usize) -> &'r [T] {
         let door = self.store_door(column);
         assert!(
             T::reads(door),

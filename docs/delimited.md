@@ -68,7 +68,9 @@ more behind it.
 - A slice is scanned in place; nothing is copied but unescaped cells.
 - A file or a stream is read through one buffer (256 KiB to begin with,
   `DelimitedOptions::buffer_bytes`). When the core consumes nothing, the unconsumed tail
-  is moved to the front, more is read behind it, and the call is made again. Because a
+  is moved to the front, more is read behind it, and the call is made again. Each successful
+  read returns to parsing, so a complete header or batch need not wait for the buffer to
+  fill or the source to close. Because a
   row start is always a clean scanner state (quote parity zero, no pending `\r`), nothing
   is rebased — the cost is re-scanning at most one row per refill.
 - A row that does not complete within the buffer doubles it, up to

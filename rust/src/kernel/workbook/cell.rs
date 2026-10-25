@@ -667,32 +667,5 @@ pub unsafe fn cast(
     Ok(raw)
 }
 
-/// The door's zero and the verdict of no cell at all: what every column of an empty row
-/// holds.
-///
-/// # Safety
-/// As [`cast`].
-pub unsafe fn cast_empty(door: Door, buffer: &ColumnBuffer, row: usize) {
-    let mut used = 0usize;
-    let mut stores = Stores {
-        arena: &mut [],
-        used: &mut used,
-        strings: &[],
-    };
-    let spec = ColumnSpec::new(0, door.code(), 0);
-    // SAFETY: the caller's contract; an empty cell renders nothing, so the arena is not asked for.
-    let _ = unsafe {
-        cast(
-            &Slot::EMPTY,
-            door,
-            &spec,
-            ExcelEpoch::Y1900,
-            buffer,
-            row,
-            &mut stores,
-        )
-    };
-}
-
 /// Re-exported for the row readers, which parse numbers and dates out of attribute text.
 pub use number::parse_f64;

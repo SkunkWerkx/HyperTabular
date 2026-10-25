@@ -9,7 +9,16 @@ use crate::kernel::door::Door;
 use hypercast::{DateOrder, ExcelEpoch, NumFormat, RawNumFormat, UnixPrecision};
 
 /// One output column.
+///
+/// Build columns with [`Column::new`] or a typed constructor, then set their numeric
+/// notation with [`Column::format`]. Additional settings may be added in a minor release.
+///
+/// ```compile_fail,E0639
+/// use hypertabular::{Column, Door, NumFormat};
+/// let column = Column { ordinal: 0, door: Door::I32, format: NumFormat::INVARIANT };
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Column {
     /// The zero-based column of the source this reads.
     pub ordinal: usize,

@@ -4,7 +4,11 @@
 use hypercast::{DateOrder, ExcelEpoch, UnixPrecision};
 
 /// One HyperCast door, plus [`Door::Text`] for the bytes themselves.
+///
+/// New doors may be added in a minor release. Matches outside this crate need a
+/// wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Door {
     Bool,
     I8,
@@ -39,7 +43,7 @@ pub enum Door {
 impl Door {
     /// The ABI discriminant. `0` is never a door; a door that declares something — the
     /// Unix precision, a date order, an Excel date system — carries it beside the code
-    /// (see [`crate::abi::ColumnSpec`]), numbered as HyperCast's own exports number it.
+    /// (see [`crate::kernel::abi::ColumnSpec`]), numbered as HyperCast's own exports number it.
     pub const fn code(self) -> u32 {
         match self {
             Door::Bool => 1,
@@ -111,7 +115,7 @@ impl Door {
         })
     }
 
-    /// True for the doors that read a [`NumFormat`] (integers, reals and decimals).
+    /// True for the doors that read a [`NumFormat`](hypercast::NumFormat) (integers, reals and decimals).
     pub const fn is_numeric(self) -> bool {
         matches!(
             self,

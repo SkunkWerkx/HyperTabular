@@ -132,7 +132,6 @@ fi
 echo "ok: rejected, by name"
 
 step "the core's own tests"
-cargo test --quiet --test kernel_delimited --test kernel_allocation_free --test kernel_inflate \
-  --test kernel_workbook --test kernel_workbook_allocation_free --test kernel_workbook_rules
+cargo test --quiet --lib --test kernel_allocation_free --test kernel_workbook_allocation_free
 
 printf '\ncheck-core: all of it holds.\n'

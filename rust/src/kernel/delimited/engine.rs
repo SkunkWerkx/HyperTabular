@@ -6,11 +6,11 @@
 //!
 //! | Engine | Classify | Prefix XOR | Where |
 //! | --- | --- | --- | --- |
-//! | [`NeonPmull`] | `vceqq_u8` + the `vpaddq` bit gather | `vmull_p64` | aarch64 with `aes` |
-//! | [`Neon`] | same | shift cascade | any aarch64 |
-//! | [`Avx2Clmul`] | `_mm256_cmpeq_epi8` + `movemask` ×2 | `_mm_clmulepi64_si128` | x86-64 with `avx2` + `pclmulqdq` |
-//! | [`Sse2Clmul`] | `_mm_cmpeq_epi8` + `movemask` ×4 | `_mm_clmulepi64_si128` | x86-64 with `pclmulqdq` |
-//! | [`Sse2`] | same | shift cascade | any x86-64 |
+//! | `NeonPmull` | `vceqq_u8` + the `vpaddq` bit gather | `vmull_p64` | aarch64 with `aes` |
+//! | `Neon` | same | shift cascade | any aarch64 |
+//! | `Avx2Clmul` | `_mm256_cmpeq_epi8` + `movemask` ×2 | `_mm_clmulepi64_si128` | x86-64 with `avx2` + `pclmulqdq` |
+//! | `Sse2Clmul` | `_mm_cmpeq_epi8` + `movemask` ×4 | `_mm_clmulepi64_si128` | x86-64 with `pclmulqdq` |
+//! | `Sse2` | same | shift cascade | any x86-64 |
 //! | [`Swar`] | 8 bytes at a time in a `u64` | shift cascade | everywhere |
 //!
 //! [`detect`] picks the best available at run time, from `CPUID` itself; the scanner is monomorphised per
@@ -43,6 +43,8 @@ pub trait Engine {
 }
 
 /// Which engine [`detect`] chose.
+// Codes are shared across targets; some variants cannot be constructed on this CPU.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Swar,
@@ -55,6 +57,7 @@ pub enum Kind {
 
 impl Kind {
     /// The engine's name, for benchmark labels.
+    #[allow(dead_code)] // Used by the benchmark target's private copy of this selector.
     pub const fn name(self) -> &'static str {
         match self {
             Kind::Swar => "swar",
@@ -282,7 +285,7 @@ mod aarch64 {
     /// NEON compares with the `vpaddq` bit gather (simdjson's `to_bitmask`); prefix XOR
     /// by shift cascade.
     pub struct Neon;
-    /// [`Neon`] classification with `vmull_p64` for the prefix XOR.
+    /// `Neon` classification with `vmull_p64` for the prefix XOR.
     pub struct NeonPmull;
 
     const BITS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
@@ -363,7 +366,7 @@ mod x86_64 {
 
     /// Four 16-byte compares per class; prefix XOR by shift cascade.
     pub struct Sse2;
-    /// [`Sse2`] classification with `pclmulqdq` for the prefix XOR.
+    /// `Sse2` classification with `pclmulqdq` for the prefix XOR.
     pub struct Sse2Clmul;
     /// Two 32-byte compares per class with `pclmulqdq` for the prefix XOR.
     pub struct Avx2Clmul;

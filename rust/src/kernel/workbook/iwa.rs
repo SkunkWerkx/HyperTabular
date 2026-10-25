@@ -72,12 +72,9 @@ pub struct Cache {
 /// One object's first message, with what its header said.
 #[derive(Clone, Copy, Debug)]
 pub struct Object<'a> {
-    pub identifier: u64,
     /// The message's type (`TSP.MessageInfo.type`), or zero for an object with none.
     pub kind: u32,
     pub payload: &'a [u8],
-    /// The stream offset of the object after this one.
-    pub end: u64,
 }
 
 /// What an object's header says: its identifier, its first message's type and length, and
@@ -476,10 +473,8 @@ impl<'a> Package<'a> {
             .get(from..from + header.first as usize)
             .ok_or(broken(BROKEN_MESSAGE, offset))?;
         Ok(Object {
-            identifier: header.identifier,
             kind: header.kind,
             payload: bytes,
-            end,
         })
     }
 
