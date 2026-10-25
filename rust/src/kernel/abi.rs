@@ -335,8 +335,10 @@ pub struct Opened {
     /// The workbook's date system: HyperCast's `ExcelEpoch` code (`1` 1900, `2` 1904).
     pub epoch: u32,
     /// An upper bound on the bytes the shared strings take: the size their part inflates
-    /// to (Numbers: the size the parts that hold its tables' strings decode to). Zero if the
-    /// workbook has none.
+    /// to (Numbers: the size the parts that hold its tables' strings decode to). The
+    /// directory's figure, held to what the part's compressed bytes can inflate to (1032
+    /// to one), so a buffer sized by it is never larger than the part could fill. Zero if
+    /// the workbook has none.
     pub strings_bytes: u64,
     /// How many shared strings the part says it has. A hint: the file's word, unchecked;
     /// Numbers says nothing, and it is zero.

@@ -17,7 +17,8 @@ mod support;
 use hypertabular::kernel::abi::{ColumnSpec, Failure};
 use hypertabular::kernel::workbook::iwa::{BROKEN_CHUNK, MISSING_OBJECT, STORAGE_VERSION};
 use hypertabular::kernel::workbook::number::{Text, parse_f64};
-use hypertabular::kernel::workbook::part::WINDOW_MIN;
+use hypertabular::kernel::workbook::part::{DEFLATE_RATIO, WINDOW_MIN};
+use hypertabular::kernel::workbook::xml::UNTERMINATED_ELEMENT;
 use hypertabular::workbook::SheetOptions;
 use packages::{
     NCell, NSheet, NTable, NumbersShape, Rng, build, numbers, numbers_generated, ods,
@@ -634,8 +635,8 @@ fn broken_containers_come_back_as_codes() {
     }
 }
 
-/// Finds the central-directory record of `name` and overwrites one of its fields.
-fn patch_directory(package: &mut [u8], name: &str, field: usize, value: u32) {
+/// Where the central-directory record of `name` starts.
+fn directory_record(package: &[u8], name: &str) -> usize {
     let needle = name.as_bytes();
     let at = (0..package.len() - needle.len())
         .rev()
@@ -645,7 +646,19 @@ fn patch_directory(package: &mut [u8], name: &str, field: usize, value: u32) {
                 && package[at - 46..at - 42] == [0x50, 0x4B, 0x01, 0x02]
         })
         .expect("the entry is in the directory");
-    package[at - 46 + field..at - 46 + field + 4].copy_from_slice(&value.to_le_bytes());
+    at - 46
+}
+
+/// One four-byte field of the central-directory record of `name`.
+fn directory_field(package: &[u8], name: &str, field: usize) -> u32 {
+    let at = directory_record(package, name) + field;
+    u32::from_le_bytes(package[at..at + 4].try_into().unwrap())
+}
+
+/// Finds the central-directory record of `name` and overwrites one of its fields.
+fn patch_directory(package: &mut [u8], name: &str, field: usize, value: u32) {
+    let at = directory_record(package, name) + field;
+    package[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 #[test]
@@ -722,6 +735,163 @@ fn sizes_that_lie_are_not_believed() {
         (7, 7)
     );
     assert_eq!(harness.last_failure.line, 2);
+}
+
+/// The smallest XLSX package the core opens, around one worksheet and one string table.
+fn xlsx_around(sheet: &[u8], strings: &[u8], deflate: bool) -> Vec<u8> {
+    build(&[
+        ("[Content_Types].xml", b"<Types/>", false),
+        (
+            "xl/workbook.xml",
+            b"<workbook xmlns:r=\"r\"><sheets><sheet name=\"S\" r:id=\"r1\"/></sheets></workbook>",
+            deflate,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            b"<Relationships><Relationship Id=\"r1\" Type=\"x/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>",
+            deflate,
+        ),
+        ("xl/sharedStrings.xml", strings, deflate),
+        ("xl/worksheets/sheet1.xml", sheet, deflate),
+    ])
+}
+
+/// A part that ends between two rows — cut off there, or declared that long by a directory
+/// that lies — is a broken part, not a shorter one: the rows before the cut are delivered,
+/// then the failure, which names the part and the element left open. Every XML part is
+/// held to this; a string table cut between two strings is one.
+#[test]
+fn a_part_cut_between_rows_is_broken() {
+    const ONE: &str = "<worksheet><sheetData><row r=\"1\"><c t=\"s\"><v>0</v></c></row>";
+    const TWO: &str = "<row r=\"2\"><c t=\"s\"><v>1</v></c></row></sheetData></worksheet>";
+    const STRINGS: &str = "<sst><si><t>kept</t></si><si><t>lost</t></si></sst>";
+    let whole = format!("{ONE}{TWO}");
+    for deflate in [false, true] {
+        for sizing in [Sizing::Stingy, Sizing::Roomy] {
+            let read = |package: &[u8]| -> (Vec<String>, Option<Failure>) {
+                let mut harness = Harness::new(package, sizing);
+                harness.open().unwrap();
+                let sheets = harness.sheets().unwrap();
+                harness.load().unwrap();
+                let read = harness.read(
+                    &sheets[0],
+                    SheetOptions::default().with_header(false),
+                    &[ColumnSpec::new(0, 18, 0)],
+                    16,
+                );
+                let cells = read
+                    .rows
+                    .iter()
+                    .map(|(_, cells)| cells[0].clone())
+                    .collect();
+                (cells, read.failed.then_some(harness.last_failure))
+            };
+            let intact = read(&xlsx_around(whole.as_bytes(), STRINGS.as_bytes(), deflate));
+            assert_eq!(
+                intact,
+                (vec!["ok \"kept\"".into(), "ok \"lost\"".into()], None)
+            );
+
+            // The worksheet's XML stops after the first row.
+            let cut = read(&xlsx_around(ONE.as_bytes(), STRINGS.as_bytes(), deflate));
+            let (rows, failure) = &cut;
+            assert_eq!(rows, &["ok \"kept\""], "deflate {deflate}, {sizing:?}");
+            let failure = failure.expect("a part cut inside sheetData is broken");
+            assert_eq!(failure.code, Failure::XML);
+            assert_eq!(failure.found, UNTERMINATED_ELEMENT);
+            assert_eq!(failure.record, u64::from(Failure::PART_SHEET));
+            assert_eq!(failure.byte, ONE.len() as u64);
+
+            // The worksheet is whole; the directory says it ends after the first row.
+            let mut lying = xlsx_around(whole.as_bytes(), STRINGS.as_bytes(), deflate);
+            patch_directory(&mut lying, "xl/worksheets/sheet1.xml", 24, ONE.len() as u32);
+            assert_eq!(read(&lying), cut, "deflate {deflate}, {sizing:?}");
+
+            // The string table stops after its first string: the workbook does not load.
+            let strings = "<sst><si><t>kept</t></si>";
+            let package = xlsx_around(whole.as_bytes(), strings.as_bytes(), deflate);
+            let mut harness = Harness::new(&package, sizing);
+            harness.open().unwrap();
+            harness.sheets().unwrap();
+            let failure = harness.load().unwrap_err();
+            assert_eq!(
+                (failure.code, failure.found, failure.record),
+                (
+                    Failure::XML,
+                    UNTERMINATED_ELEMENT,
+                    u64::from(Failure::PART_STRINGS)
+                )
+            );
+        }
+    }
+
+    // Through the Rust binding: the intact row, then the failure, which is final.
+    let package = xlsx_around(ONE.as_bytes(), STRINGS.as_bytes(), true);
+    let book = hypertabular::Workbook::from_vec(package).unwrap();
+    let mut sheet = book
+        .sheet(
+            0,
+            SheetOptions::default().with_header(false),
+            &[hypertabular::Column::text(0)],
+        )
+        .unwrap();
+    let batch = sheet.read().unwrap().expect("the row before the cut");
+    assert_eq!(batch.rows(), 1);
+    assert_eq!(batch.text_str(0, 0).unwrap(), "kept");
+    for _ in 0..3 {
+        let Err(hypertabular::Error::Structure(failure)) = sheet.read() else {
+            panic!("a cut sheet ends in a failure, every time it is read");
+        };
+        assert_eq!(failure.kind, hypertabular::FailureKind::Xml);
+    }
+}
+
+/// The size a directory declares for the string table is what a caller sizes its arena by
+/// before the table is read, so it is held to what the part's bytes can inflate to: a
+/// tiny part that claims a gigabyte is not given one, and still reads.
+#[test]
+fn a_string_table_that_claims_a_gigabyte_is_not_given_one() {
+    let sheet = xlsx_sheet(8, 50, 4);
+    for deflate in [false, true] {
+        let package = xlsx(&[("Data", &sheet)], packages::SHARED, false, deflate);
+        let compressed = u64::from(directory_field(&package, "xl/sharedStrings.xml", 20));
+        let rows_of = |bytes: &[u8]| -> (u64, usize) {
+            let mut harness = Harness::new(bytes, Sizing::Stingy);
+            let strings_bytes = harness.open().unwrap().strings_bytes;
+            let sheets = harness.sheets().unwrap();
+            harness.load().unwrap();
+            let read = harness.read(&sheets[0], SheetOptions::default(), &every_door(4), 64);
+            assert!(!read.failed);
+            (strings_bytes, read.rows.len())
+        };
+        let (honest, rows) = rows_of(&package);
+        assert!(honest > 0 && rows > 0);
+
+        let mut lying = package.clone();
+        patch_directory(&mut lying, "xl/sharedStrings.xml", 24, 1 << 30);
+        let (bounded, read) = rows_of(&lying);
+        assert_eq!(read, rows, "a lying size does not change what is read");
+        let inflatable = if deflate {
+            compressed * DEFLATE_RATIO + 64
+        } else {
+            compressed
+        };
+        assert_eq!(bounded, inflatable.min(1 << 30), "deflate {deflate}");
+        assert!(
+            bounded < 1 << 20,
+            "{bounded} bytes asked of a {compressed}-byte part"
+        );
+
+        // Both sizes lie: what the container holds past the part's bytes is the bound.
+        patch_directory(&mut lying, "xl/sharedStrings.xml", 20, 1 << 30);
+        let mut harness = Harness::new(&lying, Sizing::Stingy);
+        let bounded = harness.open().unwrap().strings_bytes;
+        assert!(
+            bounded <= (lying.len() as u64) * DEFLATE_RATIO + 64,
+            "{bounded} bytes asked of a {}-byte package",
+            lying.len()
+        );
+    }
 }
 
 /// A deflate bomb is only as large as the window it is read through.

@@ -193,7 +193,11 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   every shape a cell, a row and a part can take, read with buffers that start empty and
   grow only as asked, and with room to spare — the two must agree.
 - Hostile input: truncation, flipped bits, noise, a garbage directory, sizes that lie, a
-  deflate bomb. Each comes back as a code.
+  deflate bomb. Each comes back as a code. A part cut between two rows — by the file, or
+  by a directory that declares it that long — delivers the rows before the cut and then
+  its failure, never a shorter sheet; and the size a directory declares for the string
+  table is held to what the part's bytes can inflate to before a caller sizes an arena by
+  it.
 - Doubles: the core says and reads a double exactly as Rust's own formatter and parser
   do, checked over hundreds of thousands of values.
 - Numbers: generated packages in every layout the reader has to be indifferent to —

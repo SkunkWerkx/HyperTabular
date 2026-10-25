@@ -8,6 +8,10 @@
 //! what the old one held copied into it: every position kept here is an offset, so the
 //! read goes on from where it stopped. A stored part needs no window at all — it is
 //! tokenized where it lies in the container.
+//!
+//! The reader counts the elements the part has opened and not closed, and a part that
+//! ends inside one is broken: a worksheet cut off after a whole row — by the file, or by a
+//! directory that declares a size short of the stream — is not a shorter worksheet.
 
 use super::xml::{self, Kind, Scan, Token, slice};
 use super::zip::{Located, METHOD_DEFLATE};
@@ -21,6 +25,10 @@ pub const WINDOW_MIN: usize = 64 * 1024;
 const HISTORY: u64 = 32 * 1024;
 /// The longest thing inflate writes in one step; less room than this and it may not move.
 const MATCH_MAX: u64 = 258;
+/// The most a deflate stream can grow by: no stream of `n` bytes inflates to more than
+/// `1032n`, so a directory that declares more than that of a part is not believed
+/// ([`Part::at_most`]).
+pub const DEFLATE_RATIO: u64 = 1032;
 
 /// Why a read stopped short of what was asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +68,9 @@ pub struct Part {
     visible: u64,
     /// Depth inside an element that is being skipped to its end.
     skip: u32,
+    /// Elements opened and not yet closed, by the tokens taken: the part ending inside one
+    /// is `Failure::XML`, not its end.
+    depth: u32,
     /// Which part this is, for a failure to name (`Failure::PART_*`).
     id: u32,
     deflated: u32,
@@ -85,6 +96,7 @@ impl Part {
             end: 0,
             visible: 0,
             skip: 0,
+            depth: 0,
             id,
             deflated: u32::from(deflated),
             eof: u32::from(!deflated || located.limit == 0),
@@ -98,6 +110,20 @@ impl Part {
             eof: 1,
             ..Part::default()
         };
+    }
+
+    /// The most the part can inflate to, as begun: the size the directory declares, held
+    /// to what the bytes the container holds for it can become — a deflate stream grows by
+    /// at most [`DEFLATE_RATIO`], a stored part not at all. A caller that sizes a buffer by
+    /// a part's declared size sizes it by this, so that a directory which lies is not
+    /// given what it asks.
+    pub fn at_most(&self) -> u64 {
+        let inflatable = if self.deflated != 0 {
+            self.len.saturating_mul(DEFLATE_RATIO).saturating_add(64)
+        } else {
+            self.len
+        };
+        self.limit.min(inflatable)
     }
 
     /// How far into the part's inflated bytes the read has got.
@@ -144,13 +170,20 @@ impl Reader<'_> {
 
     /// The next token, not yet consumed: [`Reader::take`] moves past it, and until then a
     /// second `peek` finds it again — which is how a read that stopped for want of room
-    /// is picked up. Elements being skipped are skipped here.
+    /// is picked up. Elements being skipped are skipped here. The end of the part is a
+    /// token only once every element is closed: inside one it is a failure, so a reader
+    /// that takes `Kind::Eof` as the end of what it reads is right to.
     pub fn peek(&mut self) -> Result<Token, Stop> {
         loop {
             let pos = usize::try_from(self.part.pos).unwrap_or(usize::MAX);
             match xml::scan(self.buf(), pos, self.part.eof != 0) {
                 Scan::Token(token) => {
                     if self.part.skip == 0 {
+                        if token.kind == Kind::Eof && self.part.depth != 0 {
+                            return Err(Stop::Fail(
+                                self.part.failure(Failure::XML, xml::UNTERMINATED_ELEMENT),
+                            ));
+                        }
                         return Ok(token);
                     }
                     match token.kind {
@@ -195,9 +228,15 @@ impl Reader<'_> {
     /// Moves past a token [`Reader::peek`] returned.
     pub fn take(&mut self, token: &Token) {
         self.part.pos = token.next as u64;
+        match token.kind {
+            Kind::Start => self.part.depth = self.part.depth.saturating_add(1),
+            Kind::End => self.part.depth = self.part.depth.saturating_sub(1),
+            _ => {}
+        }
     }
 
-    /// Moves past a start tag and everything up to the end tag that closes it.
+    /// Moves past a start tag and everything up to the end tag that closes it: the element
+    /// is opened and closed in the skip, so the depth is as it was.
     pub fn skip_element(&mut self, token: &Token) {
         self.part.pos = token.next as u64;
         self.part.skip = 1;

@@ -125,8 +125,9 @@ impl DelimitedOptions {
     }
 
     /// The input buffer a file or a stream is read through to begin with. It grows to
-    /// hold the longest record, so this is a starting size and not a limit; a slice is
-    /// read in place and has no buffer.
+    /// hold the longest record, up to [`DelimitedReader::MAX_ROW_BYTES`], so this is a
+    /// starting size and not a limit, and a request past the ceiling starts there; a slice
+    /// is read in place and has no buffer.
     pub const fn buffer_bytes(self, bytes: usize) -> DelimitedOptions {
         DelimitedOptions {
             buffer_bytes: if bytes == 0 { 1 } else { bytes },
@@ -206,11 +207,12 @@ impl DelimitedOptions {
         dialect: Dialect,
     ) -> Result<DelimitedReader<'a>, Error> {
         let source = Source::Async {
-            buf: vec![0; self.buffer_bytes],
+            buf: vec![0; self.buffer_bytes.min(DelimitedReader::MAX_ROW_BYTES)],
             at: 0,
             end: 0,
             reader: Box::pin(reader),
             eof: false,
+            ceiling: DelimitedReader::MAX_ROW_BYTES,
         };
         let mut reader = DelimitedReader::start(source, dialect, None, self)?;
         if dialect.has_header {
@@ -224,11 +226,14 @@ impl DelimitedOptions {
     }
 
     fn stream<'a, R: Read + Send + 'a>(self, reader: R) -> Source<'a> {
+        let limit = self.buffer_bytes.min(DelimitedReader::MAX_ROW_BYTES);
         Source::Stream {
-            buf: Vec::with_capacity(self.buffer_bytes),
+            buf: Vec::with_capacity(limit),
             at: 0,
+            limit,
             reader: Box::new(reader),
             eof: false,
+            ceiling: DelimitedReader::MAX_ROW_BYTES,
         }
     }
 }
@@ -241,16 +246,21 @@ enum Source<'a> {
         at: usize,
         window: usize,
     },
-    /// A stream, read through a buffer that holds what the core has not consumed.
+    /// A stream, read through a buffer that holds what the core has not consumed. The
+    /// buffer is filled to `limit`, which doubles when a record fills it, up to the
+    /// ceiling ([`DelimitedReader::MAX_ROW_BYTES`], lowered only by a test).
     Stream {
         buf: Vec<u8>,
         at: usize,
+        limit: usize,
         reader: Box<dyn Read + Send + 'a>,
         eof: bool,
+        ceiling: usize,
     },
     /// An asynchronous stream, read through a buffer that is all initialized, `end` bytes
     /// of it read: each read is counted the moment it lands, so a read that is abandoned
     /// part-way (its future dropped) loses nothing, and the next one goes on from there.
+    /// The buffer's length is the limit a synchronous stream keeps beside its buffer.
     #[cfg(feature = "async")]
     Async {
         buf: Vec<u8>,
@@ -258,6 +268,7 @@ enum Source<'a> {
         end: usize,
         reader: std::pin::Pin<Box<dyn futures_io::AsyncRead + Send + 'a>>,
         eof: bool,
+        ceiling: usize,
     },
 }
 
@@ -319,14 +330,18 @@ impl<'a> Source<'a> {
     }
 
     /// Moves the unconsumed tail to the front of the buffer and reads more behind it,
-    /// growing the buffer if the tail fills it. A slice is read in place, so there is
-    /// nothing to make room in: one record is larger than the core takes in a call.
+    /// growing the buffer if the tail fills it — up to the ceiling, which a record that
+    /// fills without ending is too long, whatever buffer the reader began with. A slice
+    /// is read in place, so there is nothing to make room in: one record is larger than
+    /// the core takes in a call.
     fn refill(&mut self, state: &State) -> Result<(), Error> {
         let Source::Stream {
             buf,
             at,
+            limit,
             reader,
             eof,
+            ceiling,
         } = self
         else {
             return match self {
@@ -336,14 +351,14 @@ impl<'a> Source<'a> {
         };
         buf.drain(..*at);
         *at = 0;
-        if buf.len() == buf.capacity() {
-            if buf.capacity() >= DelimitedReader::MAX_ROW_BYTES {
+        if buf.len() >= *limit {
+            if *limit >= *ceiling {
                 return Err(row_too_long(state));
             }
-            buf.reserve(buf.capacity());
+            *limit = limit.saturating_mul(2).min(*ceiling);
         }
         let filled = buf.len();
-        buf.resize(buf.capacity(), 0);
+        buf.resize(*limit, 0);
         loop {
             match reader.read(&mut buf[filled..]) {
                 Ok(0) => {
@@ -374,6 +389,7 @@ impl<'a> Source<'a> {
             end,
             reader,
             eof,
+            ceiling,
         } = self
         else {
             return self.refill(state);
@@ -381,11 +397,11 @@ impl<'a> Source<'a> {
         buf.copy_within(*at..*end, 0);
         *end -= *at;
         *at = 0;
-        if *end == buf.len() {
-            if buf.len() >= DelimitedReader::MAX_ROW_BYTES {
+        if *end >= buf.len() {
+            if buf.len() >= *ceiling {
                 return Err(row_too_long(state));
             }
-            buf.resize((buf.len() * 2).max(1), 0);
+            buf.resize(buf.len().saturating_mul(2).clamp(1, *ceiling), 0);
         }
         loop {
             let read = std::future::poll_fn(|cx| reader.as_mut().poll_read(cx, &mut buf[*end..]));
@@ -413,6 +429,30 @@ impl DelimitedReader<'_> {
     pub(crate) fn limit_window(&mut self, bytes: usize) {
         if let Source::Slice { window, .. } = &mut self.source {
             *window = bytes;
+        }
+    }
+
+    /// Lowers a stream's row ceiling from [`DelimitedReader::MAX_ROW_BYTES`] to `bytes`,
+    /// so that the ceiling can be reached by a test: a buffer that began larger is cut to
+    /// it. For a reader that has read nothing yet.
+    pub(crate) fn limit_ceiling(&mut self, bytes: usize) {
+        match &mut self.source {
+            Source::Stream {
+                buf,
+                limit,
+                ceiling,
+                ..
+            } => {
+                *ceiling = bytes;
+                *limit = (*limit).min(bytes);
+                buf.truncate(*limit);
+            }
+            #[cfg(feature = "async")]
+            Source::Async { buf, ceiling, .. } => {
+                *ceiling = bytes;
+                buf.truncate(bytes);
+            }
+            Source::Slice { .. } => {}
         }
     }
 
@@ -457,8 +497,10 @@ pub struct DelimitedReader<'a> {
 }
 
 impl<'a> DelimitedReader<'a> {
-    /// The largest single record a stream is buffered for: past this the input is taken
-    /// to be something other than delimited text.
+    /// The most a stream is buffered for one record, whatever buffer the reader began
+    /// with: a record that fills this much and has not ended is
+    /// [`FailureKind::RowTooLong`], the input taken to be something other than delimited
+    /// text.
     pub const MAX_ROW_BYTES: usize = 1 << 30;
 
     /// The options a reader is built with, to change before building one.
