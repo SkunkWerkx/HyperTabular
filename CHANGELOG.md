@@ -16,10 +16,11 @@ minor release can still break both, as 0.9.0 did.
 
 ### Added
 
-- **Rust — `Batch::values<T>`** lends a typed slice for every supported value type,
-  including decimals, UUIDs and temporal values, with the same verdicts and lifetime as
-  the existing primitive column accessors.
-
+- **Rust — `Batch::values::<T>` is public.** It lends any typed column whole — decimals,
+  UUIDs, timestamps, dates, date-times and durations as well as the primitives — where only
+  the primitives had accessors (`batch.i64(col)` and its siblings, which it now underlies).
+  The slice borrows the reader as theirs do, and a cell that did not cast holds the door's
+  zero beside its verdict, as theirs does. *(Rust)*
 - **Apple Numbers.** Every binding reads a `.numbers` document — Apple's IWA packaging:
   Snappy-compressed chunks of Protocol Buffers objects — the way it reads XLSX and ODS,
   told by what the container holds, never by its name. Each table is a sheet, listed
@@ -47,20 +48,21 @@ minor release can still break both, as 0.9.0 did.
 
 ### Changed
 
-- **Rust — the supported kernel API is explicit.** ABI types and exports, doors,
-  delimited state/header/fill operations, and workbook state/buffer/book/row operations
-  remain public; parser, compression and SIMD implementation modules are private.
-  `Column`, `Dialect` and `SheetOptions` are non-exhaustive and constructed with their
-  constructors and builders; `Error` and `Door` are non-exhaustive too.
-- **Rust — live delimited streams deliver complete headers and batches promptly.**
-  Synchronous and asynchronous refills return to parsing after a successful read, rather
-  than waiting for the input buffer to fill or the source to close. Interrupted reads,
-  partial records, cancellation safety and terminal errors retain their contracts.
-
-- **`Format` and `FailureKind` are `#[non_exhaustive]`.** A format the core learns to read, or
-  a failure code it gains, is a new variant without a new major version once 1.0.0 is out; a
-  match outside the crate names a wildcard arm, and a code this binding does not know reads
-  as `Container`, as it already did. *(Rust)*
+- **Breaking — Rust: the kernel's public surface is what a binding calls, and no more.**
+  `kernel::abi`, `kernel::door`, `kernel::exports`, `kernel::delimited::fill`, and
+  `kernel::workbook`'s state, memory, format constants and `book` and `rows` modules stay
+  public; the delimited engine, scanner and unescape, the inflate, and the workbook's zip,
+  XML, styles, number, part, sort, cell, Snappy, protobuf, IWA and Numbers modules are
+  private to the crate, so 1.0.0 does not freeze them. The tests that drove
+  them directly are compiled into the crate from `tests/` and every integration target is
+  listed in the manifest. *(Rust)*
+- **Breaking — Rust: `Column`, `Dialect`, `SheetOptions`, `Door`, `Error`, `Format` and
+  `FailureKind` are `#[non_exhaustive]`.** A setting, a door, a format the core learns to
+  read or a failure it can report is an addition without a new major version once 1.0.0 is
+  out. The three configuration structs are built with their constructors, constants and
+  builder methods rather than struct literals; a match on an enum outside the crate names a
+  wildcard arm, and a failure code this binding does not know reads as `Container`, as it
+  already did. *(Rust)*
 - **C# — `HyperTabular.targets` no longer lists an `EmccExportedFunction` per export.** The
   `NativeFileReference` is the whole Blazor WebAssembly wiring: the SDK's generated pinvoke
   table calls each native function by symbol, so the link resolves them against the archive
@@ -98,6 +100,15 @@ minor release can still break both, as 0.9.0 did.
   other step of a leg together once the Numbers reader was in it (23 minutes against 15 on
   linux-x64). `cargo wasm-module` and the `wasm32-wasip1` export flags leave
   `rust/.cargo/config.toml` with it. *(Java)*
+
+### Fixed
+
+- **Rust — a live delimited stream no longer holds back a header or batch that has arrived.**
+  A refill, through `Read` or the `async` feature's `AsyncRead`, used to read until the
+  buffer was full or the source ended, so a pipe or a socket that paused after a few
+  records held them back; it now goes back to parsing after any read that returns bytes.
+  Interrupted reads, records split across reads, cancellation and terminal errors behave
+  as before. *(Rust)*
 
 ## [0.9.0] — 2026-10-21
 

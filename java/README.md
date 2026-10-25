@@ -43,7 +43,7 @@ try (Workbook book = Workbook.open(Path.of("orders.xlsx"));
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
 and `Sheet` allocate the buffers — the input, one value array and one verdict array per column, the
-table that locates each cell — once, as native memory, and reuses them for every batch. The
+table that locates each cell — once, as native memory, and reuse them for every batch. The
 core fills them in one native call per batch: the boundary is crossed once per few thousand
 rows, not once per cell.
 
@@ -110,7 +110,7 @@ Each also comes without the plan — `open(path, dialect)`, `of(bytes, dialect)`
 `of(segment, dialect)`, `of(stream, dialect[, bufferBytes])` — which reads the header and
 leaves the plan to `reader.bind(plan[, batchRows])`, once, before the first read. A read
 before `bind` is an `IllegalStateException`, and not a final one: bind, and read. The header
-is a `Header`, which is still the `List<String>` of names it always was, plus
+is a `Header`, the `List<String>` of names, with
 `ordinal(name)` (exact, case-sensitive, untrimmed; the first of two columns with one name;
 a `NoSuchElementException` naming a missing one), `findOrdinal(name)` → `OptionalInt`, and
 both again for the name's UTF-8 bytes (`byte[]` or `MemorySegment`). `columnCount()` is how

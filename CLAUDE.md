@@ -160,7 +160,7 @@ alone.
 - Remove agent worktrees and their branches once the work is in the main checkout;
   `.claude/` is untracked and `git add` picks it up.
 
-## Open follow-ups (as of 2026-10-24)
+## Open follow-ups (as of 2026-10-25)
 
 - Benchmark tables were measured on the WSL2 i9-11900H box. When the dev machine changes,
   re-measure every harness there before relabelling a table; never mix machines, and say
@@ -174,3 +174,9 @@ alone.
   JNI layer. Python, Ruby and PHP don't reach Android either.
 - Workbook performance candidates after the 2026-10-05 tokenizer pass, and Numbers' open
   (most of a `.numbers` read, sampled 2026-10-24): `docs/workbook.md`, "Parked".
+- Swift's `readAsync` over an `AsyncSequence` (`refillAsync`) still fills its whole room
+  before parsing: the stall the Rust reader lost in #20, so a live `URLSession.bytes`
+  stream holds back a complete header or batch until the buffer fills or the stream ends.
+  C#, Java, Go, Ruby, PHP and Python's file objects already parse after one read.
+- `Batch::values::<T>` lends decimal, UUID and temporal columns whole in Rust, as Go's typed
+  slices do; C#'s `Values<T>` and Java's `values` stop at the primitives.

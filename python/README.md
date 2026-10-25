@@ -56,7 +56,7 @@ plan once, before the first read. A read before it raises `RuntimeError` (and a 
 puts that right); so does a second `bind`. `is_bound` says which it is, and a delimited
 reader's `column_count` is the header's width, or the first record's once it has been read.
 
-The header is a `Header`: the tuple of `str` it always was, plus `ordinal(name)` — the first
+The header is a `Header`: a tuple of `str`, with `ordinal(name)` — the first
 column with exactly that name, case and spaces included, or a `KeyError` naming it — and
 `get(name, default=None)`, which returns `default` instead. A `bytes` name is matched against
 the bytes the file holds.

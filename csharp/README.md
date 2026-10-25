@@ -61,7 +61,7 @@ rows, not once per cell.
 - **Header first.** A `DelimitedReader` opened without a plan — from a `Stream`,
   `ReadOnlyMemory<byte>` or a path — and a sheet started without one
   (`book.Sheet(index or name, options)`) read the header straight away. `Header` is the list
-  of names it always was, plus `Ordinal(name)` (exact, case-sensitive, untrimmed, first match;
+  of names, with `Ordinal(name)` (exact, case-sensitive, untrimmed, first match;
   `KeyNotFoundException` naming the column when it is missing), `TryOrdinal`, and
   `Ordinal(ReadOnlySpan<byte>)` to match the raw UTF-8. `Bind(plan[, batchRows])` then
   declares the plan, once (`InvalidOperationException` on a second call, and on `Read()`
@@ -173,11 +173,10 @@ wires it into a Blazor WebAssembly project with no configuration: a `NativeFileR
 hands the archive to the linker beside HyperCast's (the two share no symbols), the SDK's
 generated pinvoke table calls each export by symbol so `"*"` resolves every one (with the
 archive missing, `wasm-ld` reports an undefined symbol per export), and the
-exception-handling translation .NET 11 needs is applied. The file used to list an
-`EmccExportedFunction` per export as well, on the belief that `"*"` resolution needed the
-Emscripten export; the smoke test reaches all fourteen with the list removed on .NET SDK
-11.0.100-rc.2 and fails at the link with the archive unlinked, so the list is gone. The archive reaches the linker by
-that path and nowhere else: the same targets file takes it back out of restore's copy-local
+exception-handling translation .NET 11 needs is applied. No `EmccExportedFunction` list is
+needed: the smoke test reaches all fourteen exports through that table alone, and fails at
+the link with the archive unlinked. The archive reaches the linker by that path and nowhere
+else: the same targets file takes it back out of restore's copy-local
 list, so a consumer's output carries only the linked `dotnet.native.wasm`.
 
 That link happens whether or not the app ends up reading anything. The targets file is

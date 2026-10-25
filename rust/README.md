@@ -55,24 +55,24 @@ workbook open from a
 — Tokio's through `tokio_util::compat` — and `read_async` awaits the source between
 batches.
 
-Each stream refill returns to parsing after a successful read. A complete header or
-batch can be delivered while the source remains open, without filling the input buffer.
-A workbook still needs its complete container before opening.
+A delimited stream goes back to parsing after every read that returns bytes, so a live
+source — a pipe, a socket — hands over each complete header and batch as soon as it has
+arrived, without waiting for the buffer to fill or the source to close. A workbook is a zip
+whose directory is at its end, so it is read whole before it opens.
 
-`Batch::values::<T>(column)` lends a whole column for any supported value type, including
-decimals and temporal values; the primitive accessors such as `i64` remain available.
-Slices borrow the reader and cannot survive its next read. A failed cell holds the door's
-zero: read `batch.verdicts(column)` alongside values. Text uses `batch.text` or `text_str`.
+`batch.values::<T>(column)` lends a typed column whole, for every door but text —
+decimals, UUIDs and temporal values included — and `batch.i64(column)` and its siblings
+are the same for the primitives. A slice borrows the reader and cannot outlive its next
+read. A cell that did not cast holds the door's zero, so read `batch.verdicts(column)`
+beside the values. A text cell is `batch.text` or `batch.text_str`.
 
-The supported allocation-free Rust core surface is `kernel::abi`, `kernel::door`,
-`kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s state, memory,
-format constants and `book`/`rows` operations. Parser and SIMD implementation modules
-are private. The C ABI is unchanged.
-
-Build `Column`, `Dialect`, and `SheetOptions` with their constructors, constants and
-builder methods. These configuration types are non-exhaustive so settings can be added;
-`Door`, `Error`, `Format`, and `FailureKind` likewise require wildcard arms when matched
-outside the crate.
+`Column`, `Dialect` and `SheetOptions` are built with their constructors, constants and
+builder methods (`Column::format`, `Dialect::with_quoting`, …), and are `#[non_exhaustive]` so a minor release can add a setting; `Door`,
+`Error`, `Format` and `FailureKind` are too, so a `match` on one outside the crate needs a
+wildcard arm. Below the Rust API, the core is reached through `kernel::abi`,
+`kernel::door`, `kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s
+state, memory, format constants and `book` and `rows` operations — what the C ABI exports;
+the parsing, compression and SIMD modules behind them are private.
 
 A cell that does not cast is never an error: it is a `Fault` in the batch — `Empty`,
 `Malformed` or `OutOfRange`, with the span of the offending bytes — and `batch.raw` gives

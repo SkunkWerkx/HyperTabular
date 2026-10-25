@@ -51,8 +51,8 @@ A plan known up front can be handed over at once —
 `DelimitedReader.open(path, dialect, plan)`, `book.sheet(which, options, plan)` — which binds it
 before the header is read.
 
-- **The header** (`reader.header`, `sheet.header`) is a `HyperTabular::Header`: the frozen
-  Array of frozen names it always was, which also says where a name is. `header.ordinal(name)`
+- **The header** (`reader.header`, `sheet.header`) is a `HyperTabular::Header`: a frozen
+  Array of frozen names, which also says where a name is. `header.ordinal(name)`
   is the first column with exactly that name — case and spaces included — and a `KeyError`
   naming it when there is none (or, with a block, the block's value, as `Hash#fetch` does);
   `header.find_ordinal(name)` answers `nil` instead.
@@ -65,7 +65,7 @@ before the header is read.
   `index`, `line`, `get(column)` (also `[]` and `verdict`), `value(column)`, `raw(column)`,
   `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
   so a row stays good after the read has moved on. A Row deconstructs as its verdicts, for
-  `case row in [HyperCast::Success(value: id), *]`. `reader.each_row` still yields each row as
+  `case row in [HyperCast::Success(value: id), *]`. `reader.each_row` yields each row as
   a frozen Array of verdicts, and `sheet.each_batch` walks a sheet's batches.
 - **A workbook from an IO.** `Workbook.new(io)` reads anything with `#read` to its end into a
   String the workbook owns, as soon as it is opened; `close_source: true` closes the IO once it

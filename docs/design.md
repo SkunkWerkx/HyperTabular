@@ -40,10 +40,10 @@ it. It has no standard library, allocates nothing, and cannot panic.
 eight: readers that own their buffers, and files. It allocates, in Rust's own idiom,
 exactly as the C# binding allocates in C#'s. Nothing in it is in the library.
 
-The supported allocation-free Rust interface is `kernel::abi`, `kernel::door`,
-`kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s state, memory,
-format constants and book/row operations. Compression, tokenization and SIMD modules
-are implementation details. The C ABI exposes the same operations through its exports.
+From Rust, the core is reached through `kernel::abi`, `kernel::door`, `kernel::exports`,
+`kernel::delimited::fill`, and `kernel::workbook`'s state, memory, format constants and
+`book` and `rows` operations: the operations the C ABI exports, allocation-free as they are
+there. The compression, tokenizing and SIMD modules behind them are private to the crate.
 
 The three properties of the core are not a discipline. Each is something a build refuses
 to get wrong, and `rust/check-core.sh` runs every one of them, on the code and on the
@@ -265,11 +265,10 @@ per batch instead of once per cell. This is the "column buffers in, parallel ver
 arrays out" shape the HyperCast roadmap committed to.
 
 The Rust `Batch` is a view of them, the same for delimited text and for a sheet:
-`batch.values::<T>(col)` gives any typed value column whole, including decimals and
-temporal values; primitive conveniences such as `batch.i64(col)` remain available.
-`batch.verdicts(col)` gives its verdicts; `batch.get::<T>(col, row)` one cell as
-`Result<T, Fault>` in HyperCast's own
-types; `batch.text(col, row)` a text cell's bytes; `batch.raw(col, row)` the text a fault
+`batch.values::<T>(col)` gives a typed column whole, for every door but text — decimals,
+UUIDs and temporal values included — and `batch.i64(col)` and its ten siblings are the same
+for the primitives; `batch.verdicts(col)` its verdicts; `batch.get::<T>(col, row)` one cell
+as `Result<T, Fault>` in HyperCast's own types; `batch.text(col, row)` a text cell's bytes; `batch.raw(col, row)` the text a fault
 points into; `batch.line(row)` the line or the sheet row the row came from.
 
 ### Errors
