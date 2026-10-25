@@ -56,15 +56,15 @@ fn every_case_reads_as_the_corpus_says() {
     for case in &cases {
         let name = case["name"].as_str().expect("name");
         let input = case["input"].as_str().expect("input").as_bytes();
-        let dialect = Dialect {
-            separator: case["dialect"]["separator"]
+        let dialect = Dialect::new(
+            case["dialect"]["separator"]
                 .as_str()
                 .expect("separator")
                 .as_bytes()[0],
-            quoting: case["dialect"]["quoting"].as_bool().expect("quoting"),
-            has_header: case["dialect"]["has_header"].as_bool().expect("has_header"),
-            skip_blank_lines: case["dialect"]["skip_blank_lines"].as_bool().expect("skip"),
-        };
+        )
+        .with_quoting(case["dialect"]["quoting"].as_bool().expect("quoting"))
+        .with_header(case["dialect"]["has_header"].as_bool().expect("has_header"))
+        .with_blank_lines_skipped(case["dialect"]["skip_blank_lines"].as_bool().expect("skip"));
         let plan: Vec<Column> = case["plan"]
             .as_array()
             .expect("plan")

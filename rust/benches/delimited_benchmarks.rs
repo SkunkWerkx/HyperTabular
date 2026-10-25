@@ -13,7 +13,12 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use hypertabular::kernel::abi::{Filled, OK, Span};
-use hypertabular::kernel::delimited::engine::{self, Kind};
+// Compile the same engine selector locally for labels and per-engine comparisons; it
+// is not part of the library's supported API.
+#[allow(dead_code, unused_imports)]
+#[path = "../src/kernel/delimited/engine.rs"]
+mod engine;
+use engine::Kind;
 use hypertabular::kernel::delimited::fill::{self, RawDialect, State};
 use hypertabular::{Column, DelimitedReader, Dialect};
 

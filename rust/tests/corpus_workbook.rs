@@ -101,11 +101,12 @@ fn every_case_reads_as_the_corpus_says() {
             assert_eq!(case["sheets"], json!(sheets), "{name}");
 
             for batch_rows in [1, 2, 1024] {
-                let options = SheetOptions {
-                    has_header: case["options"]["has_header"].as_bool().expect("has_header"),
-                    skip_empty_rows: case["options"]["skip_empty_rows"].as_bool().expect("skip"),
-                    batch_rows,
-                };
+                let options = SheetOptions::new()
+                    .with_header(case["options"]["has_header"].as_bool().expect("has_header"))
+                    .with_empty_rows_skipped(
+                        case["options"]["skip_empty_rows"].as_bool().expect("skip"),
+                    )
+                    .with_batch_rows(batch_rows);
                 // By index — and, where the name finds the same sheet, by name.
                 let by_name = book
                     .sheets()

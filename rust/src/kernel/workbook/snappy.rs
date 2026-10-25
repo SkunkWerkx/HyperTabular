@@ -17,20 +17,6 @@ pub fn declared(block: &[u8]) -> Option<(u64, usize)> {
     varint(block, 0)
 }
 
-/// Decodes `block` whole into `out`, which must hold the declared length, and returns how
-/// many bytes were written — the declared length, or `None` for a block that is not
-/// Snappy: an element cut short, a copy that reaches before the start, a block that writes
-/// more or less than it declared, or output too small for it.
-pub fn decode(block: &[u8], out: &mut [u8]) -> Option<usize> {
-    let (declared, _) = declared(block)?;
-    let written = prefix(block, out, usize::MAX)?;
-    if written as u64 == declared {
-        Some(written)
-    } else {
-        None
-    }
-}
-
 /// Decodes `block` into `out` until at least `need` bytes have been written or the block
 /// ends, and returns how many were — all of them when the block ends first, and then as
 /// many as it declared. `out` must hold what is decoded; a block that does not fit, or is

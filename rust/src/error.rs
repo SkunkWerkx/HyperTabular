@@ -9,7 +9,22 @@ use std::io;
 use std::sync::Arc;
 
 /// Why a reader could not be made, or stopped.
+///
+/// Additional failure modes may be added in a minor release; matches outside this
+/// crate need a wildcard arm.
+///
+/// ```compile_fail,E0004
+/// use hypertabular::Error;
+/// fn closed(error: Error) {
+///     match error {
+///         Error::Io(_) | Error::Separator(_) | Error::Plan { .. } |
+///         Error::NoSheet(_) | Error::NoColumn(_) | Error::Unbound |
+///         Error::AlreadyBound | Error::Structure(_) => (),
+///     }
+/// }
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The underlying read failed.
     Io(Arc<io::Error>),

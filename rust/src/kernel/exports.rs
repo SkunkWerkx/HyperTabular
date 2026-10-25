@@ -1,6 +1,6 @@
 //! The C ABI — every symbol the library exports, and the only place one is declared.
 //!
-//! [`export!`] is the one way to make an export, and it does two things no export may be
+//! `export!` is the one way to make an export, and it does two things no export may be
 //! without: it names the symbol (under the `exports` feature) and it puts the function
 //! under the no-panic proof (under the `no-panic` feature). `check-core.sh` holds the
 //! other end: `no_mangle` appears nowhere else in the core, and the shipped library's

@@ -40,6 +40,11 @@ it. It has no standard library, allocates nothing, and cannot panic.
 eight: readers that own their buffers, and files. It allocates, in Rust's own idiom,
 exactly as the C# binding allocates in C#'s. Nothing in it is in the library.
 
+The supported allocation-free Rust interface is `kernel::abi`, `kernel::door`,
+`kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s state, memory,
+format constants and book/row operations. Compression, tokenization and SIMD modules
+are implementation details. The C ABI exposes the same operations through its exports.
+
 The three properties of the core are not a discipline. Each is something a build refuses
 to get wrong, and `rust/check-core.sh` runs every one of them, on the code and on the
 library it becomes:
@@ -132,18 +137,24 @@ filled and a text cell is a slice of the input or of the shared strings. Reading
 batch is what ends the last.
 
 ```rust
-let plan = [Column::i64(0), Column::f64(2).format(continental), Column::text(3)];
+use hypertabular::{Column, Decimal, DelimitedReader, Dialect, SheetOptions, Workbook};
 
-let mut reader = DelimitedReader::open(path, Dialect::CSV, &plan)?;
+let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
+let header = reader.header().unwrap();
+reader.bind(&[
+    Column::i64(header.require("id")?),
+    Column::decimal(header.require("amount")?),
+])?;
 while let Some(batch) = reader.read()? {
-    let ids: &[i64] = batch.i64(0);               // a whole column
-    let verdicts = batch.verdicts(0);             // and a verdict beside each value
-    let amount: Result<f64, Fault> = batch.get(1, row);   // one cell, as HyperCast judged it
-    let name = batch.text(2, row);
+    let ids: &[i64] = batch.i64(0);
+    let amounts: &[Decimal] = batch.values(1);
+    let verdicts = batch.verdicts(1); // check each verdict before using its value
 }
 
-let book = Workbook::open(path)?;
-let mut sheet = book.sheet("Data", SheetOptions::default(), &plan)?;
+let book = Workbook::open("data.xlsx")?;
+let mut sheet = book.sheet_unbound("Data", SheetOptions::default())?;
+let header = sheet.header().unwrap();
+sheet.bind(&[Column::decimal(header.require("amount")?)])?;
 while let Some(batch) = sheet.read()? { /* the same batch */ }
 ```
 
@@ -254,8 +265,10 @@ per batch instead of once per cell. This is the "column buffers in, parallel ver
 arrays out" shape the HyperCast roadmap committed to.
 
 The Rust `Batch` is a view of them, the same for delimited text and for a sheet:
-`batch.i64(col)` and its ten siblings give a primitive column whole; `batch.verdicts(col)`
-its verdicts; `batch.get::<T>(col, row)` one cell as `Result<T, Fault>` in HyperCast's own
+`batch.values::<T>(col)` gives any typed value column whole, including decimals and
+temporal values; primitive conveniences such as `batch.i64(col)` remain available.
+`batch.verdicts(col)` gives its verdicts; `batch.get::<T>(col, row)` one cell as
+`Result<T, Fault>` in HyperCast's own
 types; `batch.text(col, row)` a text cell's bytes; `batch.raw(col, row)` the text a fault
 points into; `batch.line(row)` the line or the sheet row the row came from.
 

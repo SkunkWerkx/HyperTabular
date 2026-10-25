@@ -2,6 +2,9 @@
 name = "hypertabular"
 version = "0.9.0"
 edition = "2024"
+# Private-core tests stay in tests/ but are included by lib.rs as unit tests. List
+# integration targets explicitly so Cargo does not also compile those sources as crates.
+autotests = false
 # HyperCast's, the one dependency, whose own floor this cannot go below. CI checks the
 # library on it (check-msrv).
 rust-version = "1.88"
@@ -111,6 +114,34 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # Deflate for the tests, which build their workbook packages in memory and hold the core's
 # own inflate to another's. The crate itself inflates with the core and links neither.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# The remaining tests are separate crates; allocation counters stay process-isolated.
+[[test]]
+name = "column_values"
+
+[[test]]
+name = "corpus_delimited"
+
+[[test]]
+name = "corpus_workbook"
+
+[[test]]
+name = "delimited_reader"
+
+[[test]]
+name = "header_first"
+
+[[test]]
+name = "kernel_allocation_free"
+
+[[test]]
+name = "kernel_workbook_allocation_free"
+
+[[test]]
+name = "reader_allocation_free"
+
+[[test]]
+name = "stream_progress"
 
 [[bench]]
 name = "delimited_benchmarks"

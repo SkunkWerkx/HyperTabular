@@ -300,13 +300,6 @@ impl<'a> Tag<'a> {
             .map(|(_, value)| value)
     }
 
-    /// The raw value of the attribute with exactly this qualified name.
-    pub fn attr_qualified(&self, name: &[u8]) -> Option<&'a [u8]> {
-        self.attrs()
-            .find(|(candidate, _)| *candidate == name)
-            .map(|(_, value)| value)
-    }
-
     /// Every `(qualified name, raw value)` pair.
     pub fn attrs(&self) -> Attrs<'a> {
         Attrs { rest: self.attrs }

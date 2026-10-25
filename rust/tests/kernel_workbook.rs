@@ -1158,7 +1158,7 @@ fn the_exports_read_what_the_core_reads() {
 /// One number, not a benchmark suite: the core called directly, and the same read through
 /// the Rust binding over it, on one large, ordinary sheet — the same package, the same
 /// plan, batches of the same size. The difference is what the binding costs.
-/// `cargo test --release --test kernel_workbook throughput -- --ignored --nocapture`
+/// `cargo test --release --lib tests::kernel_workbook::throughput -- --ignored --nocapture`
 #[test]
 #[ignore = "a timing, run on request in a release build"]
 fn throughput() {

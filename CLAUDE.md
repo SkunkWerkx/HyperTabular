@@ -114,6 +114,10 @@ HyperCast and move together.
 README has its own steps. Large benchmark inputs come from the ignored
 `corpus/generate/out/`.
 
+Private core tests stay in `rust/tests/`, included by `lib.rs` through `tests/internal.rs`.
+Cargo lists integration targets explicitly; register a new integration test in
+`rust/Cargo.toml`. Allocation-counting tests remain separate integration binaries.
+
 `check-core.sh` is Linux-only (`.so`, `nm -D`, `readelf`): on a Mac run it in Docker
 (`rust:latest`, the three `cargo check` targets and `llvm-tools` added). `cargo no-panic`
 passes vacuously on Darwin, because `.cargo/config.toml` links Darwin targets with

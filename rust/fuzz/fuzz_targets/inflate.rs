@@ -8,7 +8,11 @@
 #![no_main]
 
 use flate2::{Decompress, FlushDecompress, Status as ZStatus};
-use hypertabular::kernel::inflate::{Inflate, Status};
+// Exercise the private implementation directly without making it a public API.
+#[allow(dead_code)] // This target exercises run rather than the separate reset convenience.
+#[path = "../../src/kernel/inflate.rs"]
+mod inflate;
+use inflate::{Inflate, Status};
 use libfuzzer_sys::fuzz_target;
 
 const HISTORY: usize = 32 * 1024;

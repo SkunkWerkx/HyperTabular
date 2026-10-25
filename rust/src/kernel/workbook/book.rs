@@ -815,7 +815,7 @@ fn sheets_inner(
 }
 
 /// True for a `table:table` start tag.
-pub fn is_table(tag: &Tag<'_>) -> bool {
+pub(crate) fn is_table(tag: &Tag<'_>) -> bool {
     tag.local() == b"table" && tag.name.ends_with(b"table:table")
 }
 

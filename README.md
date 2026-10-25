@@ -45,6 +45,8 @@ while (sheet.Read() is { } batch) { /* the same batch */ }
 
 ```rust
 // Rust — the API over the core
+use hypertabular::{Column, Decimal, DelimitedReader, Dialect, Fault, SheetOptions, Workbook};
+
 let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
 let header = reader.header().unwrap();
 let plan = [Column::i64(header.require("id")?), Column::f64(header.require("amount")?)];
@@ -54,6 +56,15 @@ while let Some(batch) = reader.read()? {
     for row in batch {
         let amount: Result<f64, Fault> = row.get(1);
     }
+}
+
+let book = Workbook::open("orders.xlsx")?;
+let mut sheet = book.sheet_unbound("Orders", SheetOptions::default())?;
+let header = sheet.header().unwrap();
+sheet.bind(&[Column::decimal(header.require("amount")?)])?;
+while let Some(batch) = sheet.read()? {
+    let amounts: &[Decimal] = batch.values(0);
+    let verdicts = batch.verdicts(0); // check each verdict before using its value
 }
 ```
 
