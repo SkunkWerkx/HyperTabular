@@ -1,8 +1,8 @@
-//! Throughput receipts for the workbook reader: the two real-application files of
-//! `corpus/README.md` — Excel's `excel-win-300k.xlsx` and LibreOffice's
-//! `libreoffice-300k.ods`, 300 000 rows × 8 columns each — read whole through the plan
-//! every binding's workbook benchmark reads them through, so that one number per binding
-//! sits beside this one:
+//! Throughput receipts for the workbook reader: the three real-application files of
+//! `corpus/README.md` — Excel's `excel-win-300k.xlsx`, LibreOffice's `libreoffice-300k.ods`
+//! and Numbers' `numbers-300k.numbers`, 300 000 rows × 8 columns each — read whole through
+//! the plan every binding's workbook benchmark reads them through, so that one number per
+//! binding sits beside this one:
 //!
 //! - `open`: the package opened — the directory, the workbook part, the shared strings and
 //!   the styles — and nothing read.
@@ -52,7 +52,11 @@ fn benchmarks(c: &mut Criterion) {
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../corpus/generate/out"),
         PathBuf::from,
     );
-    for name in ["excel-win-300k.xlsx", "libreoffice-300k.ods"] {
+    for name in [
+        "excel-win-300k.xlsx",
+        "libreoffice-300k.ods",
+        "numbers-300k.numbers",
+    ] {
         let Ok(container) = std::fs::read(directory.join(name)) else {
             eprintln!("{name}: not in {}, skipped", directory.display());
             continue;

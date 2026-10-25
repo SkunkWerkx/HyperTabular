@@ -11,10 +11,11 @@ use HyperTabular\Workbook;
 use PhpBench\Attributes as Bench;
 
 /**
- * The workbook reader over the two 300 000-row files of corpus/README.md — Excel's
- * excel-win-300k.xlsx and LibreOffice's libreoffice-300k.ods, 8 columns each — read whole
- * through the plan rust/benches/workbook_benchmarks.rs reads them through, so that this
- * binding's number sits beside the core's. `open` is the package opened and nothing read.
+ * The workbook reader over the three 300 000-row files of corpus/README.md — Excel's
+ * excel-win-300k.xlsx, LibreOffice's libreoffice-300k.ods and Numbers' numbers-300k.numbers,
+ * 8 columns each — read whole through the plan rust/benches/workbook_benchmarks.rs reads
+ * them through, so that this binding's number sits beside the core's. `open` is the package
+ * opened and nothing read.
  * `values` is opened, then the first sheet read in batches of 4096, every column's values
  * made and its faults counted, and the text column's lengths summed: the checksum every
  * binding's benchmark arrives at, which says they all did the same work. `verdicts` counts
@@ -48,6 +49,7 @@ final class WorkbookBench
         return [
             'xlsx' => ['file' => 'excel-win-300k.xlsx'],
             'ods' => ['file' => 'libreoffice-300k.ods'],
+            'numbers' => ['file' => 'numbers-300k.numbers'],
         ];
     }
 

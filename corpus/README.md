@@ -46,7 +46,7 @@ a binding should replay each case more than one way.
 
 ## `workbook.json` and `workbook/` — the contract for workbooks
 
-`workbook/` holds twelve small packages, and beside them the fourteen files real
+`workbook/` holds twelve small packages, and beside them the fifteen files real
 applications wrote (the table at the bottom lists them). The twelve: five fixtures
 (`basic.xlsx`, `basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and
 `basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and seven
@@ -61,8 +61,8 @@ of day, durations, error and merged cells, in layouts Numbers itself never write
 chunks of a few bytes, tiles of seven rows, wide cell offsets, a segmented string list,
 rows left out of their tile.
 
-`workbook.json` is 234 cases over those 26 packages — every sheet of every package, read
-several ways, and the two encrypted files refused — 973 rows and 45,371 cells. A case:
+`workbook.json` is 246 cases over those 27 packages — every sheet of every package, read
+several ways, and the two encrypted files refused — 1,018 rows and 49,394 cells. A case:
 
 ```json
 {
@@ -313,24 +313,63 @@ inconsistently" line has never been checked against it.
 its own format (every other reader of `.numbers` is a reverse engineering of this file
 format; this is the first file the core's IWA reader was held to). Numbers specifics:
 
-- A new blank spreadsheet; delete the table Numbers puts on it and add one named `Data`
-  with the dataset's columns, so that the sheet lists as `Data` alone. Turn off
-  Auto-Correction (Settings → Auto-Correction: spelling, capitalisation, smart quotes and
-  dashes, link detection) before typing, or `x <&> "y"` and `bob, jr` arrive changed.
+- A new blank spreadsheet with one table per sheet, each table's name hidden (Format →
+  Table → Table Name): the core lists a sheet by its name, and the export writes a shown
+  table name as a merged title row above the data. Turn off Auto-Correction (Settings →
+  Auto-Correction: spelling, capitalisation, smart quotes and dashes, link detection)
+  before typing, or `x <&> "y"` and `bob, jr` arrive changed.
 - Numbers has no 1900 date system and refuses the phantom `1900-02-29` (G3): it keeps
   reverting the cell to *Automatic* and stores the text, which is the right answer — the
   core reads that cell as text, as it does F3.
 - Format column F as Text before typing, as for every other writer. B4 typed as
   `1000000000000000` is stored as text by Numbers unless typed `1E+15`.
+- Numbers has no serial behind a date, so J, K and L hold what the serials mean: J
+  date-times, K durations (a duration is a cell type; `36:00` typed is minutes and
+  seconds), L plain numbers, since Numbers refuses the dates that `-1`, `60` and
+  `2958466` would be. A time has no fractional second: `23:59:59.5` typed becomes a
+  duration, and I4 is `=TIME(23,59,59.5)`, which Numbers evaluates to `23:59:59`. A time
+  typed alone is stored on the day it was typed, under a format that shows no date, and
+  the core reads it as a time of day — as it reads J3 and B6, whose custom format
+  `h' hours'` hides a date too.
+- Row 6 is typed as what each serial means (a number, dates, a time, a duration) under the
+  formats the table above asks for, built with Format → Cell → Data Format → Create Custom
+  Format; Numbers has no format codes. A custom format lives in the document's format list,
+  and that pattern is what tells the core a date (B6) from a time (I6). E6's parentheses
+  are the negative-number style, the unlabeled pop-up beside Decimals in the Number format,
+  not Currency. Numbers has no `NA()`; P3 is `=MATCH("zz",C2:C4,0)`. Every Numbers error
+  reads `#VALUE!`: the file records which formula failed, not which error it made.
 - The second sheet `Ünïcödé sheet` with `1` in A1; the third, `Hidden`, hidden from the
   sheet tab's menu (Numbers 26 can hide a sheet).
 
-**`numbers-data.xlsx`** — the same document, File → Export To → Excel, one worksheet per
-table. Numbers is the writer most often cited for oddly rooted parts.
+**14. `numbers-data.xlsx`** — the same document, File → Export To → Excel, one worksheet per
+table, *Include a summary worksheet* unchecked. Numbers is the writer most often cited for
+oddly rooted parts. Its export says something else than the `.numbers` file in twelve cells
+of the `Data` sheet, every one of them the writer's doing:
+
+- Serials are counted from 1899-12-30, so a date before 1900-03-01 lands a day late: J2, J4
+  and B6 are one day after their `.numbers` values, and H3, `1900-02-28`, is written as
+  serial 60 — Excel's phantom day, which the core refuses as a date and reads as the
+  number `60`.
+- A time of day is written with the day it was typed on, under `h:mm:ss`, so the core reads
+  I2, I3, J3 and I6 as wall clocks on 2026-10-24, and I4 on 1904-01-01, where Numbers'
+  `TIME()` roots its result.
+- An error cell is written as its formula with no cached value, so P2 to P4 read as empty.
+  Excel recalculates them on open; the core never evaluates.
+- The export writes no application properties: `docProps/app.xml` is an empty element.
+
+**15. `numbers-300k.numbers`** (out of tree, sha256 in the table) — the Numbers columns of
+the benchmark table. File → Open on `excel-win-300k.xlsx` (Numbers imports the formulas
+with their values; the sheet keeps its name, `Sheet1`), then File → Save, named
+`numbers-300k`, beside it. Numbers has no `NA()`, so the 3 000 `#N/A` cells of column H
+come out empty: they fault under the plan's `i64` door as the errors do, and every harness
+prints the same checksum over this file as over the other two. Numbers keeps fifteen
+significant digits of a double, so column B's values are not Excel's bit for bit. The
+package is 29.6 MB, its parts stored, not deflated; 8.8 MB of it is the calculation
+engine's formulas and 2.1 MB the string list.
 
 ## Optional: Excel for the web
 
-**14. `excel-web-data.xlsx`** — upload `excel-win-data.xlsx` to OneDrive, open in the
+**16. `excel-web-data.xlsx`** — upload `excel-win-data.xlsx` to OneDrive, open in the
 browser, change one cell and change it back (forces a rewrite), download. A different save
 path from the desktop writer, cheap to collect.
 
@@ -353,5 +392,6 @@ path from the desktop writer, cheap to collect.
 | `google-data.xlsx` | Google Sheets, downloaded 2026-10-04 | web | |
 | `google-data.ods` | Google Sheets, downloaded 2026-10-04 (generator: LibreOfficeDev 6.0.5.2) | web | |
 | `numbers-data.numbers` | Numbers 26.3.1 | macOS | |
-| `numbers-data.xlsx` | | | |
+| `numbers-data.xlsx` | Numbers 26.3.1 (its export writes no application properties) | macOS | |
+| `numbers-300k.numbers` (out of tree) | Numbers 26.3.1 | macOS | `857f29ca03521ee6772c102aa48490455824af31fe66d857d35ea087488e25bd` |
 | `excel-web-data.xlsx` | Microsoft Excel Online (AppVersion 16.0300) | web | |

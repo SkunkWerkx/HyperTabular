@@ -22,8 +22,9 @@ minor release can still break both, as 0.9.0 did.
   under its sheet's name (`<sheet> - <table>` when a sheet holds several, as Numbers'
   own Excel export names them) and hidden when its sheet is; cells are read from the
   v5 storage Numbers has written since 2018 — decimals and currencies as numbers, dates
-  as wall clocks or, under a format that shows no date, times of day, durations as
-  spans, booleans, text and rich text with the runs joined, error cells as `#VALUE!`
+  as wall clocks or, under a format that shows no date (a custom format's pattern looked
+  up in the document's list), times of day, durations as spans, booleans, text and rich
+  text with the runs joined, error cells as `#VALUE!`
   (the file does not record which error), the cells a merge covers as empty — and a
   row a tile leaves out is an empty row. The core's new `kernel/workbook/{iwa,snappy,
   proto,numbers}.rs` stay inside the no-panic, no-allocation proofs; the window holds
@@ -35,10 +36,10 @@ minor release can still break both, as 0.9.0 did.
   identifier), 4 cell storage of a version the core does not read (`expected` the
   version). The `not_a_workbook` message now says "not an XLSX, ODS or Numbers
   workbook". The corpus gains `numbers-data.numbers`, written by Numbers 26.3.1 on
-  macOS, and two generated Numbers packages in the layouts Numbers never writes small
-  (chunks of a few bytes, seven-row tiles, wide offsets, a segmented string list, rows
-  left out of their tile); `workbook.json` grows from 198 to 234 cases, every one of
-  them new. *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
+  macOS, its Excel export `numbers-data.xlsx`, and two generated Numbers packages in the
+  layouts Numbers never writes small (chunks of a few bytes, seven-row tiles, wide
+  offsets, a segmented string list, rows left out of their tile); `workbook.json` grows
+  from 198 to 246 cases, every one of them new. *(Rust, C#, Java, Go, Python, Ruby, PHP, Swift)*
 
 ### Changed
 

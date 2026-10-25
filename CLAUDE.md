@@ -168,5 +168,5 @@ alone.
   and HyperUuid run it) is off in `ci.yml`; add the config and turn `lint_swift` on.
 - Java does not reach Android: the binding uses FFM, which ART lacks, so it would need a
   JNI layer. Python, Ruby and PHP don't reach Android either.
-- Workbook performance candidates after the 2026-10-05 tokenizer pass: `docs/workbook.md`,
-  "Parked".
+- Workbook performance candidates after the 2026-10-05 tokenizer pass, and Numbers' open
+  (most of a `.numbers` read, sampled 2026-10-24): `docs/workbook.md`, "Parked".

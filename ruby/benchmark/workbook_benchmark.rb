@@ -1,10 +1,11 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# benchmark-ips: the workbook reader over the two 300 000-row files of corpus/README.md —
-# Excel's excel-win-300k.xlsx and LibreOffice's libreoffice-300k.ods, 8 columns each — read
-# whole through the plan rust/benches/workbook_benchmarks.rs reads them through, so that this
-# binding's number sits beside the core's. "open" is the package opened and nothing read.
+# benchmark-ips: the workbook reader over the three 300 000-row files of corpus/README.md —
+# Excel's excel-win-300k.xlsx, LibreOffice's libreoffice-300k.ods and Numbers'
+# numbers-300k.numbers, 8 columns each — read whole through the plan
+# rust/benches/workbook_benchmarks.rs reads them through, so that this binding's number sits
+# beside the core's. "open" is the package opened and nothing read.
 # "values" is opened, then the first sheet read in batches of 4096, every column's values
 # made — nil where a cell did not cast, so the cells that did are counted from them — and
 # the text column's lengths summed: the checksum every binding's benchmark arrives at, which
@@ -53,7 +54,7 @@ def read(container, verdicts:)
   checksum
 end
 
-%w[excel-win-300k.xlsx libreoffice-300k.ods].each do |name|
+%w[excel-win-300k.xlsx libreoffice-300k.ods numbers-300k.numbers].each do |name|
   path = File.join(DIRECTORY, name)
   unless File.exist?(path)
     puts "#{name}: not in #{DIRECTORY}, skipped"

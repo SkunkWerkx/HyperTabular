@@ -99,23 +99,23 @@ The design record — why one repository, how the scanner and the workbook reade
 
 ## Receipts
 
-- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (234 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
+- **The corpus is the contract.** `corpus/delimited.json` (33 cases) and `corpus/workbook.json` (246 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own format and in its Excel export. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
 - **Delimited text:** every cell located and handed out as text at 1.05 GiB/s, against 978 MiB/s for the `csv` crate splitting the same records; ten typed columns cast into the caller's buffers at 654 MiB/s; the structural scan alone at 2.18 GiB/s on AVX2. Linux x64, a 26 MB 200 000 × 10 file ([`docs/delimited.md`](docs/delimited.md#numbers)).
-- **Workbooks, through every binding.** Two real-application files, read whole by each binding's own benchmark harness through one eight-column plan, every verdict looked at and every text cell's bytes, each harness printing the same checksum. Excel's `excel-win-300k.xlsx` (111 MB of sheet XML in a 16.7 MB package) and LibreOffice's `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB); linux-x64, an Intel Core i9-11900H:
+- **Workbooks, through every binding.** Three real-application files, read whole by each binding's own benchmark harness through one eight-column plan, every verdict looked at and every text cell's bytes, each harness printing the same checksum. Excel's `excel-win-300k.xlsx` (111 MB of sheet XML in a 16.7 MB package), LibreOffice's `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) and Numbers' `numbers-300k.numbers` (29.4 MB of Snappy-compressed IWA parts in a 29.6 MB package); linux-x64, an Intel Core i9-11900H:
 
-  | Binding (harness) | xlsx open | xlsx read | ods open | ods read |
-  | --- | ---: | ---: | ---: | ---: |
-  | Rust (Criterion) | 34 ms | 601 ms | 337 ms | 1.20 s |
-  | C# (BenchmarkDotNet) | 32 ms | 591 ms | 334 ms | 1.21 s |
-  | Java (JMH) | 41 ms | 600 ms | 346 ms | 1.23 s |
-  | Go (`go test -bench`) | 30 ms | 590 ms | 328 ms | 1.20 s |
-  | Swift (package-benchmark) | 37 ms | 617 ms | 336 ms | 1.20 s |
-  | Python (pyperf) | 39 ms | 630 ms | 344 ms | 1.24 s |
-  | Ruby (benchmark-ips), Magnus | 30 ms | 1.01 s | 330 ms | 1.61 s |
-  | Ruby (benchmark-ips), Fiddle | 36 ms | 1.04 s | 343 ms | 1.65 s |
-  | PHP (phpbench) | 44 ms | 776 ms | 346 ms | 1.34 s |
+  | Binding (harness) | xlsx open | xlsx read | ods open | ods read | numbers open | numbers read |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Rust (Criterion) | 32 ms | 565 ms | 322 ms | 1.19 s | 820 ms | 1.16 s |
+  | C# (BenchmarkDotNet) | 31 ms | 586 ms | 332 ms | 1.23 s | 873 ms | 1.22 s |
+  | Java (JMH) | 39 ms | 606 ms | 343 ms | 1.25 s | 884 ms | 1.25 s |
+  | Go (`go test -bench`) | 30 ms | 593 ms | 329 ms | 1.20 s | 842 ms | 1.21 s |
+  | Swift (package-benchmark) | 31 ms | 617 ms | 341 ms | 1.24 s | 942 ms | 1.32 s |
+  | Python (pyperf) | 39 ms | 625 ms | 337 ms | 1.24 s | 845 ms | 1.22 s |
+  | Ruby (benchmark-ips), Magnus | 29 ms | 1.00 s | 341 ms | 1.64 s | 827 ms | 1.62 s |
+  | Ruby (benchmark-ips), Fiddle | 34 ms | 995 ms | 343 ms | 1.68 s | 885 ms | 1.69 s |
+  | PHP (phpbench) | 41 ms | 775 ms | 345 ms | 1.42 s | 890 ms | 1.44 s |
 
-  2026-10-07, every binding on the 0.7.0 core. [`docs/workbook.md`](docs/workbook.md#figures) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
+  2026-10-24, every binding on one build of the core at `00a511d`. numbers-parser, the Python reader every other `.numbers` reader is held against, opens the same file in 66.8 s there and reads it in 68.1 s. [`docs/workbook.md`](docs/workbook.md#figures) has where the time goes, why Ruby's and PHP's rows decode every value, and how to run each harness.
 - **AOT on both managed platforms.** The C# AOT smoke test publishes under `PublishAot` with the core linked in from the package's static archive, and runs, on every CI leg. The Java smoke test (`java/aot-smoke-test`) builds a GraalVM Native Image on the jar's own reachability metadata and reads through every door; it is run by hand, not in CI.
 
 ## Platform support
