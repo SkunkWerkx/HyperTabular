@@ -128,10 +128,23 @@ public sealed unsafe class Batch
 	public ReadOnlySpan<CellVerdict> Verdicts(int column) => _columns.Verdicts[column].AsSpan(0, _rows);
 
 	/// <summary>
-	/// A whole column as the core wrote it, one value per row — for the doors whose value is
-	/// a primitive: <see cref="Door.Boolean"/> as <see cref="bool"/>, the integer and
-	/// floating-point doors as their own type. The value of a row whose verdict is not ok is
-	/// zero. Columns of other doors are read a cell at a time, with <see cref="Get{T}"/>.
+	/// A whole column as the core wrote it, one value per row, nothing copied:
+	/// <list type="table">
+	/// <item><term><see cref="bool"/></term><description><see cref="Door.Boolean"/></description></item>
+	/// <item><term><see cref="sbyte"/> … <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/></term><description>the door of the same name</description></item>
+	/// <item><term><see cref="ulong"/></term><description><see cref="Door.Time"/>, nanoseconds since midnight</description></item>
+	/// <item><term><see cref="RawDecimal"/></term><description><see cref="Door.Decimal"/></description></item>
+	/// <item><term><see cref="RawTimestamp"/></term><description><see cref="Door.Timestamp"/>, <see cref="Door.Unix"/>, <see cref="Door.ExcelSerial"/></description></item>
+	/// <item><term><see cref="RawDate"/></term><description><see cref="Door.Date"/>, <see cref="Door.DateOrdered"/></description></item>
+	/// <item><term><see cref="RawCivil"/></term><description><see cref="Door.DateTime"/></description></item>
+	/// <item><term><see cref="RawDuration"/></term><description><see cref="Door.Duration"/></description></item>
+	/// </list>
+	/// The <c>Raw</c> types are HyperCast's own (<see cref="HyperCast.Interop"/>), laid out as
+	/// the core writes them, and each converts itself to the type <see cref="Get{T}"/> makes. The
+	/// value of a row whose verdict is not ok is zero. A <see cref="Door.Uuid"/> column has no
+	/// span — its 16 bytes are in RFC 9562 order, which is not <see cref="Guid"/>'s layout — and
+	/// is read a cell at a time with <see cref="Get{T}"/>, as is a <see cref="Door.Text"/> column
+	/// with <see cref="TryGetText"/>.
 	/// </summary>
 	/// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not the type the column's door writes.</exception>
 	public ReadOnlySpan<T> Values<T>(int column) where T : unmanaged
@@ -146,9 +159,14 @@ public sealed unsafe class Batch
 			: typeof(T) == typeof(byte) ? door == Door.Byte
 			: typeof(T) == typeof(ushort) ? door == Door.UInt16
 			: typeof(T) == typeof(uint) ? door == Door.UInt32
-			: typeof(T) == typeof(ulong) ? door == Door.UInt64
+			: typeof(T) == typeof(ulong) ? door is Door.UInt64 or Door.Time
 			: typeof(T) == typeof(float) ? door == Door.Single
-			: typeof(T) == typeof(double) && door == Door.Double;
+			: typeof(T) == typeof(double) ? door == Door.Double
+			: typeof(T) == typeof(RawDecimal) ? door == Door.Decimal
+			: typeof(T) == typeof(RawTimestamp) ? door is Door.Timestamp or Door.Unix or Door.ExcelSerial
+			: typeof(T) == typeof(RawDate) ? door is Door.Date or Door.DateOrdered
+			: typeof(T) == typeof(RawCivil) ? door == Door.DateTime
+			: typeof(T) == typeof(RawDuration) && door == Door.Duration;
 		if (!matches)
 			throw new InvalidOperationException(
 				$"Column {column} is cast through {door}; it has no span of {typeof(T).Name}.");

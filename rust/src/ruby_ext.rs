@@ -29,6 +29,7 @@ use magnus::{
     function, gc, method, prelude::*,
 };
 
+use crate::column;
 use crate::kernel::abi::{
     CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW,
     Failure, Filled, OK, Opened as Found, Slot, Span,
@@ -364,7 +365,9 @@ impl Delimited {
         let columns = Columns::new(ruby, specs, sizes, batch_rows)?;
         let mut read = rb_self.read.borrow_mut();
         read.per_row = per_row;
-        read.cells = vec![Span::default(); per_row * batch_rows];
+        // As many rows as the budget allows, at least one and at most a batch.
+        let rows = column::cell_rows(per_row, batch_rows);
+        read.cells = vec![Span::default(); per_row * rows];
         read.columns = Some(columns);
         Ok(())
     }
@@ -466,15 +469,19 @@ impl Delimited {
             match code {
                 OK => {
                     let rows = read.out.rows as usize;
+                    // A batch the cell table ends early (see `column::CELL_BUDGET`) is no
+                    // reason to grow the arena.
+                    let held = batch_rows.min(read.cells.len() / read.per_row.max(1));
                     read.cramped = rows > 0
-                        && rows < batch_rows
+                        && rows < held
                         && read.out.arena_used as usize * 2 >= read.arena.len();
                     return Ok(code);
                 }
                 ERR_STRUCTURE => return Ok(code),
                 ERR_CELLS => {
                     read.per_row = read.per_row.max(needed);
-                    read.cells = vec![Span::default(); read.per_row * batch_rows];
+                    let rows = column::cell_rows(read.per_row, batch_rows);
+                    read.cells = vec![Span::default(); read.per_row * rows];
                 }
                 ERR_ARENA => grow_arena(&mut read.arena, needed),
                 _ => return Err(contract(ruby)),
@@ -533,6 +540,11 @@ impl Delimited {
 
     fn per_row(&self) -> usize {
         self.read.borrow().per_row
+    }
+
+    /// The cell-table entries the reader holds.
+    fn cell_entries(&self) -> usize {
+        self.read.borrow().cells.len()
     }
 
     fn count(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
@@ -1130,6 +1142,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     delimited.define_method("arena_used", method!(Delimited::arena_used, 0))?;
     delimited.define_method("failure", method!(Delimited::failure, 0))?;
     delimited.define_method("per_row", method!(Delimited::per_row, 0))?;
+    delimited.define_method("cell_entries", method!(Delimited::cell_entries, 0))?;
     delimited.define_method("columns", method!(|rb_self: Obj<Delimited>| rb_self, 0))?;
     delimited.define_method("count", method!(Delimited::count, 0))?;
     delimited.define_method("batch_rows", method!(Delimited::batch_rows, 0))?;

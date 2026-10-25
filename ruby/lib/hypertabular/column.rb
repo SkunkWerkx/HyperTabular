@@ -32,7 +32,8 @@ module HyperTabular
     # HyperCast::NumFormat (ArgumentError), an unknown door or an undeclared option
     # (KeyError, as HyperCast raises for the same).
     def initialize(ordinal:, door:, declared: nil, format: nil)
-      raise ArgumentError, "ordinal must be an Integer in 0..#{Column::MAX_ORDINAL}; got #{ordinal.inspect}" unless
+      raise ArgumentError, "ordinal must be an Integer at least 0, and an ordinal must be below 2^20 " \
+                           "(1,048,576); got #{ordinal.inspect}" unless
         ordinal.is_a?(Integer) && ordinal.between?(0, Column::MAX_ORDINAL)
 
       DOORS.fetch(door)
@@ -159,8 +160,10 @@ module HyperTabular
     end
   end
 
-  # The widest source ordinal a column can name.
-  Column::MAX_ORDINAL = (1 << 31) - 1
+  # The widest source ordinal a column can name: an ordinal must be below 2^20. No workbook
+  # format has that many columns (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the
+  # cap one row of cell table is at most 8 MiB.
+  Column::MAX_ORDINAL = (1 << 20) - 1
 
   # The doors that read a HyperCast::NumFormat: the integers, the reals and the decimal.
   Column::NUMERIC = %i[i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 decimal].freeze

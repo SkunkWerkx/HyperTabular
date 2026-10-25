@@ -92,16 +92,23 @@ public final class Batch {
 
     /// A column's values, one per row, exactly as the core wrote them — for the doors whose
     /// value is a primitive (``ColumnValue``): ``Door/bool`` as `Bool`, the integer and
-    /// floating-point doors as their own type. The value of a row whose verdict is not ok is
-    /// zero. Columns of other doors are read a cell at a time, with ``get(_:row:as:)``.
+    /// floating-point doors as their own type, and ``Door/time`` as `UInt64` nanoseconds since
+    /// midnight. The value of a row whose verdict is not ok is zero. Columns of other doors are
+    /// read a cell at a time, with ``get(_:row:as:)``: no type they are presented as is laid
+    /// out as the core writes them.
     ///
     /// - Precondition: `T` is the type the column's door writes.
     public func values<T: ColumnValue>(_ column: Int, as type: T.Type = T.self) -> UnsafeBufferPointer<T> {
         let door = columnSet.plan[column].door
         precondition(
-            door == T.columnDoor, "Column \(column) is cast through \(door); it has no buffer of \(T.self)")
+            Self.lends(T.self, door), "Column \(column) is cast through \(door); it has no buffer of \(T.self)")
         return UnsafeBufferPointer(
             start: columnSet.valueBase[column].bindMemory(to: T.self, capacity: columnSet.batchRows), count: rows)
+    }
+
+    /// Whether a column cast through `door` is a buffer of `T`.
+    static func lends<T: ColumnValue>(_ type: T.Type, _ door: Door) -> Bool {
+        door == T.columnDoor || (T.self == UInt64.self && door == .time)
     }
 
     // MARK: - a cell at a time

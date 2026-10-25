@@ -65,7 +65,9 @@ more behind it.
 
 ## The reader
 
-- A slice is scanned in place; nothing is copied but unescaped cells.
+- A slice is scanned in place; nothing is copied but unescaped cells. It is handed to the
+  core under 2 GiB at a time, the most one call takes, so only a single record that long
+  is `FailureKind::RowTooLong`.
 - A file or a stream is read through one buffer (256 KiB to begin with,
   `DelimitedOptions::buffer_bytes`). When the core consumes nothing, the unconsumed tail
   is moved to the front, more is read behind it, and the call is made again. Each successful
@@ -80,6 +82,10 @@ more behind it.
   borrows the reader. A column of the batch is the array the core wrote; a text cell is a
   slice of the input, or of the arena if it had a doubled quote in it. Reading the next
   batch is what ends the last.
+- The cell table holds a batch of rows, or as many as 4096 × 257 entries (8 MiB: a default
+  batch of a plan reaching 256 source columns) hold, and never less than one row. A plan
+  reaching further reads shorter batches, rather than a table its reach multiplied by the
+  batch size; every binding sizes it by the same rule.
 - An arena too small for a batch's unescaped text makes for short batches, not an error;
   the reader doubles it once the short batch has been given back.
 - The plan can wait for the header. `DelimitedReader::open_unbound` (and `from_slice_unbound`,
@@ -87,7 +93,14 @@ more behind it.
   arrays and the cell table, once, before the first read. Nothing in the core's calls
   changes: `_header` never touched the plan. Reading before binding is `Error::Unbound`,
   binding twice `Error::AlreadyBound`, and the plan-taking constructors bind before the
-  header is read, so a plan error still comes first.
+  header is read, so a plan error still comes first. `Error::Plan` is a notation the core
+  refuses, an ordinal of 2^20 (1,048,576) or more, an ordinal at or past the width a header
+  has given every record (a plan bound before the header is held to it as soon as the
+  header is read), or a cell table too large to allocate. The cap is every binding's: no
+  workbook format has that many columns (XLSX and ODS stop at 16,384, Numbers at 1,000),
+  and at the cap one row of cell table is at most 8 MiB, so a headerless plan cannot ask
+  for the gigabytes a row reaching 2³¹ would take. Without a header the width is not known at bind, and a column
+  past a record's last cell reads as empty.
 - Behind the `async` feature, a reader opened with `from_async_reader` is refilled by
   awaiting a `futures_io::AsyncRead`; the fill between awaits is the same synchronous
   call. Each chunk is counted as it lands, so a `read_async` dropped part-way loses

@@ -23,8 +23,12 @@ use HyperCast\UnixPrecision;
  */
 final readonly class Column
 {
-    /** The widest ordinal a plan can name: the core counts cells per record in 32 bits. */
-    private const MAX_ORDINAL = 0x7FFFFFFE;
+    /**
+     * The widest ordinal a plan can name: below 2^20 (1,048,576). No workbook format has that
+     * many columns (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the cap one row of
+     * cell table is at most 8 MiB, so a headerless plan cannot ask for ~16 GiB.
+     */
+    private const MAX_ORDINAL = (1 << 20) - 1;
 
     /**
      * Carries the column as declared; the factories are the way in.
@@ -43,7 +47,7 @@ final readonly class Column
     ) {
         if ($ordinal < 0 || $ordinal > self::MAX_ORDINAL) {
             throw new \InvalidArgumentException(
-                "A column's ordinal must be between 0 and " . self::MAX_ORDINAL . "; got {$ordinal}"
+                "A column's ordinal must be below 2^20 (1,048,576); got {$ordinal}"
             );
         }
     }

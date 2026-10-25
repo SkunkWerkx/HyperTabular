@@ -82,6 +82,13 @@ public final class DelimitedReader implements AutoCloseable {
     // One call's input is at most this: a span's offset and length are 31 bits.
     private static final long MAX_WINDOW_BYTES = Integer.MAX_VALUE;
 
+    /**
+     * The cell-table entries a batch is given at most: what the default batch of a plan
+     * reaching 256 source columns takes (4096 rows of 257). A plan reaching further is read
+     * in shorter batches, so that a wide ordinal costs one row's entries, not a batch's.
+     */
+    static final long CELL_BUDGET = 4096L * 257;
+
     private static final ValueLayout.OfByte BYTE = ValueLayout.JAVA_BYTE;
     private static final ValueLayout.OfShort SHORT = ValueLayout.JAVA_SHORT;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
@@ -160,7 +167,7 @@ public final class DelimitedReader implements AutoCloseable {
 
     private Batch batch;
     /** Cell-table entries one row takes: one per source column the plan reaches, and one more. */
-    private int perRow;
+    private long perRow;
 
     // Everything the core is handed, allocated once: the fixed-size blocks in one arena,
     // and each buffer that can be outgrown in its own.
@@ -220,7 +227,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @param plan the output columns, in output order
      * @param batchRows rows per batch
      * @return the reader, its header already read when the dialect declares one
-     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
+     *     (a column reading at or past the width the header gives every record among them), or
      *     {@code batchRows} is not positive
      * @throws TabularException if the header record is structurally broken
      */
@@ -283,7 +291,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @param plan the output columns, in output order
      * @param batchRows rows per batch
      * @return the reader, its header already read when the dialect declares one
-     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
+     *     (a column reading at or past the width the header gives every record among them), or
      *     {@code batchRows} is not positive
      * @throws TabularException if the header record is structurally broken
      */
@@ -359,7 +368,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @param batchRows rows per batch
      * @param bufferBytes the initial read buffer; it doubles when a record does not fit
      * @return the reader, its header already read when the dialect declares one
-     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
+     *     (a column reading at or past the width the header gives every record among them), or
      *     {@code batchRows} or {@code bufferBytes} is not positive
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the stream fails
@@ -453,7 +463,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @param batchRows rows per batch
      * @param bufferBytes the initial read buffer; it doubles when a record does not fit
      * @return the reader, its header already read when the dialect declares one
-     * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
+     * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
+     *     (a column reading at or past the width the header gives every record among them), or
      *     {@code batchRows} or {@code bufferBytes} is not positive
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the file cannot be opened or read
@@ -563,13 +574,46 @@ public final class DelimitedReader implements AutoCloseable {
 
     /** Sizes everything a batch is read into by the plan's columns. */
     private void attach(Column[] plan, int batchRows) {
+        refusePastWidth(plan);
+        // A cell-table entry for every source column up to the widest the plan reads, and one
+        // for the row's line, for as many rows as the budget holds: at most 2^20 + 1 entries a
+        // row, as an ordinal is below 2^20.
+        long width = Columns.reach(plan) + 1;
+        long bytes = cellRows(width, batchRows) * width * Native.SPAN_BYTES;
         Columns bound = new Columns(plan, batchRows, arena);
-        int width = bound.width + 1;
-        Block table = new Block(Math.multiplyExact((long) width * batchRows, Native.SPAN_BYTES), 4);
+        Block table = new Block(bytes, 4);
         perRow = width;
         cells = table;
         batch = new Batch(bound, false);
         columns = bound;
+    }
+
+    /** The cell-table entries the reader holds, for the suite. */
+    long cellEntries() {
+        return cells == null ? 0 : cells.bytes() / Native.SPAN_BYTES;
+    }
+
+    /** The rows of {@code perRow} entries the cell table holds: the batch, within the budget. */
+    static long cellRows(long perRow, int batchRows) {
+        return Math.max(1, Math.min(CELL_BUDGET / perRow, batchRows));
+    }
+
+    /**
+     * Refuses the first plan column that reads at or past the width the header gives every
+     * record: it could only ever be empty. Before the header is read the width is unknown,
+     * and nothing is refused.
+     */
+    private void refusePastWidth(Column[] plan) {
+        int width = state.get(INT, Native.STATE_EXPECTED);
+        if (width == 0) {
+            return;
+        }
+        for (int index = 0; index < plan.length; index++) {
+            if (plan[index].ordinal() >= width) {
+                throw new IllegalArgumentException("Plan column " + index + " reads source column "
+                        + plan[index].ordinal() + ", past the " + width + " columns the header gives every record.");
+            }
+        }
     }
 
     /**
@@ -595,8 +639,9 @@ public final class DelimitedReader implements AutoCloseable {
      * @param plan the output columns, in output order
      * @param batchRows rows per batch
      * @throws IllegalStateException if the reader already has a plan, or is closed
-     * @throws IllegalArgumentException if a column cannot be honoured, or {@code batchRows}
-     *     is not positive; the reader is left without a plan
+     * @throws IllegalArgumentException if a column cannot be honoured — a column reading at or
+     *     past the width the header gives every record among them — or {@code batchRows} is
+     *     not positive; the reader is left without a plan
      */
     public void bind(List<Column> plan, int batchRows) {
         if (closed) {
@@ -651,6 +696,10 @@ public final class DelimitedReader implements AutoCloseable {
         try {
             if (dialect.hasHeader()) {
                 readHeader();
+                // A plan given at open was bound before the header was read.
+                if (columns != null) {
+                    refusePastWidth(columns.plan);
+                }
             }
             return this;
         } catch (RuntimeException | Error failure) {
@@ -889,8 +938,10 @@ public final class DelimitedReader implements AutoCloseable {
                     start += consumed;
                     if (count > 0) {
                         int rows = (int) count;
-                        cramped =
-                                rows < batchRows && filled.get(LONG, Native.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
+                        // Short of what the cell table holds, not of the batch: a plan reaching
+                        // past the budget is short by design.
+                        long fits = Math.min(batchRows, cellEntries() / perRow);
+                        cramped = rows < fits && filled.get(LONG, Native.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
                         return batch.fill(rows, cells.segment, perRow, base, at, unescaped.segment);
                     }
                     if (last && (consumed == length || consumed == 0)) {
@@ -900,11 +951,12 @@ public final class DelimitedReader implements AutoCloseable {
                         refill();
                     }
                 }
-                // The core says how many entries one row takes; the table holds a batch of them.
+                // The core says how many entries one row takes; the table holds a batch of them,
+                // within the budget.
                 case Native.ERR_CELLS -> {
                     long needed = filled.get(LONG, Native.FILLED_NEEDED);
-                    perRow = (int) Math.max(perRow, needed);
-                    cells.resize(Math.multiplyExact(Math.multiplyExact(needed, batchRows), Native.SPAN_BYTES), 0);
+                    perRow = Math.max(perRow, needed);
+                    cells.resize(cellRows(needed, batchRows) * needed * Native.SPAN_BYTES, 0);
                 }
                 case Native.ERR_ARENA ->
                     unescaped.resize(Math.max(filled.get(LONG, Native.FILLED_NEEDED), unescaped.bytes() * 2), 0);

@@ -71,6 +71,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyList, PyMemoryView, PyString, PyTuple};
 
+use crate::column;
 use crate::kernel::abi::{
     CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, Failure, Filled,
     OK, Span,
@@ -907,8 +908,11 @@ impl Rows {
 enum Reads {
     /// A file this reader opened, read without the interpreter in the way.
     File(File),
-    /// The caller's binary file object: anything with ``read(size)``.
-    Object(Py<PyAny>),
+    /// The caller's binary file object: anything with ``read(size)``. Its ``read1(size)``
+    /// is called instead where it has one (``read1``), because a buffered reader's
+    /// ``read(size)`` over a pipe or a socket waits for all ``size`` bytes, and with them
+    /// the records already complete inside the first.
+    Object { object: Py<PyAny>, read1: bool },
     /// The caller's asynchronous stream — anything with ``async read(size)``, an
     /// ``asyncio.StreamReader`` — which this reader never calls: a refill says how much it
     /// wants instead, and ``read_async`` awaits that much from the stream and feeds it in.
@@ -963,19 +967,16 @@ impl Source {
     }
 }
 
-/// Reads until `into` is full or the file ends; returns how much was read, and the
-/// failure that stopped it short if one did.
-fn read_full(file: &mut File, into: &mut [u8]) -> (usize, Option<std::io::Error>) {
-    let mut total = 0;
-    while let Some(room) = into.get_mut(total..).filter(|room| !room.is_empty()) {
-        match file.read(room) {
-            Ok(0) => break,
-            Ok(read) => total += read,
+/// Reads once into `into`, again only if interrupted: whatever arrives goes to the core at
+/// once, so a pipe or a FIFO delivers each record when it is complete, not when the buffer
+/// is full. A read of nothing is the end of the file.
+fn read_some(file: &mut File, into: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match file.read(into) {
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
-            Err(error) => return (total, Some(error)),
+            read => return read,
         }
     }
-    (total, None)
 }
 
 /// Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time
@@ -983,10 +984,12 @@ fn read_full(file: &mut File, into: &mut [u8]) -> (usize, Option<std::io::Error>
 ///
 /// ``DelimitedReader(source, dialect, plan=None, *, batch_rows=4096, buffer_bytes=262144)``
 /// reads ``source``: ``bytes``, read in place and never copied, or a binary file object —
-/// anything with ``read(size)`` — read forward only. ``DelimitedReader.open(path, …)``
-/// opens a file, and ``await DelimitedReader.open_async(stream, …)`` reads an asynchronous
-/// stream. ``dialect`` is a :class:`Dialect` and ``plan`` an iterable of :class:`Column`:
-/// nothing is sniffed and nothing is inferred.
+/// anything with ``read(size)``, called as ``read1(size)`` where it has one — read forward
+/// only. ``DelimitedReader.open(path, …)`` opens a file, and ``await
+/// DelimitedReader.open_async(stream, …)`` reads an asynchronous stream. Whatever a read
+/// returns is parsed at once, so a pipe's complete records are not held back for more.
+/// ``dialect`` is a :class:`Dialect` and ``plan`` an iterable of :class:`Column`: nothing is
+/// sniffed and nothing is inferred.
 ///
 /// The header, when the dialect declares one, is read as the reader is made. A reader made
 /// without a plan reads it all the same and waits for one: ``bind(plan)``, once, with
@@ -1017,7 +1020,8 @@ struct DelimitedReader {
     values: Vec<Vec<u8>>,
     /// Per plan column, `batch_rows` verdicts, as bytes.
     verdicts: Vec<Vec<u8>>,
-    /// The cell table: `batch_rows * per_row` entries.
+    /// The cell table: `per_row` entries a row, for a batch of rows or as many as
+    /// `column::CELL_BUDGET` holds.
     cells: Vec<Span>,
     arena: Vec<u8>,
     /// Whether the last batch ended early because the arena filled: the next one starts
@@ -1130,6 +1134,7 @@ impl DelimitedReader {
             doors.push(door);
             specs.push(spec);
         }
+        self.within_header(&specs)?;
 
         let per_row = widest.map_or(0, |ordinal| ordinal + 1) + 1;
         let mut values = Vec::with_capacity(doors.len());
@@ -1138,7 +1143,7 @@ impl DelimitedReader {
             values.push(zeroed(batch_rows.checked_mul(value_size(*door)))?);
             verdicts.push(zeroed(batch_rows.checked_mul(size_of::<CellVerdict>()))?);
         }
-        let entries = batch_rows.checked_mul(per_row);
+        let entries = column::cell_rows(per_row, batch_rows).checked_mul(per_row);
         let mut cells = Vec::new();
         entries
             .and_then(|entries| cells.try_reserve_exact(entries).ok().map(|()| entries))
@@ -1212,17 +1217,13 @@ impl DelimitedReader {
                             let filled = buf.len();
                             buf.resize(*limit, 0);
                             let into = buf.get_mut(filled..).unwrap_or_default();
-                            // Whatever was read before a failure is kept: the file has
-                            // moved past it, and a caller who reads on must not lose it.
-                            let (read, failure) = py.detach(|| read_full(file, into));
-                            buf.truncate(filled + read);
-                            if let Some(failure) = failure {
-                                return Err(failure.into());
-                            }
-                            *eof = read < room;
+                            let read = py.detach(|| read_some(file, into));
+                            buf.truncate(filled + *read.as_ref().unwrap_or(&0));
+                            *eof = read? == 0;
                         }
-                        Reads::Object(object) => {
-                            let chunk = object.bind(py).call_method1("read", (room,))?;
+                        Reads::Object { object, read1 } => {
+                            let method = if *read1 { "read1" } else { "read" };
+                            let chunk = object.bind(py).call_method1(method, (room,))?;
                             let chunk = chunk.cast::<PyBytes>().map_err(|_| {
                                 PyTypeError::new_err(
                                     "read() must return bytes: open the file in binary mode",
@@ -1230,9 +1231,9 @@ impl DelimitedReader {
                             })?;
                             let chunk = chunk.as_bytes();
                             if chunk.len() > room {
-                                return Err(PyValueError::new_err(
-                                    "read(size) returned more than size bytes",
-                                ));
+                                return Err(PyValueError::new_err(format!(
+                                    "{method}(size) returned more than size bytes"
+                                )));
                             }
                             buf.extend_from_slice(chunk);
                             *eof = chunk.is_empty();
@@ -1263,8 +1264,30 @@ impl DelimitedReader {
                 return Ok(Some(wanted));
             }
             self.header_pending = false;
+            // A plan bound before the header was read is held to it as soon as it is, and
+            // a reader whose plan is refused reads nothing.
+            if let Err(error) = self.within_header(&self.specs) {
+                self.failure = Some(error.clone_ref(py));
+                return Err(error);
+            }
         }
         Ok(None)
+    }
+
+    /// The first plan column reading at or past the width the header has given every
+    /// record, refused: such a column could only ever be empty.
+    fn within_header(&self, specs: &[ColumnSpec]) -> PyResult<()> {
+        let width = self.state.expected;
+        if self.header_pending || width == 0 {
+            return Ok(());
+        }
+        match specs.iter().position(|spec| spec.ordinal >= width) {
+            Some(index) => Err(PyValueError::new_err(format!(
+                "plan[{index}] reads source column {}, past the {width} columns the header gives every record",
+                specs[index].ordinal
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Reads the header record. `Some` is how much a fed stream wants before it can go on.
@@ -1400,7 +1423,10 @@ impl DelimitedReader {
                     // The batch takes its own copy of what the core wrote — the arrays
                     // are this reader's, and the next read reuses them.
                     let rows = out.rows as usize;
-                    self.cramped = rows < max_rows
+                    // A batch the cell table ends early (see `column::CELL_BUDGET`) is no
+                    // reason to grow the arena.
+                    let held = max_rows.min(self.cells.len() / self.per_row.max(1));
+                    self.cramped = rows < held
                         && (out.arena_used as usize).saturating_mul(2) >= self.arena.len();
                     let input = match &self.source {
                         Source::Bytes { bytes, at, .. } => Input::Shared {
@@ -1474,7 +1500,8 @@ impl DelimitedReader {
                 // the core says what one row takes, and the table is made to hold it.
                 ERR_CELLS => {
                     self.per_row = self.per_row.max(out.needed as usize);
-                    let needed = self.per_row.saturating_mul(max_rows);
+                    let rows = column::cell_rows(self.per_row, max_rows);
+                    let needed = self.per_row.saturating_mul(rows);
                     self.cells
                         .try_reserve_exact(needed.saturating_sub(self.cells.len()))
                         .map_err(|_| {
@@ -1527,6 +1554,13 @@ fn planned(
         },
         format: RawNumFormat::from_le_bytes(packed),
     };
+    // `Column` refuses an ordinal past the cap itself; one that got past it is refused here.
+    if spec.ordinal as usize > column::MAX_ORDINAL {
+        return Err(PyValueError::new_err(format!(
+            "plan[{index}] reads source column {}; an ordinal must be below 2^20 (1,048,576)",
+            spec.ordinal
+        )));
+    }
     let door = Door::from_code(spec.door, spec.param).ok_or_else(|| {
         PyValueError::new_err(format!(
             "plan[{index}] names no door; build it with Column's factories"
@@ -1574,7 +1608,9 @@ impl DelimitedReader {
                 "source must be bytes or a binary file object; DelimitedReader.open(path, ...) opens a file",
             ));
         } else if source.hasattr("read")? {
-            stream(Reads::Object(source.clone().unbind()), buffer_bytes)?
+            let read1 = source.hasattr("read1")?;
+            let object = source.clone().unbind();
+            stream(Reads::Object { object, read1 }, buffer_bytes)?
         } else {
             return Err(PyTypeError::new_err(format!(
                 "source must be bytes or a binary file object, not {}",
@@ -1596,7 +1632,10 @@ impl DelimitedReader {
         batch_rows: usize,
         buffer_bytes: usize,
     ) -> PyResult<Self> {
-        let source = stream(Reads::File(File::open(path)?), buffer_bytes)?;
+        // Opened with the interpreter released: opening a FIFO waits for its writer, which
+        // may be another Python thread.
+        let file = py.detach(|| File::open(path))?;
+        let source = stream(Reads::File(file), buffer_bytes)?;
         DelimitedReader::build(py, source, dialect, plan, batch_rows, false)
     }
 

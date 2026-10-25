@@ -101,3 +101,54 @@ sealed class HugeStream : Stream
 	public override void SetLength(long value) => throw new NotSupportedException();
 	public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
+
+/// <summary>
+/// A live source: hands over what has been sent and no more, and fails a read that would
+/// have to wait for bytes not yet sent, so that a reader which waits past a complete header
+/// or row is caught.
+/// </summary>
+sealed class LiveStream : Stream
+{
+	readonly List<byte> _sent = [];
+	bool _ended;
+
+	public void Send(string text) => _sent.AddRange(System.Text.Encoding.UTF8.GetBytes(text));
+
+	public void End() => _ended = true;
+
+	public override bool CanRead => true;
+	public override bool CanSeek => false;
+	public override bool CanWrite => false;
+	public override long Length => throw new NotSupportedException();
+	public override long Position
+	{
+		get => throw new NotSupportedException();
+		set => throw new NotSupportedException();
+	}
+
+	public override int Read(Span<byte> buffer)
+	{
+		if (_sent.Count == 0)
+			return _ended ? 0 : throw new InvalidOperationException("the reader waited for bytes not yet sent");
+		var count = Math.Min(buffer.Length, _sent.Count);
+		System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_sent)[..count].CopyTo(buffer);
+		_sent.RemoveRange(0, count);
+		return count;
+	}
+
+	public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+	public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+		ValueTask.FromResult(Read(buffer.Span));
+
+	public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+		ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+	public override void Flush()
+	{
+	}
+
+	public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+	public override void SetLength(long value) => throw new NotSupportedException();
+	public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}

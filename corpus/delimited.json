@@ -586,18 +586,13 @@
   },
   {
     "dialect": {
-      "has_header": true,
+      "has_header": false,
       "quoting": true,
       "separator": ",",
       "skip_blank_lines": true
     },
-    "header": [
-      "a",
-      "b",
-      "c",
-      "d"
-    ],
-    "input": "a,b,c,d\n1,2,3,4\n",
+    "header": null,
+    "input": "1,2,3,4\n",
     "name": "a plan is a projection, in its own order",
     "plan": [
       {

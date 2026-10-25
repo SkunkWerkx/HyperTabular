@@ -165,7 +165,7 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 
 | Binding | WebAssembly |
 | --- | --- |
-| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1`, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo wasm-staticlib` builds the `wasm32-unknown-emscripten` archive C# links; Go and Swift link a `wasm32-wasip1` one. |
+| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1` (libtest skips its three `should_panic` tests there, where a panic aborts), run by CI's `test-wasi` job on every pull request, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo wasm-staticlib` builds the `wasm32-unknown-emscripten` archive C# links; Go and Swift link a `wasm32-wasip1` one. |
 | C# | **Yes, on .NET 11.** `dotnet add package HyperTabular` into a Blazor WebAssembly project links the core beside HyperCast's through the package's `.targets`; `csharp/HyperTabular.WasmSmokeTest` proves it. |
 | Go | **Yes, through [TinyGo](https://tinygo.org) 0.42+.** `tinygo build -target=wasm` (or `wasip1`) links `staticlib/wasm`; stock Go's wasm toolchain cannot link a C library. |
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |

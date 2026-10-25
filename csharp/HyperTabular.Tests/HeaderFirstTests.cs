@@ -40,6 +40,91 @@ public sealed class HeaderFirstTests
 	}
 
 	[Fact]
+	void An_ordinal_of_2_to_the_20_is_refused_as_the_plans()
+	{
+		// 2²⁰ − 1 is the widest ordinal a plan may name: no workbook has more columns, and one
+		// row of cell table at the cap is at most 8 MiB. 2²⁰ and past, int.MaxValue included,
+		// is the plan's ArgumentException at bind, for a reader and a sheet.
+		var headerless = Dialect.Csv with { HasHeader = false };
+		foreach (var ordinal in new[] { 1 << 20, int.MaxValue })
+		{
+			using var reader = new DelimitedReader("a,b\n1,2\n"u8.ToArray().AsMemory(), headerless);
+			Should.Throw<ArgumentException>(() => reader.Bind([Column.Text(0), Column.Text(ordinal)]))
+				.Message.ShouldBe($"Plan column 1 reads source column {ordinal}; an ordinal must be below 2^20 (1,048,576). (Parameter 'plan')");
+			reader.IsBound.ShouldBeFalse();
+			Should.Throw<ArgumentException>(() => new DelimitedReader("a\n"u8.ToArray().AsMemory(), headerless, [Column.Text(ordinal)]));
+
+			using var book = Workbook.Open(Basic("xlsx"));
+			var sheet = book.Sheet(0, SheetOptions.Default);
+			Should.Throw<ArgumentException>(() => sheet.Bind([Column.Text(ordinal)]))
+				.Message.ShouldContain("an ordinal must be below 2^20 (1,048,576)");
+			sheet.IsBound.ShouldBeFalse();
+			Should.Throw<ArgumentException>(() => book.Sheet(0, SheetOptions.Default, [Column.Text(ordinal)]));
+		}
+
+		using var widest = new DelimitedReader("a,b\n1,2\n"u8.ToArray().AsMemory(), headerless);
+		widest.Bind([Column.Text(0), Column.Text((1 << 20) - 1)]);
+		var rows = 0;
+		while (widest.Read() is { } batch)
+		{
+			for (var row = 0; row < batch.Rows; row++)
+				batch.Verdicts(1)[row].Reason.ShouldBe(CastFailure.Empty);
+			rows += batch.Rows;
+		}
+		rows.ShouldBe(2);
+		using var widestBook = Workbook.Open(Basic("xlsx"));
+		widestBook.Sheet(0, SheetOptions.Default).Bind([Column.Text((1 << 20) - 1)]);
+	}
+
+	[Fact]
+	void A_plan_column_past_the_headers_width_is_refused_as_the_plans()
+	{
+		// The header fixes the width every record has: a column at or past it could only ever
+		// be empty, and it is refused whether the plan is bound or came with the reader.
+		var text = "a,b\n1,2\n"u8.ToArray().AsMemory();
+		using var reader = new DelimitedReader(text, Dialect.Csv);
+		Should.Throw<ArgumentException>(() => reader.Bind([Column.Int64(0), Column.Int64(2)]))
+			.Message.ShouldBe("Plan column 1 reads source column 2, past the 2 columns the header gives every record. (Parameter 'plan')");
+		reader.IsBound.ShouldBeFalse();
+		reader.Bind([Column.Int64(0), Column.Int64(1)]);
+		reader.Read().ShouldNotBeNull().Values<long>(1).ToArray().ShouldBe([2L]);
+
+		Should.Throw<ArgumentException>(() => new DelimitedReader(text, Dialect.Csv, [Column.Int64(2)]))
+			.Message.ShouldContain("Plan column 0 reads source column 2, past the 2 columns");
+		Should.Throw<ArgumentException>(() => new DelimitedReader(new MemoryStream(text.ToArray()), Dialect.Csv, [Column.Int64(2)]))
+			.Message.ShouldContain("Plan column 0 reads source column 2");
+		Should.Throw<ArgumentException>(async () => await DelimitedReader.OpenAsync(new MemoryStream(text.ToArray()), Dialect.Csv, [Column.Int64(2)]))
+			.Message.ShouldContain("Plan column 0 reads source column 2");
+		using var planned = new DelimitedReader(text, Dialect.Csv, [Column.Int64(1)]);
+		planned.Read().ShouldNotBeNull().Values<long>(0).ToArray().ShouldBe([2L]);
+	}
+
+	[Fact]
+	void Without_a_header_a_far_ordinal_reads_empty_in_a_table_the_budget_bounds()
+	{
+		// No header has fixed the width, so a column past a record's last cell is Empty — and
+		// the cell table is sized for the rows the budget holds, not the ordinal times a batch.
+		using var reader = new DelimitedReader("a,b\n1,2\n"u8.ToArray().AsMemory(), Dialect.Csv with { HasHeader = false });
+		reader.Bind([Column.Int64(0), Column.Int64((1 << 20) - 1)]);
+		reader.CellCapacity.ShouldBeLessThanOrEqualTo((1 << 20) + 1);
+		var rows = 0;
+		while (reader.Read() is { } batch)
+		{
+			for (var row = 0; row < batch.Rows; row++)
+				batch.Verdicts(1)[row].Reason.ShouldBe(CastFailure.Empty);
+			rows += batch.Rows;
+		}
+		rows.ShouldBe(2);
+		reader.CellCapacity.ShouldBeLessThanOrEqualTo((1 << 20) + 1);
+
+		// An ordinary plan keeps its whole batch.
+		using var narrow = new DelimitedReader("a,b\n"u8.ToArray().AsMemory(), Dialect.Csv with { HasHeader = false });
+		narrow.Bind([Column.Text(255)]);
+		narrow.CellCapacity.ShouldBe(DelimitedReader.DefaultBatchRows * 257);
+		DelimitedReader.CellBudget.ShouldBe(DelimitedReader.DefaultBatchRows * 257);
+	}
+
+	[Fact]
 	void Open_read_the_header_bind_by_name_then_read()
 	{
 		using var reader = new DelimitedReader(_countries.AsMemory(), Dialect.Csv);
@@ -316,6 +401,36 @@ public sealed class HeaderFirstTests
 		for (var row = 0; row < count; row++)
 			text.Append(row).Append('\n');
 		return Encoding.UTF8.GetBytes(text.ToString());
+	}
+
+	[Fact]
+	void A_live_header_and_row_are_read_before_the_source_is_asked_again()
+	{
+		var stream = new LiveStream();
+		stream.Send("n\n1\n");
+		using var reader = new DelimitedReader(stream, Dialect.Csv);
+		reader.Header.ShouldBe(["n"]);
+		reader.Bind([Column.Int32(0)]);
+		reader.Read()!.Values<int>(0).ToArray().ShouldBe([1]);
+		stream.Send("2\n");
+		reader.Read()!.Values<int>(0).ToArray().ShouldBe([2]);
+		stream.End();
+		reader.Read().ShouldBeNull();
+	}
+
+	[Fact]
+	async Task A_live_header_and_row_are_read_asynchronously_before_the_source_is_asked_again()
+	{
+		var stream = new LiveStream();
+		stream.Send("n\n1\n");
+		await using var reader = await DelimitedReader.OpenAsync(stream, Dialect.Csv, cancellationToken: TestContext.Current.CancellationToken);
+		reader.Header.ShouldBe(["n"]);
+		reader.Bind([Column.Int32(0)]);
+		(await reader.ReadAsync(TestContext.Current.CancellationToken))!.Values<int>(0).ToArray().ShouldBe([1]);
+		stream.Send("2\n");
+		(await reader.ReadAsync(TestContext.Current.CancellationToken))!.Values<int>(0).ToArray().ShouldBe([2]);
+		stream.End();
+		(await reader.ReadAsync(TestContext.Current.CancellationToken)).ShouldBeNull();
 	}
 
 	[Fact]

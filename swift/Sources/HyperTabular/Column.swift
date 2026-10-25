@@ -60,7 +60,10 @@ public enum Door: UInt32, Equatable, Sendable {
 /// let plan: [Column] = [.i32(0), .text(1), .decimal(2, format: .invariant), .date(5, order: .dayMonthYear)]
 /// ```
 public struct Column: Equatable, Sendable {
-    /// Zero-based ordinal of the source column. Past a record's last cell reads as empty.
+    /// Zero-based ordinal of the source column. Past a record's last cell reads as empty;
+    /// at or past the columns a delimited header gives every record, and 2²⁰ and past, more
+    /// columns than any workbook format has, a plan is refused at bind with
+    /// ``PlanError/outOfReach(column:)``.
     public let ordinal: Int
     /// The door.
     public let door: Door
@@ -70,8 +73,7 @@ public struct Column: Equatable, Sendable {
     let declared: UInt32
 
     private init(_ ordinal: Int, _ door: Door, declared: UInt32 = 0, format: NumFormat = .invariant) {
-        precondition(
-            ordinal >= 0 && ordinal < Int(Int32.max), "A column's ordinal is zero-based; got \(ordinal)")
+        precondition(ordinal >= 0, "A column's ordinal is zero-based; got \(ordinal)")
         self.ordinal = ordinal
         self.door = door
         self.declared = declared
@@ -205,7 +207,7 @@ public struct Column: Equatable, Sendable {
 
 /// The closed set of types a column's values can be viewed as in place, a whole batch at a
 /// time (``Batch/values(_:as:)``): the doors whose value is a primitive the core
-/// writes as Swift lays it out. The conformances are this binding's to declare — one per
+/// writes as Swift lays it out — and `UInt64`, too, for ``Door/time``. The conformances are this binding's to declare — one per
 /// such door, below — so conforming anything else is unsupported.
 public protocol ColumnValue {
     /// The door that writes this type.

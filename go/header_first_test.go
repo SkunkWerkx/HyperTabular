@@ -7,7 +7,10 @@ package hypertabular
 import (
 	"bytes"
 	"errors"
+	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -72,6 +75,119 @@ func TestAPlanIsBuiltFromTheHeaderAndBoundOnce(t *testing.T) {
 		t.Errorf("codes %v, names %q", codes, b.Text(1))
 	}
 	end(t, r)
+}
+
+// 2^20 − 1 is the widest ordinal a plan may name, for delimited text and a sheet alike; 2^20
+// and past are refused at Bind, naming the plan column, and the reader is left unbound.
+func TestAnOrdinalAtTheCapIsRefusedAtBind(t *testing.T) {
+	const widest = 1<<20 - 1
+	if spec, err := Text(widest).spec(); err != nil || spec.ordinal != widest {
+		t.Errorf("ordinal 2^20 − 1: %v (spec ordinal %d)", err, spec.ordinal)
+	}
+	ordinals := []int{1 << 20, math.MaxInt32}
+	if strconv.IntSize == 64 {
+		ordinals = append(ordinals, math.MaxInt)
+	}
+	for _, ordinal := range ordinals {
+		r, err := NewDelimitedReaderBytesUnbound([]byte("1,2\n"), headerless(','))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Bind([]Column{Text(0), Text(ordinal)}); err == nil || r.IsBound() {
+			t.Errorf("ordinal %d: %v, bound %v", ordinal, err, r.IsBound())
+		} else if want := "plan column 1: reads source column " + strconv.Itoa(ordinal) +
+			"; an ordinal must be below 2^20 (1,048,576)"; !strings.Contains(err.Error(), want) {
+			t.Errorf("ordinal %d: %v", ordinal, err)
+		}
+		// The widest ordinal still binds, and reads as empty past the record's last cell.
+		if err := r.Bind([]Column{Text(0), Text(widest)}); err != nil {
+			t.Fatalf("after the refusal: %v", err)
+		}
+		b := read(t, r, 1)
+		if b.Verdicts(1)[0].Reason() != hypercast.Empty {
+			t.Errorf("ordinal 2^20 − 1: %v", b.Verdicts(1)[0].Reason())
+		}
+	}
+	book, err := OpenWorkbook(repositoryFile(t, "corpus", "workbook", "basic.xlsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet, err := book.SheetUnbound(0, DefaultSheetOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sheet.Bind([]Column{Text(1 << 20)}); err == nil || sheet.IsBound() ||
+		!strings.Contains(err.Error(), "plan column 0: reads source column 1048576") {
+		t.Errorf("a sheet's ordinal 2^20: %v, bound %v", err, sheet.IsBound())
+	}
+	if err := sheet.Bind([]Column{Text(widest)}); err != nil {
+		t.Errorf("a sheet's ordinal 2^20 − 1: %v", err)
+	}
+	if _, err := book.Sheet(0, DefaultSheetOptions, []Column{Text(1 << 20)}); err == nil {
+		t.Error("a sheet opened with ordinal 2^20")
+	}
+}
+
+// A header fixes the width every record has, so a plan column at or past it could only ever
+// be empty: it is refused, by Bind and by a constructor given the plan, naming the column.
+func TestAnOrdinalPastTheHeaderIsRefused(t *testing.T) {
+	const input = "a,b\n1,2\n"
+	r, err := NewDelimitedReaderBytesUnbound([]byte(input), CSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Bind([]Column{I64(0, hypercast.Invariant), I64(2, hypercast.Invariant)}); err == nil || r.IsBound() {
+		t.Errorf("ordinal 2 of 2 columns: %v, bound %v", err, r.IsBound())
+	} else if !strings.Contains(err.Error(), "plan column 1") {
+		t.Errorf("ordinal 2 of 2 columns: %v", err)
+	}
+	if err := r.Bind([]Column{I64(1, hypercast.Invariant)}); err != nil {
+		t.Fatalf("ordinal 1 of 2 columns: %v", err)
+	}
+	if b := read(t, r, 1); b.I64(0)[0] != 2 {
+		t.Errorf("column b: %v", b.I64(0))
+	}
+	plan := []Column{I64(2, hypercast.Invariant)}
+	if _, err := NewDelimitedReaderBytes([]byte(input), CSV, plan); err == nil || !strings.Contains(err.Error(), "plan column 0") {
+		t.Errorf("a plan given up front: %v", err)
+	}
+	if _, err := NewDelimitedReader(strings.NewReader(input), CSV, plan); err == nil || !strings.Contains(err.Error(), "plan column 0") {
+		t.Errorf("a plan given up front, streamed: %v", err)
+	}
+}
+
+// Without a header there is no width to hold a plan to, and a far ordinal is read as empty
+// cells; the cell table is sized for as many rows as its budget holds — here one — rather than
+// a batch of rows that wide.
+func TestAFarOrdinalWithoutAHeaderIsReadInBoundedMemory(t *testing.T) {
+	// The widest ordinal a plan may name: one row is 1,048,577 entries, a batch ~34 GB.
+	const far = 1<<20 - 1
+	plan := []Column{I64(0, hypercast.Invariant), I64(far, hypercast.Invariant)}
+	r, err := NewDelimitedReaderBytes([]byte("a,b\n1,2\n"), Dialect{Separator: ',', Quoting: true}, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.cells) != far+2 {
+		t.Errorf("a cell table of %d entries, not one row of %d", len(r.cells), far+2)
+	}
+	rows := 0
+	for {
+		b, err := r.Read()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		for row := range b.Rows() {
+			if v := b.Verdicts(1)[row]; v.Reason() != hypercast.Empty || string(b.Raw(1, row)) != "" {
+				t.Errorf("row %d: %v, raw %q", rows+row, v.Reason(), b.Raw(1, row))
+			}
+		}
+		rows += b.Rows()
+	}
+	if rows != 2 {
+		t.Errorf("%d rows", rows)
+	}
 }
 
 func TestAPlanGivenUpFrontCannotBeBoundAgain(t *testing.T) {

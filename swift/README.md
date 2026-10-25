@@ -68,7 +68,14 @@ while let batch = try await reader.readAsync() { /* … */ }
 let workbook = try await Workbook(bytes: try await URLSession.shared.bytes(from: bookURL).0)
 ```
 
-A cancelled `readAsync()` throws `CancellationError` and loses nothing: every byte that had
+A sequence hands over a byte at a time and cannot say whether another is waiting, so a
+task the reader owns awaits it, up to `bufferBytes` ahead, and stops when the reader is
+released. A read takes everything that has arrived and waits only when nothing has: a batch
+is `batchRows` rows when that many are in, and a header or row is read once its line is in
+(within 200 µs, so that a sequence ahead of the reader wakes it a batch at a time rather than
+a line at a time), never held back for more. The sequence is passed `sending`, as that task
+takes it. A
+cancelled `readAsync()` throws `CancellationError` and loses nothing: every byte that had
 arrived stays buffered, and the next read goes on from there.
 
 ## The shape
@@ -83,6 +90,13 @@ once per few thousand rows, not once per cell.
   as HyperCast's `Verdict`, `string`/`text` for text and `raw` for the text a cell was cast
   from — or `nil` when there are no more rows. It is a view of the reader's buffers, valid
   until the next `read()`, and the same type for delimited text and for a sheet.
+- **Whole columns are the primitives.** `values(_:as:)` lends the bool, integer and
+  floating-point doors as their own type, and the time door as `UInt64` nanoseconds since
+  midnight. The decimal, UUID and other temporal doors are read a cell at a time with
+  `get(_:row:as:)`: HyperCast presents them as Foundation's `Decimal`, `UUID`, `Date` and
+  `DateComponents` and the standard library's `Duration`, none of which is laid out as the
+  core writes the value (`UUID`'s layout is not part of Foundation's ABI), and HyperCast's
+  Swift package has no type of its own that is.
 - **Rows, too.** A `Batch` is a `RandomAccessCollection` of `Row` — `index`, `line`,
   `get(_:as:)`, `verdict(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`, the batch's accessors
   with the row fixed, allocating nothing — and `forEachRow` on a reader or a sheet reads
@@ -90,7 +104,12 @@ once per few thousand rows, not once per cell.
 - **Header first, or plan first.** Opened without a plan, a reader or sheet reads its
   header — a `Header`, a collection of `String` with `ordinal(of:)` (throwing
   `NoSuchColumn`) and `firstIndex(of:)`, both exact byte for byte — and is bound once with
-  `bind(_:)`; reading before that, or binding twice, throws `PlanError`.
+  `bind(_:)`; reading before that, or binding twice, throws `PlanError`. Once a delimited
+  header has been read, a plan column at or past its width — where every record can only
+  be empty — is refused with `PlanError.outOfReach(column:)`, whether the plan was given
+  to the initializer or bound after. So, for a reader or a sheet, is an ordinal of 2²⁰ or
+  more: no workbook format has that many columns, and one row of cell table stays under
+  8 MiB.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
   `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
   the plan states each column's door and, for numbers, its `NumFormat`.

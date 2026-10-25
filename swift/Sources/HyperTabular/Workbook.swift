@@ -605,11 +605,13 @@ public final class Sheet {
     ///
     /// - Throws: ``PlanError/alreadyBound`` when the sheet has a plan, whether it was opened
     ///   with one or bound one already; the sheet goes on with the plan it has.
+    ///   ``PlanError/outOfReach(column:)`` when a column's ordinal is 2²⁰ or more; the sheet
+    ///   stays unbound.
     public func bind(_ plan: [Column]) throws {
         guard columnSet == nil else {
             throw PlanError.alreadyBound
         }
-        let columns = Columns(plan: plan, batchRows: options.batchRows)
+        let columns = try Columns(plan: plan, batchRows: options.batchRows)
         perRow = plan.count + 1
         // Grown, never replaced: the slots may hold a header row still to be repeated. The
         // stingy test pass leaves the cell table at its one entry, for the core to ask.

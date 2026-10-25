@@ -99,7 +99,7 @@ do {
     // HyperCast's own door — the other linked-in core — saying the same of the same text.
     let raw = batch.raw(22, row: 0)
     check(text(raw) == "a \"quoted\" cell", "raw text of a cell that failed to cast")
-    let judged = try Cast.i32(raw, format: .invariant)
+    let judged = Cast.i32(raw, format: .invariant)
     check(batch.get(22, row: 0, as: Int32.self) == judged, "the cell's verdict is HyperCast's")
     check(judged == .fault(Fault(reason: .malformed, offset: 0, length: 1)), "a fault says where")
     check(try reader.read() == nil, "end of input")

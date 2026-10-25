@@ -192,4 +192,3 @@ for sheet_row in headed.rows():
     assert_type(sheet_row, Row)
 
 assert_type(hypertabular.native_version(), str)
-assert_type(hypertabular.BACKEND, str)

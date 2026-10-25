@@ -79,14 +79,14 @@ func TestNativeVersionIsTheCratesVersion(t *testing.T) {
 }
 
 func TestAPlanIsAProjection(t *testing.T) {
-	// Five source columns read into four, out of order, one of them twice, and one that no
-	// record has.
+	// Five source columns read into four, out of order, one of them twice. (A column past
+	// the header's width is refused: TestAnOrdinalPastTheHeaderIsRefused; without a header it
+	// reads as empty: TestAFarOrdinalWithoutAHeaderIsReadInBoundedMemory.)
 	r := open(t, "id,name,score,when,flag\n7,alice,2.5,2026-01-07,yes\n8,bob,x,2026-02-30,no\n", CSV, []Column{
 		DateOnly(3),
 		Text(0),
 		I32(0, hypercast.Invariant),
 		F64(2, hypercast.Invariant),
-		Text(9),
 	})
 	if header := r.Header(); len(header) != 5 || header[4] != "flag" {
 		t.Fatalf("header %q", header)
@@ -103,13 +103,6 @@ func TestAPlanIsAProjection(t *testing.T) {
 	}
 	if scores := b.F64(3); scores[0] != 2.5 || scores[1] != 0 || b.Verdicts(3)[1].Reason() != hypercast.Malformed {
 		t.Errorf("scores %v, %v", scores, b.Verdicts(3))
-	}
-	// A source column past the record's last cell reads as empty.
-	if missing := b.Text(4); missing[0] != nil || missing[1] != nil || b.Verdicts(4)[0].Reason() != hypercast.Empty {
-		t.Errorf("a column no record has: %q, %v", missing, b.Verdicts(4))
-	}
-	if string(b.Raw(4, 0)) != "" {
-		t.Errorf("a column no record has: raw %q", b.Raw(4, 0))
 	}
 	if r.Records() != 3 {
 		t.Errorf("Records() = %d, want 3", r.Records())

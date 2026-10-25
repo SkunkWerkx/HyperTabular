@@ -75,6 +75,66 @@ fn a_plan_that_cannot_be_honoured_is_refused_at_bind() {
 }
 
 #[test]
+fn an_ordinal_of_2_20_or_more_is_refused_at_bind() {
+    // An ordinal must be below 2^20: past any workbook format's columns, and one row of
+    // cell table at most 8 MiB. Without a header, so that only the cap refuses it.
+    let dialect = Dialect::CSV.with_header(false);
+    for ordinal in [1 << 20, u32::MAX as usize, usize::MAX] {
+        let mut reader = DelimitedReader::from_slice_unbound(TEXT, dialect).unwrap();
+        let plan = [Column::text(0), Column::text(ordinal)];
+        assert!(matches!(reader.bind(&plan), Err(Error::Plan { column: 1 })));
+        assert!(!reader.is_bound());
+    }
+    // 2^20 − 1 is read, as empty.
+    let mut reader = DelimitedReader::from_slice_unbound(TEXT, dialect).unwrap();
+    reader.bind(&[Column::text((1 << 20) - 1)]).unwrap();
+    let batch = reader.read().unwrap().unwrap();
+    assert!(batch.verdicts(0).iter().all(|verdict| verdict.reason == 1));
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook/basic.xlsx");
+    let book = Workbook::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+    let mut sheet = book.sheet_unbound(0, SheetOptions::default()).unwrap();
+    assert!(matches!(
+        sheet.bind(&[Column::text(1 << 20)]),
+        Err(Error::Plan { column: 0 })
+    ));
+    sheet.bind(&[Column::text((1 << 20) - 1)]).unwrap();
+    let batch = sheet.read().unwrap().unwrap();
+    assert!(batch.verdicts(0).iter().all(|verdict| verdict.reason == 1));
+}
+
+#[test]
+fn a_column_past_the_width_a_header_gives_is_refused() {
+    // The header gives every record two cells: a third could only ever be empty.
+    const TWO: &[u8] = b"a,b\n1,2\n";
+    let mut reader = DelimitedReader::from_slice_unbound(TWO, Dialect::CSV).unwrap();
+    let plan = [Column::i64(0), Column::i64(2)];
+    assert!(matches!(reader.bind(&plan), Err(Error::Plan { column: 1 })));
+    assert!(!reader.is_bound());
+    reader.bind(&[Column::i64(1)]).unwrap();
+    assert_eq!(reader.read().unwrap().unwrap().i64(0), &[2]);
+
+    // A plan bound before the header is read is held to it as soon as it is.
+    assert!(matches!(
+        DelimitedReader::from_slice(TWO, Dialect::CSV, &plan),
+        Err(Error::Plan { column: 1 })
+    ));
+    assert!(matches!(
+        DelimitedReader::from_reader(TWO, Dialect::CSV, &plan),
+        Err(Error::Plan { column: 1 })
+    ));
+    let mut reader = DelimitedReader::from_reader(TWO, Dialect::CSV, &[Column::i64(1)]).unwrap();
+    assert_eq!(reader.read().unwrap().unwrap().i64(0), &[2]);
+
+    // Without a header the width is not known at bind, and the column reads as empty.
+    let dialect = Dialect::CSV.with_header(false);
+    let mut reader = DelimitedReader::from_slice(TWO, dialect, &plan).unwrap();
+    let batch = reader.read().unwrap().unwrap();
+    assert_eq!(batch.rows(), 2);
+    assert!(batch.verdicts(1).iter().all(|verdict| verdict.reason == 1));
+}
+
+#[test]
 fn a_sheet_is_opened_header_first() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook/basic.xlsx");
     let book = Workbook::from_reader(std::fs::File::open(path).unwrap()).unwrap();

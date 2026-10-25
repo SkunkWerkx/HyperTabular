@@ -43,6 +43,17 @@ module HyperTabular
 
       ARENA_BYTES = 4096
       NAMES = 64
+      # The cell-table entries a reader holds at most, unless one row takes more: what a
+      # batch of 4096 rows takes for a plan reaching 256 source columns, so that an ordinary
+      # plan's batches are full, and a plan reaching far past any column a record holds
+      # costs one row's entries rather than a batch of them.
+      CELL_BUDGET = 4096 * 257
+
+      # The rows of +per_row+ entries the cell table holds: as many as the budget allows,
+      # at least one and at most a batch. The core fills only the rows the table holds.
+      def self.cell_rows(per_row, batch_rows)
+        (CELL_BUDGET / [per_row, 1].max).clamp(1, batch_rows)
+      end
 
       CONTRACT = "hypertabular: libhypertabular reported a contract violation — a binding bug, " \
                  "please report it".freeze
@@ -56,6 +67,9 @@ module HyperTabular
       # ordinal the plan reads, plus two — or more, if the core asked for more. Nil until
       # #bind.
       attr_reader :columns, :per_row
+
+      # The cell-table entries the reader holds.
+      def cell_entries = @cells_cap
 
       # The loaded core's version word, major << 16 | minor << 8 | patch.
       def self.version
@@ -87,7 +101,7 @@ module HyperTabular
         @batch_rows = batch_rows
         @columns = Columns.new(specs, sizes, batch_rows)
         @per_row = per_row
-        @cells_cap = per_row * batch_rows
+        @cells_cap = per_row * Delimited.cell_rows(per_row, batch_rows)
         @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
       end
 
@@ -142,12 +156,14 @@ module HyperTabular
           needed = finished
           case code
           when OK
-            @cramped = @rows.positive? && @rows < @batch_rows && @arena_used * 2 >= @arena_cap
+            # A batch the cell table ends early (CELL_BUDGET) is no reason to grow the arena.
+            held = [@batch_rows, @cells_cap / @per_row].min
+            @cramped = @rows.positive? && @rows < held && @arena_used * 2 >= @arena_cap
             return code
           when ERR_STRUCTURE then return code
           when ERR_CELLS
             @per_row = [@per_row, needed].max
-            @cells_cap = @per_row * @batch_rows
+            @cells_cap = @per_row * Delimited.cell_rows(@per_row, @batch_rows)
             @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
           when ERR_ARENA then grow_arena(needed)
           else raise CONTRACT

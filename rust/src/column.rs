@@ -114,7 +114,10 @@ impl Column {
 
     /// The column as the core takes it; `index` is its place in the plan, for the error.
     pub(crate) fn spec(&self, index: usize) -> Result<ColumnSpec, Error> {
-        let ordinal = u32::try_from(self.ordinal).map_err(|_| Error::Plan { column: index })?;
+        if self.ordinal > MAX_ORDINAL {
+            return Err(Error::Plan { column: index });
+        }
+        let ordinal = self.ordinal as u32;
         let param = match self.door {
             Door::Unix(precision) => precision as u32,
             Door::DateOrdered(order) | Door::DateTime(order) => order as u32,
@@ -137,17 +140,63 @@ impl Column {
     }
 }
 
-/// A plan as the core takes it, and the number of row slots it reaches.
-pub(crate) fn specs(plan: &[Column]) -> Result<(Vec<ColumnSpec>, usize), Error> {
+/// The widest ordinal a plan may name: an ordinal must be below 2^20 (1,048,576). No
+/// workbook format has that many columns (XLSX and ODS stop at 16,384, Numbers at 1,000),
+/// and at the cap one row of cell table is at most 8 MiB, so a headerless plan cannot ask
+/// for the gigabytes a row reaching 2³¹ would take.
+pub(crate) const MAX_ORDINAL: usize = (1 << 20) - 1;
+
+/// A plan as the core takes it, the number of row slots it reaches, and the place in the
+/// plan of the column that reaches furthest (the first, if several do).
+pub(crate) fn specs(plan: &[Column]) -> Result<(Vec<ColumnSpec>, usize, usize), Error> {
     let specs = plan
         .iter()
         .enumerate()
         .map(|(index, column)| column.spec(index))
         .collect::<Result<Vec<_>, _>>()?;
-    let width = plan
-        .iter()
-        .map(|column| column.ordinal + 1)
-        .max()
-        .unwrap_or(0);
-    Ok((specs, width))
+    // Every ordinal is at most `MAX_ORDINAL`, so one more fits a `usize` on any target.
+    let (mut width, mut widest) = (0, 0);
+    for (index, column) in plan.iter().enumerate() {
+        if column.ordinal + 1 > width {
+            (width, widest) = (column.ordinal + 1, index);
+        }
+    }
+    Ok((specs, width, widest))
+}
+
+/// The first plan column reading at or past `width`, the source's width once a header has
+/// fixed it, as [`Error::Plan`]: every record has exactly that many cells, so such a column
+/// could only ever be empty.
+pub(crate) fn within(plan: &[Column], width: Option<usize>) -> Result<(), Error> {
+    match width.and_then(|width| plan.iter().position(|column| column.ordinal >= width)) {
+        Some(column) => Err(Error::Plan { column }),
+        None => Ok(()),
+    }
+}
+
+/// The cell-table entries a delimited reader holds at most, unless one row takes more:
+/// what a batch of 4096 rows takes for a plan reaching 256 source columns, so that an
+/// ordinary plan's batches are full, and a plan reaching far past any column a header
+/// declared costs one row's entries rather than a batch of them.
+pub(crate) const CELL_BUDGET: usize = 4096 * 257;
+
+/// The rows of `per_row` entries the cell table holds: as many as the budget allows, at
+/// least one and at most a batch. The core fills only the rows the table holds.
+pub(crate) fn cell_rows(per_row: usize, batch_rows: usize) -> usize {
+    (CELL_BUDGET / per_row.max(1)).clamp(1, batch_rows.max(1))
+}
+
+/// `len` entries, or [`Error::Plan`] naming plan column `column` — the one whose reach
+/// takes them — when that many cannot be had.
+pub(crate) fn table<T: Clone + Default>(
+    len: Option<usize>,
+    column: usize,
+) -> Result<Vec<T>, Error> {
+    let len = len.ok_or(Error::Plan { column })?;
+    let mut table = Vec::new();
+    table
+        .try_reserve_exact(len)
+        .map_err(|_| Error::Plan { column })?;
+    table.resize(len, T::default());
+    Ok(table)
 }

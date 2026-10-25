@@ -2,7 +2,6 @@ package hypertabular
 
 import (
 	"fmt"
-	"math"
 
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 )
@@ -222,9 +221,10 @@ func Span(ordinal int) Column { return Column{ordinal: ordinal, door: DoorSpan} 
 // Text is a text column: the cell's bytes themselves, untrimmed, quotes resolved.
 func Text(ordinal int) Column { return Column{ordinal: ordinal, door: DoorText} }
 
-// maxOrdinal keeps the cell table's row width — the widest ordinal plus two — inside the
-// uint32 the core counts it in.
-const maxOrdinal = math.MaxInt32 - 2
+// maxOrdinal is the widest ordinal a plan may name: below 2^20 (1,048,576). No workbook
+// format has that many columns (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the
+// cap one row of cell table is at most 8 MiB, so a headerless plan cannot ask for ~16 GiB.
+const maxOrdinal = 1<<20 - 1
 
 // spec is the column as the core reads it, or the reason it cannot be one. Everything here
 // is a caller's mistake in the plan, reported by the reader's constructor before any input
@@ -235,8 +235,11 @@ func (c Column) spec() (rawSpec, error) {
 	if c.door < DoorBool || c.door > DoorExcelSerial {
 		return spec, fmt.Errorf("door %d is not a door; build a Column with a constructor such as I32 or Text", uint32(c.door))
 	}
-	if c.ordinal < 0 || c.ordinal > maxOrdinal {
+	if c.ordinal < 0 {
 		return spec, fmt.Errorf("ordinal %d is out of range", c.ordinal)
+	}
+	if c.ordinal > maxOrdinal {
+		return spec, fmt.Errorf("reads source column %d; an ordinal must be below 2^20 (1,048,576)", c.ordinal)
 	}
 	switch c.door {
 	case DoorUnix:

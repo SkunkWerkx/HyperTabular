@@ -360,7 +360,7 @@ public sealed unsafe class Workbook : IDisposable
 
 	/// <summary>Starts a read of the sheet at <paramref name="index"/> of <see cref="Sheets"/> through <paramref name="plan"/>.</summary>
 	/// <exception cref="ArgumentOutOfRangeException">The workbook has no sheet at that index.</exception>
-	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured.</exception>
+	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, or a column's ordinal is 2²⁰ or more.</exception>
 	/// <exception cref="TabularException">The sheet, or its header row, is structurally broken.</exception>
 	public Sheet Sheet(int index, SheetOptions options, ReadOnlySpan<Column> plan)
 	{
@@ -371,7 +371,7 @@ public sealed unsafe class Workbook : IDisposable
 
 	/// <summary>Starts a read of the first sheet named <paramref name="name"/> through <paramref name="plan"/>.</summary>
 	/// <exception cref="KeyNotFoundException">The workbook has no sheet by that name.</exception>
-	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured.</exception>
+	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, or a column's ordinal is 2²⁰ or more.</exception>
 	/// <exception cref="TabularException">The sheet, or its header row, is structurally broken.</exception>
 	public Sheet Sheet(string name, SheetOptions options, ReadOnlySpan<Column> plan)
 	{

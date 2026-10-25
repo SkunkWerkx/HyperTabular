@@ -94,12 +94,7 @@ from hypercast import (
 
 from . import _native
 
-#: Which backend this process loaded: always ``"native"``, the PyO3 extension that links the
-#: Rust core straight into CPython — the only backend, and the one every wheel ships.
-BACKEND: str = "native"
-
 __all__ = [
-    "BACKEND",
     "native_version",
     "DelimitedReader",
     "Workbook",
@@ -355,8 +350,13 @@ class Column:
         """Refuses an ordinal no source column can have."""
         if not isinstance(self.ordinal, int) or isinstance(self.ordinal, bool):
             raise TypeError(f"ordinal must be an int, not {type(self.ordinal).__name__}")
-        if not 0 <= self.ordinal < 2**31:
-            raise ValueError(f"ordinal must be between 0 and 2**31 - 1, not {self.ordinal}")
+        # No workbook format has 2^20 columns (XLSX and ODS stop at 16,384, Numbers at
+        # 1,000), and at the cap one row of cell table is at most 8 MiB.
+        if not 0 <= self.ordinal < 2**20:
+            raise ValueError(
+                f"ordinal must be at least 0, and an ordinal must be below 2^20 (1,048,576);"
+                f" got {self.ordinal}"
+            )
 
     def __repr__(self) -> str:
         """The column as the factory call that makes it."""

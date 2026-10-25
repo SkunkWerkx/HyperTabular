@@ -201,16 +201,65 @@ final class ReaderTest extends TestCase
 
     public function testAColumnPastTheRecordsEndReadsAsEmpty(): void
     {
+        // Without a header the source's width is not known at bind: the column is read, and
+        // every record leaves it empty.
         $reader = DelimitedReader::fromString(
             "a,b\n1,2\n",
-            Dialect::csv(),
+            new Dialect(',', hasHeader: false),
             [Column::i32(5), Column::text(1), Column::text(5)]
         );
         $this->assertNotNull($batch = $reader->read());
-        $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $batch->get(0, 0));
-        $this->assertSame('', $batch->raw(0, 0));
-        $this->assertSame(['2'], $batch->values(1));
-        $this->assertSame([null], $batch->values(2));
+        $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $batch->get(0, 1));
+        $this->assertSame('', $batch->raw(0, 1));
+        $this->assertSame(['b', '2'], $batch->values(1));
+        $this->assertSame([null, null], $batch->values(2));
+    }
+
+    public function testAColumnPastTheHeadersWidthIsRefusedAtBind(): void
+    {
+        $text = "a,b\n1,2\n";
+        $reader = DelimitedReader::fromString($text, Dialect::csv());
+        try {
+            $reader->bind([Column::i64(0), Column::i64(2)]);
+            $this->fail('a column at the header\'s width was bound');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Plan column 1 reads source column 2', $e->getMessage());
+            $this->assertFalse($reader->isBound());
+        }
+        $reader->bind([Column::i64(0), Column::i64(1)]);
+        $this->assertSame([2], $reader->read()->values(1));
+
+        // A plan handed over is held to the header as soon as it has been read.
+        try {
+            DelimitedReader::fromString($text, Dialect::csv(), [Column::i64(2)]);
+            $this->fail('a column at the header\'s width was accepted');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Plan column 0 reads source column 2', $e->getMessage());
+        }
+        $reader = DelimitedReader::fromString($text, Dialect::csv(), [Column::i64(1)]);
+        $this->assertSame([2], $reader->read()->values(0));
+    }
+
+    public function testAFarOrdinalWithoutAHeaderCostsOneRowOfCellTable(): void
+    {
+        $reader = DelimitedReader::fromString(
+            "a,b\n1,2\n",
+            new Dialect(',', hasHeader: false),
+            [Column::text(0), Column::i64((1 << 20) - 1)]
+        );
+        // One row of 1,048,577 spans, not a batch of 4096 of them (about 34 GB).
+        $this->assertSame((1 << 20) + 1, (new \ReflectionProperty($reader, 'cellsCap'))->getValue($reader));
+        $firsts = [];
+        $empties = 0;
+        while (($batch = $reader->read()) !== null) {
+            for ($row = 0; $row < $batch->rows(); $row++) {
+                $firsts[] = $batch->values(0)[$row];
+                $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $batch->get(1, $row));
+                $empties++;
+            }
+        }
+        $this->assertSame(['a', '1'], $firsts);
+        $this->assertSame(2, $empties);
     }
 
     public function testAnEmptyPlanStillCountsRows(): void
@@ -290,6 +339,9 @@ final class ReaderTest extends TestCase
             'a plan entry that is not a column' => static fn () =>
                 DelimitedReader::fromString(self::ORDERS, Dialect::csv(), [Column::i32(0), 'i32']),
             'a negative ordinal' => static fn () => Column::text(-1),
+            'an ordinal of 2^20, past every workbook format' => static fn () => Column::text(1 << 20),
+            'an ordinal of 2³¹' => static fn () => Column::text(1 << 31),
+            'an ordinal past 32 bits' => static fn () => Column::text(PHP_INT_MAX),
             'no rows a batch' => static fn () =>
                 DelimitedReader::fromString(self::ORDERS, Dialect::csv(), [Column::i32(0)], batchRows: 0),
             'no buffer' => static fn () =>
@@ -307,6 +359,20 @@ final class ReaderTest extends TestCase
                 $this->addToAssertionCount(1);
             }
         }
+        try {
+            Column::text(1 << 20);
+            $this->fail('an ordinal of 2^20 was accepted');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('below 2^20 (1,048,576); got 1048576', $e->getMessage());
+        }
+        // 2^20 − 1, the widest ordinal a plan names, binds and reads: headerless, one row of
+        // cell table, and empty past the record.
+        $widest = Column::text((1 << 20) - 1);
+        $this->assertSame((1 << 20) - 1, $widest->ordinal);
+        $reader = DelimitedReader::fromString("a\n", new Dialect(',', hasHeader: false), [$widest]);
+        $this->assertNotNull($batch = $reader->read());
+        $this->assertSame(CastFailure::Empty, $batch->faults(0)[0]->reason);
+        $this->assertNull($reader->read());
     }
 
     public function testAStructuralFailureComesAfterTheIntactRowsAndIsFinal(): void

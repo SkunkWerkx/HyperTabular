@@ -22,6 +22,13 @@ sealed unsafe class Columns
 	internal readonly byte[][] Values;
 	internal readonly CellVerdict[][] Verdicts;
 
+	/// <summary>
+	/// The widest ordinal a plan may name: 2²⁰ − 1. No workbook format has that many columns
+	/// (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the cap one row of cell table
+	/// is at most 8 MiB, so a headerless plan cannot ask for ~16 GiB.
+	/// </summary>
+	internal const int MaxOrdinal = (1 << 20) - 1;
+
 	internal Columns(ReadOnlySpan<Column> plan, int batchRows)
 	{
 		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchRows);
@@ -36,6 +43,10 @@ sealed unsafe class Columns
 			var column = Plan[index];
 			if (column.Door == Door.Unspecified)
 				throw new ArgumentException($"Plan column {index} is default(Column); build one with Column's factories.", "plan");
+			// Refused here as the plan's, for a reader and a sheet alike.
+			if (column.Ordinal > MaxOrdinal)
+				throw new ArgumentException(
+					$"Plan column {index} reads source column {column.Ordinal}; an ordinal must be below 2^20 (1,048,576).", "plan");
 			Width = Math.Max(Width, column.Ordinal + 1);
 			Specs[index] = new Native.RawColumnSpec
 			{

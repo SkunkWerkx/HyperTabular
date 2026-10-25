@@ -18,7 +18,7 @@ let coreBundle =
 // Xcode 12 and does not read a static-library artifact bundle. It carries the same no_std
 // archives, one slice each (arm64 only), with the header and module map under
 // Headers/HyperTabularCore/, so `import HyperTabularCore` finds the same module either way.
-// HyperCast's package does the same for its own core, as of 0.7.0.
+// HyperCast's package does the same for its own core.
 //
 // Only a Mac can build for those platforms, so only a Mac's manifest declares the target; on
 // Linux and Windows this file is what it was. And only when the XCFramework is there: it is
@@ -60,7 +60,10 @@ let package = Package(
         // HyperCast is the judge: every cell is one of its verdicts, and the verdict, the
         // fault, the number format and the declared enums are its own Swift types, from its
         // own package — never copies of them.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "0.9.0")
+        // Pinned to the HyperCast commit whose Swift doors stopped throwing, until HyperCast
+        // 1.0.0 is tagged; then `from: "1.0.0"`. A tagged package cannot depend on a revision
+        // (SwiftPM refuses it to every consumer), so the release guard refuses a tag with one.
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", revision: "525ef572843e7be955a94fd4b705382948adb2af")
     ],
     targets: [
         // The native core as static libraries, one per triple (SE-0482, which is what sets
@@ -81,7 +84,11 @@ let package = Package(
         ),
         .testTarget(
             name: "HyperTabularTests",
-            dependencies: ["HyperTabular"]
+            dependencies: ["HyperTabular"],
+            // Tells CoreFreshnessTests the suite links the checkout's own core, so the
+            // committed bundle's age is no concern of this run.
+            swiftSettings: Context.environment["HYPERTABULAR_LOCAL_CORE"] == nil
+                ? [] : [.define("HYPERTABULAR_LOCAL_CORE")]
         ),
     ] + appleCoreTargets
 )

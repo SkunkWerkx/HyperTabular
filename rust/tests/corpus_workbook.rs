@@ -4,7 +4,7 @@
 //!
 //! The file is the frozen word of the std workbook reader this crate had before its core
 //! could read a workbook; that reader has been deleted, and nothing independent of the
-//! core reads a workbook here any more. So this replay is what holds the core to what
+//! core reads a workbook here. So this replay is what holds the core to what
 //! that reader read — and `the_committed_corpus_is_what_the_example_writes` is what says
 //! so when it stops.
 

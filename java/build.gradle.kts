@@ -10,10 +10,11 @@ plugins {
 // io.github.skunkwerkx — the SkunkWerkx org's Central Portal namespace, the one HyperCast
 // and HyperUuid publish under.
 group = "io.github.skunkwerkx"
-// CI may override this (0.9.0-ci.<run_number>) via HYPERTABULAR_VERSION so repeated manual
-// runs do not collide with a published version; a real publish never sets it and uses the
-// committed version as-is. It moves with rust/Cargo.toml: the suite pins the loaded
-// library's own version to it.
+// The committed version, which prepare-release.yml bumps (the Forge's hyper_config.py
+// matches this line exactly). HYPERTABULAR_VERSION overrides it for a one-off build; nothing
+// in CI sets it for Gradle, so the Central bundle release.yml packs always carries the
+// committed version. It moves with rust/Cargo.toml: the suite pins the loaded library's own version
+// to it.
 version = System.getenv("HYPERTABULAR_VERSION") ?: "0.9.0"
 
 repositories {

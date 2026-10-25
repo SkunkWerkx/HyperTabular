@@ -11,8 +11,11 @@ import array
 import copy
 import datetime as dt
 import io
+import os
 import pickle
 import sys
+import threading
+import time
 import uuid
 from decimal import Decimal
 from pathlib import Path
@@ -406,8 +409,9 @@ def test_a_cell_is_matchable_and_a_column_is_a_sequence_of_cells():
 
 def test_raw_is_the_text_a_cell_was_cast_from():
     """raw(i) is the unescaped bytes a cell was cast from."""
-    data = b'n,q\n" 7 ","say ""hi"""\nx,""\n12x4,"a\nb"\n'
-    batch = one_batch(data, [Column.i32(0), Column.text(1), Column.i32(5)], Dialect.CSV)
+    # Without a header, whose width would refuse ordinal 5 at bind.
+    data = b'" 7 ","say ""hi"""\nx,""\n12x4,"a\nb"\n'
+    batch = one_batch(data, [Column.i32(0), Column.text(1), Column.i32(5)])
     number, text, beyond = batch.columns
     # Quoting resolved, nothing trimmed — what a fault's span indexes.
     assert [number.raw(row) for row in range(3)] == [b" 7 ", b"x", b"12x4"]
@@ -769,6 +773,68 @@ def test_a_read_that_fails_is_the_callers_exception_and_not_the_end():
     assert [value for batch in reader for value in batch.column(0).values] == [1, 2]
 
 
+def _live(write_end: int, closed: threading.Event, received: threading.Event) -> None:
+    """Writes a header and three records, then holds the pipe open until the reader has had
+    them (or five seconds pass), and closes it."""
+    with os.fdopen(write_end, "wb", buffering=0) as pipe:
+        pipe.write(b"id\n1\n2\n3\n")
+        received.wait(timeout=5)
+        closed.set()
+
+
+def _read_live(open_reader) -> None:
+    """The header and the first batch arrive while the writer still holds the pipe open."""
+    read_end, write_end = os.pipe()
+    closed, received = threading.Event(), threading.Event()
+    writer = threading.Thread(target=_live, args=(write_end, closed, received))
+    writer.start()
+    try:
+        reader = open_reader(read_end)
+        assert not closed.is_set(), "the header waited for the pipe to close"
+        assert reader.header == ("id",)
+        reader.bind([Column.i32(0)])
+        batch = reader.read()
+        assert not closed.is_set(), "the records waited for the pipe to close"
+        assert batch is not None and batch.column(0).values.tolist() == [1, 2, 3]
+        received.set()
+        assert reader.read() is None
+        reader.close()
+    finally:
+        received.set()
+        writer.join()
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide cannot start a thread")
+@pytest.mark.parametrize("buffering", [-1, 0], ids=["buffered", "raw"])
+def test_a_pipe_delivers_complete_records_before_it_closes(buffering: int):
+    """A buffered file object is read with read1, a raw one with read: either way what has
+    arrived is parsed, not held until the buffer fills."""
+    _read_live(lambda fd: DelimitedReader(os.fdopen(fd, "rb", buffering=buffering), Dialect.CSV))
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no named pipes")
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide cannot start a thread")
+def test_a_fifo_opened_by_path_delivers_complete_records_before_it_closes(tmp_path: Path):
+    """A path the reader opens is read the same way: a FIFO's records arrive as they do, and
+    the open that waits for the FIFO's writer lets that writer's thread run."""
+    fifo = tmp_path / "live.csv"
+    os.mkfifo(fifo)
+
+    def open_reader(read_end: int) -> DelimitedReader:
+        # The pipe stands in for the writer's side of the FIFO: copied across as it comes,
+        # once the reader is waiting in its open.
+        def pump() -> None:
+            time.sleep(0.1)
+            with os.fdopen(read_end, "rb", buffering=0) as source, open(fifo, "wb", 0) as sink:
+                while chunk := source.read(65536):
+                    sink.write(chunk)
+
+        threading.Thread(target=pump, daemon=True).start()
+        return DelimitedReader.open(fifo, Dialect.CSV)
+
+    _read_live(open_reader)
+
+
 # --- a caller's bug is an exception, of the documented type -------------------------------------
 
 
@@ -824,9 +890,12 @@ def test_the_plan_is_columns_and_checked():
     reader = DelimitedReader(b"", Dialect.CSV, (Column.i32(index) for index in range(3)))
     assert reader.plan == (Column.i32(0), Column.i32(1), Column.i32(2))
 
-    for ordinal in (-1, 2**31):
+    for ordinal in (-1, 2**20, 2**31):
         with pytest.raises(ValueError, match="ordinal"):
             Column.i32(ordinal)
+    # 2^20 - 1, the widest ordinal a plan may name, is read, as empty.
+    widest = one_batch(b"1\n", [Column.text(2**20 - 1)])
+    assert widest.column(0)[0] == Fault(CastFailure.EMPTY, 0, 0)
     for ordinal in ("0", 0.0, None, True):
         with pytest.raises(TypeError, match="ordinal"):
             Column.text(ordinal)  # type: ignore[arg-type]
@@ -867,9 +936,44 @@ def test_sizes_are_checked():
         DelimitedReader(b"", Dialect.CSV, plan, 1024)  # type: ignore[misc]
     # The reader allocates its arrays once, up front: a batch nobody could allocate is
     # refused there, and is not a crash.
-    for plan in ([Column.i32(0)], [Column.text(0)], []):
+    for plan in ([Column.i32(0)], [Column.text(0)]):
         with pytest.raises(MemoryError, match="batch_rows"):
             DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=sys.maxsize)
+    # A plan of no columns has no arrays, and a cell table no larger than its budget.
+    assert [
+        b.rows for b in DelimitedReader(b"a\n1\n", Dialect.CSV, [], batch_rows=sys.maxsize)
+    ] == [1]
+
+
+def test_a_column_past_the_width_the_header_gives_is_refused():
+    """Once a header has fixed every record's width, a plan column past it is refused."""
+    data = b"a,b\n1,2\n"
+    reader = DelimitedReader(data, Dialect.CSV)
+    with pytest.raises(ValueError, match=r"^plan\[1\] reads source column 2, past the 2 columns"):
+        reader.bind([Column.i64(0), Column.i64(2)])
+    assert not reader.is_bound
+    reader.bind([Column.i64(1)])
+    assert [b.column(0).values.tolist() for b in reader] == [[2]]
+    # A plan handed over before the header is read is held to it as soon as it is.
+    with pytest.raises(ValueError, match=r"^plan\[0\] reads source column 2"):
+        DelimitedReader(data, Dialect.CSV, [Column.i64(2)])
+    with pytest.raises(ValueError, match=r"^plan\[0\] reads source column 2"):
+        DelimitedReader(io.BytesIO(data), Dialect.CSV, [Column.i64(2)])
+    assert one_batch(data, [Column.i64(1)], Dialect.CSV).column(0).values.tolist() == [2]
+
+
+def test_a_column_far_past_a_headerless_record_costs_a_row_of_cell_table():
+    """Without a header the width is unknown at bind: a far column reads as empty, a row at a time."""
+    reader = DelimitedReader(b"a,b\n1,2\n", HEADLESS, [Column.i64(0), Column.i64(2**20 - 1)])
+    batches = read_all(reader)
+    # One row of 2**20 + 1 cell-table entries a batch: a batch of 4096 would be 34 GB.
+    assert [b.rows for b in batches] == [1, 1]
+    assert [b.column(0)[0] for b in batches] == [Fault(CastFailure.MALFORMED, 0, 1), Success(1)]
+    assert all(b.column(1)[0] == Fault(CastFailure.EMPTY, 0, 0) for b in batches)
+    # A plan reaching 256 source columns keeps a whole batch of rows.
+    wide = "\n".join(",".join(["1"] * 256) for _ in range(5000)).encode()
+    sizes = [b.rows for b in DelimitedReader(wide, HEADLESS, [Column.i64(255)])]
+    assert sizes == [4096, 904]
 
 
 def test_numpy_takes_a_column_without_copying():

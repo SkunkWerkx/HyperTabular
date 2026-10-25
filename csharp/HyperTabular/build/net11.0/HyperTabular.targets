@@ -14,11 +14,10 @@
        assembly's P/Invokes and generates a pinvoke table that calls each native function by
        symbol, so the link itself resolves them against the archive (with it missing, wasm-ld
        fails with an undefined symbol per export) and LibraryImport("*") reaches each one
-       through that table. An @(EmccExportedFunction) per export used to be listed here too,
-       on the belief that "*" resolution needed the Emscripten export. It does not:
-       HyperTabular.WasmSmokeTest reaches all fourteen exports with the list gone on .NET SDK
-       11.0.100-rc.2, and fails at the link with the archive unlinked, so the list was dead
-       weight and is not kept.
+       through that table. No @(EmccExportedFunction) list is needed, because "*" resolution
+       does not need the Emscripten export: HyperTabular.WasmSmokeTest reaches all fourteen
+       exports without one on .NET SDK 11.0.100-rc.2, and fails at the link with the archive
+       unlinked.
 
        The archive is built without Rust's standard library and carries none of HyperCast's
        cast_* symbols, so it links beside HyperCast's own browser-wasm archive. -->

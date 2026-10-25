@@ -1,0 +1,17 @@
+only_rules:
+  - missing_docs
+
+missing_docs:
+  # public/open only — Swift's own `internal` (the default access level) is the real
+  # public/private boundary here (the native calls and the buffer helpers behind the
+  # readers are internal implementation, unreachable from outside the module), so scoping any lower
+  # would flag files that were never meant to be documented API in the first place. `error`
+  # (not `warning`) so this fails a plain `swiftlint lint` too, not just `--strict`.
+  error: [public, open]
+  # Off, where SwiftLint's default is on: the default skips every type with an inheritance
+  # clause — and everything declared inside it — on the theory that its docs are inherited.
+  # Here that clause is `: Error`, `: Equatable, Sendable`, a collection or a raw type, none
+  # of which hands a member a doc comment, so the default exempted most of this package's
+  # public value types (their stored properties, initializers, enum cases and
+  # `description`) from the rule this file exists to enforce.
+  excludes_inherited_types: false

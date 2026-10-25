@@ -66,12 +66,25 @@ rows, not once per cell.
   `Ordinal(ReadOnlySpan<byte>)` to match the raw UTF-8. `Bind(plan[, batchRows])` then
   declares the plan, once (`InvalidOperationException` on a second call, and on `Read()`
   before it — not final: bind and read). `IsBound` says which; `ColumnCount` is the header's
-  width, or the first record's once read.
+  width, or the first record's once read. A delimited plan column past the header's width
+  could only ever be empty, so it is the plan's `ArgumentException`, naming the column,
+  whether the plan is bound or came with the reader. Without a header, a column past a
+  record's last cell reads as `Empty`, and a plan reaching past 256 source columns reads
+  shorter batches, as many rows as about 8 MiB of cell table holds. An ordinal must be below
+  2²⁰ (1,048,576), in a sheet's plan as in a reader's: no workbook format has that many
+  columns (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the cap one row of cell
+  table is at most 8 MiB. Past it is the plan's `ArgumentException` too.
 - **One batch type.** `Read()` returns a `Batch` — `Rows`, `Columns`, `Line(row)`,
-  `Verdicts(column)`, `Values<T>(column)` for a whole primitive column, `Get<T>(column, row)`
-  for any one cell, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was
-  cast from — or `null` when there are no more rows. It is a view of the reader's buffers,
-  valid until the next `Read()`, and the same type for delimited text and for a sheet.
+  `Verdicts(column)`, `Values<T>(column)` for a whole column, `Get<T>(column, row)` for any
+  one cell, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was cast from —
+  or `null` when there are no more rows. It is a view of the reader's buffers, valid until
+  the next `Read()`, and the same type for delimited text and for a sheet.
+- **Whole columns as the core wrote them.** `Values<T>` lends the primitive doors as their
+  own type, the time door as `ulong` nanoseconds since midnight, and the decimal and other
+  temporal doors as HyperCast's own `HyperCast.Interop` layouts — `RawDecimal`,
+  `RawTimestamp` (timestamp, Unix, Excel serial), `RawDate`, `RawCivil` and `RawDuration` —
+  each of which converts itself to what `Get<T>` makes. A UUID column has no span: the core
+  writes RFC 9562 byte order, which is not `Guid`'s layout, so it is read with `Get<Guid>`.
 - **Rows, when that is the shape.** `foreach (var row in batch)` visits each `Row` — a
   `ref struct` view of (batch, index) with `Index`, `Line`, `Get<T>(column)`,
   `Verdict(column)`, `TryGetText`, `GetString`, `GetChars`, `TryGetChars` and `Raw` —
@@ -129,20 +142,20 @@ resolved, without the first read being what finds out.
 ## Android
 
 A .NET for Android or MAUI app (`net11.0-android`, API 24 and later, .NET 11's floor)
-references the package and writes nothing else. On CoreCLR, .NET 11's Android runtime (Mono
-is no longer supported there), the SDK takes `runtimes/android-arm64/native/libhypertabular.so`
-and its x64 twin out of the package and stores each in the APK under `lib/arm64-v8a/` and
-`lib/x86_64/`, and the ordinary `"hypertabular"` import opens it, exactly as on Linux. The
-libraries are cross-built with the NDK for API level 21, below any app that can reference
-them, and their segments are aligned to 16 KB: Android 15 devices may use 16 KB pages, a
-library aligned for 4 KB does not load on one, and Google Play requires the alignment of
-every new app. A Native AOT publish (`PublishAot`, `-r android-arm64`) links
-`staticlibs/android-{rid}/libhypertabular.a` into the app's own native library instead, as it
-does on every other RID, and the shared one is left out of the APK. HyperCast's package does
-the same for its own core, and the two sit side by side. `android-arm64` covers effectively
-every Android device in use and `android-x64` the emulator; these are the two RIDs .NET for
-Android builds by default. The 32-bit `android-arm` and `android-x86` are not in the package,
-so an app that adds them gets `Tabular.IsAvailable == false` on those ABIs.
+references the package and writes nothing else. On CoreCLR, .NET 11's Android runtime, the
+SDK takes `runtimes/android-arm64/native/libhypertabular.so` and its x64 twin out of the
+package and stores each in the APK under `lib/arm64-v8a/` and `lib/x86_64/`, and the ordinary
+`"hypertabular"` import opens it, exactly as on Linux. The libraries are cross-built with the
+NDK for API level 21, below any app that can reference them, and their segments are aligned
+to 16 KB: Android 15 devices may use 16 KB pages, a library aligned for 4 KB does not load on
+one, and Google Play requires the alignment of every new app. A Native AOT publish
+(`PublishAot`, `-r android-arm64`) links `staticlibs/android-{rid}/libhypertabular.a` into
+the app's own native library instead, as it does on every other RID, and the shared one is
+left out of the APK. HyperCast's package does the same for its own core, and the two sit side
+by side. `android-arm64` covers effectively every Android device in use and `android-x64` the
+emulator; these are the two RIDs .NET for Android builds by default. The 32-bit `android-arm`
+and `android-x86` are not in the package, so an app that adds them gets `Tabular.IsAvailable
+== false` on those ABIs.
 
 `HyperTabular.AndroidSmokeTest` is the Native AOT smoke test's `SmokeTest.Run()` again,
 started from an Activity, and unlike the other smoke tests it takes HyperTabular as a
@@ -153,13 +166,6 @@ pages, so a library aligned for 4 KB would fail to load there. Nothing hosted ru
 Android, so the arm64 pair is inspected instead: each CoreCLR APK must carry
 `libhypertabular.so` for its ABI, each Native AOT APK must not carry it at all, and all four
 must pass `zipalign -P 16`.
-
-Two .NET 11 RC1 workload behaviors shape that job, and an app on RC1 may meet them too. The
-android workload's build tasks require JDK 21 (`XA0030` on newer). And the workload RC1
-resolves was built against a runtime newer than RC1 on nuget.org, so a Native AOT publish
-fails to restore `Microsoft.NETCore.App.Runtime.NativeAOT.android-*` by exact version until
-the .NET 11 daily feed (`https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet11/nuget/v3/index.json`)
-is added as a source; the job adds it.
 
 ## WebAssembly (Blazor)
 

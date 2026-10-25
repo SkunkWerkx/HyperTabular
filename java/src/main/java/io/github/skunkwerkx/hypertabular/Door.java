@@ -75,9 +75,4 @@ public enum Door {
     int valueBytes() {
         return valueBytes;
     }
-
-    /** True for the doors whose column buffer is an array of one Java primitive. */
-    boolean isPrimitive() {
-        return code <= F64.code;
-    }
 }

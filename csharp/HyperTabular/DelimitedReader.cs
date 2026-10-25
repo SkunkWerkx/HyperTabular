@@ -48,6 +48,14 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <summary>Rows per batch unless told otherwise.</summary>
 	public const int DefaultBatchRows = 4096;
 
+	/// <summary>
+	/// The cell entries a reader's table is sized for at most: what the default 4,096-row batch
+	/// of a plan reaching 256 source columns takes (257 entries a row), about 8 MiB. A plan
+	/// reaching further gets as many rows as fit — at least one — and its batches are that
+	/// short, so the table follows the source's width and not the ordinal times the batch.
+	/// </summary>
+	internal const int CellBudget = 4096 * 257;
+
 	const string ContractViolation =
 		"libhypertabular reported a contract violation — a binding bug, please report it.";
 
@@ -83,6 +91,8 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	// Pinned, as the column arrays are: the core is given their addresses.
 	readonly State[] _state;
 	Native.RawSpan[] _cells = [];
+	/// <summary>The cell table's entries, for the tests that hold it to <see cref="CellBudget"/>.</summary>
+	internal int CellCapacity => _cells.Length;
 	byte[] _arena;
 	/// <summary>The last batch came up short with the arena mostly used: it wants a larger one.</summary>
 	bool _cramped;
@@ -132,7 +142,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <param name="batchRows">Rows per batch.</param>
 	/// <param name="bufferBytes">The initial read buffer; it doubles when a record does not fit.</param>
 	/// <param name="leaveOpen">Whether <see cref="Dispose"/> leaves the stream open.</param>
-	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured.</exception>
+	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured, a column's ordinal is 2²⁰ or more, or a column reads past the columns the header gives every record.</exception>
 	/// <exception cref="TabularException">The header record is structurally broken.</exception>
 	public DelimitedReader(
 		Stream utf8,
@@ -145,6 +155,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	{
 		if (dialect.HasHeader)
 			ReadHeader();
+		WithinHeader();
 	}
 
 	/// <summary>
@@ -171,7 +182,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <param name="batchRows">Rows per batch.</param>
-	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured.</exception>
+	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured, a column's ordinal is 2²⁰ or more, or a column reads past the columns the header gives every record.</exception>
 	/// <exception cref="TabularException">The header record is structurally broken.</exception>
 	public DelimitedReader(
 		ReadOnlyMemory<byte> utf8,
@@ -186,6 +197,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		_eof = true;
 		if (dialect.HasHeader)
 			ReadHeader();
+		WithinHeader();
 	}
 
 	/// <summary>Opens a file of UTF-8 delimited text and reads its header, leaving the plan to <see cref="Bind"/>.</summary>
@@ -272,7 +284,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <param name="bufferBytes">The initial read buffer; it doubles when a record does not fit.</param>
 	/// <param name="leaveOpen">Whether disposing the reader leaves the stream open.</param>
 	/// <param name="cancellationToken">Observed before anything is done, and at every read of the stream.</param>
-	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured.</exception>
+	/// <exception cref="ArgumentException">The dialect's separator or a column's numeric format cannot be honoured, a column's ordinal is 2²⁰ or more, or a column reads past the columns the header gives every record.</exception>
 	/// <exception cref="TabularException">The header record is structurally broken.</exception>
 	/// <exception cref="OperationCanceledException">The token was cancelled.</exception>
 	public static ValueTask<DelimitedReader> OpenAsync(
@@ -297,6 +309,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 			while (!reader.HeaderStep())
 				await reader.RefillAsync(cancellationToken).ConfigureAwait(false);
 		}
+		reader.WithinHeader();
 		return reader;
 	}
 
@@ -336,11 +349,17 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 				$"Separator '{dialect.Separator}' is not tab or printable ASCII other than '\"'.", nameof(dialect));
 	}
 
+	/// <summary>The rows a cell table of <paramref name="perRow"/> entries a row is sized for: as many as <see cref="CellBudget"/> holds, from one to a batch.</summary>
+	static long CellRows(long perRow, int batchRows) => Math.Clamp(CellBudget / perRow, 1, batchRows);
+
 	/// <summary>Sizes everything a batch is read into by the plan's columns.</summary>
 	void Attach(Columns columns)
 	{
-		_perRow = columns.Width + 1;
-		_cells = GC.AllocateUninitializedArray<Native.RawSpan>(checked(_perRow * columns.BatchRows), pinned: true);
+		// Every ordinal is below 2²⁰, so this is at most CellBudget or one row of 2²⁰ + 1.
+		long perRow = columns.Width + 1;
+		var cells = perRow * CellRows(perRow, columns.BatchRows);
+		_perRow = (int)perRow;
+		_cells = GC.AllocateUninitializedArray<Native.RawSpan>((int)cells, pinned: true);
 		_batch = new Batch(columns, workbook: false);
 		_columns = columns;
 	}
@@ -354,13 +373,50 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <param name="batchRows">Rows per batch.</param>
 	/// <exception cref="InvalidOperationException">The reader already has a plan.</exception>
-	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured; the reader is left without a plan.</exception>
+	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, a column's ordinal is 2²⁰ or more, or a column reads past the columns the header gives every record; the reader is left without a plan.</exception>
 	public void Bind(ReadOnlySpan<Column> plan, int batchRows = DefaultBatchRows)
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
 		if (_columns is not null)
 			throw new InvalidOperationException("The reader already has a plan; a plan is bound once.");
-		Attach(new Columns(plan, batchRows));
+		var columns = new Columns(plan, batchRows);
+		Within(columns.Plan);
+		Attach(columns);
+	}
+
+	/// <summary>
+	/// Refuses the first plan column past the width a header has fixed: every record has the
+	/// header's count of cells, so a column past it could only ever be empty.
+	/// </summary>
+	void Within(Column[] plan)
+	{
+		if (ColumnCount is not int width)
+			return;
+		for (var index = 0; index < plan.Length; index++)
+		{
+			if (plan[index].Ordinal >= width)
+				throw new ArgumentException(
+					$"Plan column {index} reads source column {plan[index].Ordinal}, past the {width} columns the header gives every record.", "plan");
+		}
+	}
+
+	/// <summary>
+	/// A plan that came with the reader, held to the header once it has been read. A reader
+	/// refused unpins its memory; its stream is left as a header that failed leaves it.
+	/// </summary>
+	void WithinHeader()
+	{
+		if (_columns is null)
+			return;
+		try
+		{
+			Within(_columns.Plan);
+		}
+		catch
+		{
+			Release();
+			throw;
+		}
 	}
 
 	/// <summary>Whether a plan has been bound: always, for a reader opened with one.</summary>
@@ -569,7 +625,10 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 					if (filled.Rows > 0)
 					{
 						var rows = (int)filled.Rows;
-						_cramped = rows < batchRows && (long)filled.ArenaUsed * 2 >= _arena.Length;
+						// Short of what the cell table holds, not of the batch: a plan reaching past
+						// the budget fills fewer rows than a batch every time, and that is no
+						// reason to grow the arena.
+						_cramped = rows < Math.Min(batchRows, _cells.Length / _perRow) && (long)filled.ArenaUsed * 2 >= _arena.Length;
 						_batch!.Fill(rows, _cells, _perRow, window, _arena);
 						return Step.Rows;
 					}
@@ -579,10 +638,11 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 						return Step.Input;
 					break;
 				case Native.ErrCells:
-					// The core says how many entries one row takes; the table holds a batch of them.
+					// The core says how many entries one row takes; the table holds as many rows of
+					// them as the budget does.
 					_perRow = Math.Max(_perRow, (int)filled.Needed);
 					_cells = GC.AllocateUninitializedArray<Native.RawSpan>(
-						checked((int)filled.Needed * batchRows), pinned: true);
+						checked((int)((long)filled.Needed * CellRows((long)filled.Needed, batchRows))), pinned: true);
 					break;
 				case Native.ErrArena:
 					_arena = GC.AllocateUninitializedArray<byte>(

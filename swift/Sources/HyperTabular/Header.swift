@@ -112,12 +112,18 @@ public enum PlanError: Error, Equatable, Sendable, CustomStringConvertible, Loca
     case unbound
     /// A second plan, for a reader or sheet that already has one.
     case alreadyBound
+    /// A plan column whose ordinal is 2²⁰ (1,048,576) or more — more columns than any
+    /// workbook format has — or at or past the columns a delimited header gives every record.
+    /// The associated value is the column's place in the plan. The reader stays unbound.
+    case outOfReach(column: Int)
 
     /// What was done out of order, in a sentence.
     public var description: String {
         switch self {
         case .unbound: "The reader has no plan yet: bind one before reading."
         case .alreadyBound: "The reader already has a plan: a plan is bound once, before the first read."
+        case .outOfReach(let column):
+            "Plan column \(column) reads past the columns the header gives every record, or at or past ordinal 2^20 (1,048,576)."
         }
     }
 

@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
-	"unsafe"
 )
 
 const (
@@ -228,7 +226,8 @@ func newReader(dialect Dialect, plan []Column, bound bool, opts []Option) (*Deli
 //
 // A reader with a plan already — one it was opened with, or one bound before — returns
 // ErrAlreadyBound. A plan the reader cannot honour is this method's error, as it would have
-// been the constructor's, and leaves the reader unbound. The rows a batch are the
+// been the constructor's, and leaves the reader unbound — among them, once a header has been
+// read, a column at or past the header's width, where no record has a cell. The rows a batch are the
 // BatchRows option the reader was opened with.
 func (r *DelimitedReader) Bind(plan []Column) error {
 	if r.set != nil {
@@ -238,13 +237,14 @@ func (r *DelimitedReader) Bind(plan []Column) error {
 	if err != nil {
 		return err
 	}
+	if err := r.withinHeader(plan); err != nil {
+		return err
+	}
 	// A cell table entry for every source column up to the widest the plan reads, and one
 	// for the row's line.
+	// Every ordinal is below 2^20 and the table holds at most cellBudget entries or one
+	// row, so its size fits an int even where an int is 32 bits.
 	perRow := set.width + 1
-	if perRow > math.MaxInt/int(unsafe.Sizeof(rawSpan{}))/r.batchRows {
-		return fmt.Errorf("hypertabular: a plan reading source column %d at %d rows a batch needs too large a cell table",
-			set.width-1, r.batchRows)
-	}
 	// The core's own word on the plan, before any rows: a fill of no rows still judges
 	// every column's door and notation, and touches nothing else — not the header read
 	// before it, nor the state the next fill goes on from.
@@ -260,7 +260,38 @@ func (r *DelimitedReader) Bind(plan []Column) error {
 	}
 	r.batch = Batch{columns: set}
 	r.perRow = perRow
-	r.cells = make([]rawSpan, perRow*r.batchRows)
+	r.cells = make([]rawSpan, perRow*cellRows(perRow, r.batchRows))
+	return nil
+}
+
+// cellBudget is the most cell-table entries a delimited reader sizes its table for: what
+// the default 4096-row batch of a plan reaching 256 source columns takes (a row is the
+// widest ordinal plus two), about 8 MiB. A plan that reaches further gets a table of fewer
+// rows — never fewer than one — and the core fills only as many rows a batch as the table
+// holds, so a plan naming a far ordinal of a source with no header costs a row of entries
+// that wide, not a batch of them. A plan within 256 source columns is untouched.
+const cellBudget = 4096 * 257
+
+// cellRows is the rows a cell table of perRow entries a row is sized for: as many as
+// cellBudget holds, at least one and at most batchRows.
+func cellRows(perRow, batchRows int) int {
+	return min(max(cellBudget/perRow, 1), batchRows)
+}
+
+// withinHeader refuses the first plan column reading at or past the width a header has
+// fixed: every record has exactly the header's cells, so such a column could only ever be
+// empty. A source with no header, or none read yet, has no width to hold a plan to.
+func (r *DelimitedReader) withinHeader(plan []Column) error {
+	width := r.ColumnCount()
+	if !r.dialect.HasHeader || width == 0 {
+		return nil
+	}
+	for index, column := range plan {
+		if column.ordinal >= width {
+			return fmt.Errorf("hypertabular: plan column %d reads source column %d, past the %d columns the header gives every record",
+				index, column.ordinal, width)
+		}
+	}
 	return nil
 }
 
@@ -280,6 +311,13 @@ func (r *DelimitedReader) begin(dialect Dialect) (*DelimitedReader, error) {
 	}
 	if err := r.readHeader(); err != nil {
 		return nil, err
+	}
+	// A plan the reader was opened with was bound before the header was read; the width
+	// the header fixes holds it now, before any row is delivered.
+	if r.set != nil {
+		if err := r.withinHeader(r.set.plan); err != nil {
+			return nil, err
+		}
 	}
 	return r, nil
 }
@@ -459,7 +497,9 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 			consumed := int(filled.consumed)
 			r.start += consumed
 			if rows := int(filled.rows); rows > 0 {
-				r.cramped = rows < r.set.batchRows && filled.arenaUsed*2 >= uint64(len(r.arena))
+				// Short of what the cell table holds, not of BatchRows: a table of fewer rows
+				// (see cellBudget) ends every batch early, and that is no reason to grow the arena.
+				r.cramped = rows < min(r.set.batchRows, len(r.cells)/r.perRow) && filled.arenaUsed*2 >= uint64(len(r.arena))
 				return r.batch.fill(rows, r.cells, r.perRow, window, r.arena), nil
 			}
 			if last && (consumed == len(window) || consumed == 0) {
@@ -474,7 +514,7 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 			}
 		case errCells:
 			r.perRow = max(r.perRow, int(filled.needed))
-			r.cells = make([]rawSpan, r.perRow*r.set.batchRows)
+			r.cells = make([]rawSpan, r.perRow*cellRows(r.perRow, r.set.batchRows))
 		case errArena:
 			r.arena = make([]byte, max(int(filled.needed), 2*len(r.arena)))
 		case errStructure:
