@@ -19,7 +19,10 @@ use super::proto::{self, varint};
 use super::snappy;
 use super::sort::{heap_sort, partition_point};
 use super::zip::{self, Directory, Entry, Located, METHOD_DEFLATE};
-use super::{failure, part::WINDOW_MIN};
+use super::{
+    failure,
+    part::{DEFLATE_RATIO, WINDOW_MIN},
+};
 use crate::kernel::abi::{Failure, Span};
 use crate::kernel::inflate::{Inflate, Status};
 
@@ -28,9 +31,8 @@ const CHUNK_HEADER: usize = 4;
 
 /// The most a Snappy block can grow by: a three-byte copy yields 64 bytes, so a block of
 /// `n` bytes decodes to under `22n`; a chunk that declares more than this many times its
-/// block is not one. Deflate's own ceiling is 1032 to one.
+/// block is not one. Deflate's own ceiling is [`DEFLATE_RATIO`].
 const SNAPPY_RATIO: u64 = 32;
-const DEFLATE_RATIO: u64 = 1032;
 
 /// What [`Failure::IWA`]'s `found` says.
 /// A chunk header that is not one, a block cut short, or a Snappy block that does not

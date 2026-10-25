@@ -474,6 +474,9 @@ impl Run<'_> {
             X_PREAMBLE => match token.kind {
                 Kind::Start if local == b"sheetData" => self.sheet.mode = X_ROWS,
                 Kind::Empty if local == b"sheetData" => return Ok(Step::End),
+                // The reader hands over the end of the part only once every element is
+                // closed: a part cut off inside `<worksheet>` or `<sheetData>` is its
+                // failure, never a shorter sheet. Here and below, this is a whole part.
                 Kind::Eof => return Ok(Step::End),
                 _ => {}
             },

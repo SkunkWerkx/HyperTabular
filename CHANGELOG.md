@@ -135,6 +135,27 @@ the release tag alone.
 
 ### Fixed
 
+- **A worksheet cut off between two rows is a broken part, not a shorter sheet.** An XLSX
+  worksheet whose XML ended after a whole `</row>` without closing `sheetData` — cut off by
+  the file, or by a zip directory that declared the part that long — read as a shorter
+  sheet: the rows past the cut were gone with no failure. The part reader now counts the
+  elements a part has opened and not closed, and the end of a part inside one is
+  `FailureKind::Xml` (`found` 6, an unterminated element), raised after every intact row
+  before it, final for the sheet, in every part the core reads — a string table cut
+  between two strings is refused at load. *(all packages)*
+- **A string table that claims a gigabyte is not given one.** The size a workbook's zip
+  directory declared for `sharedStrings.xml` was what every binding sized its string arena
+  by, before the part was read, capped only at 256 MiB; a kilobyte of XLSX could ask for
+  all of it. The core now holds that figure to what the part's compressed bytes can inflate
+  to (1032 to one, deflate's own ceiling), so the arena is never larger than the part
+  could fill, and an honest file is sized as before. *(all packages)*
+- **Rust — the delimited row ceiling no longer depends on the buffer the reader began
+  with.** A stream's buffer started at `buffer_bytes` and doubled unclamped, so a record
+  longer than `DelimitedReader::MAX_ROW_BYTES` was read when the buffer happened to hold it
+  and refused when it did not. The buffer now starts at most at the ceiling and grows to it
+  and no further, through `Read` and the `async` feature's `AsyncRead` alike, so a record
+  that fills the ceiling without ending is `FailureKind::RowTooLong` whatever the buffer
+  began at — as the other seven bindings already read. *(Rust)*
 - **Rust — a live delimited stream no longer holds back a header or batch that has arrived.**
   A refill, through `Read` or the `async` feature's `AsyncRead`, used to read until the
   buffer was full or the source ended, so a pipe or a socket that paused after a few

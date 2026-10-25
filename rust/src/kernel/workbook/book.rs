@@ -398,9 +398,12 @@ fn open_xlsx(
     };
     if let Some(entry) = directory.find(container, scratch.at(strings)) {
         package.strings = entry.at as u64 + 1;
-        out.strings_bytes = entry.uncompressed;
-        // The root element says how many strings there are, when it says.
         start(reader, &entry, Failure::PART_STRINGS)?;
+        // The size the directory declares is the file's word, and a caller sizes an arena
+        // by it before the part is read: it is held to what the bytes the container holds
+        // can inflate to, so a tiny part that claims a gigabyte is not given one.
+        out.strings_bytes = reader.part.at_most();
+        // The root element says how many strings there are, when it says.
         loop {
             let token = reader.peek()?;
             if matches!(token.kind, Kind::Start | Kind::Empty) {
