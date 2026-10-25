@@ -88,9 +88,10 @@ several ways, and the two encrypted files refused — 1,018 rows and 49,394 cell
 - `sheets` is the workbook's whole listing; `sheet` is the index of the one this case
   reads. A binding should open it by index and, where the name is unique, by name.
 - `plan`, `header`, `rows` and a cell are as in `delimited.json`. With the default
-  options the plan is every door over every column (ten columns for the fixtures, four
-  for the generated packages, with what a door declares varied by column); with the other
-  three the options are the point, and the plan is the text door over every column.
+  options the plan is every door over every column (ten columns for the synthetic
+  fixtures, eighteen for the real writers' files, four for the generated packages, with
+  what a door declares varied by column); with the other three the options are the point,
+  and the plan is the text door over every column.
 - `numbers` is each row's number in the sheet, parallel to `rows`.
 - A typed cell that fails its door has the cell said as text for its `raw` and a fault
   that spans all of it; a typed cell through the text door is that same text.
@@ -140,8 +141,9 @@ committed.
   nobody can regenerate.
 - Save to a local path, not a OneDrive/AutoSave folder, so the desktop application is the
   only writer of the bytes.
-- Anything over ~50 MB stays out of the tree (GitHub's limit is 100 MB): keep it under
-  `corpus/generate/out/`, which is ignored, and record its sha256 in the table instead.
+- The tree carries fixtures, not benchmark inputs: the three 300 000-row files (16.7 MB,
+  13.3 MB and 29.6 MB) live under `corpus/generate/out/`, which is ignored, and the table
+  records their sha256 instead.
 
 ## The dataset
 
@@ -212,8 +214,8 @@ the elapsed and locale-specific built-in formats, and the custom-format classifi
 
 **2. `excel-win-strict.xlsx`** — the same workbook, File → Save As → file type *Strict Open
 XML Spreadsheet (\*.xlsx)*. Excel writes ISO 8601 dates with `t="d"` and the
-`purl.oclc.org` namespaces. Proves the `t="d"` path, and will tell whether the relationship
-matching survives strict URIs — nothing checks that today.
+`purl.oclc.org` namespaces. Proves the `t="d"` path, and that the relationship matching, which
+keys on a type's last segment, survives strict URIs.
 
 **3. `excel-win-1904.xlsx`** — a **new blank** workbook, and *before typing anything*: File
 → Options → Advanced → *When calculating this workbook* → check **Use 1904 date system**
@@ -268,11 +270,11 @@ column body and Ctrl+Enter a different formula:
 
 Select all, Copy, Paste Special → **Values** (so the file holds typed cells, including
 3,000 real `#N/A` error cells, not formulas), add a header row, save. Excel takes a
-minute; the file is around 30–40 MB.
+minute; the file is 16.7 MB, 111 MB of sheet XML inside.
 
-**Not on your list: zip64.** Excel only writes zip64 structures past 4 GiB or 65,535
-entries. I will produce that fixture by re-wrapping `excel-win-data.xlsx` with Python's
-`zipfile` forcing zip64 — it is a container test, and the parts inside can be Excel's own.
+**Not from Excel: zip64.** Excel only writes zip64 structures past 4 GiB or 65,535
+entries. `excel-win-zip64.xlsx` is `excel-win-data.xlsx` re-wrapped with Python's `zipfile`
+forcing zip64 — a container test, and the parts inside are Excel's own.
 
 ## LibreOffice Calc (Windows build is fine)
 
@@ -286,7 +288,7 @@ entries. I will produce that fixture by re-wrapping `excel-win-data.xlsx` with P
 - a duration: type `25:30:00`, format `[HH]:MM:SS` (`office:time-value="PT25H30M00S"`);
 - hide a sheet: right-click tab → Hide Sheet;
 - File → Save As → *ODF Spreadsheet (.ods)*, and choose **Keep current format** if asked.
-Every ODS code path today runs on hand-written XML; this is the first file LibreOffice
+Before it, every ODS code path ran on hand-written XML; this was the first file LibreOffice
 wrote. Its million-row padding rows come free.
 
 **9. `libreoffice-data.xlsx`** — the same workbook, File → Save As → *Excel 2007–365
@@ -304,8 +306,8 @@ Data → Calculate → *Formula to Value*; save as .ods.
 **12. `google-data.xlsx` and `google-data.ods`** — File → Import → upload
 `excel-win-data.xlsx` (Replace spreadsheet), then File → Download → *Microsoft Excel
 (.xlsx)* and again *OpenDocument (.ods)*. Google's writer roots parts and writes
-relationship targets its own way; the design's "third-party writers root parts
-inconsistently" line has never been checked against it.
+relationship targets its own way; these two files are what the design's "third-party
+writers root parts inconsistently" line is checked against.
 
 ## Apple Numbers
 
@@ -373,7 +375,7 @@ engine's formulas and 2.1 MB the string list.
 browser, change one cell and change it back (forces a rewrite), download. A different save
 path from the desktop writer, cheap to collect.
 
-## The table to fill in
+## The files and their writers
 
 | File | Writer and version | OS | sha256 (out-of-tree files only) |
 | --- | --- | --- | --- |

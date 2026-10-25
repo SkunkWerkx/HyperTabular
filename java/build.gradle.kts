@@ -164,7 +164,7 @@ mavenPublishing {
     pom {
         name.set("hypertabular")
         description.set(
-            "Forward-only tabular parsing — delimited text and XLSX/ODS workbooks read a batch at a time into typed " +
+            "Forward-only tabular parsing — delimited text and XLSX, ODS and Numbers workbooks read a batch at a time into typed " +
                 "columns, every cell a HyperCast Verdict (value or reason + offending span, " +
                 "never an exception) — over FFM bindings straight into a native Rust core " +
                 "(libhypertabular) that never allocates. JDK 25+."

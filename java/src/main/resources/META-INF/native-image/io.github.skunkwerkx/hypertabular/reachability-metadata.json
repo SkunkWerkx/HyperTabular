@@ -2,17 +2,6 @@
   "resources": [
     { "glob": "native/*/*" }
   ],
-  "reflection": [
-    {
-      "type": "io.github.skunkwerkx.hypertabular.WasmBackend",
-      "methods": [
-        {
-          "name": "<init>",
-          "parameterTypes": []
-        }
-      ]
-    }
-  ],
   "foreign": {
     "downcalls": [
       { "returnType": "jint", "parameterTypes": [] },

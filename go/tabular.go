@@ -1,5 +1,5 @@
 // Package hypertabular reads delimited text — CSV, TSV, any single-byte ASCII separator — and
-// workbooks — XLSX and ODS — a batch at a time into typed columns, with a HyperCast verdict
+// workbooks — XLSX, ODS and Numbers — a batch at a time into typed columns, with a HyperCast verdict
 // for every cell.
 //
 // The native core (libhypertabular) owns no memory and reads no files. It is handed a chunk

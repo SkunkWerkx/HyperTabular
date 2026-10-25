@@ -6,7 +6,7 @@ require_relative "hypertabular/runtime/delimited"
 require_relative "hypertabular/runtime/workbook"
 
 # Tabular parsing with a HyperCast verdict for every cell: delimited text — CSV, TSV, any
-# single-byte ASCII separator — and workbooks — XLSX and ODS — read a batch at a time into
+# single-byte ASCII separator — and workbooks — XLSX, ODS and Numbers — read a batch at a time into
 # typed columns by one Rust core (libhypertabular), called through Fiddle.
 #
 #   plan = [HyperTabular::Column.i32(0), HyperTabular::Column.text(1)]

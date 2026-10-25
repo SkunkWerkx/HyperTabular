@@ -5,7 +5,7 @@ Gem::Specification.new do |spec|
   spec.summary = "Delimited text and workbooks read a batch at a time into typed columns, " \
                  "a HyperCast verdict for every cell"
   spec.description = <<~DESC
-    CSV, TSV and any single-byte ASCII separator, and XLSX and ODS workbooks, read by a
+    CSV, TSV and any single-byte ASCII separator, and XLSX, ODS and Numbers workbooks, read by a
     native Rust core into typed column batches. The core owns no memory: this gem allocates the buffers once and the
     core fills them in one native call per batch. Every cell is a HyperCast verdict — the
     value, or a reason plus the offending span — and a file that is not rows of cells at

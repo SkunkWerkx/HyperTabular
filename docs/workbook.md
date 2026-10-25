@@ -66,8 +66,8 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   what has rows and columns and what Numbers itself makes a worksheet of when it exports
   to Excel: it is listed under its sheet's name, or `<sheet> - <table>` when the sheet
   holds more than one, hidden when the sheet is. Cells are the v5 storage Numbers has
-  written since 2018 (an older file is `FailureKind::Iwa` with `found` 4 and the version
-  it found): a number is the 128-bit decimal said as text and read through the one number
+  written since 2018 (an older file is `FailureKind::Iwa` with `found` 4 and its version
+  in `expected`): a number is the 128-bit decimal said as text and read through the one number
   grammar, or the double a currency cell carries; a date is seconds since 2001-01-01, a
   wall clock, or a time of day when its format shows no date (`suppress_date_format`, or
   a pattern with no date letters — a custom format's pattern is looked up in the

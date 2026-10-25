@@ -53,10 +53,11 @@ library it becomes:
 | Nothing else linked in | The core's dependency closure is `hypercast` and nothing else, asserted. HyperCast holds itself to the same three properties, float parsing included. |
 
 What follows from "no allocation" is the shape of every call: memory is an argument. The
-caller brings the input, a 64-byte state block, the column buffers, and any scratch the
-core needs, sized by rules the core states; where a size cannot be known up front the core
-says how much it needs and takes nothing until it has it. The binding allocates all of it
-once, in whatever its language does best, and the core is crossed once per chunk.
+caller brings the input, a state block (64 bytes for delimited text, about 27 KiB for a
+workbook), the column buffers, and any scratch the core needs, sized by rules the core
+states; where a size cannot be known up front the core says how much it needs and takes
+nothing until it has it. The binding allocates all of it once, in whatever its language
+does best, and the core is crossed once per chunk.
 
 ### Delimited text in the core
 
@@ -223,7 +224,7 @@ same code, replayed against the same corpus.
   can hold.
 - `s < 0` → `Malformed` (Excel renders `####`). `s ≥ 2 958 466` (past 9999-12-31) →
   `OutOfRange`.
-- What stays tabular (`hypertabular::serial`) is what a number *format* declares: a
+- What stays tabular (`kernel::workbook::cell::serial`) is what a number *format* declares: a
   date/time-formatted serial under `1` is a `Clock`, not a `Wall` — a time of day with no
   date in it — and an elapsed-formatted serial is a `Span` of days.
 
@@ -308,7 +309,10 @@ decisions specific to it are in `docs/delimited.md`.
 
 Design lineage: Sylvan's forward-only sheet streaming, deferred `<v>` parsing, `t`-attribute
 dispatch and date-kind classification; calamine's parse-the-raw-bytes trick and ODS repeat
-handling. The decisions specific to it are in `docs/workbook.md`.
+handling. Numbers has no reader to borrow from: its path (Snappy frames, a hand-rolled
+protobuf field walk, `TST.Tile` row storage) is the core's own, held to numbers-parser's
+reading of the format and benchmarked against it. The decisions specific to it are in
+`docs/workbook.md`.
 
 - **Container.** A hand-rolled central-directory zip reader over the container's bytes
   (stored + deflate only, zip64 aware, local headers trusted only for the data offset,
@@ -439,8 +443,9 @@ grow-and-keep path above runs mid-part thousands of times against the corpus.
 
 ## Parked, deliberately
 
-- **XLS (BIFF8).** The read-only record set is small and well documented (see prior-art
-  §12); the CONTINUE-aware string cursor is the one tricky piece. It waits on a decision
+- **XLS (BIFF8).** The read-only record set is small and well documented (see
+  [`prior-art-tabular-parsers.md` §12](prior-art-tabular-parsers.md#12-xls-biff8-read-only));
+  the CONTINUE-aware string cursor is the one tricky piece. It waits on a decision
   that has not been taken.
 - **Parallel chunked scanning.** The scanner is sequential by construction (quote parity
   is a global carry). Polars' two-state chunk analysis is the cheapest known way to

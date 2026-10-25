@@ -4,6 +4,8 @@
 * text=auto eol=lf
 *.xlsx binary
 *.ods binary
+*.xlsm binary
+*.numbers binary
 
 # What a `git archive` of this repository leaves out. Packagist serves the Composer package
 # as GitHub's archive of the tag, so without this every `composer require` would download

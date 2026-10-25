@@ -1,6 +1,6 @@
 # HyperTabular — notes for agents
 
-A Rust core (`rust/`) that reads delimited text and XLSX/ODS workbooks into typed column
+A Rust core (`rust/`) that reads delimited text and XLSX, ODS and Numbers workbooks into typed column
 batches, judging each cell with HyperCast, behind a C ABI called from seven other
 languages. `docs/design.md`, `docs/delimited.md` and `docs/workbook.md` have the why; all
 CI and release logic lives in the Forge (`SkunkWerkx/.github`). This file holds what the
@@ -50,9 +50,9 @@ files and `go.mod`.
 ## Lists that move together
 
 - The export list appears in the README, `docs/design.md`, `docs/delimited.md`,
-  `docs/workbook.md`, the binding READMEs and every binding's declarations; the Forge reads it
-  from `rust/src/kernel/exports.rs` by the rule in `.github/hyper.json` (the prefix there is
-  what its symbol check recognises). The Blazor archive needs no export list: the SDK's
+  `docs/workbook.md` and every binding's declarations; the Forge reads it from
+  `rust/src/kernel/exports.rs` by the rule in `.github/hyper.json` (the prefix there is what
+  its symbol check recognises). The Blazor archive needs no export list: the SDK's
   pinvoke table links every P/Invoke by symbol.
 - Ruby ABIs: `ABIS` in `ruby/Rakefile`, `ruby_compat_version` in `ci.yml`, and in the Forge
   the `ruby.abis` default in `hyper_config.py` (an `.github/hyper.json` override if this repo
@@ -156,7 +156,7 @@ alone.
 - Remove agent worktrees and their branches once the work is in the main checkout;
   `.claude/` is untracked and `git add` picks it up.
 
-## Open follow-ups (as of 2026-10-23)
+## Open follow-ups (as of 2026-10-24)
 
 - Benchmark tables were measured on the WSL2 i9-11900H box. When the dev machine changes,
   re-measure every harness there before relabelling a table; never mix machines, and say

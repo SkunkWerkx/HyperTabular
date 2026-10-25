@@ -40,7 +40,7 @@ final class WorkbookBench
     private array $plan = [];
 
     /**
-     * The two files.
+     * The three files.
      *
      * @return array<string, array{file: string}>
      */

@@ -161,6 +161,24 @@ The model for a span-first, allocation-free reader surface. What was read:
 - **Taken:** raw-byte `<v>` parsing, prefix-agnostic names, the ODS repeat discipline.
 - **Not taken:** dense ranges, string-typed dates.
 
+### numbers-parser (Python) and Apple's IWA — `numbers_parser/`
+
+- The reader every other reader of `.numbers` is held against; the format is unpublished and
+  every reader is a reverse engineering of it. A document is a zip of `.iwa` parts, each a run
+  of Snappy-compressed chunks whose decoded stream is length-prefixed protobuf archives
+  (`TSP.ArchiveInfo`, then the message it describes), typed by Apple's `.proto` definitions,
+  which numbers-parser ships as generated classes. It decodes the whole document into objects
+  at open; a read walks what the open built. Rows live in `TST.Tile` archives (cell storage
+  v5 since 2018), strings in the table's string list, custom formats in
+  `TSK.CustomFormatListArchive`, found by uid.
+- Numbers (`docs/workbook.md`, 300 000 rows, linux-x64): 66.8 s to open and 68.1 s to read
+  the file the core opens in 820 ms and reads in 1.16 s.
+- **Taken:** the object graph to walk (document → sheets → tables → tile storage), the v5
+  cell layout, where the string list and the custom formats live.
+- **Not taken:** the generated protobuf classes and the decode-everything open — the core
+  walks fields by number with its own varint reader, keeps only the chunks of the object in
+  hand in its window, and reads a tile when it is asked for its rows.
+
 ### Format references
 
 - **XLSX / ISO 29500** (via the Open XML SDK reference pages and MS-OI29500): `c@r`

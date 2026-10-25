@@ -1,5 +1,5 @@
 // Local-dev-only JMH benchmarks — mirrors rust/benches (Criterion) and
-// csharp/HyperTabular.Benchmarks (BenchmarkDotNet): the workbook reader over the two
+// csharp/HyperTabular.Benchmarks (BenchmarkDotNet): the workbook reader over the three
 // 300 000-row files of corpus/README.md. Run by hand with `./gradlew :benchmarks:jmh`.
 plugins {
     java

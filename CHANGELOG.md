@@ -29,7 +29,7 @@ minor release can still break both, as 0.9.0 did.
   row a tile leaves out is an empty row. The core's new `kernel/workbook/{iwa,snappy,
   proto,numbers}.rs` stay inside the no-panic, no-allocation proofs; the window holds
   only the chunks of the object in hand, and a deflated part is inflated into its far
-  end. `WorkbookFormat` gains `Numbers` (`3`), `Opened.strings_bytes` is what the
+  end. `Format` gains `Numbers` (`3`), `Opened.strings_bytes` is what the
   data-list parts decode to, and a new failure kind **`iwa`** (`26`, part `10`) names
   a Numbers part that is not what the packaging says — `found` 1 a broken chunk, 2 a
   malformed message, 3 an object a reference names that is not there (`expected` its

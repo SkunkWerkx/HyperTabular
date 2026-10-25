@@ -10,7 +10,7 @@ name = "hypertabular"
 # Baked from rust/Cargo.toml at build time by maturin (manifest-path below) — the one
 # version source of truth, no second literal to drift.
 dynamic = ["version"]
-description = "Delimited text — CSV, TSV, any single-byte separator — and XLSX/ODS workbooks read a batch at a time into typed columns, with a HyperCast verdict for every cell. A PyO3 native extension linking a Rust core directly into CPython: the boundary is crossed once per batch, columns arrive as typed memoryviews rather than a call per cell, and no compiler is needed to install."
+description = "Delimited text — CSV, TSV, any single-byte separator — and XLSX, ODS and Numbers workbooks read a batch at a time into typed columns, with a HyperCast verdict for every cell. A PyO3 native extension linking a Rust core directly into CPython: the boundary is crossed once per batch, columns arrive as typed memoryviews rather than a call per cell, and no compiler is needed to install."
 # The package page on PyPI: this binding's own README, not the repo root's.
 readme = "README.md"
 license = "MIT"
