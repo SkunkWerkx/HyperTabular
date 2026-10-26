@@ -81,7 +81,7 @@ while let Some(batch) = sheet.read()? {
 | [Ruby](ruby/) | `gem install hypertabular` |
 | [PHP](php/) | `composer require skunkwerkx/hypertabular` |
 
-Each brings HyperCast 0.9 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
+Each brings HyperCast 1.0 with it: the verdict, fault, number-format and declared-option types a batch hands out are HyperCast's own, from its package, not copies.
 
 ## The shape
 

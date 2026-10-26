@@ -28,7 +28,7 @@ Gem::Specification.new do |spec|
 
   # HyperCast is the judge: the verdict, fault, number-format and decimal types and the
   # declared-option tables are its own, taken from its gem rather than copied here.
-  spec.add_dependency "hypercast", "~> 0.9.0"
+  spec.add_dependency "hypercast", "~> 1.0"
   # A default gem through Ruby 3.x and a bundled one from 4.0, so it is declared. This
   # gemspec is the universal gem's, the one that runs on Fiddle; the precompiled platform
   # gems and the hypertabular-wasm gem drop it (Rakefile), since they carry no library for

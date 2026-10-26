@@ -24,10 +24,10 @@ authors = [{ name = "Brian Buvinghausen" }]
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
-# column's notation is its `NumFormat`. 0.9.0, the first with free-threaded wheels (an
-# interpreter with the GIL off needs both extensions to declare they can run without it),
-# and below 0.10 because a 0.x minor is where its surface is allowed to move.
-dependencies = ["hypercast>=0.9.0,<0.10"]
+# column's notation is its `NumFormat`. 1.0.0 or later within the major: free-threaded
+# wheels arrived in 0.9.0 (an interpreter with the GIL off needs both extensions to declare
+# they can run without it), and from 1.0.0 only a new major may break the surface.
+dependencies = ["hypercast>=1.0.0,<2"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.

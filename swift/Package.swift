@@ -60,10 +60,10 @@ let package = Package(
         // HyperCast is the judge: every cell is one of its verdicts, and the verdict, the
         // fault, the number format and the declared enums are its own Swift types, from its
         // own package — never copies of them.
-        // Pinned to the HyperCast commit whose Swift doors stopped throwing, until HyperCast
-        // 1.0.0 is tagged; then `from: "1.0.0"`. A tagged package cannot depend on a revision
-        // (SwiftPM refuses it to every consumer), so the release guard refuses a tag with one.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", revision: "525ef572843e7be955a94fd4b705382948adb2af")
+        // 1.0.0, whose Swift doors do not throw. A version range, never a revision or a
+        // branch: SwiftPM refuses a tagged package that depends on one to every consumer, so
+        // the release guard refuses a tag that does.
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.0.0")
     ],
     targets: [
         // The native core as static libraries, one per triple (SE-0482, which is what sets
