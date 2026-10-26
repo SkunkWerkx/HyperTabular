@@ -15,7 +15,7 @@ group = "io.github.skunkwerkx"
 // in CI sets it for Gradle, so the Central bundle release.yml packs always carries the
 // committed version. It moves with rust/Cargo.toml: the suite pins the loaded library's own version
 // to it.
-version = System.getenv("HYPERTABULAR_VERSION") ?: "0.9.0"
+version = System.getenv("HYPERTABULAR_VERSION") ?: "1.0.0"
 
 repositories {
     mavenCentral()

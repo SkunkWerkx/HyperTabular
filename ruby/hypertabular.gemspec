@@ -1,7 +1,7 @@
 Gem::Specification.new do |spec|
   spec.name = "hypertabular"
   # Kept in lockstep with HyperTabular::VERSION (lib/hypertabular.rb) and rust/Cargo.toml.
-  spec.version = "0.9.0"
+  spec.version = "1.0.0"
   spec.summary = "Delimited text and workbooks read a batch at a time into typed columns, " \
                  "a HyperCast verdict for every cell"
   spec.description = <<~DESC

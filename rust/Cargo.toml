@@ -1,6 +1,6 @@
 [package]
 name = "hypertabular"
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 # Private-core tests stay in tests/ but are included by lib.rs as unit tests. List
 # integration targets explicitly so Cargo does not also compile those sources as crates.
