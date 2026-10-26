@@ -16,54 +16,79 @@ listing it. To name its product in your own target as well, add HyperCast to you
 `dependencies` too; SwiftPM only resolves a `.product(name:package:)` for a package listed
 there.
 
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+The program is an executable target's `main.swift`.
+
 ```swift
+import Foundation
 import HyperCast
 import HyperTabular
 
 // Open, read the header, and build the plan from the names it declares.
-let reader = try DelimitedReader(contentsOfFile: "orders.csv", dialect: .csv)
-let header = reader.header!                      // ["id", "name", "score"]
+let reader = try DelimitedReader(contentsOfFile: "people.csv", dialect: .csv)
+let header = reader.header!  // ["id", "name", "score"]
+print("header: \(Array(header))")
 try reader.bind([
-    .i32(header.ordinal(of: "id")),              // throws NoSuchColumn("id") if it is missing
+    .i32(header.ordinal(of: "id")),  // throws NoSuchColumn("id") if it is missing
     .text(header.ordinal(of: "name")),
     .f64(header.ordinal(of: "score")),
 ])
 
 while let batch = try reader.read() {
     // A column at a time, as the core wrote it…
-    let ids = batch.values(0, as: Int32.self)    // UnsafeBufferPointer<Int32>
-    let verdicts = batch.verdicts(2)             // a CellVerdict beside each value
+    let ids = batch.values(0, as: Int32.self)  // UnsafeBufferPointer<Int32>
+    let verdicts = batch.verdicts(2)  // a CellVerdict beside each value
+    print("ids: \(Array(ids))")
+    print("faults: \(verdicts.filter { !$0.isOk }.count)")
 
     // …or a row at a time, each cell as HyperCast's union.
     for row in batch {
         switch row.get(2, as: Double.self) {
-        case .success(let score): print(row.string(1) ?? "", score)
-        case .fault(let fault): print("line \(row.line): \(fault.reason)")
+        case .success(let score): print("\(row.string(1) ?? ""): \(score)")
+        case .fault(let fault):
+            print("line \(row.line): \(fault.reason) in \"\(String(decoding: row.raw(2), as: UTF8.self))\"")
         }
     }
 }
 
 // Columns known by position: the plan goes in with the opening.
 let byPosition = try DelimitedReader(
-    contentsOfFile: "orders.csv", dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
-try byPosition.forEachRow { row in print(row.line, row.string(1) ?? "") }
+    contentsOfFile: "people.csv", dialect: .csv, plan: [.i32(0), .text(1), .f64(2)])
+try byPosition.forEachRow { row in print("line \(row.line): \(row.string(1) ?? "")") }
 
 // A workbook reads into the same batch: from a file, memory, a stream or async bytes.
-let book = try Workbook(contentsOfFile: "orders.xlsx")
-print(book.sheets.map(\.name))                   // ["Orders"]
-let sheet = try book.sheet(named: "Orders")      // its header read; bind as above
-try sheet.bind([.i32(sheet.header!.ordinal(of: "id"))])
-while let batch = try sheet.read() { /* … */ }
+let book = try Workbook(contentsOfFile: "people.xlsx")
+print("sheets: \(book.sheets.map(\.name))")  // ["People"]
+let sheet = try book.sheet(named: "People")  // its header read; bind as above
+try sheet.bind([.text(sheet.header!.ordinal(of: "name")), .decimal(sheet.header!.ordinal(of: "score"))])
+try sheet.forEachRow { row in
+    switch row.get(1, as: Decimal.self) {  // Foundation's Decimal
+    case .success(let score): print("\(row.string(0) ?? ""): \(score)")
+    case .fault(let fault): print("line \(row.line): \(fault.reason)")
+    }
+}
 ```
 
 Asynchronous input — `URL.resourceBytes`, `FileHandle.bytes`, any `AsyncSequence` of
-`UInt8` — is read as it arrives, with Task cancellation honoured between refills:
+`UInt8` — is read as it arrives, with Task cancellation honoured between refills. Here `url`
+and `bookURL` are the `URL`s of a CSV file and a workbook:
 
 ```swift
 let (bytes, _) = try await URLSession.shared.bytes(from: url)
-let reader = try await DelimitedReader(bytes: bytes, dialect: .csv)   // awaits the header
+let reader = try await DelimitedReader(bytes: bytes, dialect: .csv)  // awaits the header
 try reader.bind([.text(reader.header!.ordinal(of: "name"))])
-while let batch = try await reader.readAsync() { /* … */ }
+while let batch = try await reader.readAsync() { print(batch.rows) }
 
 let workbook = try await Workbook(bytes: try await URLSession.shared.bytes(from: bookURL).0)
 ```

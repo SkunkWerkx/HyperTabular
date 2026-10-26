@@ -11,39 +11,88 @@ The crate is two layers:
 - **The Rust API** (the default `std` feature) — the Rust binding over the core: readers
   that own their buffers, read files, and lend out what the core wrote.
 
+```sh
+cargo add hypertabular
+```
+
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```rust
-use hypertabular::{Column, DelimitedReader, Dialect, Fault, SheetOptions, Workbook};
+use hypertabular::{Column, Decimal, DelimitedReader, Dialect, Fault, SheetOptions, Workbook};
 
-// Open, read the header, and only then say which columns to read, by name, through
-// which door. Nothing is sniffed.
-let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
-let header = reader.header().unwrap();
-let plan = [
-    Column::i64(header.require("id")?),
-    Column::f64(header.require("amount")?),
-    Column::text(header.require("name")?),
-];
-reader.bind(&plan)?;
-while let Some(batch) = reader.read()? {
-    let ids: &[i64] = batch.i64(0);              // a whole column, as the core wrote it
-    let verdicts = batch.verdicts(0);            // and a verdict beside each value
-    for row in batch {                           // or the batch read across, a row at a time
-        let amount: Result<f64, Fault> = row.get(1);
-        let name = row.text_str(2);              // a str borrowed from the input
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Open, read the header, and only then say which columns to read, by name, through
+    // which door. Nothing is sniffed.
+    let mut reader = DelimitedReader::open_unbound("people.csv", Dialect::CSV)?;
+    let header = reader.header().unwrap();
+    let names: Vec<_> = header.names().map(String::from_utf8_lossy).collect();
+    println!("header: {names:?}");
+    let plan = [
+        Column::i32(header.require("id")?),
+        Column::text(header.require("name")?),
+        Column::f64(header.require("score")?),
+    ];
+    reader.bind(&plan)?;
+    while let Some(batch) = reader.read()? {
+        let ids: &[i32] = batch.i32(0); // a whole column, as the core wrote it
+        let verdicts = batch.verdicts(2); // and a verdict beside each value
+        println!("ids: {ids:?}");
+        println!("faults: {}", verdicts.iter().filter(|v| !v.is_ok()).count());
+        for row in batch {
+            // or the batch read across, a row at a time
+            let name = row.text_str(1)?; // a str borrowed from the input
+            let score: Result<f64, Fault> = row.get(2);
+            match score {
+                Ok(score) => println!("{name}: {score}"),
+                Err(fault) => println!(
+                    "line {}: {:?} in {:?}",
+                    row.line(),
+                    fault.reason,
+                    String::from_utf8_lossy(&row.raw(2))
+                ),
+            }
+        }
     }
-}
 
-let book = Workbook::open("data.xlsx")?;         // XLSX, ODS or Numbers, told by what is in it
-let mut sheet = book.sheet_unbound("Data", SheetOptions::default())?;
-let header = sheet.header().unwrap();
-sheet.bind(&[
-    Column::decimal(header.require("amount")?),
-    Column::timestamp(header.require("created_at")?),
-])?;
-while let Some(batch) = sheet.read()? {
-    let amounts = batch.values::<hypertabular::Decimal>(0);
-    let created_at = batch.values::<hypertabular::Timestamp>(1);
-    // Check batch.verdicts(column) beside each slice before using its values.
+    // A reader that knows its columns by position takes the plan when it opens.
+    let plan = [Column::i32(0), Column::text(1), Column::f64(2)];
+    let mut by_position = DelimitedReader::open("people.csv", Dialect::CSV, &plan)?;
+    by_position.for_each_row(|row| -> Result<(), Box<dyn std::error::Error>> {
+        println!("line {}: {}", row.line(), row.text_str(1)?); // every row, batch after batch
+        Ok(())
+    })?;
+
+    let book = Workbook::open("people.xlsx")?; // XLSX, ODS or Numbers, told by what is in it
+    let sheets: Vec<&str> = book.sheets().iter().map(|s| s.name.as_str()).collect();
+    println!("sheets: {sheets:?}");
+    let mut sheet = book.sheet_unbound("People", SheetOptions::default())?;
+    let header = sheet.header().unwrap();
+    sheet.bind(&[
+        Column::text(header.require("name")?),
+        Column::decimal(header.require("score")?),
+    ])?;
+    while let Some(batch) = sheet.read()? {
+        let scores = batch.values::<Decimal>(1);
+        // Check batch.verdicts(column) beside each slice before using its values.
+        for (row, verdict) in batch.verdicts(1).iter().enumerate() {
+            match verdict.fault() {
+                None => println!("{}: {}", batch.text_str(0, row)?, scores[row]),
+                Some(fault) => println!("line {}: {:?}", batch.line(row), fault.reason),
+            }
+        }
+    }
+    Ok(())
 }
 ```
 

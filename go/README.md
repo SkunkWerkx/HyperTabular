@@ -11,55 +11,150 @@ go get github.com/SkunkWerkx/HyperTabular/go@latest
 The module lives in a subdirectory of the repository, so its tags are prefixed
 (`go/v<version>`).
 
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```go
+package main
+
 import (
+	"fmt"
+	"io"
+	"log"
+
 	// Both import paths end in /go, so the package names have to be spelled out.
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 	hypertabular "github.com/SkunkWerkx/HyperTabular/go"
 )
 
-// The dialect is declared; nothing is sniffed. Open header first, look the columns up by
-// name, and bind the plan built from them.
-reader, err := hypertabular.OpenDelimitedUnbound("orders.csv", hypertabular.CSV)
-if err != nil {
-	log.Fatal(err)
-}
-defer reader.Close()
-
-header := reader.Header() // a hypertabular.Header: a []string with lookups
-id, err := header.Ordinal("id") // a missing name is a *NoColumnError that names it
-if err != nil {
-	log.Fatal(err)
-}
-customer, _ := header.Ordinal("customer")
-total, _ := header.Ordinal("total")
-plan := []hypertabular.Column{
-	hypertabular.I32(id, hypercast.Invariant),
-	hypertabular.Text(customer),
-	hypertabular.Exact(total, hypercast.Invariant),
-}
-if err := reader.Bind(plan); err != nil {
-	log.Fatal(err)
-}
-
-for {
-	batch, err := reader.Read()
-	if err == io.EOF {
-		break
-	}
+func main() {
+	// The dialect is declared; nothing is sniffed. Open header first, look the columns up by
+	// name, and bind the plan built from them.
+	reader, err := hypertabular.OpenDelimitedUnbound("people.csv", hypertabular.CSV)
 	if err != nil {
-		log.Fatal(err) // a *hypertabular.Failure: the input is not rows of cells
+		log.Fatal(err)
 	}
-	// A column at a time: typed slices, one element per row, and a verdict beside each…
-	ids, customers := batch.I32(0), batch.Text(1)
-	for row := 0; row < batch.Rows(); row++ {
-		// …or a cell at a time, as the HyperCast door of the same name returns it.
-		total, fault := hypertabular.Get[hypercast.Decimal](batch, 2, row)
+	defer reader.Close()
+
+	header := reader.Header() // a hypertabular.Header: a []string with lookups
+	fmt.Println("header:", header)
+	id, err := header.Ordinal("id") // a missing name is a *NoColumnError that names it
+	if err != nil {
+		log.Fatal(err)
+	}
+	name, err := header.Ordinal("name")
+	if err != nil {
+		log.Fatal(err)
+	}
+	score, err := header.Ordinal("score")
+	if err != nil {
+		log.Fatal(err)
+	}
+	plan := []hypertabular.Column{
+		hypertabular.I32(id, hypercast.Invariant),
+		hypertabular.Text(name),
+		hypertabular.F64(score, hypercast.Invariant),
+	}
+	if err := reader.Bind(plan); err != nil {
+		log.Fatal(err)
+	}
+
+	for {
+		batch, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatal(err) // a *hypertabular.Failure: the input is not rows of cells
+		}
+		// A column at a time: typed slices, one element per row, and a verdict beside each…
+		ids, names := batch.I32(0), batch.Text(1)
+		fmt.Println("ids:", ids)
+		faults := 0
+		for _, verdict := range batch.Verdicts(2) {
+			if !verdict.OK() {
+				faults++
+			}
+		}
+		fmt.Println("faults:", faults)
+		for row := range batch.Rows() {
+			// …or a cell at a time, as the HyperCast door of the same name returns it.
+			value, fault := hypertabular.Get[float64](batch, 2, row)
+			if fault != nil {
+				fmt.Printf("line %d: %v in %q\n", batch.Line(row), fault.Reason, batch.Raw(2, row))
+				continue
+			}
+			fmt.Printf("%s: %v\n", names[row], value)
+		}
+	}
+
+	// A plan known up front goes straight to the constructor, and Bind is not called. Or
+	// read row by row, across batches, with Go's range-over-func iterators.
+	byPosition, err := hypertabular.OpenDelimited("people.csv", hypertabular.CSV, []hypertabular.Column{
+		hypertabular.I32(0, hypercast.Invariant),
+		hypertabular.Text(1),
+		hypertabular.F64(2, hypercast.Invariant),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer byPosition.Close()
+	for row, err := range byPosition.All() {
+		if err != nil {
+			log.Fatal(err) // how the input ended, if not at its end
+		}
+		name := row.TextString(1) // a view of the batch's bytes, not a copy
+		fmt.Printf("line %d: %s\n", row.Line(), name)
+	}
+
+	// A workbook reads into the same batch, a sheet at a time.
+	book, err := hypertabular.OpenWorkbook("people.xlsx") // or NewWorkbook(bytes), NewWorkbookReader(r)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var sheets []string
+	for _, info := range book.Sheets() {
+		sheets = append(sheets, info.Name)
+	}
+	fmt.Println("sheets:", sheets)
+	sheet, err := book.SheetNamedUnbound("People", hypertabular.DefaultSheetOptions)
+	if err != nil {
+		log.Fatal(err)
+	}
+	name, err = sheet.Header().Ordinal("name")
+	if err != nil {
+		log.Fatal(err)
+	}
+	score, err = sheet.Header().Ordinal("score")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sheet.Bind([]hypertabular.Column{
+		hypertabular.Text(name),
+		hypertabular.Exact(score, hypercast.Invariant),
+	}); err != nil {
+		log.Fatal(err)
+	}
+	for row, err := range sheet.All() {
+		if err != nil {
+			log.Fatal(err)
+		}
+		value, fault := hypertabular.Cell[hypercast.Decimal](row, 1)
 		if fault != nil {
-			fmt.Printf("%d %s: %q is %v\n", ids[row], customers[row], batch.Raw(2, row), fault.Reason)
+			fmt.Printf("line %d: %v\n", row.Line(), fault.Reason)
 			continue
 		}
-		fmt.Println(ids[row], string(customers[row]), total)
+		fmt.Printf("%s: %v\n", row.TextString(0), value)
 	}
 }
 ```
@@ -67,36 +162,8 @@ for {
 A plan known up front goes straight to the constructor — `OpenDelimited(path, dialect, plan)`,
 and likewise `NewDelimitedReader` and `NewDelimitedReaderBytes` — and `Bind` is not called.
 
-Or read row by row, across batches, with Go's range-over-func iterators:
-
-```go
-for row, err := range reader.All() {
-	if err != nil {
-		log.Fatal(err) // how the input ended, if not at its end
-	}
-	id, fault := hypertabular.Cell[int32](row, 0)
-	name := row.TextString(1) // a view of the batch's bytes, not a copy
-	…
-}
-```
-
-A workbook reads into the same batch, a sheet at a time:
-
-```go
-book, err := hypertabular.OpenWorkbook("orders.xlsx") // or NewWorkbook(bytes), NewWorkbookReader(r)
-if err != nil {
-	log.Fatal(err)
-}
-sheet, err := book.SheetNamedUnbound("Orders", hypertabular.DefaultSheetOptions)
-if err != nil {
-	log.Fatal(err)
-}
-id, err = sheet.Header().Ordinal("id")
-…
-err = sheet.Bind(plan)
-```
-
-`example_test.go` holds these as runnable examples, with their output checked by `go test`.
+`example_test.go` holds runnable examples of the same calls, with their output checked by
+`go test`.
 
 ## The shape
 

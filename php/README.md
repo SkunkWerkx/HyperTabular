@@ -11,7 +11,22 @@ composer require skunkwerkx/hypertabular
 PHP 8.2 or newer with `ext-ffi` enabled (`ffi.enable=true` for a web server; the CLI's
 default, `preload`, allows it on the command line).
 
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```php
+<?php
+
 use HyperCast\Fault;
 use HyperCast\Success;
 use HyperTabular\Column;
@@ -20,10 +35,12 @@ use HyperTabular\Dialect;
 use HyperTabular\SheetOptions;
 use HyperTabular\Workbook;
 
+require __DIR__ . '/vendor/autoload.php';
+
 // Open first, read the header, then build the plan from its names.
-$reader = DelimitedReader::open('orders.csv', Dialect::csv());
-$reader->header();                       // ['id', 'name', 'score']
-$header = $reader->headerIndex();        // the same names, looked up by name
+$reader = DelimitedReader::open('people.csv', Dialect::csv());
+echo 'header: [' . implode(', ', $reader->header()) . "]\n"; // ['id', 'name', 'score']
+$header = $reader->headerIndex(); // the same names, looked up by name
 $reader->bind([
     Column::i32($header->ordinal('id')), // an OutOfBoundsException naming a missing column
     Column::text($header->ordinal('name')),
@@ -32,17 +49,15 @@ $reader->bind([
 
 while (($batch = $reader->read()) !== null) {
     // A column at a time, decoded in one unpack — null where a cell did not cast…
-    $scores = $batch->values(2);
-    foreach ($batch->faults(2) as $row => $fault) {
-        echo "line {$batch->line($row)}: {$fault->reason->name} in \"{$batch->raw(2, $row)}\"\n";
-    }
+    echo 'ids: [' . implode(', ', $batch->values(0)) . "]\n";
+    echo 'faults: ' . count($batch->faults(2)) . "\n";
 
     // …or a row at a time, each cell as HyperCast's union.
     foreach ($batch as $row) {
         $verdict = $row->get(2);
         echo match (true) {
-            $verdict instanceof Success => "{$row->raw(1)}: {$verdict->value}\n",
-            $verdict instanceof Fault => "{$verdict->reason->name}\n",
+            $verdict instanceof Success => "{$row->value(1)}: {$verdict->value}\n",
+            $verdict instanceof Fault => "line {$row->line()}: {$verdict->reason->name} in \"{$row->raw(2)}\"\n",
         };
     }
 }
@@ -50,21 +65,26 @@ $reader->close();
 
 // A plan known up front is handed straight to the factory.
 $plan = [Column::i32(0), Column::text(1), Column::f64(2)];
-$reader = DelimitedReader::fromString("id,name,score\n1,alice,2.5\n", Dialect::csv(), $plan);
-foreach ($reader->rows() as $row) {      // every row, batch after batch
-    $row->line();                        // 2
-    $row->value(0);                      // 1, or null where the cell did not cast
+$reader = DelimitedReader::open('people.csv', Dialect::csv(), $plan);
+foreach ($reader->rows() as $row) { // every row, batch after batch
+    echo "line {$row->line()}: {$row->value(1)}\n";
 }
+$reader->close();
 
 // A workbook — from a path, a string or a stream — reads into the same batch.
-$stream = fopen('orders.xlsx', 'rb');
-$book = Workbook::fromStream($stream);   // read to its end; the stream stays yours
+$stream = fopen('people.xlsx', 'rb');
+$book = Workbook::fromStream($stream); // read to its end; the stream stays yours
 fclose($stream);
-$book->sheets();                         // [SheetInfo { name: 'Orders', hidden: false, … }]
-$sheet = $book->sheet('Orders', new SheetOptions());
-$sheet->bind([Column::i32($sheet->headerIndex()->ordinal('id'))]);
+echo 'sheets: [' . implode(', ', array_map(fn ($info) => $info->name, $book->sheets())) . "]\n";
+$sheet = $book->sheet('People', new SheetOptions());
+$header = $sheet->headerIndex();
+$sheet->bind([Column::text($header->ordinal('name')), Column::decimal($header->ordinal('score'))]);
 foreach ($sheet->rows() as $row) {
-    // …
+    $verdict = $row->get(1);
+    echo match (true) {
+        $verdict instanceof Success => "{$row->value(0)}: {$verdict->value}\n",
+        $verdict instanceof Fault => "line {$row->line()}: {$verdict->reason->name}\n",
+    };
 }
 ```
 

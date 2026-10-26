@@ -15,56 +15,79 @@
 
 Reading a spreadsheet or a CSV into typed values usually means one of two things: a library that guesses (the separator, the header, whether `1/7/2026` is January or July, whether `12.185` is a thousand or twelve) and throws on the first cell it cannot read, or a string per cell and a parser per cell in the host language. HyperTabular does neither. The dialect and the plan — which source column, through which HyperCast door, in which notation — are declared, and nothing is sniffed. A cell that does not cast is a verdict in its column, `Empty`, `Malformed` or `OutOfRange` with the span of the offending text, and the read goes on. And the work happens in one native call per batch: the binding allocates the column buffers once, the core fills them, and the boundary is crossed once per few thousand rows, not once per cell.
 
+Both examples read `people.csv` (`id,name,score`, one row whose score is `oops`) and
+`people.xlsx`, the same table on a sheet named `People`, as shown in full in each binding's
+README.
+
 ```csharp
 // C# (.NET 11+) — open, read the header, bind the plan by name; the same batch for
 // delimited text and for a sheet
-using var reader = DelimitedReader.Open("orders.csv", Dialect.Csv);
+using System.Diagnostics;
+using HyperCast;
+using HyperTabular;
+
+using var reader = DelimitedReader.Open("people.csv", Dialect.Csv);
 var header = reader.Header!;
-Column[] plan = [Column.Int32(header.Ordinal("id")), Column.Text(header.Ordinal("customer")),
+Column[] plan = [Column.Int32(header.Ordinal("id")), Column.Text(header.Ordinal("name")),
     Column.Double(header.Ordinal("score"))];
 reader.Bind(plan);
 
 while (reader.Read() is { } batch)
 {
-    ReadOnlySpan<int> ids = batch.Values<int>(0);          // a whole column, as the core wrote it
-    foreach (var row in batch)                             // or a row at a time, allocating nothing
+    ReadOnlySpan<int> ids = batch.Values<int>(0); // a whole column, as the core wrote it
+    Console.WriteLine($"ids: [{string.Join(", ", ids.ToArray())}]");
+    foreach (var row in batch) // or a row at a time, allocating nothing
     {
-        var line = row.Get<double>(2) switch               // one cell, as HyperCast's union
+        Console.WriteLine(row.Get<double>(2) switch // one cell, as HyperCast's union
         {
             Success<double> score => $"{row.GetString(1)}: {score.Value}",
             Fault fault => $"line {row.Line}: {fault.Reason}",
-            null => throw new UnreachableException(),      // default(Verdict<T>) only; no read returns it
-        };
+            null => throw new UnreachableException(), // default(Verdict<T>) only; no read returns it
+        });
     }
 }
 
-using var book = Workbook.Open("orders.xlsx");             // XLSX, ODS or Numbers, told by what is in it
-var sheet = book.Sheet("Orders", SheetOptions.Default, plan);
-while (sheet.Read() is { } batch) { /* the same batch */ }
+using var book = Workbook.Open("people.xlsx"); // XLSX, ODS or Numbers, told by what is in it
+var sheet = book.Sheet("People", SheetOptions.Default, plan);
+while (sheet.Read() is { } batch)
+{
+    Console.WriteLine($"sheet rows: {batch.Rows}"); // the same batch
+}
 ```
 
 ```rust
 // Rust — the API over the core
 use hypertabular::{Column, Decimal, DelimitedReader, Dialect, Fault, SheetOptions, Workbook};
 
-let mut reader = DelimitedReader::open_unbound("data.csv", Dialect::CSV)?;
-let header = reader.header().unwrap();
-let plan = [Column::i64(header.require("id")?), Column::f64(header.require("amount")?)];
-reader.bind(&plan)?;
-while let Some(batch) = reader.read()? {
-    let ids: &[i64] = batch.i64(0);
-    for row in batch {
-        let amount: Result<f64, Fault> = row.get(1);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut reader = DelimitedReader::open_unbound("people.csv", Dialect::CSV)?;
+    let header = reader.header().unwrap();
+    let plan = [
+        Column::i32(header.require("id")?),
+        Column::f64(header.require("score")?),
+    ];
+    reader.bind(&plan)?;
+    while let Some(batch) = reader.read()? {
+        let ids: &[i32] = batch.i32(0);
+        println!("ids: {ids:?}");
+        for row in batch {
+            let score: Result<f64, Fault> = row.get(1);
+            println!("line {}: {score:?}", row.line());
+        }
     }
-}
 
-let book = Workbook::open("orders.xlsx")?;
-let mut sheet = book.sheet_unbound("Orders", SheetOptions::default())?;
-let header = sheet.header().unwrap();
-sheet.bind(&[Column::decimal(header.require("amount")?)])?;
-while let Some(batch) = sheet.read()? {
-    let amounts: &[Decimal] = batch.values(0);
-    let verdicts = batch.verdicts(0); // check each verdict before using its value
+    let book = Workbook::open("people.xlsx")?;
+    let mut sheet = book.sheet_unbound("People", SheetOptions::default())?;
+    let header = sheet.header().unwrap();
+    sheet.bind(&[Column::decimal(header.require("score")?)])?;
+    while let Some(batch) = sheet.read()? {
+        let scores: &[Decimal] = batch.values(0);
+        let verdicts = batch.verdicts(0); // check each verdict before using its value
+        for (score, verdict) in scores.iter().zip(verdicts) {
+            println!("{score} ok: {}", verdict.is_ok());
+        }
+    }
+    Ok(())
 }
 ```
 

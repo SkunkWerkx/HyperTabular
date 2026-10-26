@@ -4,18 +4,37 @@ Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks �
 read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell.
 
+```sh
+dotnet add package HyperTabular
+```
+
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```csharp
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using HyperCast;
 using HyperTabular;
 
 // Open, read the header, find each column by name, then declare the plan.
-using var reader = DelimitedReader.Open("orders.csv", Dialect.Csv);
+using var reader = DelimitedReader.Open("people.csv", Dialect.Csv);
 var header = reader.Header!;
+Console.WriteLine($"header: [{string.Join(", ", header)}]");
 reader.Bind([
     Column.Int32(header.Ordinal("id")),
-    Column.Text(header.Ordinal("customer")),
+    Column.Text(header.Ordinal("name")),
     Column.Double(header.Ordinal("score")),
 ]);
 
@@ -23,7 +42,9 @@ while (reader.Read() is { } batch)
 {
     // A column at a time, as the core wrote it…
     ReadOnlySpan<int> ids = batch.Values<int>(0);
-    ReadOnlySpan<CellVerdict> verdicts = batch.Verdicts(0);
+    ReadOnlySpan<CellVerdict> verdicts = batch.Verdicts(2);
+    Console.WriteLine($"ids: [{string.Join(", ", ids.ToArray())}]");
+    Console.WriteLine($"faults: {verdicts.ToArray().Count(verdict => !verdict.IsOk)}");
 
     // …or a row at a time, each cell HyperCast's union.
     foreach (var row in batch)
@@ -36,14 +57,33 @@ while (reader.Read() is { } batch)
             // compiler's null analysis (CS8655), and the two above stay exhaustive (CS8509).
             null => throw new UnreachableException(),
         };
+        Console.WriteLine(line);
     }
 }
 
+// A plan whose positions are known is given up front, and bound before the header is read.
+using var byPosition = DelimitedReader.Open(
+    "people.csv", Dialect.Csv, [Column.Int32(0), Column.Text(1), Column.Double(2)]);
+foreach (var row in byPosition.Rows()) // every row, batch after batch
+{
+    Console.WriteLine($"line {row.Line}: {row.GetString(1)}");
+}
+
 // A workbook reads into the same batch, from a path, memory or a stream.
-using var book = Workbook.Open("orders.xlsx");
-var sheet = book.Sheet("Orders", SheetOptions.Default);
-sheet.Bind([Column.Int32(sheet.Header!.Ordinal("id")), Column.Text(sheet.Header.Ordinal("customer"))]);
-foreach (var row in sheet.Rows()) { /* … */ }
+using var book = Workbook.Open("people.xlsx");
+Console.WriteLine($"sheets: [{string.Join(", ", book.Sheets.Select(info => info.Name))}]");
+var sheet = book.Sheet("People", SheetOptions.Default);
+sheet.Bind([Column.Text(sheet.Header!.Ordinal("name")), Column.Decimal(sheet.Header.Ordinal("score"))]);
+foreach (var row in sheet.Rows())
+{
+    var line = row.Get<decimal>(1) switch
+    {
+        Success<decimal> score => $"{row.GetString(0)}: {score.Value}",
+        Fault fault => $"line {row.Line}: {fault.Reason}",
+        null => throw new UnreachableException(),
+    };
+    Console.WriteLine(line);
+}
 ```
 
 A plan whose positions are known can still be given up front —
@@ -137,7 +177,8 @@ rows, not once per cell.
   [Android](#android).
 
 `Tabular.IsAvailable` and `Tabular.NativeVersion` answer whether the native library
-resolved, without the first read being what finds out.
+resolved, without the first read being what finds out. `NativeVersion` is a `System.Version`
+(the core's own version, `null` when the library did not resolve), not a string.
 
 ## Android
 

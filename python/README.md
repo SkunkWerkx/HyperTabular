@@ -8,14 +8,28 @@ read a batch at a time into typed columns, with a
 pip install hypertabular
 ```
 
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```python
 from hypertabular import Column, DelimitedReader, Dialect, Fault, SheetOptions, Success, Workbook
 
 # The header first; then a plan that reads the columns by name, wherever the file put them.
-with DelimitedReader.open("orders.csv", Dialect.CSV) as reader:
-    header = reader.header                    # Header(('id', 'name', 'score'))
+with DelimitedReader.open("people.csv", Dialect.CSV) as reader:
+    header = reader.header  # Header(('id', 'name', 'score'))
+    print("header:", list(header))
     plan = [
-        Column.i32(header.ordinal("id")),     # KeyError naming the column if it is missing
+        Column.i32(header.ordinal("id")),  # KeyError naming the column if it is missing
         Column.text(header.ordinal("name")),
         Column.f64(header.ordinal("score")),
     ]
@@ -24,25 +38,35 @@ with DelimitedReader.open("orders.csv", Dialect.CSV) as reader:
         ids, names, scores = batch.columns
 
         # A column at a time, as the core wrote it…
-        total = sum(scores.values)            # a memoryview of C doubles
-        for row, fault in scores.faults():
-            print(row, fault.reason.name, scores.raw(row))
+        print("ids:", list(ids.values))  # a memoryview of C ints
+        print("faults:", scores.fault_count)
 
         # …or a cell at a time, as HyperCast's union.
         for row in range(batch.rows):
             match scores[row]:
                 case Success(value):
-                    print(names.values[row], value)
-                case Fault(reason, offset, length):
-                    print(reason.name, "on line", batch.line(row), "in", scores.raw(row))
+                    print(f"{names.values[row]}: {value}")
+                case Fault(reason):
+                    print(f'line {batch.line(row)}: {reason.name} in "{scores.raw(row).decode()}"')
+
+# A plan known up front goes straight to the constructor, bound before the header is read.
+plan = [Column.i32(0), Column.text(1), Column.f64(2)]
+with DelimitedReader.open("people.csv", Dialect.CSV, plan) as reader:
+    for row in reader.rows():  # every row, batch after batch
+        print(f"line {row.line}: {row.text(1)}")
 
 # A workbook reads into the same batch, its sheet header first or with the plan up front.
-book = Workbook.open("orders.xlsx")
-print(book.sheets)                            # (SheetInfo(name='Orders', hidden=False),)
-sheet = book.sheet("Orders", SheetOptions())
-sheet.bind([Column.i32(sheet.header.ordinal("id")), Column.text(sheet.header.ordinal("name"))])
-for batch in sheet:
-    ...
+book = Workbook.open("people.xlsx")
+print("sheets:", [info.name for info in book.sheets])  # SheetInfo(name='People', hidden=False)
+sheet = book.sheet("People", SheetOptions())
+header = sheet.header
+sheet.bind([Column.text(header.ordinal("name")), Column.decimal(header.ordinal("score"))])
+for row in sheet.rows():
+    match row.get(1):
+        case Success(value):
+            print(f"{row.text(0)}: {value}")
+        case Fault(reason):
+            print(f"line {row.line}: {reason.name}")
 ```
 
 A plan known up front goes straight to the constructor — `DelimitedReader.open(path, dialect,
@@ -76,12 +100,22 @@ and `sheet.rows()` run across batches, reading the next as one runs out. A batch
 shows, so a row stays valid after the reader has moved on.
 
 ```python
-with DelimitedReader.open("orders.csv", Dialect.CSV, plan) as reader:
-    orders = [
-        Order(id.value, row.text(1))
+from dataclasses import dataclass
+
+
+@dataclass
+class Person:
+    id: int
+    name: str
+
+
+with DelimitedReader.open("people.csv", Dialect.CSV, plan) as reader:
+    people = [
+        Person(id.value, row.text(1))
         for row in reader.rows()
         if isinstance(id := row.get(0), Success)
     ]
+print(people)
 ```
 
 ## Streams and asyncio
@@ -98,10 +132,10 @@ An asynchronous stream — an `asyncio.StreamReader`, or anything with `async re
 read with asyncio:
 
 ```python
-reader = await DelimitedReader.open_async(stream, Dialect.CSV)   # the header is awaited too
+reader = await DelimitedReader.open_async(stream, Dialect.CSV)  # the header is awaited too
 reader.bind([Column.i64(reader.header.ordinal("id"))])
-async for batch in reader:                                       # or: await reader.read_async()
-    ...
+async for batch in reader:  # or: await reader.read_async()
+    print(batch.rows)
 
 book = await Workbook.open_async(stream)
 ```
@@ -182,7 +216,7 @@ import micropip
 await micropip.install("hypertabular")
 
 import hypertabular
-hypertabular.native_version()   # the linked core's version
+hypertabular.native_version()  # the linked core's version
 ```
 
 It is the same native extension, with the same API and no JavaScript bridge. CI installs the

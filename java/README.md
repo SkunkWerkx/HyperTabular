@@ -4,38 +4,87 @@ Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks �
 read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell.
 
+```kotlin
+implementation("io.github.skunkwerkx:hypertabular:<version>")
+```
+
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+Run the program with `--enable-native-access=ALL-UNNAMED` ([below](#the-native-library)).
+
 ```java
 import io.github.skunkwerkx.hypercast.*;
 import io.github.skunkwerkx.hypertabular.*;
+import java.lang.foreign.*;
+import java.math.BigDecimal;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
 
-// Header first: open, find each column by its name, then bind the plan.
-try (DelimitedReader reader = DelimitedReader.open(Path.of("orders.csv"), Dialect.CSV)) {
-    Header header = reader.header();
-    reader.bind(List.of(
-            Column.i32(header.ordinal("id")),       // NoSuchElementException naming "id" if absent
-            Column.text(header.ordinal("name")),
-            Column.f64(header.ordinal("score"))));
-    for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
-        // A column at a time, as the core wrote it…
-        MemorySegment ids = batch.values(0);          // ids.getAtIndex(ValueLayout.JAVA_INT, row)
-        MemorySegment verdicts = batch.verdicts(0);   // CellVerdict.LAYOUT, one per row
+public class Main {
+    public static void main(String[] args) {
+        // Header first: open, find each column by its name, then bind the plan.
+        try (DelimitedReader reader = DelimitedReader.open(Path.of("people.csv"), Dialect.CSV)) {
+            Header header = reader.header();
+            System.out.println("header: " + header);
+            reader.bind(List.of(
+                    Column.i32(header.ordinal("id")), // NoSuchElementException naming "id" if absent
+                    Column.text(header.ordinal("name")),
+                    Column.f64(header.ordinal("score"))));
+            for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
+                // A column at a time, as the core wrote it…
+                MemorySegment ids = batch.values(0); // JAVA_INT, one per row
+                MemorySegment verdicts = batch.verdicts(2); // CellVerdict.LAYOUT, one per row
+                System.out.println("ids: " + Arrays.toString(ids.toArray(ValueLayout.JAVA_INT)));
+                long faults = verdicts.elements(CellVerdict.LAYOUT)
+                        .filter(verdict -> verdict.get(ValueLayout.JAVA_INT, 8) != 0) // the reason, 0 for ok
+                        .count();
+                System.out.println("faults: " + faults);
 
-        // …or a row at a time, each cell as HyperCast's union.
-        for (Row row : batch) {
-            String line = switch (row.get(2, Double.class)) {
-                case Success<Double> score -> row.string(1) + ": " + score.value();
-                case Fault<Double> fault -> "line " + row.line() + ": " + fault.reason()
-                        + " in \"" + row.rawString(2) + "\"";
-            };
+                // …or a row at a time, each cell as HyperCast's union.
+                for (Row row : batch) {
+                    String line = switch (row.get(2, Double.class)) {
+                        case Success<Double> score -> row.string(1) + ": " + score.value();
+                        case Fault<Double> fault ->
+                            "line " + row.line() + ": " + fault.reason() + " in \"" + row.rawString(2) + "\"";
+                    };
+                    System.out.println(line);
+                }
+            }
+        }
+
+        // A plan known up front is passed to the factory instead, and bound before the header is read.
+        List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
+        try (DelimitedReader reader = DelimitedReader.open(Path.of("people.csv"), Dialect.CSV, plan)) {
+            reader.forEachRow(row -> System.out.println("line " + row.line() + ": " + row.string(1)));
+        }
+
+        // A workbook reads into the same batch.
+        try (Workbook book = Workbook.open(Path.of("people.xlsx"));
+                Sheet sheet = book.sheet("People", SheetOptions.DEFAULT)) {
+            System.out.println(
+                    "sheets: " + book.sheets().stream().map(SheetInfo::name).toList());
+            Header header = sheet.header();
+            sheet.bind(List.of(Column.text(header.ordinal("name")), Column.decimal(header.ordinal("score"))));
+            sheet.forEachRow(row -> {
+                String line = switch (row.get(1, BigDecimal.class)) {
+                    case Success<BigDecimal> score -> row.string(0) + ": " + score.value();
+                    case Fault<BigDecimal> fault -> "line " + row.line() + ": " + fault.reason();
+                };
+                System.out.println(line);
+            });
         }
     }
-}
-
-// A plan known up front is passed to the factory instead, and a workbook reads into the same batch.
-List<Column> plan = List.of(Column.i32(0), Column.text(1), Column.f64(2));
-try (Workbook book = Workbook.open(Path.of("orders.xlsx"));
-        Sheet sheet = book.sheet("Orders", SheetOptions.DEFAULT, plan)) {
-    sheet.forEachRow(row -> { /* … */ });
 }
 ```
 

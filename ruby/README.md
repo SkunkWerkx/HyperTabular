@@ -4,12 +4,30 @@ Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks �
 read a batch at a time into typed columns, with a
 [HyperCast](https://github.com/SkunkWerkx/HyperCast) verdict for every cell.
 
+```sh
+gem install hypertabular
+```
+
+The examples read this file, saved as `people.csv`; the second row's score does not cast,
+so the fault path has something to print:
+
+```csv
+id,name,score
+1,alice,2.5
+2,bob,oops
+3,carol,4.75
+```
+
+and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
+row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
+
 ```ruby
 require "hypertabular"
 
-HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV) do |reader|
+HyperTabular::DelimitedReader.open("people.csv", HyperTabular::Dialect::CSV) do |reader|
   # The header is read first; the plan is built from where its names are.
-  header = reader.header              # => ["id", "name", "score"]
+  header = reader.header # => ["id", "name", "score"]
+  puts "header: #{header.inspect}"
   reader.bind([
     HyperTabular::Column.i32(header.ordinal("id")),
     HyperTabular::Column.text(header.ordinal("name")),
@@ -18,32 +36,44 @@ HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV) do 
 
   while (batch = reader.read)
     # A column at a time, decoded in one pass — nil where a cell did not cast…
-    ids = batch.values(0)
+    names = batch.values(1)
+    puts "ids: #{batch.values(0).inspect}"
+    puts "faults: #{batch.verdicts(2).count { |verdict| verdict.is_a?(HyperCast::Fault) }}"
 
     # …or a cell at a time, as HyperCast's union.
     batch.rows.times do |row|
       case batch.get(2, row)
       in HyperCast::Success(value:)
-        puts "#{batch.values(1)[row]}: #{value}"
-      in HyperCast::Fault(reason:, offset:, length:)
-        warn "line #{batch.line(row)}: #{reason} in #{batch.raw(2, row).inspect}"
+        puts "#{names[row]}: #{value}"
+      in HyperCast::Fault(reason:)
+        puts "line #{batch.line(row)}: #{reason} in #{batch.raw(2, row).inspect}"
       end
     end
   end
 end
 
-# Or a row at a time: a reader, a sheet and a batch are Enumerable over Rows.
-reader = HyperTabular::DelimitedReader.open("orders.csv", HyperTabular::Dialect::CSV)
-reader.bind([HyperTabular::Column.i32(reader.header.ordinal("id"))])
-reader.each { |row| puts "line #{row.line}: #{row.value(0).inspect}" }
+# Or a row at a time: a reader, a sheet and a batch are Enumerable over Rows. A plan known
+# up front goes straight to the factory, bound before the header is read.
+plan = [HyperTabular::Column.i32(0), HyperTabular::Column.text(1), HyperTabular::Column.f64(2)]
+HyperTabular::DelimitedReader.open("people.csv", HyperTabular::Dialect::CSV, plan) do |reader|
+  reader.each { |row| puts "line #{row.line}: #{row.value(1)}" }
+end
 
 # A workbook reads into the same batch — from a path, a String or an IO.
-book = HyperTabular::Workbook.open("orders.xlsx")
-book.sheets                           # => [#<data HyperTabular::SheetInfo name="Orders", hidden=false>]
-sheet = book.sheet("Orders", HyperTabular::SheetOptions::DEFAULT)
-sheet.bind([HyperTabular::Column.decimal(sheet.header.ordinal("Total"))])
-while (batch = sheet.read)
-  # …
+book = HyperTabular::Workbook.open("people.xlsx")
+puts "sheets: #{book.sheets.map(&:name).inspect}" # SheetInfo name="People", hidden=false
+sheet = book.sheet("People", HyperTabular::SheetOptions::DEFAULT)
+sheet.bind([
+  HyperTabular::Column.text(sheet.header.ordinal("name")),
+  HyperTabular::Column.decimal(sheet.header.ordinal("score"))
+])
+sheet.each do |row|
+  case row.get(1)
+  in HyperCast::Success(value:)
+    puts "#{row.value(0)}: #{value}"
+  in HyperCast::Fault(reason:)
+    puts "line #{row.line}: #{reason}"
+  end
 end
 ```
 
@@ -193,7 +223,7 @@ delimited text from a String or any IO.
 - **No Rust toolchain.** The gem's `extconf.rb` only hands rbwasm the prebuilt archive. The
   first `rbwasm build` compiles Ruby itself and takes 15–20 minutes; later builds reuse it.
 - **macOS with Homebrew: limit pkg-config to `openssl@3`.** Run the build as
-  `PKG_CONFIG_LIBDIR="$(brew --prefix openssl@3)/lib/pkgconfig" bundle exec rbwasm build …`.
+  `PKG_CONFIG_LIBDIR="$(brew --prefix openssl@3)/lib/pkgconfig" bundle exec rbwasm build --ruby-version 4.0 -o ruby.wasm`.
   Without it Homebrew's pkg-config files reach into the build twice: its `openssl` is OpenSSL
   4, which the native Ruby rbwasm builds first does not compile against, and its `libyaml`
   is a macOS library that psych then links into the wasm interpreter, which fails for Ruby
