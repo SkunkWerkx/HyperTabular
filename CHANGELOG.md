@@ -71,6 +71,18 @@ the release tag alone.
 
 ### Changed
 
+- **The release flow, before its first run here.** The wheels are uploaded by a step of
+  `release.yml`'s own `pypi-publish` job, so their PEP 740 publish attestations name
+  `release.yml`, as 0.9.0's do (the Forge's composite action nested the upload, where it
+  cannot find its own container image; HyperUuid's and HyperCast's 1.0.0 wheels went up
+  from another workflow for it); staging starts by itself once the release-mode CI on the
+  preparation commit is green, and a second request for a commit already staged is skipped
+  with a notice; the Forge commit's step output is `revision`, which keeps CodeQL's
+  `actions/cache-poisoning/poisonable-step` quiet. *(repository only)*
+- **Built on HyperCast 1.0.0.** Every binding depends on HyperCast's first stable release,
+  within its major: the crate `1.0.0`, NuGet `1.0.0`, Maven `1.0.0`, Go `v1.0.0`, Python
+  `>=1.0.0,<2`, Ruby `~> 1.0`, PHP `^1.0.0` and Swift `from: "1.0.0"`, where it was `0.9.0`
+  (Swift: a commit pin, which no tagged package may carry). *(all packages)*
 - **Swift — on HyperCast 1.0.0, whose doors do not throw.** HyperCast's Swift doors and
   `Cast.nativeVersion()` dropped `throws` (bad data was always the verdict's `Fault`), so a
   call needs no `try`; one left in place compiles with a warning. *(Swift)*

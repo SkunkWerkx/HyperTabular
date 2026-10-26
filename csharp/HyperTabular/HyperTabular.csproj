@@ -41,7 +41,7 @@
   <ItemGroup>
     <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
          its types, not copies of them. -->
-    <PackageReference Include="HyperCast" Version="0.9.0" />
+    <PackageReference Include="HyperCast" Version="1.0.0" />
   </ItemGroup>
 
   <ItemGroup>

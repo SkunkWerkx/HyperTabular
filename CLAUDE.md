@@ -177,10 +177,6 @@ alone.
 
 ## Open follow-ups (as of 2026-10-25)
 
-- Both `Package.swift` files pin HyperCast to `525ef57` (its Swift doors stopped throwing)
-  until HyperCast 1.0.0 is tagged. Move them to `from: "1.0.0"`, with
-  `swift/Benchmarks/Package.resolved`, before preparing HyperTabular's release: the Forge's
-  release guard refuses a tag whose manifests pin a revision or branch.
 - Benchmark tables were measured on the WSL2 i9-11900H box. When the dev machine changes,
   re-measure every harness there before relabelling a table; never mix machines, and say
   which tables predate a core change. A benchmarking workflow is an idea, not started.

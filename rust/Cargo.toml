@@ -30,11 +30,12 @@ bench = false
 [dependencies]
 # The one upstream, and the core's only dependency: every cell verdict is a HyperCast
 # verdict. 0.7.0 brought the interop surface and the typed doors this crate reads workbook
-# cells through, and 0.8.0 Android. 0.9.0 is the floor because its `python-values` is built
-# on PyO3 0.30, the PyO3 the Python binding below needs for free-threaded CPython, and
-# Cargo links one PyO3 per build. `exports` stays off, so no library built from this
-# crate carries HyperCast's `cast_*` symbols.
-hypercast = { version = "0.9.0", default-features = false }
+# cells through, 0.8.0 Android, and 0.9.0 a `python-values` built on PyO3 0.30, the PyO3 the
+# Python binding below needs for free-threaded CPython (Cargo links one PyO3 per build).
+# 1.0.0 is the floor: the first stable surface, and the one the Swift binding's
+# non-throwing doors need. `exports` stays off, so no library built from this crate carries
+# HyperCast's `cast_*` symbols.
+hypercast = { version = "1.0.0", default-features = false }
 # The asynchronous reads (the `async` feature): the runtime-neutral `AsyncRead` trait alone,
 # which Tokio's readers meet through `tokio_util::compat` and every other runtime's directly.
 futures-io = { version = "0.3", default-features = false, features = ["std"], optional = true }
