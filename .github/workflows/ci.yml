@@ -110,8 +110,8 @@ jobs:
       go_tinygo_smoke: go/internal/tinygosmoke
       ruby_wasm_smoke: ruby/wasm-smoke
 
-  # The 25 PyPI wheels — three for each of the eight native platforms (abi3, cp314t and
-  # abi3t, each installed on the interpreters it serves, free-threaded ones included), and
+  # The 17 PyPI wheels — two for each of the eight native platforms (abi3 and abi3t, each
+  # installed on the interpreters it serves, free-threaded ones included), and
   # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
   # built, installed and attested here, and published unchanged by release.yml.
   build-wheels:

@@ -47,8 +47,8 @@ no-panic = { version = "0.1", optional = true }
 # The Python binding (src/python_ext.rs), linked into a CPython extension module.
 # abi3-py311, as HyperCast's is: one build per platform serves every CPython from the
 # package's floor up with the GIL. abi3t-py315 is PEP 803's stable ABI for 3.15+, with or
-# without the GIL; free-threaded 3.14 takes a build of its own. The same PyO3 as
-# HyperCast's `python-values`.
+# without the GIL; free-threaded 3.13 and 3.14 have no stable ABI and get no wheel. The same
+# PyO3 as HyperCast's `python-values`.
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311", "abi3t-py315"], optional = true }
 # The Ruby binding's Magnus extension (src/ruby_ext.rs), linked into a Ruby native
 # extension (`hypertabular_native`) and, for ruby.wasm, into the interpreter itself. The

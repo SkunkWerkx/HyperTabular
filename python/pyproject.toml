@@ -19,8 +19,9 @@ license-files = ["LICENSE"]
 authors = [{ name = "Brian Buvinghausen" }]
 # 3.11 floor, as HyperCast's package: `match`/`case` over Success | Fault, `typing.assert_never`
 # in the standard library, and the extension is built abi3-py311, so one wheel per platform
-# covers the whole floor-and-up range with the GIL. Free-threaded CPython takes a cp314t
-# wheel and, from 3.15, the abi3t one (rust/Cargo.toml's abi3t-py315).
+# covers the whole floor-and-up range with the GIL. Free-threaded CPython is served from 3.15
+# by the abi3t wheel (rust/Cargo.toml's abi3t-py315); 3.13t and 3.14t have no stable ABI and
+# get no wheel.
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan

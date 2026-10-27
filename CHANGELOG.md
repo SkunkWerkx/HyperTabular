@@ -7,6 +7,17 @@ all of them. Each entry marks which packages it actually affects.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Python — the `cp314-cp314t` wheel is gone.** Each platform ships two wheels where it
+  shipped three, `cp311-abi3` for CPython 3.11 and newer with the GIL and `cp315-abi3.abi3t`
+  for 3.15 and newer with or without it: 17 wheels a release where 1.0.0 had 25. The
+  free-threaded 3.14 wheel proved the GIL-free path, and it was bound to one interpreter
+  version, too narrow an ABI to carry. Free-threaded 3.13 and 3.14 now get `No matching
+  distribution found`, as PyPy does; free-threading starts at 3.15. *(Python)*
+
 ## [1.0.0] — 2026-10-25
 
 The first stable release. Every package's public API and the platforms in the README's
