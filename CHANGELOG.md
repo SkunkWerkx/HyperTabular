@@ -9,6 +9,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **C# — .NET 10 is supported, on desktop, server and in the browser.** The package builds
+  `net10.0` and `net11.0` from one source, and package validation holds their public APIs
+  identical. On .NET 10 it covers Windows, Linux (glibc and musl) and macOS, framework-dependent
+  and Native AOT, and Blazor WebAssembly; iOS, Mac Catalyst and Android stay .NET 11 and later,
+  and a .NET 10 project for any of them stops at build with the new error `HYPERTABULAR003`,
+  which names the platform. The package depends on HyperCast 1.1.0, the first with
+  `lib/net10.0/`; a consumer on C# 14 reads a cell's verdict with HyperCast's `Match`, `Switch`
+  or `TryGetValue`, and the union `switch` takes C# 15. `HyperTabular.targets` moves to
+  `build/net10.0/` (and `buildTransitive/net10.0/`), one copy NuGet selects for both
+  frameworks. CI runs the suite and the Native AOT smoke test on both frameworks on every
+  desktop and musl leg, and a new `test-nuget-package` job proves from the packed package that
+  a .NET 10 Native AOT publish links the core in. *(C#)*
+
 ### Changed
 
 - **Python — the `cp314-cp314t` wheel is gone.** Each platform ships two wheels where it
@@ -17,6 +32,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   free-threaded 3.14 wheel proved the GIL-free path, and it was bound to one interpreter
   version, too narrow an ABI to carry. Free-threaded 3.13 and 3.14 now get `No matching
   distribution found`, as PyPy does; free-threading starts at 3.15. *(Python)*
+- **C# — the iOS and Mac Catalyst smoke test runs on the SDK's defaults.** Its Mac Catalyst
+  build set `Registrar` to `managed-static`, after a Release app on .NET 11's default,
+  `trimmable-static`, aborted before `Main`, a fault then put down to the SDK. It was the
+  test's own: its code touches no Apple API, so the trimmer dropped the platform assembly the
+  runtime calls into at startup, and the iOS device build, linked in CI but never run, dropped
+  it as well. One UIKit symbol used in a module initializer, as every real app uses UIKit,
+  keeps that assembly and puts UIKit back in the native link, so the hand-added UIKit
+  framework is gone too. The package is unchanged. *(repository only)*
+- **C# — the benchmarks float to BenchmarkDotNet's prereleases.** 0.15.x, the newest
+  stable, knows no runtime past .NET 10 and stops in its SDK validation on net11.0; the 0.16
+  previews know .NET 11, and the harness takes them (`*-*`) until 0.16.0 ships stable.
+  The in-process toolchain that sidestepped it is gone, so each benchmark runs in its own
+  process, BenchmarkDotNet's default; the README's C# row was measured in-process and
+  stands until the harness is run again. *(repository only)*
+
+### Fixed
+
+- **C# — a Debug Blazor WebAssembly build loads** (the same failure as
+  [HyperUuid#50](https://github.com/SkunkWerkx/HyperUuid/issues/50)). Chromium refused an
+  unstripped Debug build's `dotnet.native.wasm` with "module uses a mix of legacy and new
+  exception handling instructions": the package translated the archive's legacy exception
+  handling with a `wasm-opt` pass that rides the SDK's post-link step, and the SDK skips that
+  step for an unstripped module. The archive no longer needs translating: it is built on a
+  pinned nightly with `-Zbuild-std`, for plain wasm, so it holds no exception-handling
+  instructions and none of the features .NET 10's toolchain rejects (dotnet/runtime#132858),
+  and the package's `--translate-to-exnref` item is gone. The same build is what lets .NET 10
+  link it, and the archive in the package shrinks from 3.6 MB to 663 KB. *(C#)*
 
 ## [1.0.0] — 2026-10-25
 

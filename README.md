@@ -20,7 +20,7 @@ Both examples read `people.csv` (`id,name,score`, one row whose score is `oops`)
 README.
 
 ```csharp
-// C# (.NET 11+) — open, read the header, bind the plan by name; the same batch for
+// C# (.NET 10+; the switch is C# 15) — open, read the header, bind the plan by name; the same batch for
 // delimited text and for a sheet
 using System.Diagnostics;
 using HyperCast;
@@ -176,7 +176,7 @@ Swift and Go link the core into the consumer's executable on every platform, so 
 
 **Android**, arm64 and x86_64, is reached by the same three bindings, so that a .NET MAUI app has the core on every platform MAUI targets and a Go or Swift Android build links it as on any other platform. C# carries a shared library cross-built with the NDK at API level 21, its segments aligned to the 16 KB pages Android 15 devices may use and Google Play requires: an app on CoreCLR, .NET 11's Android runtime, loads it out of the APK like any Linux library, and a Native AOT publish links it in from a static archive like every other RID. Go links its own pair of archives under `GOOS=android` with the NDK's clang, and Swift links them from its artifact bundle with the [Swift SDK for Android](https://www.swift.org/documentation/articles/swift-sdk-for-android-getting-started.html) (Swift 6.3+, API 28+). HyperCast reaches Android the same three ways, and its libraries sit beside these in the same app. CI's `test-android` job builds the C# app both ways for both RIDs from a package packed in that run, cross-builds the Go and Swift suites, runs everything x86_64 in an emulator whose image uses 16 KB pages, and links or inspects the arm64 builds. See [`csharp/README.md`](csharp/README.md#android), [`go/README.md`](go/README.md#android) and [`swift/README.md`](swift/README.md#linking-and-deployment).
 
-**Runtime floors** follow upstream support: a version that has reached end of life is not a floor. Today that is .NET 11, JDK 25, Go 1.26, Python 3.11, Ruby 3.3 and PHP 8.2, the same floors as HyperCast and HyperUuid. Swift's floor is 6.2 for a different reason: it is the first release whose package manager can link a static library, which is how the binding reaches musl and WebAssembly at all. The crate's own floor is Rust 1.88 (`rust-version` in its manifest, HyperCast's own), and CI builds the library and the `no_std` shared library on exactly that toolchain.
+**Runtime floors** follow upstream support: a version that has reached end of life is not a floor. Today that is .NET 10 (with iOS, Mac Catalyst and Android on .NET 11), JDK 25, Go 1.26, Python 3.11, Ruby 3.3 and PHP 8.2, the same floors as HyperCast (HyperUuid differs on two: JDK 21 and PHP 8.3). Swift's floor is 6.2 for a different reason: it is the first release whose package manager can link a static library, which is how the binding reaches musl and WebAssembly at all. The crate's own floor is Rust 1.88 (`rust-version` in its manifest, HyperCast's own), and CI builds the library and the `no_std` shared library on exactly that toolchain.
 
 ## WebAssembly
 
@@ -188,8 +188,8 @@ already brings. Every browser row below runs in headless Chrome in CI: on every 
 
 | Binding | WebAssembly |
 | --- | --- |
-| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1` (libtest skips its three `should_panic` tests there, where a panic aborts), run by CI's `test-wasi` job on every pull request, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo wasm-staticlib` builds the `wasm32-unknown-emscripten` archive C# links; Go and Swift link a `wasm32-wasip1` one. |
-| C# | **Yes, on .NET 11.** `dotnet add package HyperTabular` into a Blazor WebAssembly project links the core beside HyperCast's through the package's `.targets`; `csharp/HyperTabular.WasmSmokeTest` proves it. |
+| Rust | **Yes.** The full suite passes under [wasmtime](https://wasmtime.dev/) on `wasm32-wasip1` (libtest skips its three `should_panic` tests there, where a panic aborts), run by CI's `test-wasi` job on every pull request, and `rust/browser-test` runs the crate on `wasm32-unknown-unknown` in Chrome. `cargo +<pin> wasm-staticlib` builds the `wasm32-unknown-emscripten` archive C# links, on the dated nightly `.github/hyper.json` pins as `wasm.toolchain`; Go and Swift link a `wasm32-wasip1` one. |
+| C# | **Yes, on .NET 10+.** `dotnet add package HyperTabular` into a Blazor WebAssembly project links the core beside HyperCast's through the package's `.targets`; it needs the `wasm-tools` workload (`wasm-tools-net10` for a `net10.0` app on the .NET 11 SDK). The archive is built for plain wasm, with no exception-handling instructions and no feature but the two .NET 10's toolchain accepts throughout, so both frameworks link it as it is, Release or Debug. `csharp/HyperTabular.WasmSmokeTest` proves it on both. |
 | Go | **Yes, through [TinyGo](https://tinygo.org) 0.42+.** `tinygo build -target=wasm` (or `wasip1`) links `staticlib/wasm`; stock Go's wasm toolchain cannot link a C library. |
 | Swift | **Yes, on Swift 6.2+.** swift.org's WebAssembly SDK links the artifact bundle's `wasm32-unknown-wasip1` archive; the result is a `wasm32-wasip1` module, run in the browser through a WASI shim. |
 | Python | **Yes, on [Pyodide](https://pyodide.org/) 314.x.** `await micropip.install("hypertabular")` installs the seventeenth wheel (`pyemscripten_2026_0_wasm32`) and `hypercast`'s; CI runs the whole pytest suite in Pyodide under Node and in Chrome. |
@@ -247,7 +247,7 @@ the command on its own artifact: [Rust](rust/#verifying-provenance),
 ```
 corpus/     the shared conformance cases and the workbooks they read — the cross-language contract
 rust/       the core (no_std, allocation-free, panic-free; 14 exports, hypertabular_version among them) and the Rust API over it
-csharp/     the .NET 11 binding: LibraryImport, HyperCast's Verdict<T>, corpus replay, AOT smoke test
+csharp/     the .NET 10 and 11 binding: LibraryImport, HyperCast's Verdict<T>, corpus replay, AOT smoke test
 java/       the JDK 25+ binding: FFM, HyperCast's sealed Verdict, corpus replay, Native Image smoke test
 go/         the Go binding: the core linked in through cgo, typed slices and Get[T]
 swift/      the SwiftPM binding: the core linked in as a static library on every platform

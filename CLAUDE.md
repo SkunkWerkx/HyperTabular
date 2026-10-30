@@ -60,9 +60,21 @@ files and `go.mod`.
   covers every Ruby and platform outside them and must never be restricted. Ruby 3.4
   reaches EOL on 2028-03-31: then drop it from those lists and clear
   `ruby_compat_version`.
-
-## Never hand-edit
-
+- The .NET floor: `TargetFrameworks` in `csharp/Directory.Build.props` (the Apple and Android
+  smoke tests, the gate probe and the benchmarks set their own), the csproj's HyperCast
+  reference (a HyperCast with `lib/net10.0/`, 1.1.0 or later), ci.yml's
+  `csharp_aot_frameworks` and `csharp_extra_runtime`, the `HYPERTABULAR003` gate and the
+  `build/net10.0/` folder name (which the smoke tests and
+  `csharp/HyperTabular.PlatformGateTest` import by path), `test-nuget-package`'s layout step
+  (its `lib/` and `build/` paths and the no-`build/net11.0` check), its AOT loop (`net10.0
+  net11.0`) and control (`-f net10.0`), the needles `test_workflow_contracts.py` pins for
+  that job, its floor step (a net9.0 restore must fail with NU1202) and its gate step, the
+  Apple and Android probe steps that hard-code `net10.0-*`, the WasmSmokeTest's per-framework
+  references and `check.sh`'s net10 legs and header, `wasm-tools-net10` in the
+  `HYPERTABULAR002` text and both READMEs, the Forge `test-blazor` job's .NET 10 SDK and
+  `wasm-tools-net10` steps (keyed on the wasm pin, not the floor), and the floor sentences in
+  `csharp/README.md` and `README.md`. .NET 10 reaches EOL on 2028-11-14: then drop it from
+  all of them, and the targets folder moves to the new lowest TFM. ## Never hand-edit
 - `go/staticlib/`, the Swift artifact bundle and `php/src/native/` are CI-built binaries
   committed by `stage-native-binaries.yml`.
 - Versions: bump through `prepare-release.yml`. The libraries embed their version.
@@ -77,6 +89,13 @@ Each language's primary toolchain is its current release; check endoflife.date r
 assuming. Exceptions must be commented where pinned: a real platform constraint, or an
 older floor shipped beside the primary and dropped at its EOL. Floors match HyperUuid and
 HyperCast and move together.
+
+Rust's one exception is the Blazor archive: `wasm.toolchain` in `.github/hyper.json` pins a
+dated nightly, because only `-Zbuild-std` leaves out the prebuilt sysroot's legacy exception
+handling and the features .NET 10's wasm-opt rejects (`rust/.cargo/config.toml` says why).
+Moving the pin is its own PR, re-proven by CI's guard and Blazor legs, and it matches
+HyperUuid's and HyperCast's. When build-std stabilizes, the pin goes and `cargo
+wasm-staticlib` returns to stable. Everything else in `rust/` stays on stable.
 
 ## Forge coupling and releases
 
@@ -120,7 +139,12 @@ with `.github/scripts/local-core.sh`, then `go test -tags hypertabular_local ./.
 builds each leg's core before its suites, so it never sees the committed ones. Outside CI
 the three suites refuse to run against a committed core older than `rust/` (the core
 freshness check), and `local-core.sh` finds `../HyperForge` on its own. Go caches a pass
-from before a core change; `-count=1` runs the check again. Large benchmark inputs come from the ignored `corpus/generate/out/`.
+from before a core change; `-count=1` runs the check again. Large benchmark inputs come from
+the ignored `corpus/generate/out/`.
+
+The Blazor archive needs the pinned nightly with its sources: `rustup toolchain install
+<pin> --component rust-src --target wasm32-unknown-emscripten`, emsdk on PATH, then `cargo
++<pin> wasm-staticlib` in `rust/`; the Forge's `wasm_archive_guard.py` checks the result.
 
 The suite also runs under wasmtime: `cargo test --target wasm32-wasip1 --target-dir <target>`
 with `CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run --dir=<repo>::<repo>

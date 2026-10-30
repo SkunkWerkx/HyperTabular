@@ -1,5 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+	<!-- Two modes. By default it references the library project and imports the package's
+	     targets file by hand, which is what the in-tree publish proves. With
+	     -p:HyperTabularVersion=<v> -p:RestoreAdditionalProjectSources=<feed> (the Android smoke
+	     test's convention) it takes the packed package from that feed instead, so the targets
+	     file arrives by NuGet's own import, as a consumer gets it. Frameworks come from
+	     Directory.Build.props; publish one at a time: dotnet publish -f net10.0 (or net11.0)
+	     -r <rid> -p:PublishAot=true; without -f a multi-targeted publish fails with NETSDK1129. -->
+
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
 		<IsPackable>false</IsPackable>
@@ -8,7 +16,8 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="../HyperTabular/HyperTabular.csproj" />
+		<ProjectReference Include="../HyperTabular/HyperTabular.csproj" Condition="'$(HyperTabularVersion)' == ''" />
+		<PackageReference Include="HyperTabular" Version="$(HyperTabularVersion)" Condition="'$(HyperTabularVersion)' != ''" />
 	</ItemGroup>
 
 	<!-- One real workbook, compiled into the program: the binary is run where it is
@@ -23,7 +32,7 @@
 	     the Native AOT wiring in it. The archive it links is
 	     csharp/HyperTabular/staticlibs/{rid}/, which is not committed — the forge's
 	     static-libs/build-static-libs.sh stages it, in CI and by hand. Where it is absent the
-	     publish loads the shared library. -->
-	<Import Project="../HyperTabular/build/net11.0/HyperTabular.targets" />
+	     publish loads the shared library. In package mode NuGet does the import. -->
+	<Import Project="../HyperTabular/build/net10.0/HyperTabular.targets" Condition="'$(HyperTabularVersion)' == ''" />
 
 </Project>

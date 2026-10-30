@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- TargetFramework (net11.0 floor), LangVersion preview, and CS8509-as-error come from
+  <!-- TargetFrameworks (net10.0;net11.0), LangVersion preview, and CS8509-as-error come from
        csharp/Directory.Build.props, as in HyperCast. -->
   <PropertyGroup>
     <PackageId>HyperTabular</PackageId>
@@ -30,6 +30,10 @@
     <!-- An undocumented public member fails the build instead of shipping undocumented. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- One source, two TFMs: pack fails if net11.0 ever exposes API net10.0 lacks, or the
+         two lib/ groups drift apart. -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <EnableStrictModeForCompatibleFrameworksInPackage>true</EnableStrictModeForCompatibleFrameworksInPackage>
   </PropertyGroup>
 
   <ItemGroup>
@@ -40,8 +44,9 @@
 
   <ItemGroup>
     <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
-         its types, not copies of them. -->
-    <PackageReference Include="HyperCast" Version="1.0.0" />
+         its types, not copies of them. 1.1.0 is the first HyperCast with lib/net10.0/ and the
+         browser-wasm archive both frameworks link. -->
+    <PackageReference Include="HyperCast" Version="1.1.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -64,7 +69,7 @@
     <None Include="buildTransitive/**" Pack="true" PackagePath="buildTransitive" />
     <!-- The core as a static library, one per RID: for a Native AOT publish to link in
          instead of loading the shared library, and for an iOS or Mac Catalyst app, which can
-         only link it. build/net11.0/HyperTabular.targets has the wiring. Staged here before
+         only link it. build/net10.0/HyperTabular.targets has the wiring. Staged here before
          packing, like runtimes/, and not committed. -->
     <None Include="staticlibs/**" Pack="true" PackagePath="staticlibs" />
     <!-- Local dev loop: when the core has been built in-repo (`cargo cdylib` in rust/), copy

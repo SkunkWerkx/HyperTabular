@@ -205,6 +205,34 @@ class CiTests(unittest.TestCase):
         self.assertIn('needs: [build-static, build-android]', self.jobs['test-android'])
         self.assertIn('needs: build-static', self.jobs['test-swift-static'])
 
+    def test_csharp_runs_on_net10_and_net11(self):
+        build = self.jobs['build-native']
+        self.assertIn('      csharp_aot_frameworks: "net10.0 net11.0"\n', build)
+        self.assertIn('      csharp_extra_runtime: "10.0"\n', build)
+
+    def test_mobile_net10_builds_stop_with_hypertabular003(self):
+        apple = self.jobs['test-apple-mobile']
+        self.assertIn('- name: C# — net10.0-ios and net10.0-maccatalyst stop with HYPERTABULAR003', apple)
+        self.assertIn('"net10.0-ios|iOS" "net10.0-maccatalyst|Mac Catalyst"', apple)
+        self.assertIn('-p:OutputType=Exe', apple)
+        android = self.jobs['test-android']
+        self.assertIn('- name: C# — net10.0-android stops with HYPERTABULAR003', android)
+        self.assertIn('Android needs .NET 11 or later: target net11.0-android.', android)
+
+    def test_nuget_package_job_proves_the_packed_layout(self):
+        job = self.jobs['test-nuget-package']
+        self.assertIn('    needs: [build-static, build-native]\n', header(job))
+        self.assertIn('setup-dotnet', job)
+        self.assertIn('global-json-file: global.json', job)
+        for needle in ('HYPERTABULAR003', 'NU1202', '.nobuild', 'readelf -d',
+                       'build/net10.0/HyperTabular.targets buildTransitive/net10.0/HyperTabular.targets',
+                       'lib/net10.0/HyperTabular.Managed.dll lib/net11.0/HyperTabular.Managed.dll'):
+            self.assertIn(needle, job)
+        self.assertIn('      - name: The gate admits Blazor WebAssembly on .NET 10 and 11\n', job)
+        request = self.jobs['request-staging']
+        needs = re.search(r'^    needs: \[([^]]*)\]', request, re.M)[1]
+        self.assertIn('test-nuget-package', re.split(r'[\s,]+', needs.strip()))
+
     def test_static_checks_run_in_the_forge_with_this_repositorys_inputs(self):
         core = self.jobs['check-core']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-check-core.yml@master', core)

@@ -10,13 +10,18 @@
 	     Unlike the other smoke tests, this one takes HyperTabular as a package, not a project
 	     reference. What Android needs proving is the package's own layout: that the .NET for
 	     Android SDK finds runtimes/{rid}/native/libhypertabular.so in the .nupkg and puts it in
-	     the APK under lib/{abi}/, and that build/net11.0/HyperTabular.targets, imported by
+	     the APK under lib/{abi}/, and that build/net10.0/HyperTabular.targets, imported by
 	     NuGet and not by hand, hands a Native AOT publish staticlibs/{rid}/libhypertabular.a.
 	     A project reference would take neither path. CI packs the package from the staged
 	     native binaries into a local folder and passes it in:
 
 	       dotnet build -p:HyperTabularVersion=<version> -p:RestoreAdditionalProjectSources=<folder> -->
 	<PropertyGroup>
+		<!-- One framework, singular, so `dotnet publish -r <rid>` (test-android's call) needs no -f:
+		     Directory.Build.props' net10.0;net11.0 is cleared rather than replaced, since even a
+		     one-item TargetFrameworks makes a cross-targeting build, where Publish stops with
+		     NETSDK1129. -->
+		<TargetFrameworks></TargetFrameworks>
 		<TargetFramework>net11.0-android</TargetFramework>
 		<SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
 		<OutputType>Exe</OutputType>
