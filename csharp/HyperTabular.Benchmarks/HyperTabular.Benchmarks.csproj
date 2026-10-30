@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
+		<!-- One framework, so `dotnet run` needs no -f; the receipts are measured on .NET 11. -->
+		<TargetFrameworks>net11.0</TargetFrameworks>
 		<OutputType>Exe</OutputType>
 		<IsPackable>false</IsPackable>
 		<IsPublishable>false</IsPublishable>

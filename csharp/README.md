@@ -86,6 +86,11 @@ foreach (var row in sheet.Rows())
 }
 ```
 
+The `switch` over a cell's verdict is C# 15: a .NET 11 project's default, and
+`<LangVersion>preview</LangVersion>` in a .NET 10 one. On C# 14, the .NET 10 default,
+HyperCast's `Match`, `Switch` or `TryGetValue` read the same verdict, one delegate or
+`out` per case ([HyperCast's README](https://github.com/SkunkWerkx/HyperCast/tree/master/csharp#without-c-15)).
+
 A plan whose positions are known can still be given up front —
 `DelimitedReader.Open(path, Dialect.Csv, plan)`, `book.Sheet(0, SheetOptions.Default, plan)` —
 and is bound before the header is read.
@@ -165,6 +170,12 @@ rows, not once per cell.
   `IAsyncDisposable`, disposing its stream asynchronously unless it was left open. This is
   what a browser's streams (an `HttpClient` response, a picked file), which cannot be read
   synchronously, need.
+- **.NET 10 and 11.** The package builds `net10.0` and `net11.0` from one source, and package
+  validation holds their public APIs identical. On .NET 10 it serves Windows, Linux and
+  macOS, framework-dependent or Native AOT, and Blazor WebAssembly. iOS, Mac Catalyst and
+  Android need .NET 11: a `net10.0-ios`, `net10.0-maccatalyst` or `net10.0-android` project
+  stops at build with `HYPERTABULAR003`, which names the platform and the framework to
+  target. A project older than .NET 10 is refused at restore (NU1202).
 - **Native AOT.** Source-generated `LibraryImport` only. An AOT publish links the core in
   from the package's static archive: one executable, nothing loaded at start.
 - **iOS and Mac Catalyst.** A `net11.0-ios` or `net11.0-maccatalyst` app (MAUI included)
@@ -182,8 +193,9 @@ resolved, without the first read being what finds out. `NativeVersion` is a `Sys
 
 ## Android
 
-A .NET for Android or MAUI app (`net11.0-android`, API 24 and later, .NET 11's floor)
-references the package and writes nothing else. On CoreCLR, .NET 11's Android runtime, the
+A .NET for Android or MAUI app (`net11.0-android`, API 24 and later; Android takes .NET 11,
+and a `net10.0-android` build stops with `HYPERTABULAR003`) references the package and
+writes nothing else. On CoreCLR, .NET 11's Android runtime, the
 SDK takes `runtimes/android-arm64/native/libhypertabular.so` and its x64 twin out of the
 package and stores each in the APK under `lib/arm64-v8a/` and `lib/x86_64/`, and the ordinary
 `"hypertabular"` import opens it, exactly as on Linux. The libraries are cross-built with the
@@ -215,28 +227,39 @@ times — `"hypertabular"` for platforms that load a library, `"*"` for the stat
 wasm module and `"__Internal"` for iOS and Mac Catalyst — picked at the call site by
 `OperatingSystem.IsBrowser()` and `OperatingSystem.IsIOS()`. CI builds the
 `wasm32-unknown-emscripten` archive on every pull request, the release pack stages it under
-`runtimes/browser-wasm/nativeassets/`, and the package's `build/net11.0/HyperTabular.targets`
+`runtimes/browser-wasm/nativeassets/`, and the package's `build/net10.0/HyperTabular.targets`
 wires it into a Blazor WebAssembly project with no configuration: a `NativeFileReference`
 hands the archive to the linker beside HyperCast's (the two share no symbols), the SDK's
 generated pinvoke table calls each export by symbol so `"*"` resolves every one (with the
-archive missing, `wasm-ld` reports an undefined symbol per export), and the
-exception-handling translation .NET 11 needs is applied. No `EmccExportedFunction` list is
-needed: the smoke test reaches all fourteen exports through that table alone, and fails at
-the link with the archive unlinked. The archive reaches the linker by that path and nowhere
-else: the same targets file takes it back out of restore's copy-local
-list, so a consumer's output carries only the linked `dotnet.native.wasm`.
+archive missing, `wasm-ld` reports an undefined symbol per export). No
+`EmccExportedFunction` list is needed: the smoke test reaches all fourteen exports through
+that table alone, and fails at the link with the archive unlinked. The archive reaches the
+linker by that path and nowhere else: the same targets file takes it back out of restore's
+copy-local list, so a consumer's output carries only the linked `dotnet.native.wasm`.
 
 That link happens whether or not the app ends up reading anything. The targets file is
 evaluated before the trimmer runs and cannot see what it removes, so a client bundle whose
 trimmer drops `HyperTabular` entirely still links the archive and exports all 14 entry
 points into `dotnet.native.wasm`, as HyperCast's package does for its own.
 
+**WebAssembly on .NET 10 and later, as linked.** The static library is built with
+`-Zbuild-std` on a pinned nightly, for plain wasm (MVP plus `sign-ext` and `mutable-globals`),
+instead of on Rust's prebuilt sysroot, as HyperCast's is. So it holds no exception-handling
+instructions, and a browser never sees .NET 11's encoding mixed with the sysroot's legacy one
+(`module uses a mix of legacy and new exception handling instructions`), whether or not the
+SDK runs `wasm-opt` after the link. And it uses no feature but those two, Binaryen's defaults,
+which every `wasm-opt` run in a .NET 10 publish accepts with no flag: Emscripten's does not
+know `bulk-memory-opt` or `call-indirect-overlong` (dotnet/runtime#132858), and the SDK's own,
+after the link, rejects a saturating float-to-int conversion. The archive is checked for both
+before it is packed.
+
 **Needs the `wasm-tools` workload.** Only the workload's toolchain relinks the runtime.
 Without it the SDK skips the link with nothing louder than its own warning, and the publish
 succeeds with a `dotnet.native.wasm` that has no `hypertabular_*` symbols in it; `NETSDK1147`
 does not fire for this. So the targets file stops the build with error `HYPERTABULAR002`
-instead (`dotnet workload install wasm-tools`). An app that gates on `Tabular.IsAvailable`
-and keeps a managed fallback can set
+instead (`dotnet workload install wasm-tools`; a `net10.0` app built with the .NET 11 SDK
+takes `wasm-tools-net10`). An app that gates on `Tabular.IsAvailable` and keeps a managed
+fallback can set
 `<HyperTabularRequireWasmWorkload>false</HyperTabularRequireWasmWorkload>`.
 
 No export takes more than twelve integer arguments, because Mono's interpreter, which runs
@@ -245,7 +268,12 @@ struct instead. `HyperTabular.WasmSmokeTest` proves the chain in headless Chrome
 pull request: a Blazor app that reads delimited text and a workbook through the public API
 and renders `PASS` or `FAIL` into the page. One of the files it reads is one it serves,
 fetched with `HttpClient` as a streamed response — a stream the browser only reads
-asynchronously — and read through `OpenAsync` and `ReadAsync`.
+asynchronously — and read through `OpenAsync` and `ReadAsync`. `./check.sh` in that
+directory stages the wasm static library, publishes the app four ways (each framework, in
+Release and in an unstripped Debug build, where the SDK runs no `wasm-opt` after the link),
+loads each in headless Chromium and requires `PASS`; name legs (`net11-release net11-debug
+net10-release net10-debug`) to run fewer. Each publish links HyperCast's archive from its
+package beside this one.
 
 ## Native binary provenance
 

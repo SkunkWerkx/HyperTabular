@@ -52,7 +52,7 @@
 	     csharp/HyperTabular/staticlibs/{rid}/, staged from the static-libs artifact. HyperCast
 	     arrives as a package, so its own targets link libhypercast.a beside it, which is the
 	     pairing every real consumer gets. -->
-	<Import Project="../HyperTabular/build/net11.0/HyperTabular.targets" />
+	<Import Project="../HyperTabular/build/net10.0/HyperTabular.targets" />
 
 	<!-- UIKit, by hand, because this app never touches it. From .NET 11 the SDK links only the
 	     frameworks the trimmer sees the app use, and the runtime's own libxamarin still

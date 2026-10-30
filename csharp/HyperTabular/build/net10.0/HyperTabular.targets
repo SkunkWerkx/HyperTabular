@@ -1,16 +1,27 @@
 <Project>
   <!-- Auto-imported into every consuming project via NuGet's build/{tfm}/{PackageId}.targets
-       convention. buildTransitive/net11.0/HyperTabular.targets imports this file, so a project
-       that reaches the package through another project gets the same wiring. The net11.0
-       folder is the gate: the package targets nothing older, so NuGet refuses it to an older
-       project at restore (NU1202) instead of leaving the build to fail later.
+       convention. buildTransitive/net10.0/HyperTabular.targets imports this file, so a project
+       that reaches the package through another project gets the same wiring.
+
+       Two frameworks, one file. The package carries lib/net10.0/ and lib/net11.0/, and this
+       file sits once under build/net10.0/ (with buildTransitive/net10.0/'s copy beside it):
+       NuGet picks the nearest build/{tfm}/ folder, and net10.0 is the nearest one for both
+       net10.0 and net11.0 projects, so there is no build/net11.0/ copy to keep in step. A
+       project older than .NET 10 is refused at restore (NU1202).
+
+       On .NET 10 the file serves Windows, Linux and macOS, framework-dependent or Native AOT,
+       and Blazor WebAssembly, and refuses the platforms that need .NET 11 with
+       HYPERTABULAR003 (the gate below): Android, iOS and Mac Catalyst. HyperCast's copy of
+       this file has the full account of how the gate reads the framework and why it speaks
+       first. Every other block below stands aside when the gate fires, so a refused build
+       reports one diagnostic.
 
        Blazor WebAssembly: link the core in. One piece, as in HyperCast's package, whose copy
        of this file has the full account: the NativeFileReference. Restore never hands a plain
        PackageReference's runtimes/browser-wasm/nativeassets/ archive to the linker, so the
        reference names it by path. nativeassets/net11.0/ is the forge's folder for the archive
-       (hyper-pack-nuget.yml stages it there), matching the only framework that links it; the
-       path is named directly, so nothing selects on the folder name. The SDK scans every
+       (hyper-pack-nuget.yml stages it there), and .NET 10 and 11 link it alike; the path is
+       named directly, so nothing selects on the folder name. The SDK scans every
        assembly's P/Invokes and generates a pinvoke table that calls each native function by
        symbol, so the link itself resolves them against the archive (with it missing, wasm-ld
        fails with an undefined symbol per export) and LibraryImport("*") reaches each one
@@ -20,8 +31,31 @@
        unlinked.
 
        The archive is built without Rust's standard library and carries none of HyperCast's
-       cast_* symbols, so it links beside HyperCast's own browser-wasm archive. -->
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
+       cast_* symbols, so it links beside HyperCast's own browser-wasm archive. It is built
+       for plain wasm, with no exception-handling instructions and none of the features .NET
+       10's toolchain rejects (rust/.cargo/config.toml), so both frameworks link it as it is,
+       Release or Debug. -->
+  <!-- HYPERTABULAR003: the platforms .NET 10 cannot serve. Evaluated here, at the top, so
+       every block below can stand aside on _HyperTabularNet10Unsupported. Windows desktop
+       (net10.0-windows) and net10.0-macos are not matched and build as before. -->
+  <PropertyGroup Condition="'$([MSBuild]::GetTargetFrameworkIdentifier($(TargetFramework)))' == '.NETCoreApp' And $([MSBuild]::VersionLessThan($([MSBuild]::GetTargetFrameworkVersion($(TargetFramework))), '11.0'))">
+    <_HyperTabularNet10Platform>$([MSBuild]::GetTargetPlatformIdentifier($(TargetFramework)))</_HyperTabularNet10Platform>
+    <_HyperTabularNet10Unsupported Condition="'$(_HyperTabularNet10Platform)' == 'android'">Android</_HyperTabularNet10Unsupported>
+    <_HyperTabularNet10Unsupported Condition="'$(_HyperTabularNet10Unsupported)' == '' And '$(_HyperTabularNet10Platform)' == 'ios'">iOS</_HyperTabularNet10Unsupported>
+    <_HyperTabularNet10Unsupported Condition="'$(_HyperTabularNet10Unsupported)' == '' And '$(_HyperTabularNet10Platform)' == 'maccatalyst'">Mac Catalyst</_HyperTabularNet10Unsupported>
+    <_HyperTabularNet10Tfm Condition="'$(_HyperTabularNet10Unsupported)' == 'Android'">net11.0-android</_HyperTabularNet10Tfm>
+    <_HyperTabularNet10Tfm Condition="'$(_HyperTabularNet10Unsupported)' == 'iOS'">net11.0-ios</_HyperTabularNet10Tfm>
+    <_HyperTabularNet10Tfm Condition="'$(_HyperTabularNet10Unsupported)' == 'Mac Catalyst'">net11.0-maccatalyst</_HyperTabularNet10Tfm>
+  </PropertyGroup>
+
+  <Target Name="_HyperTabularErrorUnsupportedNet10Platform"
+          BeforeTargets="_CheckForInvalidConfigurationAndPlatform"
+          Condition="'$(_HyperTabularNet10Unsupported)' != ''">
+    <Error Code="HYPERTABULAR003"
+           Text="HyperTabular supports .NET 10 on Windows, Linux and macOS, framework-dependent or Native AOT, and in Blazor WebAssembly. $(_HyperTabularNet10Unsupported) needs .NET 11 or later: target $(_HyperTabularNet10Tfm)." />
+  </Target>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm' And '$(_HyperTabularNet10Unsupported)' == ''">
     <NativeFileReference Include="$(MSBuildThisFileDirectory)../../runtimes/browser-wasm/nativeassets/net11.0/libhypertabular.a" />
   </ItemGroup>
 
@@ -38,25 +72,16 @@
        them, and 001 is unused in all three packages. -->
   <Target Name="_HyperTabularErrorWasmWorkloadMissing"
           BeforeTargets="BeforeBuild"
-          Condition="'$(RuntimeIdentifier)' == 'browser-wasm' And '$(WasmNativeWorkloadAvailable)' != 'true' And '$(HyperTabularRequireWasmWorkload)' != 'false'">
+          Condition="'$(RuntimeIdentifier)' == 'browser-wasm' And '$(WasmNativeWorkloadAvailable)' != 'true' And '$(HyperTabularRequireWasmWorkload)' != 'false' And '$(_HyperTabularNet10Unsupported)' == ''">
     <Error Code="HYPERTABULAR002"
-           Text="HyperTabular's WebAssembly support links its native core into the runtime, which needs the wasm-tools workload, and it is not installed. Without it the publish succeeds but the app has no hypertabular_* symbols, Tabular.IsAvailable is false in the browser and every read throws. Run 'dotnet workload install wasm-tools', or set HyperTabularRequireWasmWorkload to false if the app keeps a managed fallback." />
+           Text="HyperTabular's WebAssembly support links its native core into the runtime, which needs the wasm-tools workload, and it is not installed. Without it the publish succeeds but the app has no hypertabular_* symbols, Tabular.IsAvailable is false in the browser and every read throws. Run 'dotnet workload install wasm-tools' (a net10.0 app built with the .NET 11 SDK takes 'wasm-tools-net10'), or set HyperTabularRequireWasmWorkload to false if the app keeps a managed fallback." />
   </Target>
-
-  <!-- .NET 11 links browser-wasm with the new (exnref) exception-handling encoding, and
-       Rust's precompiled core inside the archive uses the legacy one; the browser refuses a
-       module that mixes them. Binaryen's translate-to-exnref pass makes it uniform. Exclude
-       names the item list itself, so an app that also references HyperCast or HyperUuid
-       hands wasm-opt the pass once. -->
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
-    <WasmOptConfigurationFlags Include="--translate-to-exnref" Exclude="@(WasmOptConfigurationFlags)" />
-  </ItemGroup>
 
   <!-- Restore resolves the archive as a copy-local native asset too, which would put it in
        bin/ and the publish root of every Blazor consumer, never served and never read. -->
   <Target Name="_HyperTabularDropWasmArchiveFromCopyLocal"
           AfterTargets="ResolvePackageAssets"
-          Condition="'$(RuntimeIdentifier)' == 'browser-wasm'">
+          Condition="'$(RuntimeIdentifier)' == 'browser-wasm' And '$(_HyperTabularNet10Unsupported)' == ''">
     <ItemGroup>
       <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
                             Condition="'%(NativeCopyLocalItems.NuGetPackageId)' == 'HyperTabular' And '%(NativeCopyLocalItems.Filename)%(NativeCopyLocalItems.Extension)' == 'libhypertabular.a'" />
@@ -80,12 +105,12 @@
        maccatalyst-arm64 and maccatalyst-x64. An RID with no archive here (iossimulator-x64,
        tvOS) gets nothing, and the app fails at its native link on the undefined
        hypertabular_* symbols: at build time, not at run time. -->
-  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != '' And '$(_HyperTabularNet10Unsupported)' == ''">
     <_HyperTabularAppleMobile Condition="$(RuntimeIdentifier.StartsWith('ios-')) Or $(RuntimeIdentifier.StartsWith('iossimulator-')) Or $(RuntimeIdentifier.StartsWith('maccatalyst-'))">true</_HyperTabularAppleMobile>
     <_HyperTabularAppleMobileLibrary Condition="'$(_HyperTabularAppleMobile)' == 'true'">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/libhypertabular.a</_HyperTabularAppleMobileLibrary>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(_HyperTabularAppleMobile)' == 'true' And Exists('$(_HyperTabularAppleMobileLibrary)')">
+  <ItemGroup Condition="'$(_HyperTabularAppleMobile)' == 'true' And Exists('$(_HyperTabularAppleMobileLibrary)') And '$(_HyperTabularNet10Unsupported)' == ''">
     <NativeReference Include="$(_HyperTabularAppleMobileLibrary)" Kind="Static" />
   </ItemGroup>
 
@@ -101,13 +126,13 @@
        this file has the full account. Not for browser-wasm or for iOS and Mac Catalyst, which
        have their own wiring above, and not for anything but an AOT publish: a JIT process cannot link an
        archive, so it still loads the shared library. -->
-  <PropertyGroup Condition="'$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(RuntimeIdentifier)' != 'browser-wasm' And '$(_HyperTabularAppleMobile)' != 'true' And '$(HyperTabularStaticLink)' != 'false'">
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(RuntimeIdentifier)' != 'browser-wasm' And '$(_HyperTabularAppleMobile)' != 'true' And '$(HyperTabularStaticLink)' != 'false' And '$(_HyperTabularNet10Unsupported)' == ''">
     <_HyperTabularStaticLibrary Condition="$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/hypertabular.lib</_HyperTabularStaticLibrary>
     <_HyperTabularStaticLibrary Condition="!$(RuntimeIdentifier.StartsWith('win'))">$(MSBuildThisFileDirectory)../../staticlibs/$(RuntimeIdentifier)/libhypertabular.a</_HyperTabularStaticLibrary>
     <_HyperTabularStaticLibrary Condition="!Exists('$(_HyperTabularStaticLibrary)')"></_HyperTabularStaticLibrary>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(_HyperTabularStaticLibrary)' != ''">
+  <ItemGroup Condition="'$(_HyperTabularStaticLibrary)' != '' And '$(_HyperTabularNet10Unsupported)' == ''">
     <DirectPInvoke Include="hypertabular" />
     <NativeLibrary Include="$(_HyperTabularStaticLibrary)" />
   </ItemGroup>
@@ -118,7 +143,7 @@
        out, by file name. -->
   <Target Name="_HyperTabularDropSharedLibraryFromAotPublish"
           AfterTargets="ComputeResolvedFilesToPublishList"
-          Condition="'$(_HyperTabularStaticLibrary)' != ''">
+          Condition="'$(_HyperTabularStaticLibrary)' != '' And '$(_HyperTabularNet10Unsupported)' == ''">
     <ItemGroup>
       <_HyperTabularSharedLibrary Include="@(ResolvedFileToPublish)"
                          Condition="'%(Filename)%(Extension)' == 'libhypertabular.so' Or '%(Filename)%(Extension)' == 'libhypertabular.dylib' Or '%(Filename)%(Extension)' == 'hypertabular.dll'" />

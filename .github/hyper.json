@@ -6,5 +6,6 @@
     "patterns": ["\\bfn (hypertabular_\\w+)\\("],
     "exclude": ["hypertabular_canary"],
     "prefixes": ["hypertabular_"]
-  }
+  },
+  "wasm": { "toolchain": "nightly-2026-10-27" }
 }

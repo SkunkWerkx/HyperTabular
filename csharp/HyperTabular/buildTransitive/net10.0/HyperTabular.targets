@@ -6,5 +6,5 @@
        project downstream of the reference; this file hands those projects the same targets
        a direct consumer imports, so there is one copy of the wiring to keep right.
        HyperCast's package is laid out the same way. -->
-  <Import Project="$(MSBuildThisFileDirectory)../../build/net11.0/HyperTabular.targets" />
+  <Import Project="$(MSBuildThisFileDirectory)../../build/net10.0/HyperTabular.targets" />
 </Project>
