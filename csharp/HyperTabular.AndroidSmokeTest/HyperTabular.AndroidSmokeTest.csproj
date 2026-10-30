@@ -17,8 +17,12 @@
 
 	       dotnet build -p:HyperTabularVersion=<version> -p:RestoreAdditionalProjectSources=<folder> -->
 	<PropertyGroup>
-		<!-- Plural, to replace Directory.Build.props' net10.0;net11.0 rather than sit beside it. -->
-		<TargetFrameworks>net11.0-android</TargetFrameworks>
+		<!-- One framework, singular, so `dotnet publish -r <rid>` (test-android's call) needs no -f:
+		     Directory.Build.props' net10.0;net11.0 is cleared rather than replaced, since even a
+		     one-item TargetFrameworks makes a cross-targeting build, where Publish stops with
+		     NETSDK1129. -->
+		<TargetFrameworks></TargetFrameworks>
+		<TargetFramework>net11.0-android</TargetFramework>
 		<SupportedOSPlatformVersion>24</SupportedOSPlatformVersion>
 		<OutputType>Exe</OutputType>
 		<IsPackable>false</IsPackable>
