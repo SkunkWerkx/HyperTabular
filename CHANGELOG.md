@@ -32,6 +32,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   free-threaded 3.14 wheel proved the GIL-free path, and it was bound to one interpreter
   version, too narrow an ABI to carry. Free-threaded 3.13 and 3.14 now get `No matching
   distribution found`, as PyPy does; free-threading starts at 3.15. *(Python)*
+- **C# — the iOS and Mac Catalyst smoke test runs on the SDK's defaults.** Its Mac Catalyst
+  build set `Registrar` to `managed-static`, after a Release app on .NET 11's default,
+  `trimmable-static`, aborted before `Main`, a fault then put down to the SDK. It was the
+  test's own: its code touches no Apple API, so the trimmer dropped the platform assembly the
+  runtime calls into at startup, and the iOS device build, linked in CI but never run, dropped
+  it as well. One UIKit symbol used in a module initializer, as every real app uses UIKit,
+  keeps that assembly and puts UIKit back in the native link, so the hand-added UIKit
+  framework is gone too. The package is unchanged. *(repository only)*
+- **C# — the benchmarks float to BenchmarkDotNet's prereleases.** 0.15.x, the newest
+  stable, knows no runtime past .NET 10 and stops in its SDK validation on net11.0; the 0.16
+  previews know .NET 11, and the harness takes them (`*-*`) until 0.16.0 ships stable.
+  The in-process toolchain that sidestepped it is gone, so each benchmark runs in its own
+  process, BenchmarkDotNet's default; the README's C# row was measured in-process and
+  stands until the harness is run again. *(repository only)*
 
 ### Fixed
 

@@ -33,6 +33,14 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Every C# step that restores HyperTabular needs HyperCast 1.1, which is not on nuget.org yet.
+# The steps in this file that do check this switch; the two forge calls that run C# can't read
+# it, so they are turned off by hand beside a comment naming it: build-native's csharp and
+# build-wasm's blazor_check, along with test-android's APK line. Once HyperCast 1.1 is
+# published, set this to 'true' and undo those three.
+env:
+  HYPERCAST_ON_NUGET: 'false'
+
 jobs:
   build-static:
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@master
@@ -77,6 +85,8 @@ jobs:
       project: HyperTabular
       crate: hypertabular
       pure_env: HYPERTABULAR_PURE
+      # HYPERCAST_ON_NUGET (top of this file): true once HyperCast 1.1 is on nuget.org.
+      csharp: false
       csharp_test_project: csharp/HyperTabular.Tests/HyperTabular.Tests.csproj
       csharp_aot_project: csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj
       # The suite and the AOT smoke test run on net10.0 and net11.0 on every desktop and musl
@@ -111,7 +121,8 @@ jobs:
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
-      blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
+      # HYPERCAST_ON_NUGET (top of this file): back on once HyperCast 1.1 is on nuget.org.
+      # blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
       rust_browser_test: rust/browser-test
       go_tinygo_smoke: go/internal/tinygosmoke
       ruby_wasm_smoke: ruby/wasm-smoke
@@ -321,7 +332,7 @@ jobs:
         run: dotnet workload install ios maccatalyst
 
       - name: C# — a Mac Catalyst app, built and run
-        if: ${{ !cancelled() }}
+        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
         run: |
           set -euo pipefail
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
@@ -335,7 +346,7 @@ jobs:
           grep -q "^all ok" "$log"
 
       - name: C# — an iOS app, installed and launched in the simulator
-        if: ${{ !cancelled() }}
+        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
         run: |
           set -euo pipefail
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
@@ -355,7 +366,7 @@ jobs:
           grep -q "^all ok" "$log"
 
       - name: C# — an iOS device app links the core in
-        if: ${{ !cancelled() }}
+        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
         run: |
           set -euo pipefail
           dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-ios -r ios-arm64 -p:EnableCodeSigning=false -p:ValidateXcodeVersion=false
@@ -467,6 +478,7 @@ jobs:
         run: dotnet workload install android
 
       - name: Pack HyperTabular into a local feed
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           version="0.0.0-android.${{ github.run_id }}"
@@ -482,6 +494,7 @@ jobs:
       # Each build from a clean tree, since the CoreCLR and Native AOT builds of one RID share
       # bin/ and obj/; the signed APK is copied out under a name that says which it is.
       - name: Build the four APKs
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           mkdir -p apks
@@ -516,6 +529,7 @@ jobs:
           echo "net10.0-android stops with HYPERTABULAR003"
 
       - name: Inspect the APKs
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           zipalign="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name zipalign | sort -V | tail -1)"
@@ -569,8 +583,9 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           # One command per line: the action runs each on its own and fails on the first that does.
+          # HYPERCAST_ON_NUGET (top of this file): back in once HyperCast 1.1 is on nuget.org.
+          #   .github/scripts/android_smoke.sh "$APP_ID" "$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)" apks/coreclr-android-x64.apk apks/aot-android-x64.apk
           script: |
-            .github/scripts/android_smoke.sh "$APP_ID" "$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)" apks/coreclr-android-x64.apk apks/aot-android-x64.apk
             .github/scripts/android_device_test.sh stage/go-x86_64 ./hypertabular.test -test.v -test.skip '^ExampleWorkbook$'
             .github/scripts/android_device_test.sh stage/swift-x86_64 ./HyperTabularPackageTests.xctest
 
@@ -631,6 +646,7 @@ jobs:
           dotnet --list-sdks
 
       - name: Pack HyperTabular into a local feed and check its layout
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           version="0.0.0-pkg.${{ github.run_id }}"
@@ -653,6 +669,7 @@ jobs:
       # targets import. One TFM at a time (without -f a multi-targeted publish fails with
       # NETSDK1129), from a clean tree, since the two share bin/ and obj/.
       - name: Native AOT from the package, on net10.0 and net11.0
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           for tfm in net10.0 net11.0; do
@@ -683,6 +700,7 @@ jobs:
       # the publish its archive, and it quietly falls back to the shared library beside the
       # executable. If it did not, the check above could not see a lost static link.
       - name: Control — a package without its targets falls back to the shared library
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           nobuild="$HYPERTABULAR_VERSION.nobuild"
@@ -697,6 +715,7 @@ jobs:
           echo "without its targets the publish carries libhypertabular.so beside the executable"
 
       - name: The floor is .NET 10
+        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           rm -rf "${SMOKE_DIR:?}/bin" "${SMOKE_DIR:?}/obj"
