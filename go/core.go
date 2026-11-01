@@ -801,6 +801,8 @@ func (s *scratch) book(call bookCall, set *columns, opened *rawOpened, stride in
 	in := n.in
 	if !in.ensure(&n.bookWindow, uint64(s.window), true) || !in.ensure(&n.arena, uint64(s.arenaCap), true) ||
 		!in.ensure(&n.cells, 8*uint64(s.cellsCap), true) || !in.ensure(&n.row, 16*uint64(s.row), true) || !n.attach(set) {
+		// The report is the last call's: a fill that stops here wrote no rows.
+		s.filled = rawFilled{}
 		return errGuestMemory
 	}
 	n.putBuffers(n.bookWindow, s.window, n.arena, s.arenaCap, n.cells, s.cellsCap, n.row, s.row, call == bookHeader || call == bookFill)
@@ -847,6 +849,7 @@ func (s *scratch) sheet(info *SheetInfo, options SheetOptions) int32 {
 	n := s.core
 	var ok bool
 	if n.part, ok = n.in.alloc(uint64(len(info.part))); !ok {
+		s.filled = rawFilled{}
 		return errGuestMemory
 	}
 	n.part.put(n.in, info.part)

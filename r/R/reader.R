@@ -41,7 +41,12 @@ bind <- function(x, plan) {
     stop("the reader already has a plan: a plan is bound once", call. = FALSE)
   }
   plan <- as_plan(plan)
-  if (inherits(x, "hypertabular_delimited_reader")) {
+  if (!is.null(x$failure)) {
+    # The header could not be read: no read will bind, so a source name has nothing to be
+    # found in, and the failure stays a value. read_batch() returns NULL from here on.
+    x$plan <- plan
+    x$names <- resolve_names(plan, x$header)
+  } else if (inherits(x, "hypertabular_delimited_reader")) {
     bind_delimited(x, plan)
   } else {
     bind_sheet(x, plan)

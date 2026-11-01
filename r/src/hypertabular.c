@@ -106,13 +106,15 @@ static void contract_violation(void) {
 
 /* ---- native memory ---- */
 
-/* A block of n bytes, at least one, 8-byte aligned (what malloc returns). */
-static void *block(size_t n) { return R_Calloc(n ? n : 1, uint64_t); }
-
-static void *grown_block(void *p, size_t n) {
-  size_t words = (n ? n : 1) / sizeof(uint64_t) + 1;
-  return R_Realloc(p, words, uint64_t);
+/* The 8-byte words that hold n bytes, at least one: R_Calloc and R_Realloc count elements. */
+static size_t words_for(size_t n) {
+  return n ? n / sizeof(uint64_t) + (n % sizeof(uint64_t) != 0) : 1;
 }
+
+/* A zeroed block of n bytes, at least one, 8-byte aligned (what malloc returns). */
+static void *block(size_t n) { return R_Calloc(words_for(n), uint64_t); }
+
+static void *grown_block(void *p, size_t n) { return R_Realloc(p, words_for(n), uint64_t); }
 
 static void release(void *p) {
   if (p)

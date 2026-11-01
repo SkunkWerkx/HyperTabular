@@ -156,6 +156,19 @@ test_that("a structural failure is a value, after the rows before it, and final"
   expect_null(header(reader))
   expect_identical(failure(reader)$kind, "unclosed_quote")
   expect_identical(read_delimited(csv("\"a\n"))$failure$kind, "unclosed_quote")
+  # So is it when the plan names its sources: there is no header to find them in, and the
+  # read ends at once on the failure rather than in an error.
+  reader <- delimited_reader(csv("\"a\n"), plan = list(col_i32("a"), b = col_text("b")))
+  expect_identical(failure(reader)$kind, "unclosed_quote")
+  expect_null(read_batch(reader))
+  expect_identical(failure(reader)$kind, "unclosed_quote")
+  expect_error(bind(reader, list(col_i32(1))), "bound once")
+  reader <- delimited_reader(csv("\"a\n"))
+  bind(reader, list(col_i32("a")))
+  expect_null(read_batch(reader))
+  t <- read_delimited(csv("\"a\n"), list(col_i32("a")))
+  expect_identical(t$failure$kind, "unclosed_quote")
+  expect_identical(names(t$columns), "a")
 })
 
 test_that("the dialect is declared, and checked", {

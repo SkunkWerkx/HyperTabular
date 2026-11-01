@@ -319,6 +319,20 @@ func TestBuffersPastTheCoresMemoryAreAnError(t *testing.T) {
 	if err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
 		t.Errorf("a cell table of 4.5 GiB: %v", err)
 	}
+
+	// The same table met by the first Read of a sheet bound after its header: the header's
+	// rows are not this call's, so no batch comes back beside the error.
+	unbound, err := book.SheetUnbound(0, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unbound.Bind(plan); err != nil {
+		t.Fatal(err)
+	}
+	batch, err := unbound.Read()
+	if batch != nil || err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
+		t.Errorf("a cell table of 4.5 GiB after a header: a batch %t, %v", batch != nil, err)
+	}
 }
 
 // A call that panicked inside the core left its instance mid-call; the reader refuses to go
