@@ -72,7 +72,7 @@ public struct TabularError: Error, Equatable, Sendable, CustomStringConvertible,
 
     /// The failure the core reported. A code this module does not know is the
     /// container's: the most general refusal.
-    init(_ raw: hypertabular_failure) {
+    init(_ raw: HyperTabularFailure) {
         self.init(
             kind: TabularFailure(rawValue: Int32(bitPattern: raw.code)) ?? .container,
             record: Int64(clamping: raw.record), line: Int(clamping: raw.line),

@@ -108,7 +108,7 @@ type (
 	_ [64 - unsafe.Sizeof(rawOpened{})]struct{}
 )
 
-// bookCall is which workbook call nativeBook makes; the values are backend_static.go's.
+// bookCall is which workbook call scratch.book makes.
 type bookCall int
 
 const (
@@ -121,54 +121,49 @@ const (
 )
 
 // scratch is the memory a workbook call works in: one set for a workbook while it opens,
-// one for each sheet. All of it Go memory with no Go pointer inside.
+// one for each sheet, each in an instance of the core of its own (core.go), which holds
+// the buffers and the container. window, arenaCap, cellsCap and row are the elements the
+// core is told each buffer holds; arena and cells are views of the last call's.
 type scratch struct {
-	window []byte
-	arena  []byte
-	cells  []rawSpan
-	row    []rawSlot
+	core     *native
+	window   int
+	arenaCap int
+	cellsCap int
+	row      int
+	arena    []byte
+	cells    []rawSpan
 	// rowFollowsCells is whether row grows with cells: while the header of a sheet opened
 	// without a plan is read, there is a row slot for every cell the header call is given,
 	// because the header row's cells are kept in the slots as well as named (see
 	// Sheet.readHeader).
 	rowFollowsCells bool
-	// filled is where a call reports: its own allocation, so that C is never pointed into
-	// a struct that holds Go pointers.
-	filled *rawFilled
+	// filled is what the last call reported.
+	filled rawFilled
 }
 
-func newScratch(window, arena, cells, row int) *scratch {
-	return &scratch{
-		window: make([]byte, window),
-		arena:  make([]byte, arena),
-		cells:  make([]rawSpan, cells),
-		row:    make([]rawSlot, row),
-		filled: new(rawFilled),
-	}
+func newScratch(core *native, window, arena, cells, row int) *scratch {
+	return &scratch{core: core, window: window, arenaCap: arena, cellsCap: cells, row: row}
 }
 
 // drive makes call until it stops asking for room, growing the buffer it names each time —
 // with what the buffer held kept, which is what lets the core go on from where it stopped —
-// and returns the code it ended on; what it reported is in s.filled.
-func (s *scratch) drive(call bookCall, book *Workbook, state []uint64, set *columns) int32 {
-	var tables *Workbook
-	if call == bookHeader || call == bookFill {
-		tables = book
-	}
+// and returns the code it ended on; what it reported is in s.filled, and the cells of the
+// rows it reported, stride entries a row, in s.cells.
+func (s *scratch) drive(call bookCall, set *columns, stride int) int32 {
 	for {
-		code := nativeBook(call, state, book.container, s, tables, set, unsafe.Pointer(s.filled))
+		code := s.book(call, set, nil, stride)
 		switch code {
 		case errWindow:
 			s.window = grownTo(s.window, s.filled.needed)
 			grown[0]++
 		case errArena:
-			s.arena = grownTo(s.arena, s.filled.needed)
+			s.arenaCap = grownTo(s.arenaCap, s.filled.needed)
 			grown[1]++
 		case errCells:
-			s.cells = grownTo(s.cells, s.filled.needed)
+			s.cellsCap = grownTo(s.cellsCap, s.filled.needed)
 			grown[2]++
 			if s.rowFollowsCells {
-				s.row = atLeast(s.row, len(s.cells))
+				s.row = max(s.row, s.cellsCap)
 			}
 		default:
 			return code
@@ -184,23 +179,28 @@ func settled(code int32, filled *rawFilled) error {
 		return nil
 	case errStructure:
 		return structural(filled.failure)
-	case errShimMemory:
-		return errors.New("hypertabular: out of memory for a plan's column table")
+	case errGuestMemory:
+		return errWorkbookMemory
 	default:
 		panic(contractViolation)
 	}
 }
 
+// errWorkbookMemory is the error for a workbook whose buffers the core's memory cannot hold.
+var errWorkbookMemory = errors.New("hypertabular: the workbook's buffers do not fit the core's 4 GiB memory")
+
 // Workbook is an XLSX, ODS or Numbers workbook held in memory, its sheets listed and its shared
 // strings and styles loaded: what a Sheet reads from.
 //
-// A workbook is read in place and holds nothing that needs releasing — every buffer is
-// ordinary Go memory. Its sheets may be read at once, each with buffers of its own, but
-// neither a Workbook nor a Sheet is safe for concurrent use.
+// A workbook holds nothing that needs releasing — every buffer is ordinary Go memory. Its
+// sheets may be read at once, each with buffers of its own and its own instance of the core,
+// which holds a copy of the container and of the workbook's shared strings: a sheet costs
+// that memory while it is in use. Neither a Workbook nor a Sheet is safe for concurrent use.
 type Workbook struct {
 	container []byte
-	// state is the state as opening left it: the template every sheet's own is copied from.
-	state  []uint64
+	// state is the state block as opening left it: the template every sheet's own is copied
+	// from.
+	state  []byte
 	format WorkbookFormat
 	epoch  hypercast.ExcelEpoch
 	sheets []SheetInfo
@@ -235,18 +235,22 @@ func OpenWorkbook(path string) (*Workbook, error) {
 	return NewWorkbook(container)
 }
 
-// NewWorkbook opens the workbook in container, in place — nothing is copied, so the bytes
-// must not change while the workbook or any of its sheets is in use. A container that is
+// NewWorkbook opens the workbook in container. The core reads a copy of it, made as it
+// opens and as each sheet starts; the bytes must not change meanwhile. A container that is
 // not a workbook this module can read is a *Failure.
 func NewWorkbook(container []byte) (*Workbook, error) {
 	size := nativeWorkbookStateSize()
 	if size <= 0 {
 		panic(contractViolation)
 	}
-	w := &Workbook{container: container, state: make([]uint64, (size+7)/8)}
-	s := newScratch(windowMin, 1024, 64, 0)
+	w := &Workbook{container: container, state: make([]byte, size)}
+	core, ok := newBookNative(w, false)
+	if !ok {
+		return nil, errWorkbookMemory
+	}
+	s := newScratch(core, windowMin, 1024, 64, 0)
 	if stingy {
-		s = newScratch(1, 1, 1, 0)
+		s = newScratch(core, 1, 1, 1, 0)
 	}
 	opened, err := w.open(s)
 	if err != nil {
@@ -266,7 +270,7 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 	}
 	w.epoch = epoch
 
-	if err := settled(s.drive(bookSheets, w, w.state, nil), s.filled); err != nil {
+	if err := settled(s.drive(bookSheets, nil, 3), &s.filled); err != nil {
 		return nil, err
 	}
 	w.sheets = make([]SheetInfo, s.filled.rows)
@@ -282,19 +286,20 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 
 	// The shared strings take no more room than their part inflates to; asking for it once
 	// saves growing into it.
-	if bound := min(opened.stringsBytes, 1<<28); !stingy && uint64(len(s.arena)) < bound {
-		s.arena = grownTo(s.arena, bound)
+	if bound := min(opened.stringsBytes, 1<<28); !stingy && uint64(s.arenaCap) < bound {
+		s.arenaCap = grownTo(s.arenaCap, bound)
 	}
-	if err := settled(s.drive(bookStrings, w, w.state, nil), s.filled); err != nil {
+	if err := settled(s.drive(bookStrings, nil, 1), &s.filled); err != nil {
 		return nil, err
 	}
 	w.strings = append([]byte(nil), s.arena[:s.filled.arenaUsed]...)
 	w.table = append([]rawSpan(nil), s.cells[:s.filled.rows]...)
 
-	if err := settled(s.drive(bookStyles, w, w.state, nil), s.filled); err != nil {
+	if err := settled(s.drive(bookStyles, nil, 0), &s.filled); err != nil {
 		return nil, err
 	}
 	w.kinds = append([]byte(nil), s.arena[:s.filled.rows]...)
+	w.state = core.bookState()
 	return w, nil
 }
 
@@ -303,15 +308,17 @@ func NewWorkbook(container []byte) (*Workbook, error) {
 func (w *Workbook) open(s *scratch) (*rawOpened, error) {
 	opened := new(rawOpened)
 	for {
-		switch nativeBook(bookOpen, w.state, w.container, s, nil, nil, unsafe.Pointer(opened)) {
+		switch s.book(bookOpen, nil, opened, 0) {
 		case codeOK:
 			return opened, nil
 		case errWindow:
 			s.window = grownTo(s.window, opened.needed)
 		case errArena:
-			s.arena = grownTo(s.arena, opened.needed)
+			s.arenaCap = grownTo(s.arenaCap, opened.needed)
 		case errStructure:
 			return nil, structural(opened.failure)
+		case errGuestMemory:
+			return nil, errWorkbookMemory
 		default:
 			panic(contractViolation)
 		}
@@ -390,8 +397,8 @@ func (w *Workbook) sheetNamed(name string) (*SheetInfo, error) {
 // Sheet is a forward-only read of one sheet of a Workbook, a batch at a time, through a
 // plan — into the same Batch delimited text is read into.
 //
-// A sheet has its own buffers and its own copy of the workbook's read state, so several can
-// be read at once. A typed workbook cell is converted directly by its door — a stored 42.0
+// A sheet has its own buffers, its own copy of the workbook's read state and its own
+// instance of the core, so several can be read at once. A typed workbook cell is converted directly by its door — a stored 42.0
 // never passes through text to become an int32 — and a text cell goes through the door as
 // delimited text would. A Sheet is not safe for concurrent use.
 type Sheet struct {
@@ -400,7 +407,6 @@ type Sheet struct {
 	// set is the plan and its buffers: nil until one is bound.
 	set     *columns
 	batch   Batch
-	state   []uint64
 	scratch *scratch
 	// perRow is the cell-table entries one row takes: one per plan column, and one more.
 	perRow int
@@ -411,12 +417,12 @@ type Sheet struct {
 }
 
 func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Column, bound bool) (*Sheet, error) {
-	s := &Sheet{
-		book:    book,
-		options: options,
-		// A copy of the opened state, which the core allows, so that this sheet's read is
-		// its own.
-		state: append([]uint64(nil), book.state...),
+	s := &Sheet{book: book, options: options}
+	// An instance of the sheet's own, with a copy of the opened state, which the core
+	// allows, so that this sheet's read is its own.
+	core, ok := newBookNative(book, true)
+	if !ok {
+		return nil, errWorkbookMemory
 	}
 	if bound {
 		// The plan is bound before the sheet is opened, so that its error comes first, and
@@ -425,9 +431,9 @@ func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Colu
 		if err != nil {
 			return nil, err
 		}
-		s.scratch = newScratch(0, 4096, perRow*options.BatchRows, set.width)
+		s.scratch = newScratch(core, 0, 4096, perRow*options.BatchRows, set.width)
 		if stingy {
-			s.scratch = newScratch(1, 1, 1, set.width)
+			s.scratch = newScratch(core, 1, 1, 1, set.width)
 		}
 		s.attach(set, perRow)
 	} else {
@@ -436,12 +442,12 @@ func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Colu
 		}
 		// No plan to size the row's slots by: there is one for every cell the header call is
 		// given, and they grow with the cell table (see readHeader).
-		s.scratch = newScratch(0, 4096, 64, 64)
+		s.scratch = newScratch(core, 0, 4096, 64, 64)
 		if stingy {
-			s.scratch = newScratch(1, 1, 1, 1)
+			s.scratch = newScratch(core, 1, 1, 1, 1)
 		}
 	}
-	if err := settled(nativeSheet(s.state, book.container, info, options, s.scratch.filled), s.scratch.filled); err != nil {
+	if err := settled(s.scratch.sheet(info, options), &s.scratch.filled); err != nil {
 		return nil, err
 	}
 	if options.HasHeader {
@@ -482,12 +488,12 @@ func (s *Sheet) attach(set *columns, perRow int) {
 // call is given, grown with the cell table, and binding a plan later keeps them.
 func (s *Sheet) readHeader() error {
 	if s.set == nil {
-		s.scratch.row = atLeast(s.scratch.row, len(s.scratch.cells))
+		s.scratch.row = max(s.scratch.row, s.scratch.cellsCap)
 		s.scratch.rowFollowsCells = true
 	}
-	code := s.scratch.drive(bookHeader, s.book, s.state, nil)
+	code := s.scratch.drive(bookHeader, nil, 1)
 	s.scratch.rowFollowsCells = false
-	if err := settled(code, s.scratch.filled); err != nil {
+	if err := settled(code, &s.scratch.filled); err != nil {
 		return err
 	}
 	s.header = make(Header, s.scratch.filled.rows)
@@ -522,9 +528,9 @@ func (s *Sheet) Bind(plan []Column) error {
 	// and a slot for every column the plan reads. What the slots hold, a header row still to
 	// be repeated, is kept: they are grown, never replaced or shrunk.
 	if !stingy {
-		s.scratch.cells = atLeast(s.scratch.cells, perRow*s.options.BatchRows)
+		s.scratch.cellsCap = max(s.scratch.cellsCap, perRow*s.options.BatchRows)
 	}
-	s.scratch.row = atLeast(s.scratch.row, set.width)
+	s.scratch.row = max(s.scratch.row, set.width)
 	s.attach(set, perRow)
 	return nil
 }
@@ -563,10 +569,10 @@ func (s *Sheet) Read() (*Batch, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	code := s.scratch.drive(bookFill, s.book, s.state, s.set)
+	code := s.scratch.drive(bookFill, s.set, s.perRow)
 	rows := int(s.scratch.filled.rows)
 	if code != codeOK {
-		failure := settled(code, s.scratch.filled)
+		failure := settled(code, &s.scratch.filled)
 		if rows == 0 {
 			s.err = failure
 			return nil, failure

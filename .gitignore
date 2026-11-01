@@ -1,25 +1,5 @@
 # Rust
 **/target/
-corpus/generate/out/
-
-# Python
-**/__pycache__/
-**/*.egg-info/
-**/.venv/
-**/dist/
-**/.pytest_cache/
-**/.mypy_cache/
-# The staged PyO3 extension for local dev/test — nested at hypertabular._native (the maturin
-# module-name), built from the core crate's python feature. The abi3 and abi3t builds carry
-# one file per platform regardless of Python version (the plain, .abi3 and .abi3t
-# spellings); a free-threaded 3.14 build is tagged per version (`maturin develop` names it
-# _native.cpython-314t-<platform>.so), hence the glob; .pyd covers Windows.
-python/src/hypertabular/_native.so
-python/src/hypertabular/_native.abi3.so
-python/src/hypertabular/_native.abi3t.so
-python/src/hypertabular/_native.cpython-*t-*.so
-python/src/hypertabular/_native.pyd
-python/src/hypertabular/_native.*.pyd
 
 # .NET
 **/bin/
@@ -32,56 +12,53 @@ csharp/HyperTabular/runtimes/
 # static-libs/build-static-libs.sh at test and pack time, never committed.
 csharp/HyperTabular/staticlibs/
 
-# PHP
-# Native libs under php/src/native/{rid}/ are not ignored: as in HyperCast, Packagist has no
-# packing step — the git tree at the tag IS the package — so the libraries a release ships
-# are committed there. Without one for the platform, the binding falls back to
-# rust/target/release/ (`cargo cdylib`).
-php/vendor/
-php/composer.lock
-php/.phpunit.result.cache
-# The root composer.json exists only for Packagist, which reads the repository root; nothing
-# here runs `composer install` from the root, and a stray local one should not be committed.
-/vendor/
-/composer.lock
-
-# Swift
-# The static libraries under swift/HyperTabularCore.artifactbundle/{triple}/ and
-# swift/HyperTabularCoreApple.xcframework/, and the info.json and Info.plist that list them,
-# are not ignored — as in HyperCast, where they are committed, because SwiftPM has no
-# packing step for a git-URL dependency, and only by stage-native-binaries.yml, after their
-# provenance checks. The forge's static-libs/build-static-libs.sh builds them too (CI runs
-# it before every Swift step); a developer's own build of them shows up as modified or
-# untracked and is not to be committed by hand.
-**/.build/
-# A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
-# the manifests declare, by CI as by anyone depending on this package.
-/Package.resolved
-/swift/Package.resolved
-/swift/StaticSmokeTest/Package.resolved
-
 # Gradle / Java
 **/.gradle/
 **/build/
-# CI places each leg's native library here before `gradlew test`, and the Maven publish
-# bundles every platform's at publish time; the local dev loop stages into
-# build/generated-resources instead (already covered by **/build/ above), so anything here
-# is regenerable via `cargo cdylib`.
+# CI (hyper-publish-maven.yml) bundles all platforms' natives here at publish time; the
+# local dev loop stages into build/generated-resources instead (already covered by
+# **/build/ above), so anything here is regenerable via `cargo cdylib`.
 java/src/main/resources/native/
 # csharp/HyperTabular/build/ is NuGet's real, tracked build/{PackageId}.targets packaging
-# convention, not a build output. It collides with **/build/ above, which would otherwise
-# silently swallow anything new in it: the file would sit on disk, pack correctly in a
-# local `dotnet pack`, and simply never exist in CI. Each directory level needs its own
-# negation — git won't descend into an excluded directory to find a deeper !file
-# re-inclusion — and gitignore rules apply in file order, so this must come after the rule
-# it un-ignores. HyperCast carries the same block for the same reason.
+# convention (auto-imported into every consumer for the browser-wasm NativeFileReference and
+# EmccExportedFunction wiring — see HyperTabular.csproj), not a build output. It collides with
+# **/build/ above, which would otherwise silently swallow it: the file would sit on disk,
+# pack correctly in a local `dotnet pack`, and simply never exist in CI. Each directory level
+# needs its own negation — git won't descend into an excluded directory to find a deeper
+# !file re-inclusion — and gitignore rules apply in file order, so this must come after the
+# rule it un-ignores. HyperUuid carries the same block for the same reason.
 !csharp/HyperTabular/build/
 !csharp/HyperTabular/build/net10.0/
 !csharp/HyperTabular/build/net10.0/HyperTabular.targets
 
+# Python
+**/__pycache__/
+**/*.egg-info/
+**/.venv/
+**/dist/
+**/.pytest_cache/
+**/.mypy_cache/
+# The staged PyO3 extension for local dev/test — nested at hypertabular._native (the maturin
+# module-name), built from the core crate's python feature. Its file name varies with the
+# Python version and platform (_native.abi3.so, _native.abi3t-darwin.so,
+# _native.cpython-314t-<platform>.so and more), so these match every compiled spelling and
+# nothing else: _native.pyi beside them is the tracked type stub.
+python/src/hypertabular/_native*.so
+python/src/hypertabular/_native*.pyd
+
+# Swift
+# The core in the artifact bundle and the XCFramework is build output: CI and
+# .github/scripts/local-core.sh write it, and consumers get it from the release's assets (the
+# root Package.swift). Only the bundle's include/ (header and module map) is source.
+**/.build/
+swift/HyperTabularCore.artifactbundle/*
+!swift/HyperTabularCore.artifactbundle/include/
+swift/HyperTabularCoreApple.xcframework/
+
 # Ruby
-# CI places each leg's native lib here for `bundle exec rspec` at build-native time, and the
-# gem build stages every RID's into the gem; regenerable locally via `cargo cdylib`.
+# CI places each leg's native lib here for `bundle exec rspec` at build-native time, and
+# rubygems-publish stages all eight into the universal gem at gem-build time (the platform
+# gems carry none); regenerable locally via `cargo cdylib`.
 ruby/lib/hypertabular/native/*/
 ruby/Gemfile.lock
 ruby/pkg/
@@ -94,22 +71,54 @@ ruby/wasm-smoke/Gemfile.lock
 ruby/wasm-smoke/build/
 ruby/wasm-smoke/rubies/
 ruby/wasm-smoke/*.wasm
-ruby/wasm-smoke/node_modules/
-# The Magnus extension staged for local dev/test (`rake native:dev`, or CI's in-job copy),
-# flat and per Ruby ABI (lib/hypertabular/<minor>/, which release.yml also writes from CI
-# artifacts to pack the platform gems). Build output, never committed; scoped to the
-# extension's filename so it cannot swallow a real lib/hypertabular/*.rb source file.
+# Staged Magnus extension for local dev/test (built from the core crate's ruby feature;
+# precompiled platform gems carry the real artifact).
 ruby/lib/hypertabular_native.so
 ruby/lib/hypertabular_native.bundle
+# The per-ABI staging the fat platform gem is packed from (lib/hypertabular/<minor>/), written
+# by release.yml from CI artifacts. Same story as the flat pair above: build output, never
+# committed. Scoped to the extension filename rather than the whole directory so it can't
+# swallow a real lib/hypertabular/*.rb source file if a minor-version-shaped one ever appears.
 ruby/lib/hypertabular/*/hypertabular_native.so
 ruby/lib/hypertabular/*/hypertabular_native.bundle
 
-# go/staticlib's archives ARE committed — a Go module is whatever is in the tree — but only
-# by the staging workflow, which adds them with `git add -f` after verifying each one's
-# build provenance. Ignored here so that a developer's own build of them (the forge's
-# static-libs/build-static-libs.sh, which `go test` needs to link) can never
-# ride into a commit by accident.
-go/staticlib/*/*.a
+# PHP
+php/vendor/
+php/composer.lock
+php/.phpunit.result.cache
+# The root composer.json is the PIE package's metadata, not a project anyone installs from
+# the repo root, but a stray local `composer install` there shouldn't get committed either.
+/vendor/
+/composer.lock
+php/.phpunit.result.cache
+# Root-level composer.json exists only for Packagist (see php/README.md's Install section) —
+# nothing actually runs `composer install` from the repo root except a consumer's own build,
+# but a stray local one shouldn't get committed either.
+/vendor/
+/composer.lock
+
+# Node: the TypeScript binding and ruby/wasm-smoke's test harness.
+**/node_modules/
+# The napi-rs addon `npm run build` writes for this machine, and the per-platform package
+# directories `napi create-npm-dirs` writes (the Forge's pack-npm action runs it on a copy of
+# typescript/ at release time); never committed.
+typescript/*.node
+typescript/npm/
+
+# R. vendor.sh derives the wrapper crate's lock from rust/Cargo.lock, vendors the crates
+# (the core among them, from this checkout) and stages the header and the corpus into these
+# at release time, in CI and for the local loop; R CMD INSTALL leaves the objects and the
+# library. All generated, never committed. r/.gitignore and typescript/.gitignore repeat
+# their entries for their own trees.
+r/src/rust/vendor/
+r/src/rust/vendor.tar.xz
+r/src/rust/Cargo.lock
+r/src/.cargo/
+r/src/include/
+r/tests/testthat/corpus/
+r/src/*.o
+r/src/*.so
+r/src/*.dll
 
 # BenchmarkDotNet
 # Writes output relative to the process's working directory when invoked via `dotnet run`
@@ -118,14 +127,50 @@ go/staticlib/*/*.a
 # covered by the **/target/ rule above.
 **/BenchmarkDotNet.Artifacts/
 
+# IDE
+.idea/
+.vs/
+
+# cargo-fuzz working state — the targets and Cargo.toml are tracked; the evolving corpus
+# and any crash artifacts are machine-local (a reproducing crash gets minimized and
+# committed as a regression test, not as a raw artifact).
+rust/fuzz/corpus/
+rust/fuzz/artifacts/
+rust/fuzz/coverage/
+
+# The corpus copy test-apple-mobile stages for the Go suite in the iOS simulator
+# (go_ios_exec carries only the module's testdata), if made by hand.
+go/testdata/corpus/
+
+# CI artifacts downloaded to the repository root (`gh run download` with no --dir lands one
+# folder per artifact here): native libraries, wheels, gems, packages and AOT reports from a
+# ci.yml run. No binary is committed; these never belong in a commit. Anchored to the root
+# so nothing tracked below it is touched.
+/aot-report-*/
+/native-*/
+/nuget-org-*/
+/php-ext-*/
+/pypi-wheels-*/
+/ruby-native-*/
+/ruby-wasm-*/
+/static-libs/
+/swift-static/
+/wasm-emscripten-staticlib/
+/wasm-wasip1-module/
+
 # What Windows attaches to a downloaded file, when the file is copied into WSL.
 *:Zone.Identifier
 # What Finder writes into any folder it opens.
 .DS_Store
 
-# The corpus copy test-apple-mobile stages for the Go suite in the iOS simulator
-# (go_ios_exec carries only the module's testdata), if made by hand.
-go/testdata/corpus/
+# A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
+# the manifests declare, by CI as by anyone depending on this package.
+/Package.resolved
+/swift/Package.resolved
+/swift/StaticSmokeTest/Package.resolved
+
+# The large benchmark inputs corpus/generate writes.
+corpus/generate/out/
 
 # cargo-fuzz's working state: the corpora rust/fuzz/seed.py writes and libFuzzer grows, and
 # the inputs it saves when a target fails. A failing input worth keeping becomes a test.

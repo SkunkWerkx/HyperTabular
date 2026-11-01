@@ -6,14 +6,16 @@
 //! `Runtime::Delimited` (a delimited read), `Runtime::Book::Opened` (an open workbook) and
 //! `Runtime::Book::Reading` (one sheet being read), plus `Runtime.unescape`. Everything above
 //! them — the readers, the workbook, `Batch` and every value and verdict it builds — is plain
-//! Ruby that never sees a pointer. So this extension replaces exactly those, **in place**: on
-//! require it redefines the constructors (`Delimited.start`, `Opened.new`, `Reading.new`),
+//! Ruby that never sees a pointer. So this extension replaces exactly those: on require it
+//! defines the constructors (`Delimited.start`, `Opened.new`, `Reading.new`),
 //! `Delimited.version` and `Runtime.unescape` to hand back objects of its own, which answer
-//! the same methods with the same bytes. The Ruby above them stays shared byte for byte, so
-//! the two backends cannot disagree about what a cell means; what changes is that no Fiddle
-//! library is loaded and no pointer is marshalled — which is also what lets the extension
-//! run in ruby.wasm, where there is no Fiddle at all. `HYPERTABULAR_PURE=1` (checked
-//! Ruby-side) keeps Fiddle.
+//! the same methods with the same bytes. Each goes in front of what it replaces, never over
+//! it: the Fiddle `start`, `version` and `unescape` live in `FiddleBackend` modules their
+//! owners extend, and `new` is `Class#new`, so `ruby -w` sees nothing redefined. The Ruby
+//! above them stays shared byte for byte, so the two backends cannot disagree about what a
+//! cell means; what changes is that no Fiddle library is loaded and no pointer is
+//! marshalled — which is also what lets the extension run in ruby.wasm, where there is no
+//! Fiddle at all. `HYPERTABULAR_PURE=1` (checked Ruby-side) keeps Fiddle.
 //!
 //! The buffers are this binding's own, as they are every binding's: the core fills them and
 //! keeps nothing. A Ruby object one of them reads from — the text being read, the workbook's
@@ -1102,7 +1104,7 @@ impl SheetRead {
 #[magnus::init(name = "hypertabular_native")]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     // lib/hypertabular.rb has defined the Fiddle backend before requiring this; these
-    // redefinitions replace its entry points in place.
+    // definitions go in front of its FiddleBackend entry points.
     let hypertabular = ruby.define_module("HyperTabular")?;
     let runtime: RModule = hypertabular.const_get("Runtime")?;
     let fiddle_delimited: RClass = runtime.const_get("Delimited")?;

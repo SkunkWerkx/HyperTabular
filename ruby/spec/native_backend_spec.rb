@@ -30,6 +30,19 @@ RSpec.describe "native backend" do
     expect(fiddle_eval("HyperTabular.native_version")).to eq(HyperTabular.native_version)
   end
 
+  it "loads under -w without a method-redefinition warning" do
+    # 1.0.0 printed six lines under `ruby -w`, "method redefined; discarding old start" and
+    # "previous definition of start was here" for Delimited.start, Delimited.version and
+    # Runtime.unescape: the Fiddle definitions sat on the singleton classes, exactly where
+    # the extension then defined its own. hypercast loads first with warnings off, so this
+    # holds this gem's own require, whatever the installed hypercast says.
+    lib = File.expand_path("../lib", __dir__)
+    script = '$VERBOSE = nil; require "hypercast"; $VERBOSE = true; require "hypertabular"; ' \
+             "print HyperTabular::BACKEND"
+    out, status = Open3.capture2e(RbConfig.ruby, "-I", lib, "-e", script)
+    expect([status.success?, out]).to eq([true, "native"])
+  end
+
   # Every cell of both corpora, in batches small enough that every read stops and resumes,
   # said as text and hashed: the verdicts, the raw text, the lines, the headers, the
   # failures.

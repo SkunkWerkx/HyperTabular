@@ -45,6 +45,25 @@ module HyperTabular
     @mutex = Mutex.new
     @functions = nil
 
+    # The entry point the Magnus extension also defines, the Fiddle way. It lives in a module
+    # Runtime extends rather than on its singleton class, so the extension's
+    # define_singleton_method puts its definition in front of this one: an override through
+    # the ancestor chain, not a redefinition, and `ruby -w` has nothing to say about it (1.0.0
+    # printed "method redefined" for it, and for Delimited.start and .version, on every
+    # require under -w). With the extension loaded no call ever reaches it.
+    module FiddleBackend
+      # A quoted delimited cell — the bytes a flagged cell-table entry names — with its
+      # quotes resolved, as the core cast it.
+      def unescape(quoted)
+        input = pin(quoted)
+        out = buffer([quoted.bytesize, 1].max)
+        written = function(:hypertabular_delimited_unescape).call(input, quoted.bytesize, out, quoted.bytesize)
+        out[0, written]
+      end
+    end
+
+    extend FiddleBackend
+
     class << self
       # The export's Fiddle::Function, for the caller to invoke directly.
       def function(symbol)
@@ -66,15 +85,6 @@ module HyperTabular
       def pin(string)
         functions
         Fiddle::Pointer[string]
-      end
-
-      # A quoted delimited cell — the bytes a flagged cell-table entry names — with its
-      # quotes resolved, as the core cast it.
-      def unescape(quoted)
-        input = pin(quoted)
-        out = buffer([quoted.bytesize, 1].max)
-        written = function(:hypertabular_delimited_unescape).call(input, quoted.bytesize, out, quoted.bytesize)
-        out[0, written]
       end
 
       private

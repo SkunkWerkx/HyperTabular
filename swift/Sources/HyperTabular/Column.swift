@@ -192,8 +192,8 @@ public struct Column: Equatable, Sendable {
     /// native format cannot carry — equal separators, a separator or sign over 8 UTF-8 bytes,
     /// a currency symbol over 16, a symbol with a digit or whitespace in it — so nothing here
     /// can fail.
-    var spec: hypertabular_column_spec {
-        var spec = hypertabular_column_spec()
+    var spec: HyperTabularColumnSpec {
+        var spec = HyperTabularColumnSpec()
         spec.ordinal = UInt32(ordinal)
         spec.door = door.rawValue
         spec.param = declared

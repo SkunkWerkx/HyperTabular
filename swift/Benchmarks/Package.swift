@@ -2,8 +2,8 @@
 import PackageDescription
 
 // The workbook benchmarks, beside the package rather than in it so that the library's
-// consumers never resolve package-benchmark. Run by hand: `swift package benchmark` here
-// (HYPERTABULAR_LOCAL_CORE=1 for the core built from this checkout).
+// consumers never resolve package-benchmark. Run by hand: `swift package benchmark` here, after
+// .github/scripts/local-core.sh has built the core from this checkout.
 let package = Package(
     name: "HyperTabularBenchmarksPackage",
     platforms: [.macOS(.v13)],

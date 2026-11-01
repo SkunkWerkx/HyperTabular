@@ -24,6 +24,86 @@ pub const ERR_CELLS: i32 = -4;
 /// returns this, [`ERR_ARENA`] or [`ERR_CELLS`] expects next.
 pub const ERR_WINDOW: i32 = -5;
 
+// The size and alignment of every shape that crosses the ABI, pinned here because the
+// bindings restate them by hand (C# structs, Java's layouts, Go and PHP declarations, ctypes)
+// and the C header carries each fixed size as `<Type>_SIZE`. A layout change fails to compile
+// here first, and these numbers are what every binding's own declaration has to move to.
+// `ColumnBuffer` and `Buffers` are pointers and sizes, so they are pinned in pointer widths;
+// the delimited state is pinned beside its private fields (delimited/fill.rs).
+//
+// Only where a u64 is 8-aligned, which is every target a binding ships for.
+macro_rules! pin_layout {
+    ($($ty:ty => ($size:expr, $align:expr)),+ $(,)?) => {$(
+        const _: () = assert!(
+            align_of::<u64>() != 8 || (size_of::<$ty>() == $size && align_of::<$ty>() == $align)
+        );
+    )+};
+}
+
+const WORD: usize = size_of::<usize>();
+
+pin_layout! {
+    Span => (Span::SIZE as usize, 4),
+    CellVerdict => (CellVerdict::SIZE as usize, 4),
+    ColumnSpec => (ColumnSpec::SIZE as usize, 4),
+    ColumnBuffer => (2 * WORD, WORD),
+    Failure => (Failure::SIZE as usize, 8),
+    Filled => (Filled::SIZE as usize, 8),
+    Slot => (Slot::SIZE as usize, 8),
+    Buffers => (14 * WORD, WORD),
+    Opened => (Opened::SIZE as usize, 8),
+    SheetInfo => (SheetInfo::SIZE as usize, 4),
+}
+
+// The offsets, pinned the same way.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(Span, offset) == 0 && offset_of!(Span, len) == 4);
+    assert!(offset_of!(CellVerdict, offset) == 0);
+    assert!(offset_of!(CellVerdict, len) == 4);
+    assert!(offset_of!(CellVerdict, reason) == 8);
+    assert!(offset_of!(ColumnSpec, ordinal) == 0);
+    assert!(offset_of!(ColumnSpec, door) == 4);
+    assert!(offset_of!(ColumnSpec, param) == 8);
+    assert!(offset_of!(ColumnSpec, format) == 12);
+    assert!(offset_of!(ColumnBuffer, values) == 0 && offset_of!(ColumnBuffer, verdicts) == WORD);
+    assert!(offset_of!(Failure, code) == 0);
+    assert!(offset_of!(Failure, line) == 4);
+    assert!(offset_of!(Failure, record) == 8);
+    assert!(offset_of!(Failure, byte) == 16);
+    assert!(offset_of!(Failure, expected) == 24);
+    assert!(offset_of!(Failure, found) == 28);
+    assert!(offset_of!(Filled, rows) == 0);
+    assert!(offset_of!(Filled, consumed) == 8);
+    assert!(offset_of!(Filled, arena_used) == 16);
+    assert!(offset_of!(Filled, needed) == 24);
+    assert!(offset_of!(Filled, failure) == 32);
+    assert!(offset_of!(Buffers, window) == 0);
+    assert!(offset_of!(Buffers, window_cap) == WORD);
+    assert!(offset_of!(Buffers, arena) == 2 * WORD);
+    assert!(offset_of!(Buffers, arena_cap) == 3 * WORD);
+    assert!(offset_of!(Buffers, cells) == 4 * WORD);
+    assert!(offset_of!(Buffers, cells_cap) == 5 * WORD);
+    assert!(offset_of!(Buffers, row) == 6 * WORD);
+    assert!(offset_of!(Buffers, row_cap) == 7 * WORD);
+    assert!(offset_of!(Buffers, strings) == 8 * WORD);
+    assert!(offset_of!(Buffers, strings_len) == 9 * WORD);
+    assert!(offset_of!(Buffers, table) == 10 * WORD);
+    assert!(offset_of!(Buffers, table_len) == 11 * WORD);
+    assert!(offset_of!(Buffers, kinds) == 12 * WORD);
+    assert!(offset_of!(Buffers, kinds_len) == 13 * WORD);
+    assert!(offset_of!(Opened, format) == 0);
+    assert!(offset_of!(Opened, epoch) == 4);
+    assert!(offset_of!(Opened, strings_bytes) == 8);
+    assert!(offset_of!(Opened, strings_count) == 16);
+    assert!(offset_of!(Opened, needed) == 24);
+    assert!(offset_of!(Opened, failure) == 32);
+    assert!(offset_of!(SheetInfo, name) == 0);
+    assert!(offset_of!(SheetInfo, part) == 8);
+    assert!(offset_of!(SheetInfo, flags) == 16);
+    assert!(offset_of!(SheetInfo, index) == 20);
+};
+
 /// A byte range. Where it points is the field's to say; the top bit of `len` is a flag
 /// each use defines, and [`Span::len`] is the length without it.
 #[repr(C)]
@@ -36,10 +116,13 @@ pub struct Span {
 }
 
 impl Span {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 8;
+
     /// The flag bit of `len`. On a cell-table entry: the cell is quoted with `""` inside
     /// and has to be unescaped to be read. On a `Text` value: the bytes are in the arena
     /// rather than in the input.
-    pub const FLAG: u32 = 1 << 31;
+    pub const FLAG: u32 = 0x8000_0000;
 
     /// The length, without the flag.
     pub const fn len(self) -> usize {
@@ -71,6 +154,9 @@ pub struct CellVerdict {
 }
 
 impl CellVerdict {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 12;
+
     /// The success verdict.
     pub const OK: CellVerdict = CellVerdict {
         offset: 0,
@@ -111,10 +197,17 @@ impl CellVerdict {
 pub struct ColumnSpec {
     /// Zero-based ordinal of the source column it reads. Past a row's end reads as empty.
     pub ordinal: u32,
-    /// The door's code ([`crate::kernel::door::Door::code`]).
+    /// The door's code ([`crate::kernel::door::Door::code`]): `1` bool, `2`–`5` i8 to i64,
+    /// `6`–`9` u8 to u64, `10` f32, `11` f64, `12` UUID, `13` timestamp, `14` Unix time,
+    /// `15` date, `16` time of day, `17` duration, `18` text, `19` decimal, `20` a date
+    /// under a declared order, `21` a civil date-time under a declared order, `22` an Excel
+    /// serial.
     pub door: u32,
-    /// What the door declares, where it declares something: the Unix precision, a date
-    /// order, an Excel date system — numbered as HyperCast numbers them. `0` otherwise.
+    /// What the door declares, where it declares something, numbered as HyperCast numbers
+    /// it: for `14` the Unix precision (`1` seconds, `2` milliseconds, `3` microseconds, `4`
+    /// nanoseconds), for `20` and `21` the date order (`1` year-month-day, `2`
+    /// month-day-year, `3` day-month-year), for `22` the Excel date system (`1` 1900, `2`
+    /// 1904). `0` otherwise.
     pub param: u32,
     /// The numeric notation, read by the numeric doors: HyperCast's size-tagged layout,
     /// built whole (its `size` is `RawNumFormat::SIZE`, 92). All zeros — a `size` of `0` —
@@ -123,6 +216,9 @@ pub struct ColumnSpec {
 }
 
 impl ColumnSpec {
+    /// The layout's size in bytes: three words, then HyperCast's 92-byte `RawNumFormat`.
+    pub const SIZE: u32 = 104;
+
     /// A column over `ordinal` through the door `door`/`param`, invariant notation.
     pub const fn new(ordinal: u32, door: u32, param: u32) -> ColumnSpec {
         ColumnSpec {
@@ -183,6 +279,9 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 32;
+
     /// The input ended inside a quoted cell.
     pub const UNCLOSED_QUOTE: u32 = 1;
     /// A record's cell count disagrees with the first record's.
@@ -267,6 +366,11 @@ pub struct Filled {
     pub failure: Failure,
 }
 
+impl Filled {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 64;
+}
+
 /// One cell of the row a workbook read is assembling: a tag and a payload, plain integers.
 /// The caller supplies the scratch these live in ([`Buffers::row`]) and never reads them.
 #[repr(C)]
@@ -275,6 +379,11 @@ pub struct Slot {
     pub(crate) tag: u32,
     pub(crate) aux: u32,
     pub(crate) bits: u64,
+}
+
+impl Slot {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 16;
 }
 
 /// The memory a workbook call works in — all of it the caller's, handed over again on
@@ -349,6 +458,11 @@ pub struct Opened {
     pub failure: Failure,
 }
 
+impl Opened {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 64;
+}
+
 /// One sheet as `hypertabular_workbook_sheets` lists it: three spans' worth of the table.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -363,4 +477,9 @@ pub struct SheetInfo {
     /// The sheet's position among the document's tables (ODS, Numbers), given back
     /// likewise.
     pub index: u32,
+}
+
+impl SheetInfo {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 24;
 }

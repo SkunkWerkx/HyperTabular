@@ -1,46 +1,46 @@
 // swift-tools-version:6.2
 import PackageDescription
 
-#if canImport(Darwin)
-    import Foundation
-#endif
+import Foundation
 
-// The development loop: HYPERTABULAR_LOCAL_CORE=1 links the bundle
-// .github/scripts/local-core.sh builds from the checkout, under rust/target/ (which git
-// ignores), in place of the committed one, so the suite can run against the core as it stands
-// without replacing a committed archive.
-let coreBundle =
-    Context.environment["HYPERTABULAR_LOCAL_CORE"] == nil
-    ? "HyperTabularCore.artifactbundle" : "../rust/target/local-core/swift/HyperTabularCore.artifactbundle"
-
+// The native core is a static-library artifact bundle, one archive per triple (SE-0482, which
+// is what sets the tools version above): glibc and musl Linux and macOS on x86_64 and arm64,
+// Windows (MSVC) on x86_64 and arm64, Android on x86_64 and arm64, and WASI. SwiftPM picks the
+// variant for the triple being built and links it into the consumer's executable, so nothing
+// ships beside it and nothing is opened at run time. A triple with no variant has no
+// `HyperTabularCore` module, and the build stops there rather than at run time.
+//
+// The core is build output, never committed: CI writes each leg's archives (and info.json)
+// into HyperTabularCore.artifactbundle/ before any Swift step, and
+// .github/scripts/local-core.sh writes the host's. The bundle is declared only once its
+// info.json is there, so the package still resolves without one (Dependabot resolves
+// swift/Benchmarks through this file); a build then stops at `import HyperTabularCore`.
+// Consumers never see this file: they resolve the root Package.swift, which takes the core
+// from the release's assets.
+//
 // iOS, the iOS simulator and Mac Catalyst take the core from an XCFramework instead: an app
 // for those is built by Xcode, which has linked a static library out of an XCFramework since
 // Xcode 12 and does not read a static-library artifact bundle. It carries the same no_std
 // archives, one slice each (arm64 only), with the header and module map under
 // Headers/HyperTabularCore/, so `import HyperTabularCore` finds the same module either way.
+// Only a Mac builds one (the full static-libs build), so it is declared only when it is there.
 // HyperCast's package does the same for its own core.
-//
-// Only a Mac can build for those platforms, so only a Mac's manifest declares the target; on
-// Linux and Windows this file is what it was. And only when the XCFramework is there: it is
-// committed by stage-native-binaries.yml, whole, so a checkout from before its first staging
-// has none, and a binary target whose path is missing fails the whole package, macOS
-// included.
-#if canImport(Darwin)
-    let appleCore = "HyperTabularCoreApple.xcframework"
-    let linksAppleCore = FileManager.default.fileExists(
-        atPath: "\(Context.packageDirectory)/\(appleCore)/Info.plist")
-#else
-    let appleCore = ""
-    let linksAppleCore = false
-#endif
-let appleCoreTargets: [Target] =
-    linksAppleCore ? [.binaryTarget(name: "HyperTabularCoreApple", path: appleCore)] : []
-let coreDependency: [Target.Dependency] =
-    linksAppleCore
-    ? [
-        .target(name: "HyperTabularCore", condition: .when(platforms: [.macOS, .linux, .windows, .wasi, .android])),
-        .target(name: "HyperTabularCoreApple", condition: .when(platforms: [.iOS, .macCatalyst])),
-    ] : ["HyperTabularCore"]
+func built(_ path: String) -> Bool {
+    FileManager.default.fileExists(atPath: "\(Context.packageDirectory)/\(path)")
+}
+let core = "HyperTabularCore.artifactbundle"
+let appleCore = "HyperTabularCoreApple.xcframework"
+let linksCore = built("\(core)/info.json")
+let linksAppleCore = built("\(appleCore)/Info.plist")
+let coreTargets: [Target] =
+    (linksCore ? [.binaryTarget(name: "HyperTabularCore", path: core)] : [])
+    + (linksAppleCore ? [.binaryTarget(name: "HyperTabularCoreApple", path: appleCore)] : [])
+let coreDependencies: [Target.Dependency] =
+    (linksCore
+        ? [.target(name: "HyperTabularCore", condition: .when(platforms: [.macOS, .linux, .windows, .wasi, .android]))]
+        : [])
+    + (linksAppleCore
+        ? [.target(name: "HyperTabularCoreApple", condition: .when(platforms: [.iOS, .macCatalyst]))] : [])
 
 let package = Package(
     name: "HyperTabular",
@@ -60,35 +60,21 @@ let package = Package(
         // HyperCast is the judge: every cell is one of its verdicts, and the verdict, the
         // fault, the number format and the declared enums are its own Swift types, from its
         // own package — never copies of them.
-        // 1.0.0, whose Swift doors do not throw. A version range, never a revision or a
-        // branch: SwiftPM refuses a tagged package that depends on one to every consumer, so
-        // the release guard refuses a tag that does.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.0.0")
+        // 1.1.0, whose Swift core comes from its release by URL and checksum. A version range,
+        // never a revision or a branch: SwiftPM refuses a tagged package that depends on one to
+        // every consumer, so the release guard refuses a tag that does.
+        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.1.0")
     ],
     targets: [
-        // The native core as static libraries, one per triple (SE-0482, which is what sets
-        // the tools version above): glibc and musl Linux and macOS on x86_64 and arm64,
-        // Windows (MSVC) on x86_64 and arm64, and WASI. SwiftPM picks the variant for the
-        // triple being built and links it into the consumer's executable, so nothing ships
-        // beside it and nothing is opened at run time. A triple with no variant has no
-        // `HyperTabularCore` module, and the build stops there rather than at run time.
-        .binaryTarget(
-            name: "HyperTabularCore",
-            path: coreBundle
-        ),
         .target(
             name: "HyperTabular",
-            dependencies: coreDependency + [
+            dependencies: coreDependencies + [
                 .product(name: "HyperCast", package: "HyperCast")
             ]
         ),
         .testTarget(
             name: "HyperTabularTests",
-            dependencies: ["HyperTabular"],
-            // Tells CoreFreshnessTests the suite links the checkout's own core, so the
-            // committed bundle's age is no concern of this run.
-            swiftSettings: Context.environment["HYPERTABULAR_LOCAL_CORE"] == nil
-                ? [] : [.define("HYPERTABULAR_LOCAL_CORE")]
+            dependencies: ["HyperTabular"]
         ),
-    ] + appleCoreTargets
+    ] + coreTargets
 )

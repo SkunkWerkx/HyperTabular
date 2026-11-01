@@ -151,16 +151,18 @@ once per few thousand rows, not once per cell.
 ## Linking and deployment
 
 The core is linked into the executable as a static library on every platform — a SwiftPM
-binary target, `HyperTabularCore.artifactbundle`, with an archive for Linux (glibc and
-Swift's static musl SDK) and Windows on x86-64 and arm64 and for macOS on both
-architectures — so there is nothing to deploy beside the executable. Swift 6.2 is the floor:
-it is the first release whose package manager links a static library. HyperCast's Swift
-package links its own core the same way, and the two link side by side.
+binary target, `HyperTabularCore.artifactbundle.zip`, attached to the GitHub Release and named
+in the manifest by URL and checksum, with an archive for Linux (glibc and Swift's static musl
+SDK) and Windows on x86-64 and arm64 and for macOS on both architectures — so SwiftPM
+downloads it, checks it, and links the one for your target, and there is nothing to deploy
+beside the executable. Swift 6.2 is the floor: it is the first release whose package manager
+links a static library. HyperCast's Swift package takes its own core the same way, and the two
+link side by side.
 
 iOS, the iOS simulator and Mac Catalyst get the same archives from a second binary target,
 `HyperTabularCoreApple.xcframework`: an app for those is built by Xcode, which links a
 static library out of an XCFramework and does not read a static-library artifact bundle.
-The manifest declares it only on a Mac, and only when the XCFramework is in the tree; both
+The manifest declares it only on a Mac, where those platforms can be built at all, and both
 targets define the one `HyperTabularCore` module the binding imports. The floors are iOS 16
 and Mac Catalyst 16. CI's `test-apple-mobile` job runs the suite on an iOS simulator and as
 a Mac Catalyst process with `xcodebuild test`, and builds the package for an iOS device.
@@ -177,6 +179,14 @@ runs it in an emulator whose image uses 16 KB pages, through
 against a local emulator; the aarch64 build is linked. The Swift runtime on Android is shared
 libraries, which an app packages the way the SDK's documentation describes; the core adds
 nothing to them.
+
+In a checkout of this repository the core is build output, never committed:
+`.github/scripts/local-core.sh` builds the host's archive from the checkout's `rust/` into
+`swift/HyperTabularCore.artifactbundle/` (gitignored but for its `include/`), and then
+`swift test` from `swift/` links it. CI writes each leg's archives there the same way. Without
+one the package still resolves, and a build stops at `import HyperTabularCore`. The root
+`Package.swift` links that local bundle when it is there too, so CI's smoke tests build through
+the consumer's manifest against the core the run built; a dependency's checkout never has one.
 
 ### WebAssembly
 
@@ -196,25 +206,26 @@ executable in headless Chrome.
 
 ## Verifying provenance
 
-SwiftPM resolves a git tag directly against this repo, so there is no separate package registry
-to attest: what it fetches is the tree at that tag, the static libraries under
-`swift/HyperTabularCore.artifactbundle/` and `swift/HyperTabularCoreApple.xcframework/`
-included. Each verifies from the release tag alone: the release attestation, signed by this
-repository's `release.yml` at the tag, names every one of them, with the release inventory as
-its predicate.
+There is no separate package registry to attest here: SwiftPM resolves a git tag directly
+against this repo, and downloads the two zips the tag's `Package.swift` names from that
+release's assets, refusing either if its SHA-256 differs from the checksum written there. Each
+zip verifies from the release tag alone: the release attestation, signed by this repository's
+`release.yml` at the tag, names both, with the release inventory as its predicate.
 
 ```sh
-gh attestation verify swift/HyperTabularCore.artifactbundle/arm64-apple-macosx/libhypertabular.a \
+gh release download v<version> --repo SkunkWerkx/HyperTabular --pattern 'HyperTabularCore*.zip'
+gh attestation verify HyperTabularCore.artifactbundle.zip \
   --repo SkunkWerkx/HyperTabular --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
 ```
 
-Each archive also carries build provenance from `hyper-build-static.yml` in
-`SkunkWerkx/.github`, at the preparation commit the tagged commit was staged from
-(`stage-native-binaries.yml` verifies that before committing a byte), so that check needs
-`--signer-repo` beside `--repo`:
+Each zip also carries build provenance from `hyper-build-static.yml` in `SkunkWerkx/.github`,
+at the preparation commit the tagged commit was staged from (the preparation run's
+`stage-release` job verifies that before it writes a checksum into `Package.swift`, and the tag
+run again before it signs the release attestation), so that check needs `--signer-repo` beside
+`--repo`:
 
 ```sh
-gh attestation verify swift/HyperTabularCore.artifactbundle/x86_64-unknown-linux-gnu/libhypertabular.a \
+gh attestation verify HyperTabularCoreApple.xcframework.zip \
   --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
 ```
 

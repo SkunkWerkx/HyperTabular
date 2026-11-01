@@ -1,14 +1,17 @@
 """Pins the typed surface: ``py.typed`` ships, ``_native.pyi`` describes what the loaded
 extension actually has, and a consumer's code — a ``match`` over a cell included —
 type-checks against the package under ``mypy --strict``. The last needs mypy and is skipped
-without it."""
+without it, and on PyPy, where mypy refuses to run."""
 
 from __future__ import annotations
 
 import ast
 import inspect
 import os
+import platform
+import sysconfig
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -34,6 +37,19 @@ def _classes() -> dict[str, ast.ClassDef]:
 
 def _is_static(node: ast.FunctionDef) -> bool:
     return any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list)
+
+
+def _mypy(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """mypy's API, pointed at the package the suite imported, or a skip without it."""
+    if platform.python_implementation() == "PyPy":
+        pytest.skip("mypy does not run on PyPy")
+    api: ModuleType = pytest.importorskip("mypy.api")
+    # The package as this checkout has it, the way conftest.py puts it on sys.path. --strict
+    # follows the import, so hypertabular's own annotations are checked against the stub too.
+    # An installed package is found through site-packages, which mypy refuses on MYPYPATH.
+    if str(PACKAGE.parent) not in {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}:
+        monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
+    return api
 
 
 def test_the_package_is_marked_typed():
@@ -111,10 +127,7 @@ def test_the_stub_and_the_loaded_backend_agree_on_class_members():
 
 def test_a_consumers_code_type_checks(monkeypatch):
     """mypy --strict accepts a consumer of the package."""
-    api = pytest.importorskip("mypy.api")
-    # The package as this checkout has it, the way conftest.py puts it on sys.path. --strict
-    # follows the import, so hypertabular's own annotations are checked against the stub too.
-    monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
+    api = _mypy(monkeypatch)
     out, err, status = api.run(
         ["--strict", "--cache-dir", os.devnull, str(SAMPLES / "consumer.py")]
     )
@@ -125,8 +138,7 @@ def test_the_checker_catches_a_missing_case(monkeypatch, tmp_path):
     """The other half of the promise: drop the Fault arm and the same assert_never is an error.
     Without this, "it type-checks" could just mean the checker saw Any.
     """
-    api = pytest.importorskip("mypy.api")
-    monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
+    api = _mypy(monkeypatch)
     sample = tmp_path / "missing_case.py"
     sample.write_text(
         "from typing import assert_never\n"
@@ -147,8 +159,7 @@ def test_the_checker_catches_a_missing_case(monkeypatch, tmp_path):
 
 def test_the_checker_catches_a_plan_that_is_not_columns(monkeypatch, tmp_path):
     """mypy rejects a plan that is not a list of Column."""
-    api = pytest.importorskip("mypy.api")
-    monkeypatch.setenv("MYPYPATH", str(PACKAGE.parent))
+    api = _mypy(monkeypatch)
     sample = tmp_path / "bad_plan.py"
     sample.write_text(
         "from hypertabular import DelimitedReader, Dialect\n"

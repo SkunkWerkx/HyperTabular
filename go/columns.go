@@ -13,7 +13,8 @@ import (
 type column struct {
 	plan Column
 	// values is the door's value array inside the block: batchRows values of the layout the
-	// core writes.
+	// core writes. It and verdicts are pointed at the rows of every batch the core fills
+	// (core.go's point), and are nil before the first.
 	values   unsafe.Pointer
 	verdicts []CellVerdict
 
@@ -37,12 +38,15 @@ type columns struct {
 	// width is the widest ordinal the plan reads, plus one.
 	width int
 
-	// Everything the core is handed, all of it Go memory with no Go pointer inside it. The
-	// column buffers are one allocation — block — and each column's two arrays are named
-	// to the core by their offsets into it; see backend_static.go for why.
-	specs   []rawSpec
-	offsets []uintptr
-	block   []uint64
+	// The plan as the core reads it, and where each column's two arrays sit in the block of
+	// blockBytes that holds them all: offsets[2i] is column i's values, offsets[2i+1] its
+	// verdicts. The block is laid out in the reader's instance of the core (core.go's
+	// attach); block here is the Go copy a host that cannot view the instance's memory
+	// decodes it into, allocated the first time one does.
+	specs      []rawSpec
+	offsets    []uintptr
+	blockBytes uintptr
+	block      []uint64
 }
 
 // newColumns checks a plan and allocates its buffers.
@@ -82,12 +86,9 @@ func newColumns(plan []Column, batchRows int) (*columns, error) {
 		}
 	}
 	s.width = widest + 1
-	s.block = make([]uint64, words)
-	base := unsafe.Pointer(unsafe.SliceData(s.block))
+	s.blockBytes = words * 8
 	for index := range s.columns {
 		c := &s.columns[index]
-		c.values = unsafe.Add(base, s.offsets[2*index])
-		c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, s.offsets[2*index+1])), batchRows)
 		switch c.plan.door {
 		case DoorTimestamp, DoorUnix, DoorExcelSerial:
 			c.times = make([]time.Time, batchRows)
@@ -102,24 +103,13 @@ func newColumns(plan []Column, batchRows int) (*columns, error) {
 	return s, nil
 }
 
-// grownTo is old made at least needed long, what it held kept — which is what lets the core go
-// on from where it stopped when a workbook call asks for room.
-func grownTo[T any](old []T, needed uint64) []T {
-	length := len(old) + 1
+// grownTo is a capacity of old elements made at least needed — what a workbook call that
+// stopped for room asks its buffer grown to. The instance keeps what the buffer held (core.go's
+// ensure), which is what lets the core go on from where it stopped.
+func grownTo(old int, needed uint64) int {
+	length := old + 1
 	if needed > uint64(length) {
 		length = int(min(needed, uint64(math.MaxInt32)))
 	}
-	larger := make([]T, length)
-	copy(larger, old)
-	return larger
-}
-
-// atLeast is old made at least n long, what it held kept; old itself when it is long enough.
-func atLeast[T any](old []T, n int) []T {
-	if len(old) >= n {
-		return old
-	}
-	larger := make([]T, n)
-	copy(larger, old)
-	return larger
+	return length
 }

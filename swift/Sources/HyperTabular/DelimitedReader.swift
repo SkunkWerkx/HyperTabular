@@ -83,17 +83,23 @@ public final class DelimitedReader {
     // block is the size the core says it is, and each value is as wide as the core writes it.
     private static let layoutChecked: Bool = {
         precondition(
-            MemoryLayout<hypertabular_delimited_state>.size == Int(hypertabular_delimited_state_size()),
+            MemoryLayout<HyperTabularDelimitedState>.size == Int(hypertabular_delimited_state_size()),
             "hypertabular.h and the linked libhypertabular disagree on the state block")
         precondition(
-            MemoryLayout<hypertabular_cell_verdict>.stride == 12 && MemoryLayout<CellVerdict>.stride == 12
-                && MemoryLayout<hypertabular_span>.stride == 8
-                && MemoryLayout<hypertabular_column_spec>.stride == 104
-                && MemoryLayout<hypertabular_timestamp>.stride == 16
-                && MemoryLayout<hypertabular_date>.stride == 4
-                && MemoryLayout<hypertabular_civil>.stride == 16
-                && MemoryLayout<hypertabular_duration>.stride == 16
-                && MemoryLayout<hypertabular_decimal>.stride == 16
+            MemoryLayout<HyperTabularCellVerdict>.stride == HyperTabularCellVerdict_SIZE
+                && MemoryLayout<CellVerdict>.stride == HyperTabularCellVerdict_SIZE
+                && MemoryLayout<HyperTabularSpan>.stride == HyperTabularSpan_SIZE
+                && MemoryLayout<HyperTabularColumnSpec>.stride == HyperTabularColumnSpec_SIZE
+                && MemoryLayout<HyperTabularRawNumFormat>.size == HyperTabularRawNumFormat_SIZE
+                && MemoryLayout<HyperTabularDelimitedState>.size == HyperTabularDelimitedState_SIZE
+                && MemoryLayout<HyperTabularFilled>.size == HyperTabularFilled_SIZE
+                && MemoryLayout<HyperTabularSlot>.stride == HyperTabularSlot_SIZE
+                && MemoryLayout<HyperTabularOpened>.size == HyperTabularOpened_SIZE
+                && MemoryLayout<HyperTabularTimestamp>.stride == 16
+                && MemoryLayout<HyperTabularDate>.stride == 4
+                && MemoryLayout<HyperTabularCivilDateTime>.stride == 16
+                && MemoryLayout<HyperTabularDuration>.stride == 16
+                && MemoryLayout<HyperTabularDecimal>.stride == 16
                 && MemoryLayout<uuid_t>.stride == 16,
             "hypertabular.h's shapes are not the sizes the core writes")
         return true
@@ -112,8 +118,8 @@ public final class DelimitedReader {
 
     // What the core is handed beside the plan's buffers, allocated once and moved only to
     // grow: it is given addresses.
-    private let state: UnsafeMutablePointer<hypertabular_delimited_state>
-    private(set) var cells: UnsafeMutableBufferPointer<hypertabular_span>
+    private let state: UnsafeMutablePointer<HyperTabularDelimitedState>
+    private(set) var cells: UnsafeMutableBufferPointer<HyperTabularSpan>
     private var arena: UnsafeMutableBufferPointer<UInt8>
     /// Whether the last batch ended early because the arena filled: the next one starts with
     /// it doubled, so that escaped text costs a few batches, not one per row.
@@ -349,7 +355,7 @@ public final class DelimitedReader {
             try bind(plan)
         }
         guard dialect.hasHeader else { return }
-        var names = UnsafeMutableBufferPointer<hypertabular_span>.allocate(capacity: 64)
+        var names = UnsafeMutableBufferPointer<HyperTabularSpan>.allocate(capacity: 64)
         defer { names.deallocate() }
         while try !headerStep(&names) {
             try await refillAsync()
@@ -379,7 +385,7 @@ public final class DelimitedReader {
         self.windowLimit = min(windowLimit, Self.callLimit)
 
         state = .allocate(capacity: 1)
-        var raw = hypertabular_dialect(
+        var raw = HyperTabularRawDialect(
             separator: UInt8(dialect.separator.value), quoting: dialect.quoting ? 1 : 0,
             skip_blank_lines: dialect.skipBlankLines ? 1 : 0, engine: 0)
         precondition(
@@ -439,7 +445,7 @@ public final class DelimitedReader {
             try bind(plan)
         }
         guard dialect.hasHeader else { return }
-        var names = UnsafeMutableBufferPointer<hypertabular_span>.allocate(capacity: 64)
+        var names = UnsafeMutableBufferPointer<HyperTabularSpan>.allocate(capacity: 64)
         defer { names.deallocate() }
         while try !headerStep(&names) {
             try refill()
@@ -607,7 +613,7 @@ public final class DelimitedReader {
         return error
     }
 
-    private func structural(_ raw: hypertabular_failure) -> TabularError {
+    private func structural(_ raw: HyperTabularFailure) -> TabularError {
         let error = TabularError(raw)
         failure = error
         return error
@@ -621,17 +627,17 @@ public final class DelimitedReader {
 
     /// The bytes a text value or a header name locates: in the input as it was shown to
     /// the core, or — flagged — in the arena, where the core unescaped them.
-    private func located(_ span: hypertabular_span, in base: UnsafeRawPointer?) -> UnsafeRawBufferPointer {
-        let from = span.len & HYPERTABULAR_SPAN_FLAG != 0 ? UnsafeRawPointer(arena.baseAddress) : base
+    private func located(_ span: HyperTabularSpan, in base: UnsafeRawPointer?) -> UnsafeRawBufferPointer {
+        let from = span.len & spanFlag != 0 ? UnsafeRawPointer(arena.baseAddress) : base
         return UnsafeRawBufferPointer(
             start: from.map { $0 + Int(span.offset) },
-            count: Int(span.len & ~HYPERTABULAR_SPAN_FLAG))
+            count: Int(span.len & ~spanFlag))
     }
 
     /// Reads the header from what is buffered: `true` once it has been read, `false` when
     /// the core needs more input first. `names` grows when the core asks.
-    private func headerStep(_ names: inout UnsafeMutableBufferPointer<hypertabular_span>) throws -> Bool {
-        var filled = hypertabular_filled()
+    private func headerStep(_ names: inout UnsafeMutableBufferPointer<HyperTabularSpan>) throws -> Bool {
+        var filled = HyperTabularFilled()
         while true {
             let (base, length, last) = nextWindow()
             let code = hypertabular_delimited_header(
@@ -699,14 +705,14 @@ public final class DelimitedReader {
 
     /// Fills a batch from what is buffered.
     private func fillStep(_ columnSet: Columns) throws -> Step {
-        var filled = hypertabular_filled()
+        var filled = HyperTabularFilled()
         while true {
             let (base, length, last) = nextWindow()
             // The cells and the arena travel in a buffers block, the workbook calls' own, of
             // which the fill reads those two alone: Mono's interpreter passes no more than
             // twelve integer arguments to a native function, and the C ABI is the same for
             // every binding.
-            var buffers = hypertabular_buffers()
+            var buffers = HyperTabularBuffers()
             buffers.cells = cells.baseAddress
             buffers.cells_cap = UInt(cells.count)
             buffers.arena = arena.baseAddress

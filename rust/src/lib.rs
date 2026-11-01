@@ -52,11 +52,12 @@
 //! formats, the header, and the dialect. The design record is `docs/design.md`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(windows, feature = "php"), feature(abi_vectorcall))]
 
 // The panic handler for the no_std libraries this crate links itself (`cargo staticlib`,
 // `cargo cdylib`), built with `panic = "abort"`. No export can reach it — that is what the
 // no-panic proof says — but a no_std artifact has to name one. HyperCast's lib.rs has the
-// whole account of this and of the two blocks after it; the mechanics are identical.
+// whole account of this and of the blocks after it; the mechanics are identical.
 #[cfg(all(feature = "staticlib", not(feature = "std")))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -89,6 +90,42 @@ core::arch::global_asm!(
 ))]
 core::arch::global_asm!(
     ".globl rust_eh_personality",
+    ".hidden rust_eh_personality",
+    ".type rust_eh_personality, %function",
+    "rust_eh_personality:",
+    "ret",
+);
+
+// The static library's half: the same reference, left for the final link, fails it
+// ("undefined reference to `rust_eh_personality'") whenever the program pulls in an
+// intrinsic whose unwind entry names it (the 128-bit division helpers) and the linker keeps
+// unwind tables of unused code (no --gc-sections / -dead_strip, so a plain `cc app.c
+// libhypertabular.a`). A weak hidden definition resolves it, and two Hyper* archives (or a
+// Rust program with std's own, strong, definition) linked into one program coalesce to one
+// instead of colliding.
+#[cfg(all(
+    feature = "staticlib",
+    not(feature = "cdylib"),
+    not(feature = "std"),
+    target_vendor = "apple"
+))]
+core::arch::global_asm!(
+    ".globl _rust_eh_personality",
+    ".weak_definition _rust_eh_personality",
+    ".private_extern _rust_eh_personality",
+    "_rust_eh_personality:",
+    "ret",
+);
+#[cfg(all(
+    feature = "staticlib",
+    not(feature = "cdylib"),
+    not(feature = "std"),
+    not(target_vendor = "apple"),
+    not(target_os = "windows"),
+    not(target_arch = "wasm32"),
+))]
+core::arch::global_asm!(
+    ".weak rust_eh_personality",
     ".hidden rust_eh_personality",
     ".type rust_eh_personality, %function",
     "rust_eh_personality:",

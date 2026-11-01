@@ -6,9 +6,9 @@ import HyperTabularCore
 /// these, for code that wants to scan a batch without a ``Verdict`` per cell.
 public struct CellVerdict: Equatable, Sendable {
     // The core's own 12 bytes, so that a verdict array is a buffer of these as it stands.
-    let raw: hypertabular_cell_verdict
+    let raw: HyperTabularCellVerdict
 
-    init(_ raw: hypertabular_cell_verdict) {
+    init(_ raw: HyperTabularCellVerdict) {
         self.raw = raw
     }
 

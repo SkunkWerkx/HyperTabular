@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,9 +94,18 @@ type corpusFailure struct {
 // iOS simulator: Go's go_ios_exec carries the module's files and testdata directories into
 // the app, and nothing above the module, so the repository's corpus/ is not there to walk
 // up to. On Android (.github/scripts/android_device_test.sh) the corpus is pushed beside the
-// test binary, in the directory it runs in, which is the first place looked.
+// test binary, in the directory it runs in, which is the first place looked. A WASI runtime
+// sees only what is mounted, so the corpus is wherever HYPERTABULAR_CORPUS names when it is
+// set (the forge's wasm job mounts the checkout and points there).
 func repositoryFile(t *testing.T, elem ...string) string {
 	t.Helper()
+	if dir := os.Getenv("HYPERTABULAR_CORPUS"); dir != "" && len(elem) > 0 && elem[0] == "corpus" {
+		candidate := filepath.Join(append([]string{dir}, elem[1:]...)...)
+		if _, err := os.Stat(candidate); err != nil {
+			t.Fatalf("%s not found at %s: %v", filepath.Join(elem...), candidate, err)
+		}
+		return candidate
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -658,12 +668,34 @@ func bound(r *DelimitedReader, err error, plan []Column) (_ *DelimitedReader, fa
 	return r, nil
 }
 
-func TestDelimitedCorpus(t *testing.T) {
+// tempDir is t.TempDir, except under WASI with no temporary directory mounted (the forge's
+// TinyGo run mounts only the checkout): there it reports false, and the caller leaves out
+// what needs a file of its own.
+func tempDir(t *testing.T) (string, bool) {
+	t.Helper()
+	if runtime.GOOS == "wasip1" {
+		if _, err := os.Stat(os.TempDir()); err != nil {
+			return "", false
+		}
+	}
+	return t.TempDir(), true
+}
+
+// missingPath is a path to a file that is not there.
+func missingPath(t *testing.T, name string) string {
+	t.Helper()
+	if dir, ok := tempDir(t); ok {
+		return filepath.Join(dir, name)
+	}
+	return filepath.Join(string(filepath.Separator), "no such directory", name)
+}
+
+func TestCorpusDelimited(t *testing.T) {
 	corpus := delimitedCorpus(t)
 	if len(corpus) < 30 {
 		t.Fatalf("the corpus has %d cases; expected at least 30", len(corpus))
 	}
-	directory := t.TempDir()
+	directory, files := tempDir(t)
 	doors := map[Door]bool{}
 	for index := range corpus {
 		c := &corpus[index]
@@ -672,8 +704,10 @@ func TestDelimitedCorpus(t *testing.T) {
 			doors[planned.column(t).Door()] = true
 		}
 		path := filepath.Join(directory, fmt.Sprintf("case-%d.csv", index))
-		if err := os.WriteFile(path, input, 0o600); err != nil {
-			t.Fatal(err)
+		if files {
+			if err := os.WriteFile(path, input, 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 
 		for _, batchRows := range []int{1, 2, 1024} {
@@ -709,10 +743,12 @@ func TestDelimitedCorpus(t *testing.T) {
 						return NewDelimitedReaderBytes(input, dialect, plan, BatchRows(batchRows), rowCeiling(window))
 					})
 			}
-			replay(t, fmt.Sprintf("%s (file, %d rows a batch)", c.Name, batchRows), c,
-				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
-					return OpenDelimited(path, dialect, plan, BatchRows(batchRows), BufferBytes(32))
-				})
+			if files {
+				replay(t, fmt.Sprintf("%s (file, %d rows a batch)", c.Name, batchRows), c,
+					func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+						return OpenDelimited(path, dialect, plan, BatchRows(batchRows), BufferBytes(32))
+					})
+			}
 			// Header first, the plan bound after: the same reads, whatever the source.
 			replay(t, fmt.Sprintf("%s (memory, bound after the header, %d rows a batch)", c.Name, batchRows), c,
 				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
@@ -724,11 +760,13 @@ func TestDelimitedCorpus(t *testing.T) {
 					r, err := NewDelimitedReaderUnbound(bytes.NewReader(input), dialect, BatchRows(batchRows), BufferBytes(5))
 					return bound(r, err, plan)
 				})
-			replay(t, fmt.Sprintf("%s (file, bound after the header, %d rows a batch)", c.Name, batchRows), c,
-				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
-					r, err := OpenDelimitedUnbound(path, dialect, BatchRows(batchRows), BufferBytes(7))
-					return bound(r, err, plan)
-				})
+			if files {
+				replay(t, fmt.Sprintf("%s (file, bound after the header, %d rows a batch)", c.Name, batchRows), c,
+					func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+						r, err := OpenDelimitedUnbound(path, dialect, BatchRows(batchRows), BufferBytes(7))
+						return bound(r, err, plan)
+					})
+			}
 		}
 	}
 	// The corpus reaches every door this binding has a constructor for.

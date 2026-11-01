@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: hypertabular
+Description: Typed, batched reads of CSV, TSV and XLSX, ODS and Numbers workbooks, each cell a value or a fault with its byte span, from the HyperTabular core
+URL: https://github.com/SkunkWerkx/HyperTabular
+Version: @VERSION@
+Libs: -L${libdir} -lhypertabular
+Cflags: -I${includedir}

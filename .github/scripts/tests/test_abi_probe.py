@@ -37,6 +37,14 @@ class HyperConfigTests(unittest.TestCase):
         self.assertTrue((ROOT / self.cfg.get('abi_probe', '.github/scripts/abi_probe.c')).is_file())
         self.assertTrue((BUNDLE_INCLUDE / 'hypertabular.h').is_file())
 
+    def test_r_corpus_is_every_corpus_file_the_replay_reads(self):
+        # The Forge requires exactly these in the R source tarball: the two corpus files and
+        # every workbook package workbook.json names, which r/tools/vendor.sh stages the same
+        # way, so a fixture added to the corpus without this list fails the pack.
+        named = re.findall(r'"file": *"(workbook/[^"]*)"', (ROOT / 'corpus' / 'workbook.json').read_text())
+        expected = sorted(p.name for p in (ROOT / 'corpus').glob('*.json')) + sorted(set(named))
+        self.assertEqual(self.cfg['r_corpus'], expected)
+
     def test_export_rule_reads_the_fourteen_exports_and_not_the_canary(self):
         exports = self.cfg['exports']
         names = set()
@@ -81,11 +89,11 @@ class AbiProbeTests(unittest.TestCase):
 #include <string.h>
 #include "hypertabular.h"
 uint32_t hypertabular_version(void) {{return {version};}}
-uintptr_t hypertabular_delimited_state_size(void) {{return sizeof(hypertabular_delimited_state);}}
-int32_t hypertabular_delimited_init(hypertabular_delimited_state *s, const hypertabular_dialect *d) {{(void)s;(void)d; return 0;}}
-int32_t hypertabular_delimited_fill(hypertabular_delimited_state *s, const uint8_t *in, uintptr_t len, uint32_t last,
-    const hypertabular_column_spec *spec, const hypertabular_column_buffer *columns, uintptr_t count, uintptr_t cap,
-    const hypertabular_buffers *b, hypertabular_filled *filled) {{
+uintptr_t hypertabular_delimited_state_size(void) {{return sizeof(HyperTabularDelimitedState);}}
+int32_t hypertabular_delimited_init(HyperTabularDelimitedState *s, const HyperTabularRawDialect *d) {{(void)s;(void)d; return 0;}}
+int32_t hypertabular_delimited_fill(HyperTabularDelimitedState *s, const uint8_t *in, uintptr_t len, uint32_t last,
+    const HyperTabularColumnSpec *spec, const HyperTabularColumnBuffer *columns, uintptr_t count, uintptr_t cap,
+    const HyperTabularBuffers *b, HyperTabularFilled *filled) {{
     (void)s;(void)len;(void)last;(void)count;(void)b;(void)cap;
     if (spec->format.size != 0 && spec->format.size != sizeof(spec->format)) return {contract};
     if (spec->door == 11) {{ *(double *)columns->values = 1234.5; columns->verdicts[0].reason = 0; filled->rows = 1; return 0; }}

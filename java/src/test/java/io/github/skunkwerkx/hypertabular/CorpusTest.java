@@ -485,7 +485,7 @@ final class CorpusTest {
     void fromNativeMemoryInPlace() {
         everyCase((name, vector, input, batchRows) -> {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment text = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
+                MemorySegment text = nativeCopy(arena, input);
                 replay(
                         name + " (native segment, " + batchRows + " rows a batch)",
                         vector,
@@ -537,7 +537,7 @@ final class CorpusTest {
             boolean quoting = vector.getAsJsonObject("dialect").get("quoting").getAsBoolean();
             int smallest = longestRecord(input, quoting) + 1;
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment text = arena.allocateFrom(ValueLayout.JAVA_BYTE, input);
+                MemorySegment text = nativeCopy(arena, input);
                 for (int windowBytes : new int[] {Math.max(smallest, 4), smallest + 7}) {
                     replay(
                             name + " (windows of " + windowBytes + " bytes, " + batchRows + " rows a batch)",
@@ -600,5 +600,12 @@ final class CorpusTest {
                 }
             }
         }
+    }
+
+    // By hand rather than Arena.allocateFrom, which JDK 21 lacks: testFloor runs this too.
+    private static MemorySegment nativeCopy(Arena arena, byte[] bytes) {
+        MemorySegment copy = arena.allocate(bytes.length);
+        MemorySegment.copy(bytes, 0, copy, ValueLayout.JAVA_BYTE, 0, bytes.length);
+        return copy;
     }
 }

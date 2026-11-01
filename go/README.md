@@ -8,8 +8,11 @@ read a batch at a time into typed columns, with a
 go get github.com/SkunkWerkx/HyperTabular/go@latest
 ```
 
-The module lives in a subdirectory of the repository, so its tags are prefixed
-(`go/v<version>`).
+Requires Go 1.26 or later (the `go` directive in `go.mod`); no C compiler, and `CGO_ENABLED`
+makes no difference. The module lives in a subdirectory of the repository, so its tags are
+prefixed (`go/v<version>`). What `go get` fetches is source, the translated core included;
+HyperCast's Go module (1.1.0 or later, cgo-free the same way) and `github.com/google/uuid`
+are its dependencies.
 
 The examples read this file, saved as `people.csv`; the second row's score does not cast,
 so the fault path has something to print:
@@ -167,10 +170,9 @@ and likewise `NewDelimitedReader` and `NewDelimitedReaderBytes` — and `Bind` i
 
 ## The shape
 
-The native core owns no memory and reads no files. The reader allocates the buffers — one
-value slice and one verdict slice per column, the table that locates each cell — once, and
-the core fills them in one cgo call per batch: the boundary is crossed once per few thousand
-rows, not once per cell.
+The core owns no memory and reads no files. The reader sizes the buffers — one value array
+and one verdict array per column, the table that locates each cell — once, and the core
+fills them in one call per batch: once per few thousand rows, not once per cell.
 
 - **One batch type.** `Read()` returns a `*Batch` — `Rows()`, `Columns()`, `Line(row)`,
   `Verdicts(column)`, a typed slice per door (`I32`, `F64`, `Exact`, `Timestamp`,
@@ -220,107 +222,208 @@ rows, not once per cell.
   inside a quoted cell, a workbook whose container or parts cannot be read, is a
   `*hypertabular.Failure`, returned after every intact row before it.
 
-## Linking
+## The core
 
-The core is linked in through cgo from the module's own `staticlib/{GOOS}_{GOARCH}`
-archives — Linux, macOS, Windows and [Android](#android) on x86-64 and arm64, and
-[iOS and Mac Catalyst](#ios-and-mac-catalyst) — so a binary carries the core and
-loads nothing. Building takes a C compiler; `CGO_ENABLED=0` or any other target is a
-compile error rather than a binary that fails at run time. HyperCast's Go module links its
-own core the same way, and the two archives link side by side.
+The Rust core is built for `wasm32-wasip1`, a module that imports nothing at all, and
+[wasm2go](https://github.com/ncruces/wasm2go) translates it into one Go source file,
+`internal/core/core.go`, committed and compiled with the rest of the package. Every call into
+it is an ordinary Go call; nothing crosses a foreign boundary, nothing is loaded at run time,
+and `NativeVersion()` reports the version compiled into that file from the crate's.
+
+- **An instance a reader.** The core keeps a reader's position in a state block it is
+  handed and its buffers between calls, so every `DelimitedReader` and every `Sheet` owns an
+  instance of the translated module — its code's linear memory, three 64 KiB pages to
+  start — with the reader's buffers allocated in it once and grown in place. Readers share
+  nothing, so readers on different goroutines run at once, and none takes a lock. A
+  `Workbook` opens in an instance it drops once its sheets, shared strings and styles are
+  read; each `Sheet` copies the package and the shared strings into its own, so an open
+  sheet costs that memory again. Everything is garbage like any other Go memory once its
+  reader is; there is nothing to close beyond a file `OpenDelimited` opened.
+- **What is copied.** Input goes in: text a chunk at a time — each byte about once, the
+  chunk growing until it holds a batch, and a call cut short by the chunk's end made again
+  over a larger one, so a batch from memory is still full — and a workbook's package once per
+  instance. What the core writes comes out in place: on a little-endian host a column's
+  values and verdicts, the cell table and the arena are views of the instance's memory, so a
+  batch is still a view and `Text` still slices the input itself. A big-endian host
+  (`s390x`, `ppc64`, `mips64`) decodes each field by field into buffers the reader keeps;
+  the guest is little-endian whatever the host is.
+- **4 GiB.** WebAssembly addresses 4 GiB, and a reader's buffers live in its instance, so a
+  plan, a batch or a record too large for that is an error from the constructor, `Bind` or
+  `Read` rather than a run-time fault: a 4,096-row batch of a few hundred columns is
+  nowhere near it.
+- **A panic is a bug, not a corruption.** wasm2go's code bounds-checks every memory access
+  and keeps the call stack in Go, so a core bug, a guest stack overflow included, is a Go
+  panic and never a corrupted heap; the reader it happened in refuses every call after it.
+  The guest stack is 64 KiB, HyperCast's size and HyperUuid's.
+
+wasm2go is pre-1.0 (v0.4.19 today) with one maintainer. It is pinned in a tool module of its
+own, [`internal/wasm2go/`](internal/wasm2go), so it never enters your module graph, and
+because its output is committed, a dead wasm2go would cost this repository its regeneration
+step and cost a consumer nothing.
+
+## Platforms
+
+Every GOOS and GOARCH Go has, with `CGO_ENABLED=0`, because the core is Go source. CI
+cross-compiles and vets the package for these 23 pairs on every pull request that touches
+the Go binding, the core or the workflows, and on every release-mode run:
+
+| GOOS | GOARCH |
+| --- | --- |
+| `linux` | `amd64`, `386`, `arm`, `arm64`, `riscv64`, `ppc64le`, `s390x`, `loong64`, `mips64le` |
+| `windows` | `amd64`, `arm64`, `386` |
+| `darwin` | `amd64`, `arm64` |
+| `freebsd`, `openbsd`, `netbsd`, `illumos`, `plan9` | `amd64` |
+| `aix` | `ppc64` |
+| `android` | `arm64` |
+| `js`, `wasip1` | `wasm` |
+
+and runs the whole suite natively on Linux and Windows on x64 and arm64, on macOS on arm64,
+on Alpine (musl x64 and arm64), in an iOS simulator, in an Android emulator, and on the three
+WebAssembly hosts below. No big-endian host runs in CI; the suite runs the corpus through the
+big-endian decoding on every host as well (`TestTheCorpusThroughDecodedCopies`), and
+`TestDecodingForABigEndianHost` holds that decoding to big-endian order. A binary carries the
+core like any package and starts without touching the filesystem.
 
 ### iOS and Mac Catalyst
 
-Go builds for all three as `GOOS=ios`, with cgo and the platform's own clang. A Mach-O
-object says which platform it was built for and the linker refuses a mismatch, so each has
-its own archive, and since the three are one `GOOS`/`GOARCH` pair to Go, build tags choose
-between them:
+`GOOS=ios GOARCH=arm64` builds the package as it builds any other. What an iOS executable
+needs is Xcode's linker, because Go's `ios/arm64` port links externally; that is Go's rule
+for the platform, nothing of this binding's, and it is what
+[`gomobile`](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile) arranges. For the
+simulator, Go's own `misc/ios/clangwrap.sh` is the `CC`:
 
-| Building for | Tags | Archive |
-| --- | --- | --- |
-| An iOS device | none | `staticlib/ios_arm64` |
-| The iOS simulator, Apple silicon | `iossimulator` | `staticlib/iossimulator_arm64` |
-| Mac Catalyst | `maccatalyst` | `staticlib/maccatalyst_arm64`, `staticlib/maccatalyst_amd64` |
+```sh
+CGO_ENABLED=1 CC="$(go env GOROOT)/misc/ios/clangwrap.sh" GOOS=ios GOARCH=arm64 go build ./...
+```
 
-`gomobile` sets `maccatalyst` itself; nothing sets `iossimulator`, so a simulator build
-passes `-tags iossimulator` by hand. The simulator on an Intel Mac has no archive and is a
-compile error. CI checks the selection for every platform
-(`.github/scripts/check_go_archives.sh`), runs this suite in an iOS simulator through Go's
-`misc/ios/go_ios_exec.go`, and links a device build.
+The device, the simulator and Mac Catalyst build the same package; nothing here selects on a
+tag. CI runs this suite in an iOS simulator through Go's `misc/ios/go_ios_exec.go`, with the
+corpus staged as `testdata/corpus` since that wrapper carries nothing above the module into
+the simulator, and builds it for a device. `ExampleWorkbook` is skipped there, since it opens
+`../corpus` by its path.
 
 ### Android
 
-`GOOS=android` with cgo, the NDK's clang as `CC`, as `gomobile` arranges and as any cgo
-package on Android needs:
+`GOOS=android GOARCH=arm64 go build ./...` needs no NDK: Go links it internally.
+`android/amd64` (the emulator) is a platform Go itself links externally, so it takes the
+NDK's clang as `CC` with `CGO_ENABLED=1`, as any Go program for it does; nothing of the
+core's is linked either way. CI cross-builds this whole suite for `android/amd64` and runs it
+in an x86_64 emulator whose image uses 16 KB pages (`.github/scripts/android_build_suite.sh`
+and `android_device_test.sh`, which run the same way against a local emulator);
+`android/arm64` is built in the cross-compile sweep. `ExampleWorkbook` is skipped there, as
+in the simulator.
 
-```shell
-CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
-  GOOS=android GOARCH=arm64 CGO_ENABLED=1 go build ./...
-```
+### WebAssembly
 
-(`x86_64-linux-android21-clang` and `GOARCH=amd64` for the emulator.) `GOOS=android` also
-satisfies Go's `linux` constraint, so the Linux link lines exclude it and it takes its own
-archives, `staticlib/android_arm64` and `staticlib/android_amd64`, built for Android against
-Bionic (API 21+). HyperCast's Go module does the same for its own core, and the two link
-side by side. Page alignment is the final link's: NDK r28 and later align to the 16 KB pages
-Android 15 devices may use by default, and an older NDK needs
-`-extldflags=-Wl,-z,max-page-size=16384`.
-
-CI checks that both select their own archive (`.github/scripts/check_go_archives.sh`),
-cross-compiles this whole suite for `android/amd64`, and runs it in an x86_64 emulator whose
-image uses 16 KB pages (`.github/scripts/android_build_suite.sh` and
-`android_device_test.sh`, which run the same way against a local emulator); `android/arm64`
-is linked. `ExampleWorkbook` is skipped there, since it opens `../corpus` by its path and
-nothing is above the directory the suite is pushed to.
-
-### In the browser (TinyGo)
-
-[TinyGo](https://tinygo.org) 0.42 or later compiles this module to WebAssembly with the core
-linked in: TinyGo links with `wasm-ld` and has cgo, so `backend_tinygo.go` names
-`staticlib/wasm/libhypertabular.a` — the core built for `wasm32-wasip1` — on its link line.
-HyperCast's module does the same with its own archive, and the two link side by side.
+The translated core is plain Go, so it builds for the browser and for WASI under stock Go
+and TinyGo alike, with no archive and no cgo:
 
 ```sh
-tinygo build -target=wasm -no-debug -opt=z -o main.wasm .
+GOOS=js GOARCH=wasm go build -o main.wasm .          # stock Go, the browser or Node
+cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" .
+
+tinygo build -target=wasm -no-debug -opt=z -o main.wasm .   # TinyGo, the browser
 cp "$(tinygo env TINYGOROOT)/targets/wasm_exec.js" .
 ```
 
-Use TinyGo's own `wasm_exec.js`, not stock Go's. The core imports nothing, so the page loads
-one module. `-target=wasip1` works the same way under a WASI runtime. CI builds
-[`internal/tinygosmoke`](internal/tinygosmoke) this way on every pull request and runs it in
-headless Chrome: every export, delimited text and a workbook written in memory, a fault
-with its span, and the core's version against `rust/Cargo.toml`. Stock Go compiled to
-WebAssembly (`GOOS=wasip1`, `GOOS=js`) links Go code only, so it is a compile error.
+Use the `wasm_exec.js` of the toolchain that built the module. `GOOS=wasip1 GOARCH=wasm` and
+`tinygo build -target=wasip1` do the same for a WASI runtime. The core imports nothing, so a
+page loads one module. Under TinyGo, ranging over a batch's `All()` costs the three
+allocations TinyGo makes for a range-over-func loop's closures, once a loop and never a row;
+every other allocation count below holds there as under stock Go.
+
+CI runs the whole suite three ways on every pull request that touches the Go binding, the
+core or the workflows: under TinyGo on wasip1 under wasmtime (with the checkout mounted and
+the corpus found through `HYPERTABULAR_CORPUS`, and the same binary run without the mount
+as a negative control), and under stock Go on `js/wasm` under Node and on `wasip1/wasm`
+under wasmtime. It also builds [`internal/tinygosmoke`](internal/tinygosmoke) with TinyGo
+for the browser and runs it in headless Chrome: every export, delimited text and a workbook
+written in memory, a fault with its span, and the core's version against `rust/Cargo.toml`.
+
+## Allocations
+
+A batch allocates nothing: every buffer is sized when the reader is built, or grown when the
+core asks for room, and a `Read()` copies its input into the reader's instance, calls the
+core once and hands out views. `allocs_test.go` holds it — a batch from memory and from a
+stream, every column of it read, `Raw` (an escaped cell is unescaped into a buffer the
+reader keeps), `Batch.All` and `reader.All()` across batches — with a fault (`Fault`, or
+`Get`/`Cell` on a cell that did not cast) the one allocation, HyperCast's `*Fault`.
+
+## Building and regenerating
+
+Nothing to build: `go test ./...` runs on the committed core. The core is regenerated only
+after a change to `rust/` or to the pins:
+
+```sh
+rustup toolchain install 1.99.1 --profile minimal --target wasm32-wasip1
+go generate     # in go/: builds rust/ for wasm32-wasip1 and rewrites internal/core/core.go
+```
+
+[`internal/wasm2go`](internal/wasm2go) is the generator: it builds the crate's `cargo cdylib`
+with the rustc named in its `rust-toolchain.toml` (1.99.1), a 64 KiB guest stack
+(`-C link-arg=-zstack-size=65536`) and wasi-libc for `memcmp`, `memcpy` and `memset` (`-l
+c`), then runs the wasm2go pinned in its own `go.mod`. The rustc is pinned as a
+reproducibility constraint, not a floor: the wasm's bytes follow rustc's codegen, so one named
+toolchain makes the committed file reproducible, and a bump is a deliberate
+regenerate-and-commit. `HYPERTABULAR_CHECK_CORE=1 go test -count=1 -run
+'TestCoreIsCurrent|TestRegenerationCarriesTheCrateVersion' .` regenerates into a temporary
+file and diffs it against the committed one (without the variable the test skips when the
+toolchain is missing); CI runs it on every pull request that touches the Go binding, the
+core or the workflows, and release preparation regenerates the core at the new version,
+since the version is a literal in the file.
+
+## Benchmarks
+
+`go test -run '^$' -bench 'Delimited|Workbook' -benchmem` (the workbook files come from
+`corpus/generate/out/` or `HYPERTABULAR_BENCH_DIR`; `docs/workbook.md` has what each does).
+Apple M6 (Mac18,5, 12 cores), macOS 27.2, Go 1.27.3, 2026-11-01: six runs of each binding
+interleaved in one session (the workbook benchmarks at three iterations a run), benchstat
+medians with benchstat's spread; every difference below is significant (p = 0.002). The cgo
+column is the binding this one replaced, at commit `93e0807` with its committed
+`darwin_arm64` archive (the 1.0.0 core) and HyperCast's cgo module v1.0.0, run with this
+same benchmark file. Other work shared the machine during the session.
+
+**Every row is a loss.** The translated core is bounds-checked Go, and nearly all of a read's
+time is in it (a CPU profile puts the binding's copying and decoding at a few percent), so
+the read is 2–3.7x slower than the native core was. The batch shape is unchanged — still
+one call per batch, still views, still no allocation a batch — but a reader that needs the
+native speed should take one of the bindings that load the shared library.
+
+| Benchmark | translated core | cgo binding | |
+| --- | ---: | ---: | --- |
+| Delimited, 300 000 rows × 8 columns (22.0 MB), from memory | 64.3 ms ±10% | 17.5 ms ±9% | **3.7x slower** |
+| Delimited, the same, from a stream | 64.3 ms ±5% | 17.8 ms ±6% | **3.6x slower** |
+| `excel-win-300k.xlsx`, open | 42.1 ms ±10% | 15.3 ms ±18% | **2.8x slower** |
+| `excel-win-300k.xlsx`, read | 736 ms ±10% | 274 ms ±11% | **2.7x slower** |
+| `libreoffice-300k.ods`, open | 384 ms ±10% | 201 ms ±6% | **1.9x slower** |
+| `libreoffice-300k.ods`, read | 1.40 s ±8% | 627 ms ±6% | **2.2x slower** |
+| `numbers-300k.numbers`, open | 991 ms ±9% | 505 ms ±10% | **2.0x slower** |
+| `numbers-300k.numbers`, read | 1.43 s ±8% | 722 ms ±7% | **2.0x slower** |
+
+Memory a read allocates grows too, since every byte the core reads or writes now lives in a
+reader's instance as well as wherever it came from: the xlsx read allocates 126 MiB against
+21.7 MiB, the Numbers read 253 MiB against 38.6 MiB (the package is copied into the
+workbook's instance to open it and into the sheet's to read it), and a delimited read from
+memory 7.9 MiB against 1.1 MiB. Allocation counts are unchanged, a few dozen a read and none a
+batch.
+
+The Go row of the "Through every binding" table in [`docs/workbook.md`](../docs/workbook.md)
+**predates the translated core**: it measured the cgo binding on the Linux i9-11900H on
+2026-10-24.
 
 ## Verifying build provenance
 
-Go has no package registry to attest: `go get` resolves straight from the `go/v<version>` git
-tag against this repo, and what it fetches is the tree at that tag, the static libraries under
-`go/staticlib/` included. Each of them verifies from the release tag alone: the release
-attestation, signed by this repository's `release.yml` at the root tag, names every one of
-them, with the release inventory as its predicate. The same file sits in the module cache at
-`$(go env GOMODCACHE)/github.com/!skunk!werkx/!hyper!tabular/go@v<version>/staticlib/`.
-
-```sh
-gh attestation verify go/staticlib/linux_amd64/libhypertabular.a --repo SkunkWerkx/HyperTabular \
-  --source-ref refs/tags/v<version> --predicate-type https://github.com/SkunkWerkx/.github/predicates/release/v1
-```
-
-Each archive also carries build provenance from `hyper-build-static.yml` in
-`SkunkWerkx/.github`, at the preparation commit the tagged commit was staged from
-(`stage-native-binaries.yml` verifies that before committing a byte, and the staging commit's
-`Release-Source-SHA` and `Release-CI-Run-ID` trailers name the commit and the run), so that
-check needs `--signer-repo` beside `--repo`:
-
-```sh
-gh attestation verify go/staticlib/linux_amd64/libhypertabular.a \
-  --repo SkunkWerkx/HyperTabular --signer-repo SkunkWerkx/.github
-```
-
-Get the signer wrong and `gh` reports a bare `verifying with issuer "sigstore.dev"`, which
-reads like a bad signature but is only an identity mismatch. The root README's
-[Provenance](../README.md#provenance) section has the whole picture: the inventory, which
-artifacts are signed from where, and the gates every byte passes before publication.
+Go has no package registry to attest, and this module ships no binary: `go get` resolves
+straight from the `go/v<version>` git tag against this repo, and what it fetches is source,
+the generated core included. That file's provenance is reproducible generation, claimed
+exactly: `internal/core/core.go` is the deterministic output of wasm2go over the crate at that
+tag built with the pinned rustc, CI regenerates it with those pins and fails on any diff, and
+anyone can repeat it with `go generate` in a checkout
+([Building and regenerating](#building-and-regenerating)). No attestation is claimed for the
+intermediate wasm, which is not a release asset. The root README's
+[Provenance](../README.md#provenance) section has the picture for the artifacts the release
+does ship: the inventory, which are signed from where, and the gates every byte passes before
+publication.
 
 ## License
 

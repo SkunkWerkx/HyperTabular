@@ -1,0 +1,35 @@
+# The local registry run.sh serves the packed tarballs from. @skunkwerkx/hypertabular* is local
+# only (no uplink, so nothing published to npmjs can leak into a scenario); the peer,
+# @skunkwerkx/hypercast*, and everything else proxy to npmjs, which is how the peer, the WASI
+# package's runtime dependencies and the consumer's own tools resolve (run.sh can publish the
+# peer's tarballs here too, before its version is on npmjs). run.sh passes --listen, and the
+# storage lives under work/.
+storage: ./work/storage
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+auth:
+  htpasswd:
+    file: ./work/htpasswd
+    # One publisher: run.sh creates it through the registry's own user endpoint and publishes
+    # with its token (npm refuses to publish with no credentials at all, so an anonymous
+    # publish rule alone is not enough).
+    max_users: 1
+packages:
+  '@skunkwerkx/hypertabular*':
+    access: $all
+    publish: $authenticated
+  '@skunkwerkx/hypercast*':
+    access: $all
+    publish: $authenticated
+    proxy: npmjs
+  '@skunkwerkx/*':
+    access: $all
+    publish: $authenticated
+  '**':
+    access: $all
+    proxy: npmjs
+log:
+  type: stdout
+  format: pretty
+  level: warn

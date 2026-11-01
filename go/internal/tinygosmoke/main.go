@@ -1,9 +1,9 @@
 // Command tinygosmoke is the check CI runs in headless Chrome: this module compiled by TinyGo
-// for the browser (`tinygo build -target=wasm`), with the core linked in from
-// staticlib/wasm and HyperCast's beside it, loaded by index.html through TinyGo's own
+// for the browser (`tinygo build -target=wasm`), its core the translated Go source in
+// internal/core and HyperCast's beside it, loaded by index.html through TinyGo's own
 // wasm_exec.js. It prints one PASS or FAIL line per check and DONE at the end; the forge's
 // hyper-build-wasm.yml fails the run on any FAIL or a missing DONE, which is also what a
-// trap part-way through looks like.
+// panic part-way through looks like.
 //
 // Every export crosses at least once: the version, the delimited reader's five (unescape by
 // a doubled quote), and the workbook's eight, through an XLSX written here in memory with
@@ -12,10 +12,10 @@
 // read from memory, and a cell's fault and a torn file's error cross as well.
 //
 // The expected core version comes from rust/Cargo.toml at build time
-// (`-ldflags "-X main.wantVersion=..."`), so the page proves the archive that was linked is
-// the one this commit's core builds, not a stale one. Stock Go builds this too, natively
-// under cgo, so `go vet ./...` covers it like any other package; it is internal, so it is
-// nothing a consumer can import.
+// (`-ldflags "-X main.wantVersion=..."`), so the page proves the core compiled in is the one
+// this commit's crate translates to, not a stale one. Stock Go builds this too, so
+// `go vet ./...` covers it like any other package; it is internal, so it is nothing a
+// consumer can import.
 package main
 
 import (

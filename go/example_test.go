@@ -167,7 +167,7 @@ func ExampleWorkbook() {
 }
 
 func ExampleNativeVersion() {
-	// The linked core's own version, read from the core.
+	// The compiled-in core's own version, read from the core.
 	fmt.Println(hypertabular.NativeVersion() != "")
 	// Output: true
 }

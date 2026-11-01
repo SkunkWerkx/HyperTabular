@@ -75,12 +75,15 @@ for symbol in $(nm -D --undefined-only "$lib" | awk '{print $NF}' | sed 's/@.*//
     *) fail "the library imports $symbol" ;;
   esac
 done
+# Its own name, which a C program linked against it records (build.rs).
+soname="$(readelf -d "$lib" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p')"
+[ "$soname" = libhypertabular.so ] || fail "the library's soname is '$soname', not libhypertabular.so"
 needed="$(readelf -d "$lib" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
 case "$needed" in
   "libc.so.6 "|"libc.musl-x86_64.so.1 "|"libc.musl-aarch64.so.1 ") ;;
   *) fail "the library needs: $needed" ;;
 esac
-echo "ok: $(echo "$exported" | wc -l) exports, $(stat -c %s "$lib") bytes, needs $needed"
+echo "ok: $(echo "$exported" | wc -l) exports, $(stat -c %s "$lib") bytes, soname $soname, needs $needed"
 
 step "the static library needs nothing from Rust"
 cargo staticlib --quiet
@@ -105,9 +108,15 @@ for symbol in $("$tools/llvm-nm" --undefined-only "$work/$object" | awk '{print 
     *) fail "the crate's object leaves $symbol undefined" ;;
   esac
 done
-if "$tools/llvm-nm" --defined-only --extern-only "$work/$object" | awk '{print $3}' | grep -v '^hypertabular_'; then
+# Beside the exports, one definition: the personality routine compiler_builtins' unwind
+# tables name, weak and hidden so that a C program links the archive on its own and two
+# Hyper* archives in one program coalesce (lib.rs).
+if "$tools/llvm-nm" --defined-only --extern-only "$work/$object" | awk '{print $3}' \
+     | grep -v '^hypertabular_' | grep -vx 'rust_eh_personality'; then
   fail "the crate's object defines the symbols above beside its exports"
 fi
+"$tools/llvm-nm" --defined-only --extern-only "$work/$object" | grep -E ' [VW] rust_eh_personality$' >/dev/null \
+  || fail "the crate's object does not define rust_eh_personality weak"
 echo "ok: one object, $(stat -c %s "$work/$object") bytes"
 
 step "no export can panic"

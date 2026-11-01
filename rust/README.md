@@ -125,7 +125,10 @@ builder methods (`Column::format`, `Dialect::with_quoting`, …), and are
 `FailureKind` are too, so a `match` on one outside the crate needs a wildcard arm. Below the Rust API, the core is reached through `kernel::abi`,
 `kernel::door`, `kernel::exports`, `kernel::delimited::fill`, and `kernel::workbook`'s
 state, memory, format constants and `book` and `rows` operations — what the C ABI exports;
-the parsing, compression and SIMD modules behind them are private.
+the parsing, compression and SIMD modules behind them are private. That ABI's C header,
+`include/hypertabular.h`, is generated from them by cbindgen (`tests/header.rs` fails when it
+is stale), and the release's C and C++ archives are described in
+[`c/README.md`](https://github.com/SkunkWerkx/HyperTabular/tree/master/c).
 
 A cell that does not cast is never an error: it is a `Fault` in the batch — `Empty`,
 `Malformed` or `OutOfRange`, with the span of the offending bytes — and `batch.raw` gives
@@ -135,8 +138,8 @@ returned once every intact row before them has been delivered.
 **WebAssembly.** The crate needs nothing from its host — no clock, no entropy, no
 allocator in the core — so it builds for `wasm32-unknown-unknown` as it is, and its whole
 suite passes under wasmtime on `wasm32-wasip1` (all but its three `should_panic` tests,
-which libtest skips where a panic aborts). CI runs that suite in its `test-wasi` job and
-`browser-test/` in headless Chrome, on every pull request.
+which libtest skips where a panic aborts). CI runs that suite in `core-checks` and
+`browser-test/` in headless Chrome, on every pull request that touches the core or `.github/`.
 
 The design record is in [`docs/`](https://github.com/SkunkWerkx/HyperTabular/tree/master/docs).
 

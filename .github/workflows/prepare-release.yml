@@ -2,21 +2,23 @@ name: Prepare release
 
 # Step one of a release: bump the version in every manifest that carries it as committed
 # text (rust/Cargo.toml, the csproj, build.gradle.kts, the gemspec and lib/hypertabular.rb's
-# VERSION constant, together, so they never disagree), refresh the lock files (the core's, the
-# fuzz targets' and the browser test's), push the bump
+# VERSION constant, together, so they never disagree), refresh the lock files, push the bump
 # straight to master and dispatch ci.yml against it. Python needs nothing: pyproject.toml
-# sources its version from rust/Cargo.toml. PHP, Swift and Go have no version field, but the
-# native libraries committed for them report the crate version (`hypertabular_version()`), so
-# ci.yml's release-mode run on the bump commit (A) is what stage-native-binaries.yml stages
-# onto it as B. The order of a release:
+# sources its version from rust/Cargo.toml. PHP, Swift and Go have no version field, but what
+# they ship reports the crate version (`hypertabular_version()`, and `phpversion('hypertabular')` for
+# PHP's extension), so ci.yml's release-mode run on the bump commit (A) builds it, and that
+# run's tail stages Swift's checksums onto it as B. The order of a release:
 #
-#   1. this workflow: bump every manifest, push A, dispatch ci.yml on A;
-#   2. ci.yml goes green on A, its last job dispatches stage-native-binaries.yml, which
-#      waits for the run to complete and commits that run's libraries on top as B;
-#   3. a human tags B; release.yml refuses a tag whose ci.yml run or committed libraries were
-#      built at a different version, then prepares, and a dispatch publishes (RELEASING.md).
+#   1. this workflow: bump every manifest, date the CHANGELOG heading, push A, dispatch
+#      ci.yml on A;
+#   2. ci.yml goes green on A; its tail packs every registry input, attests and preserves the
+#      inventory, runs CodeQL on A and commits Package.swift's release lines on top as B;
+#   3. a human tags B; release.yml refuses a tag whose ci.yml run or Package.swift were built
+#      at a different version, verifies the preserved bytes, attests them from the tag and
+#      publishes; a dispatch at the tag replays with the receipts (RELEASING.md).
 #
-# The manifests come from .github/hyper.json; the body lives in the Forge.
+# The Forge's hyper_config.py derives the manifest list from .github/hyper.json's crate and
+# project names; the body lives in the Forge.
 
 on:
   workflow_dispatch:

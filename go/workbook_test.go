@@ -57,7 +57,7 @@ func workbookCorpus(t *testing.T) []workbookCase {
 	return cases
 }
 
-func TestWorkbookCorpus(t *testing.T) {
+func TestCorpusWorkbook(t *testing.T) {
 	replayWorkbookCorpus(t)
 }
 
@@ -65,7 +65,10 @@ func TestWorkbookCorpus(t *testing.T) {
 // front: each read stops wherever the core runs out of room and resumes in a grown buffer
 // that has to have kept what the old one held. A grow that dropped it would read garbage,
 // and the corpus would say so.
-func TestWorkbookCorpusWithBuffersThatStartWithNoRoom(t *testing.T) {
+func TestCorpusWorkbookWithBuffersThatStartWithNoRoom(t *testing.T) {
+	if raceDetector {
+		t.Skip("one goroutine, and three minutes under the race detector: the plain run holds it")
+	}
 	stingy, grown = true, [3]int{}
 	defer func() { stingy = false }()
 	replayWorkbookCorpus(t)
@@ -273,7 +276,7 @@ func TestWhatIsNotThereIsAnErrorOfItsOwn(t *testing.T) {
 	if _, err := book.Sheet(0, SheetOptions{}, plan); err == nil {
 		t.Error("no rows a batch: no error")
 	}
-	if _, err := OpenWorkbook(filepath.Join(t.TempDir(), "missing.xlsx")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := OpenWorkbook(missingPath(t, "missing.xlsx")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a missing file: %v", err)
 	}
 	var failure *Failure

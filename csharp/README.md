@@ -243,15 +243,15 @@ trimmer drops `HyperTabular` entirely still links the archive and exports all 14
 points into `dotnet.native.wasm`, as HyperCast's package does for its own.
 
 **WebAssembly on .NET 10 and later, as linked.** The static library is built with
-`-Zbuild-std` on a pinned nightly, for plain wasm (MVP plus `sign-ext` and `mutable-globals`),
-instead of on Rust's prebuilt sysroot, as HyperCast's is. So it holds no exception-handling
-instructions, and a browser never sees .NET 11's encoding mixed with the sysroot's legacy one
-(`module uses a mix of legacy and new exception handling instructions`), whether or not the
-SDK runs `wasm-opt` after the link. And it uses no feature but those two, Binaryen's defaults,
-which every `wasm-opt` run in a .NET 10 publish accepts with no flag: Emscripten's does not
-know `bulk-memory-opt` or `call-indirect-overlong` (dotnet/runtime#132858), and the SDK's own,
-after the link, rejects a saturating float-to-int conversion. The archive is checked for both
-before it is packed.
+`-Zbuild-std` (on stable Rust, with `RUSTC_BOOTSTRAP=1` for that one build), for plain wasm
+(MVP plus `sign-ext` and `mutable-globals`), instead of on Rust's prebuilt sysroot, as
+HyperCast's is. So it holds no exception-handling instructions, and a browser never sees
+.NET 11's encoding mixed with the sysroot's legacy one (`module uses a mix of legacy and new
+exception handling instructions`), whether or not the SDK runs `wasm-opt` after the link.
+And it uses no feature but those two, Binaryen's defaults, which every `wasm-opt` run in a
+.NET 10 publish accepts with no flag: Emscripten's does not know `bulk-memory-opt` or
+`call-indirect-overlong` (dotnet/runtime#132858), and the SDK's own, after the link, rejects a
+saturating float-to-int conversion. The archive is checked for both before it is packed.
 
 **Needs the `wasm-tools` workload.** Only the workload's toolchain relinks the runtime.
 Without it the SDK skips the link with nothing louder than its own warning, and the publish
@@ -279,7 +279,7 @@ package beside this one.
 
 The `.nupkg` carries compiled native code, which is a real thing to ask questions about before adopting it inside a trust boundary. Nothing under `csharp/HyperTabular/runtimes/` is committed: the native libraries are built from `rust/` by CI and staged into the package at pack time, so what ships is produced by the same workflow run that built and tested the source. The core is a normal Rust crate with no build-time codegen (`cd rust && cargo cdylib`), so you never have to take the shipped binary at all, but a rebuild is not bit-reproducible across machines, and the mechanism that does work is a cryptographic attestation binding each artifact to the workflow run and commit that produced it. Two kinds cover the package.
 
-The *release attestation* is one statement, signed by this repository's `release.yml` at the release tag, whose subjects are every file the release ships — the `.nupkg` as packed and as nuget.org serves it, every other registry package, and every native library committed for Go, Swift and PHP — and whose predicate is the release inventory (`inventory.json`: every file's size, SHA-256 and the commit it was built from). One command verifies any of them from the tag alone:
+The *release attestation* is one statement, signed by this repository's `release.yml` at the release tag, whose subjects are every file the release ships — the `.nupkg` as packed and as nuget.org serves it, every other registry package, and the files on the GitHub Release (Swift's two zips, the C archives and the PHP extension's zips) — and whose predicate is the release inventory (`inventory.json`: every file's size, SHA-256 and the commit it was built from). One command verifies any of them from the tag alone:
 
 ```shell
 gh attestation verify HyperTabular.<version>.nupkg --repo SkunkWerkx/HyperTabular \
@@ -309,6 +309,6 @@ gh attestation verify HyperTabular.<version>.nupkg \
 
 The release run downloads the package nuget.org serves, runs `dotnet nuget verify` on it, and requires every entry but `.signature.p7s` to match the packed package before attesting it. That claim is checked on every release rather than asserted here, so if nuget.org ever changes how it finalizes packages, the run says so instead of the README quietly going stale.
 
-Attestations are produced by every release-mode build — the release's own run and the weekly one. Pull requests build in `pr` mode, which ships nothing and so signs nothing. The release itself is two acts at one tag: the tag push packs, attests and preserves everything without uploading, and a dispatch of `release.yml` publishes from those preserved bytes, waiting up to 20 minutes for nuget.org to serve the package before attesting the served bytes; the Go tag and GitHub Release wait on it. A slower validation is recovered by dispatching again with `publication_run_id`, which pushes nothing twice (see [RELEASING.md](../.github/RELEASING.md)). The root README's [Provenance](../README.md#provenance) section has the whole picture across the eight bindings.
+Attestations are produced by every release-mode build — the release's own run and the weekly one. Pull requests build in `pr` mode, which ships nothing and so signs nothing. The release itself is two acts: the preparation run packs, attests and preserves everything, and the tag push verifies those preserved bytes and publishes, waiting up to 20 minutes for nuget.org to serve the package before attesting the served bytes; the Go tag and GitHub Release wait on it. A slower validation is recovered by dispatching `release.yml` again at the tag with `publication_run_id`, which pushes nothing twice (see [RELEASING.md](../.github/RELEASING.md)). The root README's [Provenance](../README.md#provenance) section has the whole picture across every binding.
 
 **Not currently done: NuGet author signing.** The package carries nuget.org's repository signature but no author signature of our own, which would need an X.509 code-signing certificate registered to the account. An author signature is verified automatically by every consumer's SDK at restore time, whereas an attestation is only checked by someone who deliberately runs `gh attestation verify`; if you want the automatic restore-time check, this is the gap.

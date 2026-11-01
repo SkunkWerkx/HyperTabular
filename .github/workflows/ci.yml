@@ -1,16 +1,47 @@
 name: CI — build native, build wasm, test every binding
 
-# The forge's pipeline (SkunkWerkx/.github): the core built fresh on five real-hardware
-# legs, both musl RIDs and a cross-built Intel macOS, its own suite run on each, the
-# libraries attested and uploaded as `native-{rid}`, the nine static libraries built, and
-# every binding run against that leg's library — Ruby twice, on Fiddle and on the Magnus
-# extension. Every binding the forge knows is on.
+# The board: the Rust core first, on the seven hosts (hyper-core.yml, one caller job whose
+# matrix builds, tests, export-checks and C-smokes each leg and uploads native-<rid>), then
+# one job per host × binding, each binding's own Forge workflow called only when `changes`
+# says the pull request touched it (or the core, or .github/), so a one-binding change pays
+# one toolchain setup per host and nothing for the eight other bindings. Each binding's lint
+# runs once, on ubuntu-26.04-arm, ahead of its suites: a red lint starts no suite anywhere.
+# On workflow_dispatch and schedule nothing is gated — `changes` emits every output true and
+# docs_only false — so the release-mode board is the whole board, and pr-board, the one
+# status to read, is red when any needed job failed or was skipped while its gate said run.
 #
-# Beside it, the Forge's static checks (hyper-check-core.yml), which run the check that is
-# this repo's own: rust/check-core.sh, proving on the library itself that the core has no
-# standard library, no allocation and no panic.
+# The forge is one canonical pipeline, and this repo conforms to it rather than the other
+# way round. When the forge assumes something HyperUuid's crate has and this one lacks,
+# this crate gets the same thing — never a forge input, opt-out, or auto-detection to
+# route around the difference. The one check that is this repo's own is rust/check-core.sh,
+# which core-checks runs: on the library itself, the core has no standard library, no
+# allocation and no panic.
 #
-# No `push` trigger, as in every Hyper* repo: a PR run and a manual one are enough.
+# CI's job is build, test, and upload reusable artifacts. Every native leg builds+tests
+# fresh, and the raw outputs (the plain FFI libhypertabular.so/.dylib/.dll, the compiled Ruby
+# Magnus extension) get uploaded here for later reuse, as do the 17 PyPI wheels, which
+# are built, installed and called into on every run (build-wheels below). On a release's run
+# the tail below packs every registry input from those libraries too: the release train.
+#
+# None of it is version-agnostic: each native library reports the crate version it was
+# built at (`hypertabular_version()`), and a wheel carries it in its file name. So the run a
+# release publishes from has to be one that ran against the version-bump commit, which is
+# why prepare-release.yml dispatches this workflow after it pushes the bump — see
+# release.yml's tag-guard for the gate.
+#
+# The release tail, after the board and only on prepare-release.yml's dispatch at master:
+# `forge` resolves the one Forge commit this run uses, the eight pack jobs pack from this
+# run's artifacts, `release-prepare` builds, attests and preserves the inventory (A, this
+# run, the Forge), `codeql` dispatches codeql.yml on this commit and requires a clean
+# dashboard, and `stage-release` commits B, the release commit, on master. The tag push at B
+# then runs release.yml, which verifies and signs what this run preserved and publishes it.
+#
+# No push trigger, deliberately (not because master is branch-protected — checked via
+# `gh api repos/.../branches/master/protection`, it isn't, despite this having been assumed
+# here before): a stray run rebuilding/retesting on every trivial direct push (stage-release's
+# own B included) would just be wasted compute for a result nobody's waiting on. The version
+# bump is the one push that does need a run, and prepare-release.yml asks for it explicitly.
+
 on:
   pull_request:
   workflow_dispatch:
@@ -20,9 +51,9 @@ on:
     - cron: "0 6 * * 1"
 
 # Least privilege for the whole board: every job below reads the repository and nothing more.
-# The five HyperForge build jobs need id-token and attestations on top of that (SLSA provenance
-# for what they build), and request-staging needs actions to start stage-native-binaries.yml;
-# each declares those itself — a job-level `permissions:` replaces this block rather than
+# The HyperForge jobs that attest, the pack jobs and release-prepare need id-token and
+# attestations on top of that (SLSA provenance for what they build), codeql needs actions to
+# start codeql.yml, and stage-release needs contents to push B; each declares those itself — a job-level `permissions:` replaces this block rather than
 # adding to it, so the writes never reach another job. This is also what
 # quietens CodeQL's actions/missing-workflow-permissions, which otherwise fires once per job.
 permissions:
@@ -33,16 +64,81 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Every C# step that restores HyperTabular needs HyperCast 1.1, which is not on nuget.org yet.
-# The steps in this file that do check this switch; the two forge calls that run C# can't read
-# it, so they are turned off by hand beside a comment naming it: build-native's csharp and
-# build-wasm's blazor_check, along with test-android's APK line. Once HyperCast 1.1 is
-# published, set this to 'true' and undo those three.
-env:
-  HYPERCAST_ON_NUGET: 'false'
-
 jobs:
+  # What the pull request touched, one boolean per class (.github/scripts/pr_changes.py has
+  # the rules: `ci` is .github/**, `core` is rust/, include/, c/ and corpus/, `docs_only` is
+  # Markdown and dotfiles alone, and an unclassified path is everything). Every gate below
+  # reads these. The file list comes from the API, paginated, so a rename classifies both
+  # sides and no checkout depth is involved; under pipefail an API failure is a red job, never
+  # a docs-only board. Off a pull request every output is true: the whole board runs.
+  changes:
+    runs-on: ubuntu-26.04
+    # pull-requests read is what the files endpoint documents for a fine-grained token (a public
+    # repository's files are readable without it, but the scope is read-only either way and
+    # a fork's pull request gets the same read token, so nothing is widened).
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      core: ${{ steps.classify.outputs.core }}
+      ci: ${{ steps.classify.outputs.ci }}
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+      csharp: ${{ steps.classify.outputs.csharp }}
+      java: ${{ steps.classify.outputs.java }}
+      python: ${{ steps.classify.outputs.python }}
+      ruby: ${{ steps.classify.outputs.ruby }}
+      php: ${{ steps.classify.outputs.php }}
+      swift: ${{ steps.classify.outputs.swift }}
+      typescript: ${{ steps.classify.outputs.typescript }}
+      r: ${{ steps.classify.outputs.r }}
+      go: ${{ steps.classify.outputs.go }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Classify the pull request's files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" --paginate \
+              --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' \
+              | python3 .github/scripts/pr_changes.py | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 .github/scripts/pr_changes.py --all | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  # The core on the seven hosts: cargo cdylib, the crate's suite and corpus, the glibc floor,
+  # the cdylib's exports held to rust/src/ffi.rs and loaded by .github/scripts/cdylib_smoke.py,
+  # this leg's static archive, the C archive assembled from both and c/smoke/ built against
+  # it, and native-<rid> uploaded (attested off pull requests). It never skips on a code
+  # change: a binding change can touch nothing here and still needs a core to test against.
+  core:
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-core.yml@master
+    # A reusable workflow can never escalate beyond what the calling job was granted, so the
+    # two scopes attest-build-provenance needs have to be handed down from here — id-token to
+    # mint the OIDC token it signs with, attestations to record the result. contents stays
+    # read: nothing in the called workflow writes to the repo.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+
+  # The cross-target bundle (Apple, Android, the archives the NuGet targets link), one
+  # producer of static-libs: C#'s and Swift's suites and the NuGet consumer test download it.
   build-static:
+    needs: [changes]
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' || needs.changes.outputs.swift == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@master
     permissions:
       contents: read
@@ -56,6 +152,8 @@ jobs:
       android: true
 
   build-android:
+    needs: [changes]
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@master
     permissions:
       contents: read
@@ -65,53 +163,323 @@ jobs:
       crate: hypertabular
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
 
-  test-swift-static:
-    needs: build-static
-    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift-static.yml@master
+  # Every static check on the core, in one Forge job on three hosts (hyper-core-checks.yml):
+  # rustfmt and clippy, the C ABI held to rust/src/kernel/exports.rs by
+  # .github/scripts/check_exports.py, the release checks, cargo-semver-checks against the last
+  # crates.io release, the MSRV, the no_std consumer build, the crate's whole suite on
+  # wasm32-wasip1 under a pinned wasmtime, actionlint over this directory with the
+  # workflow-contract, ABI-probe and text-file tests in .github/scripts/tests, and
+  # clang-format and shellcheck over c/smoke/ and the C++ header. The inputs are what is
+  # HyperTabular about it: rust/check-core.sh on both architectures proves the core has no
+  # standard library, no allocation and no panic, running `cargo no-panic` and its canary
+  # itself, so the Forge's own no-panic job is off; the async feature is built, tested,
+  # linted and checked on the MSRV too; there is no conformance oracle to re-derive (the
+  # corpus is generated, not derived); and `big_endian` runs the core's suite, both corpora
+  # included, on s390x under QEMU.
+  # The bindings' own lints are the lint-<binding> jobs below. None of it waits on the core legs.
+  core-checks:
+    needs: [changes]
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-core-checks.yml@master
     permissions:
       contents: read
     with:
+      core_script: rust/check-core.sh
+      extra_features: async
+      no_panic: false
+      corpus_oracle: ""
+      big_endian: s390x-unknown-linux-gnu
+
+  # Each binding's formatter and linter, once, on ubuntu-26.04-arm, ahead of its suites. The
+  # Forge's lint_node, lint_r and lint_java_jni default false until the siblings carry those
+  # bindings; everything else defaults on. Go's fast gate is gofmt, go vet, revive and the
+  # committed-core regeneration check; lint-go-full adds the cross-compile sweep and the race
+  # run beside the suites, gating nothing.
+  lint-csharp:
+    needs: [changes]
+    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-csharp.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
       project: HyperTabular
 
-  build-native:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-build-native.yml@master
-    permissions:            # attestation signs with OIDC; a reusable workflow
-      contents: read        # can never escalate beyond its caller's grant
-      id-token: write
-      attestations: write
+  lint-java:
+    needs: [changes]
+    if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-java.yml@master
+    permissions:
+      contents: read
     with:
-      # pr: every leg and suite, nothing only a release needs (see the forge's README).
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      project: HyperTabular
       crate: hypertabular
-      pure_env: HYPERTABULAR_PURE
-      # HYPERCAST_ON_NUGET (top of this file): true once HyperCast 1.1 is on nuget.org.
-      csharp: false
-      csharp_test_project: csharp/HyperTabular.Tests/HyperTabular.Tests.csproj
+      project: HyperTabular
+      lint_java_jni: true
+
+  lint-python:
+    needs: [changes]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-python.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+
+  lint-ruby:
+    needs: [changes]
+    if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-ruby.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+
+  lint-php:
+    needs: [changes]
+    if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-php.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+
+  lint-swift:
+    needs: [changes]
+    if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-swift.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+
+  lint-typescript:
+    needs: [changes]
+    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-typescript.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      lint_node: true
+
+  lint-r:
+    needs: [changes]
+    if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-r.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      lint_r: true
+
+  lint-go:
+    needs: [changes]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      linters: fast
+
+  lint-go-full:
+    needs: [changes]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      linters: full
+
+  # Each binding's suite on the hosts it ships on, after its lint and the core legs (Go waits
+  # for its lint alone: its core is committed Go source). The inputs are the ones the native
+  # workflow took for the binding; the jobs whose Forge workflow attests what it uploads
+  # (jni-<rid>, node-<rid>, ruby-native-<rid>-<abi>, php-ext-<rid>-<minor>) hand down the two
+  # scopes, as core does.
+  test-csharp:
+    needs: [changes, lint-csharp, core, build-static]
+    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-csharp.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      # Turns the package's Native AOT claim into a per-platform receipt: publish on all five
+      # legs, fail on any ILxxxx/AOTxxxx trim diagnostic, then actually run the produced
+      # binary and require exit 0. The log uploads as aot-report-{rid}. The smoke test
+      # exercises a door from every family plus the union's compile-checked consumption, so
+      # it covers the AOT-sensitive surface, not one call.
       csharp_aot_project: csharp/HyperTabular.AotSmokeTest/HyperTabular.AotSmokeTest.csproj
+      csharp_aot_frameworks: "net10.0 net11.0"
       # The suite and the AOT smoke test run on net10.0 and net11.0 on every desktop and musl
       # leg: the forge installs the global.json SDK plus the 10.0 runtime and publishes once
       # per framework. iOS, Mac Catalyst and Android stay .NET 11 (HYPERTABULAR003); Blazor
       # WebAssembly takes both.
-      csharp_aot_frameworks: "net10.0 net11.0"
+      csharp_test_project: csharp/HyperTabular.Tests/HyperTabular.Tests.csproj
       csharp_extra_runtime: "10.0"
+      # The csproj's runtimes/**/native wildcard stages at pack time, so the binding takes the
+      # pipeline's explicit per-leg placement for in-repo testing.
       csharp_runtimes_dir: csharp/HyperTabular/runtimes
-      # Explicit placement, as HyperCast does it: the forge puts this leg's library at
-      # src/main/resources/native/{rid}/ — where the shipped jar carries it — and the
-      # Gradle dev loop, which would otherwise stage whatever rust/target/release holds
-      # by then, stands down.
+  test-java:
+    needs: [changes, lint-java, core]
+    if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-java.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      # A jar has no per-platform package selection like NuGet's RID folders, so the binding
+      # takes the pipeline's explicit per-leg placement for in-repo testing.
       java_resources_dir: java/src/main/resources/native
-      # A second Ruby minor the Magnus extension is built and tested against, so each
-      # platform gem carries two ABIs (3.4 and the forge's 4.0), as HyperCast's do.
+      # JDK 21 is the jar's floor (JNI on 21–24), shipped beside the primary 25; it reaches
+      # EOL at Temurin on 2029-12-31, then this input and `java_jni` go.
+      java_jni: true
+      jdk_floor_version: "21"
+  test-python:
+    needs: [changes, lint-python, core]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-python.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+  test-ruby:
+    needs: [changes, lint-ruby, core]
+    if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-ruby.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+      pure_env: HYPERTABULAR_PURE
+      # The forge's ruby_version default (4.0, the current release) is the primary ABI; this
+      # adds a second Magnus build+suite against 3.4 so each platform gem can ship both. A
+      # Magnus extension is bound to one Ruby minor — unlike PyO3's abi3 wheels, which is why
+      # Python needs no equivalent input. Keep this in step with ruby/Rakefile's ABIS, the
+      # Forge's ruby.abis default (RUBY_ABIS in hyper_config.py, which its pack-gems action
+      # packs) and hyper-build-wasm.yml's ruby_wasm_abis default; `rake native:gem` aborts
+      # naming the missing file if they drift. Ruby 3.4 goes EOL 2028-03-31 — clear this line
+      # then and 3.4 consumers fall back to the universal Fiddle gem, which is exactly what
+      # it's there for.
       ruby_compat_version: "3.4"
+  test-php:
+    needs: [changes, lint-php, core]
+    if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-build-php-extension.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      # The floor composer.json declares; explicit while the Forge's default is still 8.2,
+      # below every Hyper* floor. A pull request builds and tests the extension on two legs,
+      # one per build path: linux-x64 on the newest minor from the image's own PHP, and win-x64 on this
+      # floor through setup-php (the floor's Windows build takes another toolset). Release
+      # mode ignores pr_legs and builds every minor on six RIDs.
+      php_floor_version: "8.3"
+      pr_legs: two-paths
+      # The suite judges every cell with ext-hypercast's classes: the Forge builds HyperCast's
+      # extension from the registry release Cargo.lock pins and loads it beside this one.
+      php_companions: hypercast
+  test-swift:
+    needs: [changes, lint-swift, core, build-static]
+    if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+  test-typescript:
+    needs: [changes, lint-typescript, core]
+    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-typescript.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+  test-r:
+    needs: [changes, lint-r, core]
+    if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-r.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      project: HyperTabular
+  test-go:
+    needs: [changes, lint-go]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-go.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      crate: hypertabular
+      go_version_file: go/go.mod
+  # The C archives the release attaches, packed from this run's libraries the way the tag run
+  # packs them (c_package.py pack over every RID, the Android archives included, and the
+  # layout check), uploaded as c-packages-ci. The per-RID smokes ran on the core legs and the
+  # formatter in core-checks, so this is the pack alone; the Apple mobile smoke takes the
+  # packed archives in test-apple-mobile.
+  pack-c:
+    needs: [changes, core, build-static, build-android]
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-test-c.yml@master
+    permissions:
+      contents: read
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      smokes: false
+      lint: false
 
-  # WebAssembly, through the forge: the core as a wasm32 static library for the NuGet
-  # package's browser-wasm asset, the C# binding in a Blazor app, the crate's own
-  # wasm-bindgen tests and the Go binding under TinyGo, each in headless Chrome; and the Ruby
-  # binding's Magnus extension for wasm32-wasip1, linked into ruby.wasm, under Node and Chrome
-  # (release mode only: weekly and at release, not on PRs).
+  # C#/NuGet's WASM support is a shipped surface (Norse Architecture needs it), so it's
+  # built on every pull request that can reach it, not just at release time.
   build-wasm:
+    needs: [changes]
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.go == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
+    # Handed down for the same reason as core's: the ruby.wasm job attests the archives the
+    # companion gem ships.
     permissions:
       contents: read
       id-token: write
@@ -121,18 +489,47 @@ jobs:
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
-      # HYPERCAST_ON_NUGET (top of this file): back on once HyperCast 1.1 is on nuget.org.
-      # blazor_check: csharp/HyperTabular.WasmSmokeTest/check.sh
-      rust_browser_test: rust/browser-test
-      go_tinygo_smoke: go/internal/tinygosmoke
+      # Every browser target runs in headless Chrome, not just built, each when the pull
+      # request can reach it: the archive and the Blazor smoke app linking it (C#, the core
+      # or the workflows), the crate itself for wasm32-unknown-unknown (the core), and the Go
+      # binding's smoke package compiled by TinyGo, its core being Go source (translated by
+      # wasm2go from the crate's wasm32-wasip1 build and committed). The Go suite itself runs
+      # on WebAssembly too: under TinyGo on wasip1 (wasmtime, the corpus mounted, with a
+      # negative control without the mount), and under stock Go on js/wasm (Node) and
+      # wasip1/wasm (wasmtime). And in release mode (weekly and release, not PRs) the Magnus
+      # extension, built for each Ruby minor the -wasm gem carries, linked into a ruby.wasm
+      # interpreter and run under Node and in headless Chrome; those archives are uploaded as
+      # ruby-wasm-{minor} for release.yml.
+      archive: ${{ needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' }}
+      blazor_check: ${{ (needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true') && 'csharp/HyperTabular.WasmSmokeTest/check.sh' || '' }}
+      rust_browser_test: ${{ (needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') && 'rust/browser-test' || '' }}
+      go_wasm_suite: ${{ needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.go == 'true' }}
+      go_tinygo_smoke: ${{ (needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.go == 'true') && 'go/internal/tinygosmoke' || '' }}
       ruby_wasm_smoke: ruby/wasm-smoke
+      # The TypeScript binding's WebAssembly fallback: the napi-rs module built for threadless
+      # wasm32-wasip1, the whole suite run against it with the native addon refused, the WASI
+      # npm package packed as the release packs it and run bundled into a page in headless
+      # Chrome; the module and its loaders are attested and uploaded as node-wasm32-wasip1,
+      # which pack-npm and test-npm-package below consume. First job in that workflow: the
+      # newest code fails first.
+      node_wasi: ${{ needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.typescript == 'true' }}
 
-  # The 17 PyPI wheels — two for each of the eight native platforms (abi3 and abi3t, each
-  # installed on the interpreters it serves, free-threaded ones included), and
-  # Pyodide's, whose job runs the whole suite in Pyodide under Node and in headless Chrome —
-  # built, installed and attested here, and published unchanged by release.yml.
+  # The 17 PyPI wheels, on every run rather than only at the tag: built by maturin,
+  # installed on their own platform and on each interpreter they serve, free-threaded ones
+  # included (the musl ones on Alpine, osx-x64 under Rosetta, the Pyodide one in Pyodide
+  # under Node and in headless Chrome, where the whole pytest suite runs too), called
+  # into, attested and uploaded as pypi-wheels-{rid}. release.yml publishes these exact
+  # files. A wheel that cannot be installed therefore fails the pull request; while they
+  # were built in release.yml, 0.4.0's osx-x64 wheel failed its first install with four
+  # registries already published. With `sdist` in `.github/hyper.json`, the source
+  # distribution too: built, `pip install`ed at exactly `rust-version` on manylinux2014 and
+  # Alpine (one minor lower must fail), attested and uploaded as `pypi-wheels-sdist`.
   build-wheels:
+    needs: [changes]
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
+    # Same two scopes core hands down, for the same reason: the forge attests each wheel and
+    # cannot escalate past what this job was granted.
     permissions:
       contents: read
       id-token: write
@@ -142,66 +539,47 @@ jobs:
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
 
-  # Every static check on the core and every binding's lint and formatter, once, in the Forge
-  # (hyper-check-core.yml): the no_std consumer build, rust/check-core.sh on both
-  # architectures (the core has no standard library, no allocation and no panic: it runs
-  # `cargo no-panic` and the canary itself, so the Forge's own no-panic job is off), the
-  # async feature's tests, the no_std shared library built on every RID with its exports held
-  # to rust/src/kernel/exports.rs through .github/hyper.json, the release-guard tests, rustfmt
-  # and clippy, the MSRV, cargo-semver-checks against the last crates.io release, and
-  # actionlint over this directory. Off: check_exports.py (no binding here declares the C ABI
-  # by a pattern the script could read; the Forge's export check is the cdylib one), the
-  # conformance oracle (the corpus is generated, not derived). SwiftLint holds swift/'s
-  # public API to its doc comments (missing_docs, swift/.swiftlint.yml) as in HyperCast and
-  # HyperUuid. Static analysis only, so none of it waits on build-native.
-  check-core:
-    uses: SkunkWerkx/.github/.github/workflows/hyper-check-core.yml@master
-    permissions:
-      contents: read
-    with:
-      core_script: rust/check-core.sh
-      extra_features: async
-      no_panic: false
-      exports: false
-      corpus_oracle: ""
-
   # iOS and Mac Catalyst, for the three bindings that reach them. Neither platform loads a
   # library: the core is linked into the app, from the static libraries build-static
   # cross-compiles and attests (the forge's apple_mobile input), which
-  # are the bytes stage-native-binaries.yml commits for Swift and Go and release.yml packs for
-  # C#. This job is the one place they are linked into something and run, and it needs what
-  # no build-native leg carries: Xcode, a simulator, and the .NET ios and maccatalyst
-  # workloads. Ported from HyperUuid's job of the same name.
+  # are the bytes the release attaches for Swift (zipped) and release.yml packs for C#.
+  # This job is the one place they are linked into something and run, and it needs what no
+  # build-native leg carries: Xcode, a simulator, and the .NET ios and maccatalyst workloads.
   #
   #  * Swift takes them from swift/HyperTabularCoreApple.xcframework, which swift/Package.swift
   #    declares only when it is there. The binding's suite runs on an iOS simulator and as a
   #    Mac Catalyst process, and the package is built for an iOS device. It also runs once
-  #    more for macOS itself, and the root manifest is built: with the XCFramework present
-  #    the manifest declares a second binary target and puts a platform condition on the
-  #    first, which is the package a macOS consumer resolves from a tag and the one shape of
-  #    it build-native's macOS leg, whose tree has no XCFramework yet, never sees.
-  #  * C# takes them from csharp/HyperTabular/staticlibs/{rid}/ through
-  #    build/net10.0/HyperTabular.targets. HyperTabular.AppleSmokeTest is the Native AOT smoke
-  #    test's Program.cs as an app: run as a Mac Catalyst process, installed and launched in
-  #    the simulator, and built for an iOS device with signing off. No runner has a device,
-  #    so that last one is proved as far as a link goes: the app's executable must define
-  #    the core's symbols.
-  #  * Go takes them from go/staticlib/, picked by build tag (lint-go checks the picking
-  #    for every platform). The suite runs in the simulator through Go's own wrapper,
-  #    misc/ios/go_ios_exec.go, which is how the Go project tests its iOS port. The wrapper
-  #    carries the module's files and testdata directories into the simulator and nothing
-  #    above the module, so the corpus is staged as go/testdata/corpus (corpus_test.go looks
-  #    there too). Two are skipped: the test that reads rust/Cargo.toml, and ExampleWorkbook,
-  #    which opens ../corpus by its path as the documentation shows it. A device build is
-  #    linked and inspected. Mac Catalyst is not linked from Go here: the same archive is
-  #    linked and run by Swift and C# above, and Go's part of it is the selection.
+  #    more for macOS itself, and the root manifest is built, both with this run's bundle and
+  #    XCFramework in the tree: with the XCFramework present the manifest declares a second
+  #    binary target and puts a platform condition on the first, which is the package a macOS
+  #    consumer resolves from a tag (there from the release's zips).
+  #  * C# takes them from csharp/HyperTabular/staticlibs/{rid}/ through build/net10.0/HyperTabular.targets.
+  #    HyperTabular.AppleSmokeTest is the Native AOT smoke test's SmokeTest.Run() as an app: run as a
+  #    Mac Catalyst process, installed and launched in the simulator, and built for an iOS
+  #    device with signing off. No runner has a device, so that last one is proved as far as
+  #    a link goes: the app's executable must define the core's symbols.
+  #
+  #  * C takes the four archives pack-c packed (header, static library, CMake and pkg-config
+  #    files): c/smoke/apple-mobile.sh builds the smoke consumer against each and runs the
+  #    simulator and Catalyst ones, in the simulator booted below.
+  #  * Go takes none: its core is Go source (go/internal/core), so the suite here proves the
+  #    translated core on iOS, not a link. It runs in the simulator through Go's own
+  #    wrapper, misc/ios/go_ios_exec.go, which is how the Go project tests its iOS port; the
+  #    test that reads rust/Cargo.toml and ExampleWorkbook, which opens ../corpus by its path
+  #    as the documentation shows it, are skipped there, since the wrapper carries the module
+  #    into the simulator and nothing above it, and the corpus is staged as
+  #    go/testdata/corpus (corpus_test.go looks there too) for the same reason. Go requires
+  #    external linking on ios/arm64, so both the simulator run and the device build go
+  #    through a C compiler (Go's clangwrap.sh, the iPhoneOS SDK's clang), with nothing of
+  #    the core's for it to link. The device build is built and kept, not run: no runner has
+  #    a device. Mac Catalyst is not a Go target.
   #
   # The simulator hands back neither an exit code nor a console to a launched app, so the C#
   # app also writes what it prints to a file in its container (SmokeLog.cs) and that file is
   # what is checked.
   test-apple-mobile:
-    needs: build-static
-    # Start when the static archives are ready; release mode only.
+    needs: [changes, build-static, pack-c]
+    # Start when the static archives and the packed C archives are ready; release board only.
     if: github.event_name != 'pull_request'
     # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) are built against Xcode 27.0 and
     # refuse any other version; macos-latest (macOS 26) tops out at Xcode 26.6. The xcode-27
@@ -219,8 +597,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Over the checkout: the artifact is laid out by repository path, so the XCFramework
-      # lands whole under swift/, the C# archives under csharp/HyperTabular/staticlibs/ and the
-      # Go ones under go/staticlib/.
+      # lands whole under swift/ and the C# archives under csharp/HyperTabular/staticlibs/.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: static-libs
@@ -234,7 +611,6 @@ jobs:
           (cd swift && xcodebuild -list)
           find swift/HyperTabularCoreApple.xcframework -type f | sort
           ls csharp/HyperTabular/staticlibs/{ios-arm64,iossimulator-arm64,maccatalyst-arm64,maccatalyst-x64}/libhypertabular.a
-          ls go/staticlib/{ios_arm64,iossimulator_arm64,maccatalyst_arm64,maccatalyst_amd64}/libhypertabular.a
 
       - name: Boot an iPhone simulator
         id: sim
@@ -254,6 +630,45 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      # The C archives' four Apple mobile smokes, moved here from the Forge's hyper-test-c.yml
+      # so the full board boots one simulator: the archives pack-c packed, unpacked and built
+      # against through CMake (c/smoke/apple-mobile.sh: the iOS and simulator slices, Mac
+      # Catalyst on both architectures, maccatalyst-x64 under Rosetta), in the simulator above.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: c-packages-ci
+          path: c-packages
+
+      - name: Unpack the four Apple mobile archives
+        if: ${{ !cancelled() }}
+        id: unpack
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -n 1)
+          mkdir unpacked
+          for rid in ios-arm64 iossimulator-arm64 maccatalyst-arm64 maccatalyst-x64; do
+            archives=(c-packages/*-"$version-$rid".tar.gz)
+            [ "${#archives[@]}" = 1 ] && [ -f "${archives[0]}" ] \
+              || { echo "::error::expected one $rid archive at $version, found: ${archives[*]}"; exit 1; }
+            tar -xzf "${archives[0]}" -C unpacked
+          done
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rosetta
+        if: ${{ !cancelled() }}
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            softwareupdate --install-rosetta --agree-to-license
+          fi
+          arch -x86_64 /usr/bin/true
+
+      - name: C — the four Apple mobile archives, built against and run
+        if: ${{ !cancelled() }}
+        env:
+          VERSION: ${{ steps.unpack.outputs.version }}
+        run: c/smoke/apple-mobile.sh unpacked "$VERSION"
 
       - name: Swift — macOS, with the XCFramework declared
         run: |
@@ -304,24 +719,25 @@ jobs:
           chmod +x "$RUNNER_TEMP/go-ios/bin/go_ios_arm64_exec"
           export PATH="$RUNNER_TEMP/go-ios/bin:$PATH"
           GOOS=ios GOARCH=arm64 CGO_ENABLED=1 CC="$(go env GOROOT)/misc/ios/clangwrap.sh" \
-            go test -tags iossimulator -skip '^(TestNativeVersionIsTheCratesVersion|ExampleWorkbook)$' -v . | tee "$RUNNER_TEMP/go-ios/test.log"
+            go test -skip '^(TestNativeVersionIsTheCratesVersion|ExampleWorkbook)$' -v . | tee "$RUNNER_TEMP/go-ios/test.log"
           grep -q '^ok' "$RUNNER_TEMP/go-ios/test.log"
 
-      - name: Go — an iOS device build links the core in
+      - name: Go — an iOS device build of the suite
         if: ${{ !cancelled() }}
         working-directory: go
         run: |
           set -euo pipefail
+          # The device SDK's clang, because Go's ios/arm64 port links externally; the
+          # binary is the proof, there is no device to run it on.
           mkdir -p "$RUNNER_TEMP/go-ios"
           GOOS=ios GOARCH=arm64 CGO_ENABLED=1 \
             CC="$(xcrun --sdk iphoneos --find clang) -arch arm64 -isysroot $(xcrun --sdk iphoneos --show-sdk-path) -miphoneos-version-min=12.0" \
             go test -c -o "$RUNNER_TEMP/go-ios/hypertabular-device.test" .
-          nm "$RUNNER_TEMP/go-ios/hypertabular-device.test" > "$RUNNER_TEMP/go-ios/device-symbols.txt"
-          grep -q " [Tt] _hypertabular_workbook_fill\$" "$RUNNER_TEMP/go-ios/device-symbols.txt" \
-            || { echo "::error::the iOS device test binary does not define hypertabular_workbook_fill; the core was not linked in"; exit 1; }
-          echo "the iOS device test binary defines the core's exports"
+          [ -s "$RUNNER_TEMP/go-ios/hypertabular-device.test" ] \
+            || { echo "::error::the iOS device build of the Go suite produced no binary"; exit 1; }
+          echo "the Go suite builds for an iOS device"
 
-      # The SDK global.json names, as build-native's legs take it.
+      # The SDK global.json names, as the Forge's C# legs take it.
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         if: ${{ !cancelled() }}
         with:
@@ -332,7 +748,7 @@ jobs:
         run: dotnet workload install ios maccatalyst
 
       - name: C# — a Mac Catalyst app, built and run
-        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
@@ -346,7 +762,7 @@ jobs:
           grep -q "^all ok" "$log"
 
       - name: C# — an iOS app, installed and launched in the simulator
-        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           want=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
@@ -366,7 +782,7 @@ jobs:
           grep -q "^all ok" "$log"
 
       - name: C# — an iOS device app links the core in
-        if: ${{ env.HYPERCAST_ON_NUGET == 'true' && !cancelled() }}
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-ios -r ios-arm64 -p:EnableCodeSigning=false -p:ValidateXcodeVersion=false
@@ -378,11 +794,12 @@ jobs:
           done
           echo "the iOS device app defines the core's exports"
 
-      # The net10.0 apps the targets file refuses; the net11.0 builds above are the control,
-      # since they import the same file and build. The probe builds an Exe because the Apple
-      # SDK's Xcode check (_ValidateXcodeVersion) runs only for one: a class library builds on
-      # any Xcode, so without OutputType=Exe the probe would pass with the gate gone, while
-      # with it the gate must win over the Xcode error.
+      # The net10.0 apps the targets file refuses; the three net11.0 builds above are the
+      # control, since they import the same file and build. The probe builds an Exe because
+      # the Apple SDK's Xcode check (_ValidateXcodeVersion) runs only for one: a class library
+      # builds on any Xcode, so without OutputType=Exe the probe would pass with the gate gone,
+      # while with it the gate must win over the Xcode error (proven both ways locally on
+      # Xcode 27.1, where a gate-less net10.0-ios Exe fails "requires Xcode 26.0").
       - name: C# — net10.0-ios and net10.0-maccatalyst stop with HYPERTABULAR003
         if: ${{ !cancelled() }}
         run: |
@@ -403,16 +820,14 @@ jobs:
             echo "$tfm stops with HYPERTABULAR003"
           done
 
-  # Android, in an emulator, for the three bindings that reach it: C#, Go and Swift. Ported
-  # from HyperCast's job of the same name.
+  # Android, in an emulator, for the three bindings that reach it: C#, Go and Swift.
   #
   # C#: HyperTabular.AndroidSmokeTest, which runs the Native AOT smoke test's SmokeTest.Run()
   # from an Activity, against the package as a MAUI app would take it — packed here from
-  # build-native's Android libraries and static-libs archives, and restored from a local
-  # folder, so that what is proven is the .nupkg's own layout (NuGet's runtimes/{rid}/native/
-  # into the APK's lib/{abi}/, and build/net10.0/HyperTabular.targets handing a Native AOT
-  # publish its archive), not a project reference's. HyperCast arrives from nuget.org as the
-  # package's own dependency, as it does for every consumer.
+  # build-android's shared libraries and build-static's static-libs archives, and
+  # restored from a local folder, so that what is proven is the .nupkg's own layout (NuGet's
+  # runtimes/{rid}/native/ into the APK's lib/{abi}/, and build/net10.0/HyperTabular.targets
+  # handing a Native AOT publish its archive), not a project reference's.
   #
   # Four APKs: CoreCLR (.NET 11's Android runtime; Mono is not supported there) and
   # Native AOT, each for android-x64 and android-arm64. The x64 pair runs in an x86_64
@@ -423,15 +838,17 @@ jobs:
   # Google Play applies), and each Native AOT APK must not carry it at all, because the core
   # is linked into the app; the x64 one then passing in the emulator is the proof that it was.
   #
-  # Go and Swift: each binding's whole suite, both corpora's replay included, cross-compiled
-  # for Android against this run's archives (the static-libs artifact lands them in
-  # go/staticlib and the Swift bundle) and run on the same emulator through adb, by the two
-  # scripts that also run it against a local one: android_build_suite.sh and
-  # android_device_test.sh. Go's ExampleWorkbook is skipped there, as in the iOS simulator:
-  # it opens ../corpus by its path, and the device has nothing above the pushed directory.
-  # The aarch64 builds are linked, not run. Swift's SDK for Android needs Swift 6.3 or later.
+  # Go and Swift: each binding's whole suite, corpus replay included, cross-compiled for
+  # Android (Swift against this run's archives, which the static-libs artifact lands in the
+  # Swift bundle; Go from its translated core, linked through the NDK's clang only because
+  # Go itself requires external linking on android/amd64) and run on the same emulator
+  # through adb, by the two scripts that also run it locally: android_build_suite.sh and
+  # android_device_test.sh. The
+  # aarch64 builds are linked, not run. Swift's SDK for Android needs Swift 6.3 or later.
   test-android:
-    needs: [build-static, build-android]
+    needs: [changes, build-static, build-android]
+    # Release board only: an emulator run is minutes a pull request's own suites already cover.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
@@ -447,8 +864,7 @@ jobs:
           path: artifacts
 
       # Over the checkout, laid out by repository path: the Android archives land in
-      # csharp/HyperTabular/staticlibs/android-{rid}/, go/staticlib/android_{goarch}/ and the
-      # Swift bundle.
+      # csharp/HyperTabular/staticlibs/android-{rid}/.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: static-libs
@@ -478,7 +894,6 @@ jobs:
         run: dotnet workload install android
 
       - name: Pack HyperTabular into a local feed
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           version="0.0.0-android.${{ github.run_id }}"
@@ -494,7 +909,6 @@ jobs:
       # Each build from a clean tree, since the CoreCLR and Native AOT builds of one RID share
       # bin/ and obj/; the signed APK is copied out under a name that says which it is.
       - name: Build the four APKs
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           mkdir -p apks
@@ -529,20 +943,19 @@ jobs:
           echo "net10.0-android stops with HYPERTABULAR003"
 
       - name: Inspect the APKs
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           zipalign="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name zipalign | sort -V | tail -1)"
           for rid in android-x64 android-arm64; do
             case "$rid" in android-x64) abi=x86_64 ;; android-arm64) abi=arm64-v8a ;; esac
-            unzip -l "apks/coreclr-$rid.apk" | grep -q " lib/$abi/libhypertabular.so\$" \
+            unzip -l "apks/coreclr-$rid.apk" | grep " lib/$abi/libhypertabular.so\$" >/dev/null \
               || { echo "::error::the CoreCLR $rid APK has no lib/$abi/libhypertabular.so"; exit 1; }
             "$zipalign" -c -P 16 -v 4 "apks/coreclr-$rid.apk" | grep "libhypertabular.so"
             for runtime in coreclr aot; do
               "$zipalign" -c -P 16 4 "apks/$runtime-$rid.apk" \
                 || { echo "::error::the $runtime $rid APK fails zipalign -P 16"; exit 1; }
             done
-            if unzip -l "apks/aot-$rid.apk" | grep -q "/libhypertabular.so\$"; then
+            if unzip -l "apks/aot-$rid.apk" | grep "/libhypertabular.so\$" >/dev/null; then
               echo "::error::the Native AOT $rid APK carries libhypertabular.so; the core should be linked into the app"
               exit 1
             fi
@@ -583,9 +996,8 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
           # One command per line: the action runs each on its own and fails on the first that does.
-          # HYPERCAST_ON_NUGET (top of this file): back in once HyperCast 1.1 is on nuget.org.
-          #   .github/scripts/android_smoke.sh "$APP_ID" "$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)" apks/coreclr-android-x64.apk apks/aot-android-x64.apk
           script: |
+            .github/scripts/android_smoke.sh "$APP_ID" "$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)" apks/coreclr-android-x64.apk apks/aot-android-x64.apk
             .github/scripts/android_device_test.sh stage/go-x86_64 ./hypertabular.test -test.v -test.skip '^ExampleWorkbook$'
             .github/scripts/android_device_test.sh stage/swift-x86_64 ./HyperTabularPackageTests.xctest
 
@@ -600,11 +1012,10 @@ jobs:
   #  * the floor (net9.0 does not restore) and the gate, which admits Blazor WebAssembly on
   #    net10.0 and net11.0: evaluated, and built only to show HYPERTABULAR002, because this job
   #    installs no wasm workload.
-  # HyperCast arrives from nuget.org as the package's own dependency, as it does for every
-  # consumer. The runner image's SDK is not assumed to be the only one: the job logs which are
-  # there.
+  # The runner image's SDK is not assumed to be the only one: the job logs which are there.
   test-nuget-package:
-    needs: [build-static, build-native]
+    needs: [changes, core, build-static]
+    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
@@ -646,7 +1057,6 @@ jobs:
           dotnet --list-sdks
 
       - name: Pack HyperTabular into a local feed and check its layout
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           version="0.0.0-pkg.${{ github.run_id }}"
@@ -669,7 +1079,6 @@ jobs:
       # targets import. One TFM at a time (without -f a multi-targeted publish fails with
       # NETSDK1129), from a clean tree, since the two share bin/ and obj/.
       - name: Native AOT from the package, on net10.0 and net11.0
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           for tfm in net10.0 net11.0; do
@@ -700,7 +1109,6 @@ jobs:
       # the publish its archive, and it quietly falls back to the shared library beside the
       # executable. If it did not, the check above could not see a lost static link.
       - name: Control — a package without its targets falls back to the shared library
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           nobuild="$HYPERTABULAR_VERSION.nobuild"
@@ -715,7 +1123,6 @@ jobs:
           echo "without its targets the publish carries libhypertabular.so beside the executable"
 
       - name: The floor is .NET 10
-        if: env.HYPERCAST_ON_NUGET == 'true'
         run: |
           set -euo pipefail
           rm -rf "${SMOKE_DIR:?}/bin" "${SMOKE_DIR:?}/obj"
@@ -727,7 +1134,7 @@ jobs:
             || { echo "::error::the net9.0 restore failed, but not with NU1202"; cat restore-net9.log; exit 1; }
           echo "net9.0 does not restore the package (NU1202)"
 
-      # The wasm archive is built with -Zbuild-std for a feature set both .NET 10's and .NET 11's
+      # The wasm archive is built with -Zbuild-std (on stable, RUSTC_BOOTSTRAP=1) for a feature set both .NET 10's and .NET 11's
       # wasm toolchains accept, so the gate stands aside for Blazor on both. Evaluation shows the
       # gate's answer; the build is to show HYPERTABULAR002, since this job installs no wasm
       # workload. The Android evaluation is the control: the property is read, and does flag.
@@ -751,24 +1158,467 @@ jobs:
             echo "$f + browser-wasm passes the gate (and stops at HYPERTABULAR002 without the workload)"
           done
 
-  # A release's run is dispatched by prepare-release.yml with a GITHUB_TOKEN, and GitHub raises
-  # no workflow_run for a run that token started, so stage-native-binaries.yml would never hear
-  # that it finished. workflow_dispatch is one of the two events the token may raise: once every
-  # job above is green, this asks staging for this exact run. Staging waits for the run to
-  # complete and holds it to the same checks as ever; a run a human dispatched also raises
-  # workflow_run, and whichever staging request comes second finds A staged and skips. Pull
-  # requests and the weekly schedule never stage, and only this job may start a workflow.
-  request-staging:
-    needs: [build-static, build-android, test-swift-static, build-native, build-wasm, build-wheels,
-            check-core, test-apple-mobile, test-android, test-nuget-package]
+  # The npm packages as a consumer gets them, on the three desktop OSes (a native pass on an OS
+  # proves nothing about WASI initialisation and file resolution there; Windows' preopen and
+  # path handling, macOS's resolution). Each leg first runs the whole conformance suite against
+  # the WASI module built above, with the native addon refused (NAPI_RS_FORCE_WASI=error), so
+  # byte-buffer mutation, batches, timestamps and error propagation are proven on the module
+  # on that OS, not just that it loads; then packs the ten tarballs with the Forge's
+  # npm_package.py, the release's own pack body, from the run's node-<rid> artifacts, and
+  # serves them from a local Verdaccio to the installation scenarios in
+  # typescript/consumer-tests/run.sh (its header lists them): a plain install loads native
+  # with the WASI package present and an empty stderr; --omit=optional, a deleted native and
+  # a forced run load wasm32-wasip1; three negative controls fail or report unavailability
+  # the documented way; on Linux also npm/cli#4828's damaged lockfile, the exact Node floor
+  # in node:22.13.0-alpine with engine-strict, an emulated s390x host (QEMU, so no native
+  # package fits; big-endian, so the smoke's checks pass and the documented exit hang is
+  # asserted, not hidden) and two bundlers. Bun runs the forced-WASI suite too, and its result is
+  # recorded in the step summary without failing the job: Bun's node:wasi cannot initialise
+  # the module today (the design spec's Bun decision); native Bun stays green on the TypeScript legs.
+  # The Forge is checked out at master here, as release.yml does, for the pack script; the
+  # workflow calls above resolve the same way.
+  test-npm-package:
+    # node-<rid> comes from the TypeScript legs, node-wasm32-wasip1 from build-wasm.
+    needs: [changes, core, build-wasm, test-typescript]
+    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, xcode-27, windows-2025-vs2026]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out the Forge at master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: master
+          path: .hyperforge
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: node-*
+          path: artifacts/node
+          merge-multiple: false
+
+      # The module and its loaders beside binding.js, where the loader's first WASI candidate
+      # looks; no .node is built or downloaded into the checkout, and the forced mode never
+      # consults one anyway.
+      - name: The conformance suite against the WASI module, native refused
+        shell: bash
+        working-directory: typescript
+        run: |
+          set -euo pipefail
+          npm ci
+          cp ../artifacts/node/node-wasm32-wasip1/* .
+          ls -l hypertabular.wasm32-wasip1.wasm
+          NAPI_RS_FORCE_WASI=error npm test
+          npm run typecheck
+
+      # Bun's runner prints each failure as a `::error` workflow command when it sees GitHub
+      # Actions, and Bun 1.4.4 cannot load the WASI module, so this tolerated step posted ten
+      # error annotations per leg on the 1.1.0 preparation. Workflow commands are off for its
+      # output and resumed before the exit status is returned, so the next step still records
+      # the result and the Actions tab counts no errors from a step that cannot fail the job.
+      - name: The same on Bun, recorded
+        id: bun
+        shell: bash
+        working-directory: typescript
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          token="$(node -e 'console.log(require("node:crypto").randomBytes(16).toString("hex"))')"
+          echo "::stop-commands::$token"
+          status=0
+          NAPI_RS_FORCE_WASI=error npm run test:bun || status=$?
+          echo "::$token::"
+          exit "$status"
+
+      - name: Record Bun's result
+        shell: bash
+        env:
+          BUN_OUTCOME: ${{ steps.bun.outcome }}
+          OS: ${{ matrix.os }}
+        run: |
+          echo "- Bun $(bun --version) forced-WASI suite on $OS: $BUN_OUTCOME (recorded, never a failure of this job)" >> "$GITHUB_STEP_SUMMARY"
+
+      # PR mode has no osx-x64 build (hyper-core.yml skips it), so the pack leaves that
+      # platform package out by name, as pack-c does; the root still pins all eight, and npm
+      # tolerates an optional dependency whose packument is missing. A release skips nothing.
+      - name: Pack the ten tarballs as the release does
+        shell: bash
+        env:
+          MODE: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            release) skip=() ;;
+            pr) skip=(--skip osx-x64) ;;
+            *) echo "::error::mode must be release or pr, not $MODE"; exit 1 ;;
+          esac
+          python3 ".hyperforge/.github/scripts/npm_package.py" pack --package typescript --artifacts artifacts/node --out npm-packages ${skip[@]+"${skip[@]}"}
+          ls -l npm-packages
+
+      - name: The consumer-test harness
+        shell: bash
+        working-directory: typescript/consumer-tests
+        run: npm ci
+
+      # s390x for the emulated-host scenario; the floor and s390x scenarios need Docker, which
+      # only this leg has, and the lockfile scenario runs beside them.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.os == 'ubuntu-26.04'
+        with:
+          platforms: s390x
+
+      - name: Every installation scenario
+        if: matrix.os == 'ubuntu-26.04'
+        shell: bash
+        run: bash typescript/consumer-tests/run.sh "$GITHUB_WORKSPACE/npm-packages" all
+
+      - name: The installation scenarios this OS can run
+        if: matrix.os != 'ubuntu-26.04'
+        shell: bash
+        run: >-
+          bash typescript/consumer-tests/run.sh "$GITHUB_WORKSPACE/npm-packages"
+          negative-unpublished plain omit-optional absent-native forced-wasi
+          negative-deleted-package negative-deleted-wasm bundlers
+
+  # The release tail. A release's run is dispatched by prepare-release.yml at master once the
+  # bump is pushed as A; pull requests and the weekly schedule never reach it. Everything below
+  # needs every board job above, through `forge`, so nothing is packed from a red board.
+  #
+  # The Forge is called at master. GitHub resolves that to one commit when the run is queued
+  # and records it in the run's referenced_workflows; every .hyperforge checkout below and the
+  # inventory's forge_sha use that commit, so the actions and scripts match the reusable
+  # workflows. The tag run later requires this commit to be an ancestor of its own Forge.
+  # The output is `revision`, not `sha`: CodeQL reads a checkout ref whose step, job or output
+  # name contains head, sha, commit, branch or ref as a pull request head, and in a read-only
+  # job it reports the checkout as a cache-poisoning step (actions/cache-poisoning/poisonable-step).
+  forge:
+    needs: [changes, core, build-static, build-android, core-checks, lint-csharp, lint-java,
+            lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
+            lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
+            test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,
+            test-nuget-package, test-npm-package, test-apple-mobile, test-android]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-26.04
     permissions:
-      actions: write
+      contents: read
+    outputs:
+      revision: ${{ steps.forge.outputs.revision }}
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Ask stage-native-binaries.yml to stage this run
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the Forge commit this run uses
+        id: forge
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh workflow run stage-native-binaries.yml --repo "$GITHUB_REPOSITORY" --ref master
-          -f head_sha="$GITHUB_SHA" -f ci_run_id="$GITHUB_RUN_ID"
+        run: |
+          set -euo pipefail
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith("SkunkWerkx/.github/")) | .sha] | unique | .[]')
+          [[ "$shas" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Expected one Forge commit in this run, got: ${shas:-none}"; exit 1; }
+          echo "revision=$shas" >> "$GITHUB_OUTPUT"
+
+      - name: Read the version this run was built at
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::rust/Cargo.toml has no stable X.Y.Z version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # The eight pack jobs, each packing this run's attested artifacts at this commit and
+  # attesting what it packs. The three reusable workflows carry the Forge's identity; the
+  # composites keep this repository's, which RubyGems.org, npmjs.com and the inventory's
+  # signer_repo for the gems, the npm tarballs, the CRAN tarball and the C archives require.
+  nuget-org-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-pack-nuget.yml@master
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      csproj_path: csharp/HyperTabular/HyperTabular.csproj
+      runtimes_dir: csharp/HyperTabular/runtimes
+      android: true
+      source_run_id: ${{ github.run_id }}
+
+  crate-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-pack-crate.yml@master
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+  maven-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-pack-maven.yml@master
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    with:
+      crate: hypertabular
+      java_resources_dir: java/src/main/resources/native
+      java_jni: true
+      source_run_id: ${{ github.run_id }}
+    secrets:
+      MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+      MAVEN_SIGNING_KEY_PASSWORD: ${{ secrets.MAVEN_SIGNING_KEY_PASSWORD }}
+
+  ruby-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/pack-gems
+        with:
+          run_id: ${{ github.run_id }}
+          source_sha: ${{ github.sha }}
+          token: ${{ github.token }}
+
+  npm-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/pack-npm
+        with:
+          run_id: ${{ github.run_id }}
+          source_sha: ${{ github.sha }}
+          token: ${{ github.token }}
+
+  # The CRAN source tarball: preserved and inventoried with everything else, uploaded by no job.
+  r-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/pack-r
+        with:
+          source_sha: ${{ github.sha }}
+
+  # The C archives, one per platform, for the GitHub Release: this run's attested libraries
+  # with the header and c/'s package files.
+  c-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/pack-c
+        with:
+          run_id: ${{ github.run_id }}
+          source_sha: ${{ github.sha }}
+          token: ${{ github.token }}
+
+  pypi-pack:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/verify-wheels
+        with:
+          run_id: ${{ github.run_id }}
+          source_sha: ${{ github.sha }}
+          token: ${{ github.token }}
+
+  # One inventory of every registry input, every GitHub Release file and every shipped native,
+  # each verified against its build provenance at this commit: inventory.json names A, this
+  # run and the Forge above, and is attested here; release-packages is preserved for 90 days
+  # in this run. The release attestation over every file is the tag's (release.yml).
+  release-prepare:
+    needs: [changes, forge, nuget-org-pack, crate-pack, maven-pack, ruby-pack, npm-pack, r-pack,
+            c-pack, pypi-pack]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/release-prepare
+        with:
+          version: ${{ needs.forge.outputs.version }}
+          source_sha: ${{ github.sha }}
+          ci_run_id: ${{ github.run_id }}
+          forge_sha: ${{ needs.forge.outputs.revision }}
+          token: ${{ github.token }}
+          npm_packages: true
+          cran_packages: true
+
+  # CodeQL on this commit, before B exists: codeql.yml is dispatched at master with this run's
+  # id (its Swift leg unpacks this run's attested Swift zips, since no checkout carries a core),
+  # held to have scanned this commit (master must still be A), watched to completion, and the
+  # code scanning dashboard must then hold no open alert on master. The only job here that may
+  # start a workflow; it checks nothing out.
+  codeql:
+    needs: [changes, forge]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: write
+      security-events: read
+    steps:
+      - name: Scan this commit and require a clean code scanning dashboard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/codeql.yml/dispatches" \
+            -f ref=master -f "inputs[ci_run_id]=${{ github.run_id }}" --jq '.workflow_run_id')
+          [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::codeql.yml dispatch returned no run id"; exit 1; }
+          scanned=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)
+          [ "$scanned" = "$GITHUB_SHA" ] || { echo "::error::codeql.yml scanned $scanned, not this commit: master moved beyond A; prepare again"; exit 1; }
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 60
+          open=$(gh api --paginate "repos/$GITHUB_REPOSITORY/code-scanning/alerts?state=open&ref=refs/heads/master&per_page=100" --jq '.[].number' | wc -l | tr -d ' ')
+          [ "$open" = 0 ] || { echo "::error::$open open code scanning alerts on master; fix them and prepare again"; exit 1; }
+
+  # B, the release commit: this run's attested Swift zips' checksums and the version written
+  # into the root Package.swift and committed on master, which must still be A, with the
+  # Release-Source-SHA, Release-CI-Run-ID and Release-Forge-SHA trailers release.yml's
+  # tag-guard reads back. The only job here that may write the repository. The tag is pushed
+  # at B by hand (RELEASING.md).
+  stage-release:
+    needs: [changes, forge, release-prepare, codeql]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      attestations: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: ${{ needs.forge.outputs.revision }}
+          path: .hyperforge
+          persist-credentials: false
+      - uses: ./.hyperforge/.github/actions/stage-release
+        with:
+          source_sha: ${{ github.sha }}
+          ci_run_id: ${{ github.run_id }}
+          forge_sha: ${{ needs.forge.outputs.revision }}
+          token: ${{ github.token }}
+
+  # The one status to read. Master is not branch-protected and a skipped job satisfies a
+  # required check, so this job, which always runs, is red when any job above failed or was
+  # cancelled, or was skipped while `changes` said it should run (a too-narrow classifier
+  # would otherwise be invisible); .github/scripts/pr_board.py has the gates, one per job.
+  pr-board:
+    needs: [changes, core, build-static, build-android, core-checks, lint-csharp, lint-java,
+            lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
+            lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
+            test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,
+            test-nuget-package, test-npm-package, test-apple-mobile, test-android, forge,
+            nuget-org-pack, crate-pack, maven-pack, ruby-pack, npm-pack, r-pack, c-pack,
+            pypi-pack, release-prepare, codeql, stage-release]
+    if: always()
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every needed job green, or skipped with its gate off
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CHANGES: ${{ toJSON(needs.changes.outputs) }}
+        run: python3 .github/scripts/pr_board.py

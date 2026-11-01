@@ -12,8 +12,8 @@ final class Columns {
     let widest: Int
 
     // Everything the core is handed, allocated once and never moved: it is given addresses.
-    let specs: UnsafeMutablePointer<hypertabular_column_spec>
-    let buffers: UnsafeMutablePointer<hypertabular_column_buffer>
+    let specs: UnsafeMutablePointer<HyperTabularColumnSpec>
+    let buffers: UnsafeMutablePointer<HyperTabularColumnBuffer>
     let valueBase: [UnsafeMutableRawPointer]
     let verdictBase: [UnsafeMutablePointer<CellVerdict>]
 
@@ -49,10 +49,10 @@ final class Columns {
             verdicts.append(verdict)
             (specs + index).initialize(to: column.spec)
             (buffers + index).initialize(
-                to: hypertabular_column_buffer(
+                to: HyperTabularColumnBuffer(
                     values: value,
                     verdicts: UnsafeMutableRawPointer(verdict).assumingMemoryBound(
-                        to: hypertabular_cell_verdict.self)))
+                        to: HyperTabularCellVerdict.self)))
         }
         valueBase = values
         verdictBase = verdicts

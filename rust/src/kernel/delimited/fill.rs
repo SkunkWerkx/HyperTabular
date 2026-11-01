@@ -67,6 +67,8 @@ impl RawDialect {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
+    /// The dialect, as `init` copied it in. The core's own, as `started` and `reserved`
+    /// are: a caller reads the fields that follow and writes none of them.
     separator: u8,
     quoting: u8,
     skip_blank_lines: u8,
@@ -84,6 +86,42 @@ pub struct State {
     /// The structural failure that ended this input, if `code` is nonzero.
     pub failure: Failure,
 }
+
+impl RawDialect {
+    /// The layout's size in bytes.
+    pub const SIZE: u32 = 4;
+}
+
+impl State {
+    /// The layout's size in bytes, which `hypertabular_delimited_state_size` also reports.
+    pub const SIZE: u32 = 64;
+}
+
+// The two layouts pinned as crate::kernel::abi pins the rest, here because the state's
+// private fields are visible only in this module.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(size_of::<RawDialect>() == RawDialect::SIZE as usize && align_of::<RawDialect>() == 1);
+    assert!(offset_of!(RawDialect, separator) == 0);
+    assert!(offset_of!(RawDialect, quoting) == 1);
+    assert!(offset_of!(RawDialect, skip_blank_lines) == 2);
+    assert!(offset_of!(RawDialect, engine) == 3);
+    assert!(
+        align_of::<u64>() != 8
+            || (size_of::<State>() == State::SIZE as usize && align_of::<State>() == 8)
+    );
+    assert!(offset_of!(State, separator) == 0);
+    assert!(offset_of!(State, quoting) == 1);
+    assert!(offset_of!(State, skip_blank_lines) == 2);
+    assert!(offset_of!(State, engine) == 3);
+    assert!(offset_of!(State, line) == 4);
+    assert!(offset_of!(State, records) == 8);
+    assert!(offset_of!(State, offset) == 16);
+    assert!(offset_of!(State, expected) == 24);
+    assert!(offset_of!(State, started) == 28);
+    assert!(offset_of!(State, reserved) == 29);
+    assert!(offset_of!(State, failure) == 32);
+};
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// Offsets are 31 bits: a [`Span`]'s length keeps its top bit for a flag.

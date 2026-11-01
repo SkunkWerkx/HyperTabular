@@ -202,22 +202,22 @@ public final class Workbook implements AutoCloseable {
         this.container = container;
         this.read = read;
         state = arena.allocate(Native.workbookStateSize(), 8);
-        Scratch scratch = stingy ? new Scratch(arena, 1, 1, 1, 0) : new Scratch(arena, Native.WINDOW_MIN, 1024, 64, 0);
+        Scratch scratch = stingy ? new Scratch(arena, 1, 1, 1, 0) : new Scratch(arena, Abi.WINDOW_MIN, 1024, 64, 0);
         try {
             MemorySegment opened = open(scratch);
-            format = switch (opened.get(ValueLayout.JAVA_INT, Native.OPENED_FORMAT)) {
+            format = switch (opened.get(ValueLayout.JAVA_INT, Abi.OPENED_FORMAT)) {
                 case 1 -> WorkbookFormat.XLSX;
                 case 3 -> WorkbookFormat.NUMBERS;
                 default -> WorkbookFormat.ODS;
             };
-            dateSystem = ExcelEpoch.fromCode(opened.get(ValueLayout.JAVA_INT, Native.OPENED_EPOCH))
+            dateSystem = ExcelEpoch.fromCode(opened.get(ValueLayout.JAVA_INT, Abi.OPENED_EPOCH))
                     .orElseThrow(() -> new IllegalStateException(CONTRACT_VIOLATION));
 
-            MemorySegment filled = settle(scratch.drive(this, state, Native.Book.SHEETS));
-            int count = (int) filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS);
+            MemorySegment filled = settle(scratch.drive(this, state, Abi.Book.SHEETS));
+            int count = (int) filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ROWS);
             SheetInfo[] listed = new SheetInfo[count];
             for (int index = 0; index < count; index++) {
-                long at = index * 3L * Native.SPAN_BYTES;
+                long at = index * 3L * Abi.SPAN_BYTES;
                 MemorySegment cells = scratch.cells.segment;
                 byte[] name = scratch.arenaBytes(
                         cells.get(ValueLayout.JAVA_INT, at), cells.get(ValueLayout.JAVA_INT, at + 4));
@@ -234,19 +234,16 @@ public final class Workbook implements AutoCloseable {
 
             // The shared strings take no more room than their part inflates to; asking for it
             // once saves growing into it.
-            long bound = Math.min(opened.get(ValueLayout.JAVA_LONG, Native.OPENED_STRINGS_BYTES), 1L << 28);
+            long bound = Math.min(opened.get(ValueLayout.JAVA_LONG, Abi.OPENED_STRINGS_BYTES), 1L << 28);
             if (!stingy && scratch.arena.bytes() < bound) {
                 scratch.arena.resize(bound, scratch.arena.bytes());
             }
-            filled = settle(scratch.drive(this, state, Native.Book.STRINGS));
-            strings = copy(scratch.arena.segment, filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ARENA_USED), 1);
-            table = copy(
-                    scratch.cells.segment,
-                    filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS) * Native.SPAN_BYTES,
-                    4);
+            filled = settle(scratch.drive(this, state, Abi.Book.STRINGS));
+            strings = copy(scratch.arena.segment, filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ARENA_USED), 1);
+            table = copy(scratch.cells.segment, filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ROWS) * Abi.SPAN_BYTES, 4);
 
-            filled = settle(scratch.drive(this, state, Native.Book.STYLES));
-            kinds = copy(scratch.arena.segment, filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS), 1);
+            filled = settle(scratch.drive(this, state, Abi.Book.STYLES));
+            kinds = copy(scratch.arena.segment, filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ROWS), 1);
         } finally {
             scratch.close();
         }
@@ -260,17 +257,17 @@ public final class Workbook implements AutoCloseable {
 
     /** Opening starts over when it is refused, and reports through its own shape. */
     private MemorySegment open(Scratch scratch) {
-        MemorySegment opened = arena.allocate(Native.OPENED_BYTES, 8);
+        MemorySegment opened = arena.allocate(Abi.OPENED_BYTES, 8);
         while (true) {
-            int code = Native.book(Native.Book.OPEN, state, container, scratch.buffers(null), opened);
-            long needed = opened.get(ValueLayout.JAVA_LONG, Native.OPENED_NEEDED);
+            int code = Native.book(Abi.Book.OPEN, state, container, scratch.buffers(null), opened);
+            long needed = opened.get(ValueLayout.JAVA_LONG, Abi.OPENED_NEEDED);
             switch (code) {
-                case Native.OK -> {
+                case Abi.OK -> {
                     return opened;
                 }
-                case Native.ERR_WINDOW -> scratch.window.resize(Math.max(needed, scratch.window.bytes() + 1), 0);
-                case Native.ERR_ARENA -> scratch.arena.resize(Math.max(needed, scratch.arena.bytes() + 1), 0);
-                case Native.ERR_STRUCTURE -> throw TabularException.from(opened, 32);
+                case Abi.ERR_WINDOW -> scratch.window.resize(Math.max(needed, scratch.window.bytes() + 1), 0);
+                case Abi.ERR_ARENA -> scratch.arena.resize(Math.max(needed, scratch.arena.bytes() + 1), 0);
+                case Abi.ERR_STRUCTURE -> throw TabularException.from(opened, 32);
                 default -> throw new IllegalStateException(CONTRACT_VIOLATION);
             }
         }
@@ -279,8 +276,8 @@ public final class Workbook implements AutoCloseable {
     /** What a call's answer means: done, or a structural failure; anything else is this binding's bug. */
     static MemorySegment settle(int code, MemorySegment filled) {
         return switch (code) {
-            case Native.OK -> filled;
-            case Native.ERR_STRUCTURE -> throw TabularException.from(filled, Native.FAILURE_CODE);
+            case Abi.OK -> filled;
+            case Abi.ERR_STRUCTURE -> throw TabularException.from(filled, Abi.FAILURE_CODE);
             default -> throw new IllegalStateException(CONTRACT_VIOLATION);
         };
     }
@@ -410,12 +407,12 @@ public final class Workbook implements AutoCloseable {
 
     /** Writes the workbook's tables into a buffers block, for a call that reads a sheet. */
     void tables(MemorySegment buffers) {
-        buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_STRINGS, strings);
-        buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_STRINGS + 8, strings.byteSize());
-        buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_TABLE, table);
-        buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_TABLE + 8, table.byteSize() / Native.SPAN_BYTES);
-        buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_KINDS, kinds);
-        buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_KINDS + 8, kinds.byteSize());
+        buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_STRINGS, strings);
+        buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_STRINGS + 8, strings.byteSize());
+        buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_TABLE, table);
+        buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_TABLE + 8, table.byteSize() / Abi.SPAN_BYTES);
+        buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_KINDS, kinds);
+        buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_KINDS + 8, kinds.byteSize());
     }
 
     /**
@@ -452,16 +449,16 @@ public final class Workbook implements AutoCloseable {
         Scratch(Arena owner, long window, long arena, long cells, long rowSlots) {
             this.window = new Block(window, 8);
             this.arena = new Block(arena, 8);
-            this.cells = new Block(cells * Native.SPAN_BYTES, 4);
-            this.row = new Block(Math.max(rowSlots, 1) * Native.SLOT_BYTES, 8);
-            this.buffers = owner.allocate(Native.BUFFERS_BYTES, 8);
-            this.filled = owner.allocate(Native.FILLED_BYTES, 8);
+            this.cells = new Block(cells * Abi.SPAN_BYTES, 4);
+            this.row = new Block(Math.max(rowSlots, 1) * Abi.SLOT_BYTES, 8);
+            this.buffers = owner.allocate(Abi.BUFFERS_BYTES, 8);
+            this.filled = owner.allocate(Abi.FILLED_BYTES, 8);
             this.rowSlots = rowSlots;
         }
 
         /** Entries the cell table has room for. */
         long cellEntries() {
-            return cells.bytes() / Native.SPAN_BYTES;
+            return cells.bytes() / Abi.SPAN_BYTES;
         }
 
         /** Grows the row's slots to {@code slots}, keeping what they held: never shrinks them. */
@@ -469,25 +466,25 @@ public final class Workbook implements AutoCloseable {
             if (rowSlots >= slots) {
                 return;
             }
-            row.resize(Math.multiplyExact(slots, Native.SLOT_BYTES), rowSlots * Native.SLOT_BYTES);
+            row.resize(Math.multiplyExact(slots, Abi.SLOT_BYTES), rowSlots * Abi.SLOT_BYTES);
             rowSlots = slots;
         }
 
         byte[] arenaBytes(int offset, int span) {
-            return arena.segment.asSlice(offset, span & Native.SPAN_LENGTH).toArray(ValueLayout.JAVA_BYTE);
+            return arena.segment.asSlice(offset, span & Abi.SPAN_LENGTH).toArray(ValueLayout.JAVA_BYTE);
         }
 
         /** This scratch as the core takes it, with the workbook's tables when a sheet is being read. */
         MemorySegment buffers(Workbook book) {
             buffers.fill((byte) 0);
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_WINDOW, window.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_WINDOW + 8, window.bytes());
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ARENA, arena.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ARENA + 8, arena.bytes());
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_CELLS, cells.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_CELLS + 8, cells.bytes() / Native.SPAN_BYTES);
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ROW, row.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ROW + 8, rowSlots);
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WINDOW, window.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_WINDOW + 8, window.bytes());
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_ARENA, arena.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_ARENA + 8, arena.bytes());
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_CELLS, cells.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_CELLS + 8, cells.bytes() / Abi.SPAN_BYTES);
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_ROW, row.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_ROW + 8, rowSlots);
             if (book != null) {
                 book.tables(buffers);
             }
@@ -499,19 +496,19 @@ public final class Workbook implements AutoCloseable {
          * — with what the buffer held kept, which is what lets the core go on from where it
          * stopped. Returns the code it ended on and what it reported.
          */
-        Answer drive(Workbook book, MemorySegment state, Native.Book call) {
+        Answer drive(Workbook book, MemorySegment state, Abi.Book call) {
             return drive(book, state, call, null, false);
         }
 
         /**
-         * {@link #drive(Workbook, MemorySegment, Native.Book)}, for a fill when {@code columns}
+         * {@link #drive(Workbook, MemorySegment, Abi.Book)}, for a fill when {@code columns}
          * is given. {@code rowFollowsCells} grows the row's slots with the cell table, keeping
          * what they held — for the header of a sheet with no plan, whose slots are to hold
          * every cell the header row has, since a row the sheet repeats (an ODS
          * {@code number-rows-repeated}) is delivered again from them.
          */
-        Answer drive(Workbook book, MemorySegment state, Native.Book call, Columns columns, boolean rowFollowsCells) {
-            boolean tables = call == Native.Book.HEADER || columns != null;
+        Answer drive(Workbook book, MemorySegment state, Abi.Book call, Columns columns, boolean rowFollowsCells) {
+            boolean tables = call == Abi.Book.HEADER || columns != null;
             while (true) {
                 MemorySegment handed = buffers(tables ? book : null);
                 int code = columns == null
@@ -525,19 +522,18 @@ public final class Workbook implements AutoCloseable {
                                 columns.batchRows,
                                 handed,
                                 filled);
-                long needed = filled.get(ValueLayout.JAVA_LONG, Native.FILLED_NEEDED);
+                long needed = filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_NEEDED);
                 switch (code) {
-                    case Native.ERR_WINDOW -> {
+                    case Abi.ERR_WINDOW -> {
                         window.resize(Math.max(needed, window.bytes() + 1), window.bytes());
                         grown[0]++;
                     }
-                    case Native.ERR_ARENA -> {
+                    case Abi.ERR_ARENA -> {
                         arena.resize(Math.max(needed, arena.bytes() + 1), arena.bytes());
                         grown[1]++;
                     }
-                    case Native.ERR_CELLS -> {
-                        cells.resize(
-                                Math.max(needed * Native.SPAN_BYTES, cells.bytes() + Native.SPAN_BYTES), cells.bytes());
+                    case Abi.ERR_CELLS -> {
+                        cells.resize(Math.max(needed * Abi.SPAN_BYTES, cells.bytes() + Abi.SPAN_BYTES), cells.bytes());
                         grown[2]++;
                         if (rowFollowsCells) {
                             growRow(cellEntries());

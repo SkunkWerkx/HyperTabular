@@ -1,0 +1,25 @@
+[package]
+name = "rcore"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+# The core from crates.io at exactly this package's version, the way any Rust consumer of it
+# depends on it, and nothing else. prepare-release bumps the pin with DESCRIPTION, and
+# tools/vendor.sh refuses a pin that differs from rust/Cargo.toml: it resolves this version
+# from the checkout's rust/ and vendors that source into src/rust/vendor.tar.xz, beside the
+# HyperCast crate the core judges every cell with, so the package builds offline from the
+# published graph. `staticlib` is the core's no_std archive feature: the 14 C exports and the
+# panic handler, with no copy of Rust's standard library and none of HyperCast's symbols.
+[dependencies]
+hypertabular = { version = "=1.0.0", default-features = false, features = ["staticlib"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

@@ -1,9 +1,10 @@
 package hypertabular
 
-// The allocation claims, held as tests: every buffer is allocated when the reader is built,
-// so a batch — the one cgo crossing, and every column of it handed out — allocates nothing.
-// backend_static.go's shim is what makes the crossing itself free: nothing is pinned and
-// nothing escapes that was not already on the heap.
+// The allocation claims, held as tests: every buffer is allocated when the reader is built
+// (in its instance of the core, core.go) or grown when the core asks, so a batch — the one
+// call into the core, and every column of it handed out — allocates nothing. The input is
+// copied into the instance, the results are views of its memory (or decoded into buffers the
+// reader keeps), and nothing escapes that was not already on the heap.
 
 import (
 	"bytes"
@@ -163,8 +164,14 @@ func TestRowsAllocateNothing(t *testing.T) {
 		t.Fatalf("Read returned %v, %v", b, err)
 	}
 	// What the loop reads is checked after it, so that nothing in it is boxed for a message.
+	// TinyGo moves the closures a range-over-func loop is built from to the heap: three
+	// allocations a loop, whatever its length, and none a row.
+	loop := 0.0
+	if runtime.Compiler == "tinygo" {
+		loop = 3
+	}
 	rows, sum, bad := 0, 0, 0
-	assertAllocs(t, "Batch.All", 0, func() {
+	assertAllocs(t, "Batch.All", loop, func() {
 		rows, sum, bad = 0, 0, 0
 		for row := range b.All() {
 			// A fault is the one allocation a cell makes, here as through Get: the verdict

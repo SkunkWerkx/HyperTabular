@@ -75,9 +75,10 @@ require_relative "hypertabular/delimited_reader"
 require_relative "hypertabular/workbook"
 
 # --- backend selection, as hypercast makes its own: the Magnus extension, when present,
-# replaces the Fiddle crossing in place. Every native call and every byte of native memory is
-# behind HyperTabular::Runtime (Runtime::Delimited, Runtime::Book::Opened and ::Reading, and
-# Runtime.unescape), so that is all the extension redefines (rust/src/ruby_ext.rs): the
+# takes over the Fiddle crossing. Every native call and every byte of native memory is behind
+# HyperTabular::Runtime (Runtime::Delimited, Runtime::Book::Opened and ::Reading, and
+# Runtime.unescape), so that is all the extension defines in front of it, never over it
+# (rust/src/ruby_ext.rs; the FiddleBackend modules say why): the
 # constructors hand back objects of its own that answer the same methods with the same bytes,
 # and everything above them — the readers, the workbook, Batch and every value and verdict it
 # builds — is the same Ruby on either backend. It is how the precompiled platform gems ship,
