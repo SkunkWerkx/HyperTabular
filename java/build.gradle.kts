@@ -41,7 +41,7 @@ dependencies {
     api("io.github.skunkwerkx:hypercast:1.0.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("com.google.code.gson:gson:2.14.0")
+    testImplementation("com.google.code.gson:gson:2.15.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
