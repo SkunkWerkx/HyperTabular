@@ -17,6 +17,17 @@ const { test }: typeof import('node:test') = require('node:test')
 const hypercast = require('@skunkwerkx/hypercast') as typeof import('@skunkwerkx/hypercast')
 const api = require('../index.js') as typeof import('../index.js')
 const { Column, DelimitedReader, Workbook } = api
+// Under the WASI fallback on Windows no path reaches the module: napi-rs preopens the drive
+// root under its Windows name (`D:\`), which wasi-libc matches only before a `/`. Opening by
+// path is a recorded loss there (README), pinned below as the I/O error it is; every case is
+// still read, from bytes.
+const wasi =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native'
+const pathsUnreachable = wasi && process.platform === 'win32'
+
+function unreachable(label: string, outcome: Outcome<unknown>) {
+  assert.ok(!outcome.ok && outcome.error.kind === 'io', `${label}: ${JSON.stringify(outcome)}`)
+}
 type Batch = import('../index.js').Batch
 type Outcome<T> = import('../index.js').Outcome<T>
 type Value = import('../index.js').Value
@@ -420,6 +431,10 @@ test('delimited.json, from memory and from a file, every batch size and buffer',
           for (const [where, open] of sources) {
             const label = `${c.name} (${where}, ${batchRows} rows, buffer ${bufferBytes})`
             const plan = c.plan.map(columnOf)
+            if (pathsUnreachable && where === 'a file') {
+              unreachable(label, open(plan) as Outcome<unknown>)
+              continue
+            }
             const reader = opened(
               label,
               open(plan) as Outcome<InstanceType<typeof DelimitedReader>>,
@@ -473,7 +488,10 @@ test('workbook.json, by index and by name, header first and bound up front', () 
     const file = path.join(CORPUS, c.file)
     if (c.format === undefined) {
       // A file the core refuses: the refusal, never a throw.
-      const refused = Workbook.open(file)
+      if (pathsUnreachable) unreachable(c.name, Workbook.open(file))
+      const refused = pathsUnreachable
+        ? Workbook.fromBytes(new Uint8Array(readFileSync(file)))
+        : Workbook.open(file)
       assert.ok(!refused.ok, c.name)
       assertFailure(c.name, refused.error, c.failure as Failure)
       continue
@@ -525,6 +543,10 @@ test('workbook.json, by index and by name, header first and bound up front', () 
 
 test('the same workbook opened from its path', () => {
   const c = workbooks.find((each) => each.format !== undefined) as WorkbookCase
+  if (pathsUnreachable) {
+    unreachable(c.name, Workbook.open(path.join(CORPUS, c.file)))
+    return
+  }
   const book = opened(c.name, Workbook.open(path.join(CORPUS, c.file)))
   assert.equal(book.format, c.format)
   assert.deepEqual(book.sheets, c.sheets)

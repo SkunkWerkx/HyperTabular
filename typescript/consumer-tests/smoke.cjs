@@ -115,9 +115,23 @@ const delimited = readAll(reader)
 if (delimited.rows !== broken.rows.length || delimited.error?.failure?.byte !== broken.failure.byte)
   fail(`delimited case ${broken.name}: ${JSON.stringify(delimited)}`)
 
-// A workbook from its file: its rows, as many as the corpus lists.
+// A workbook from its file: its rows, as many as the corpus lists. Under the WASI fallback on
+// Windows no path reaches the module (the README's recorded loss): the path must be refused as
+// an I/O error, and the same file is read from its bytes.
 const sheetCase = load('workbook.json').find((c) => c.format !== undefined && !c.failure)
-const book = opened(sheetCase.file, Workbook.open(path.join(corpus, sheetCase.file)))
+const sheetFile = path.join(corpus, sheetCase.file)
+const unreachable = binding.__napiBindingTarget !== 'native' && process.platform === 'win32'
+if (unreachable) {
+  const refused = Workbook.open(sheetFile)
+  if (refused.ok || refused.error.kind !== 'io')
+    fail(`${sheetCase.file} by path under WASI on Windows: ${JSON.stringify(refused)}`)
+}
+const book = opened(
+  sheetCase.file,
+  unreachable
+    ? Workbook.fromBytes(new Uint8Array(fs.readFileSync(sheetFile)))
+    : Workbook.open(sheetFile),
+)
 const sheet = opened(
   sheetCase.name,
   book.sheet(

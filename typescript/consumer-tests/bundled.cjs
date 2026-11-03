@@ -32,6 +32,20 @@ const corpus = process.env.HYPERTABULAR_CORPUS
 if (!corpus) fail('HYPERTABULAR_CORPUS is not set')
 const load = (name) => JSON.parse(fs.readFileSync(path.join(corpus, name), 'utf8'))
 const sheetCase = load('workbook.json').find((c) => c.format !== undefined && !c.failure)
-const book = opened(sheetCase.file, Workbook.open(path.join(corpus, sheetCase.file)))
+const sheetFile = path.join(corpus, sheetCase.file)
+// On Windows no path reaches the WASI module (the README's recorded loss): the path must be
+// refused as an I/O error, and the same file is read from its bytes.
+const unreachable = process.platform === 'win32'
+if (unreachable) {
+  const refused = Workbook.open(sheetFile)
+  if (refused.ok || refused.error.kind !== 'io')
+    fail(`${sheetCase.file} by path under WASI on Windows: ${JSON.stringify(refused)}`)
+}
+const book = opened(
+  sheetCase.file,
+  unreachable
+    ? Workbook.fromBytes(new Uint8Array(fs.readFileSync(sheetFile)))
+    : Workbook.open(sheetFile),
+)
 if (book.format !== sheetCase.format) fail(`${sheetCase.file}: ${book.format}`)
 process.stdout.write('checks: i32 fault workbook OK\n')

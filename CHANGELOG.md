@@ -21,7 +21,9 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   Every cell is a `@skunkwerkx/hypercast` verdict, `{ ok: true, value }` or `{ ok: false,
   fault }`; opening, binding and reading return an `Outcome<T>` whose structural and argument
   errors are values, never thrown. Batches are copied out of the reader, and readers and sheets
-  have `close()`. `@skunkwerkx/hypercast` `^1.1.0` is a peer dependency. *(TypeScript)*
+  have `close()`. `@skunkwerkx/hypercast` `^1.1.0` is a peer dependency. Under the fallback
+  on Windows, opening by path is a recorded loss (an `io` error; `fromBytes` reads the same
+  file). *(TypeScript)*
 - **An R binding, as the source package `hypertabular`.** A C shim over the core's C ABI,
   built from a vendored copy of the core and HyperCast with Rust 1.89 or newer; R 4.2 and
   later. Every cell is a hypercast `hypercast_verdict` with the faulted text beside its span,

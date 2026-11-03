@@ -295,6 +295,10 @@ same, the suite is the same, and `isAvailable()` is `true`. What differs:
   through the module before any Rust runs. The module stays sound and the next call answers.
   The native addon never looks at an argument's prototype, so there these are answered like
   any other value.
+- On Windows, opening by path is a recorded loss: `DelimitedReader.open` and `Workbook.open`
+  answer an `io` error for every path, since the runtime preopens the drive root under its
+  Windows name (`D:\`), which the module's libc matches only before a `/`. Read the file
+  yourself and pass its bytes to `fromBytes`; the suite reads every case that way there.
 - Panics abort. `wasm32-wasip1` has no unwinder, so the fallback is built with
   `panic = "abort"`: a panic surfaces as `RuntimeError: unreachable` thrown from the call.
 - Bun 1.4.4 cannot run it: its `node:wasi` has no reactor `initialize`, so Bun with no native
