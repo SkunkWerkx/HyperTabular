@@ -65,25 +65,24 @@ final class Columns {
         this.planList = List.of(plan);
         this.batchRows = batchRows;
         int count = plan.length;
-        specs = arena.allocate(Math.max(count, 1) * Native.SPEC_BYTES, 4);
-        buffers = arena.allocate(Math.max(count, 1) * Native.BUFFER_BYTES, 8);
+        specs = arena.allocate(Math.max(count, 1) * Abi.SPEC_BYTES, 4);
+        buffers = arena.allocate(Math.max(count, 1) * Abi.BUFFER_BYTES, 8);
         values = new MemorySegment[count];
         verdicts = new MemorySegment[count];
         for (int index = 0; index < count; index++) {
             Column column = plan[index];
-            long spec = index * Native.SPEC_BYTES;
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_ORDINAL, column.ordinal());
-            specs.set(
-                    ValueLayout.JAVA_INT, spec + Native.SPEC_DOOR, column.door().code());
-            specs.set(ValueLayout.JAVA_INT, spec + Native.SPEC_PARAM, column.declared());
-            NativeValues.writeFormat(column.format(), specs, spec + Native.SPEC_FORMAT);
+            long spec = index * Abi.SPEC_BYTES;
+            specs.set(ValueLayout.JAVA_INT, spec + Abi.SPEC_ORDINAL, column.ordinal());
+            specs.set(ValueLayout.JAVA_INT, spec + Abi.SPEC_DOOR, column.door().code());
+            specs.set(ValueLayout.JAVA_INT, spec + Abi.SPEC_PARAM, column.declared());
+            NativeValues.writeFormat(column.format(), specs, spec + Abi.SPEC_FORMAT);
 
             // 8-aligned whatever the door, so every value reads through an aligned layout.
             values[index] = arena.allocate((long) batchRows * column.door().valueBytes(), 8);
-            verdicts[index] = arena.allocate(batchRows * Native.VERDICT_BYTES, 4);
-            long entry = index * Native.BUFFER_BYTES;
+            verdicts[index] = arena.allocate(batchRows * Abi.VERDICT_BYTES, 4);
+            long entry = index * Abi.BUFFER_BYTES;
             buffers.set(ValueLayout.ADDRESS, entry, values[index]);
-            buffers.set(ValueLayout.ADDRESS, entry + Native.BUFFER_VERDICTS, verdicts[index]);
+            buffers.set(ValueLayout.ADDRESS, entry + Abi.BUFFER_VERDICTS, verdicts[index]);
         }
         this.width = reach(plan);
     }

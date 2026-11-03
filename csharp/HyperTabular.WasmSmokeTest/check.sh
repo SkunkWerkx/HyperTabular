@@ -6,11 +6,12 @@
 #   (WasmNativeStrip=false), where the SDK skips its post-link wasm-opt: the archive has to be
 #   loadable as linked, with nothing rewriting it afterwards.
 #   Needs: the .NET SDK global.json pins with the wasm-tools and wasm-tools-net10 workloads
-#   (the second relinks the net10.0 legs), and chromium or Chrome
-#   (CHROMIUM=/path/to/browser to override); plus the nightly .github/hyper.json pins as
-#   wasm.toolchain, with rust-src and the wasm32-unknown-emscripten target, and emsdk on PATH,
-#   unless STATICLIB names an already-built libhypertabular.a to use instead — which is how
-#   CI runs it, with the archive hyper-build-wasm.yml just built.
+#   (the second relinks the net10.0 legs), chromium or Chrome
+#   (CHROMIUM=/path/to/browser to override) and Node 22 or newer, which drives it through
+#   browser.mjs; plus stable Rust with rust-src and the
+#   wasm32-unknown-emscripten target (the build sets RUSTC_BOOTSTRAP=1 for its -Zbuild-std),
+#   and emsdk on PATH, unless STATICLIB names an already-built libhypertabular.a to use
+#   instead — which is how CI runs it, with the archive hyper-build-wasm.yml just built.
 set -euo pipefail
 legs=("$@")
 [ "${#legs[@]}" -gt 0 ] || legs=(net11-release net11-debug net10-release net10-debug)
@@ -24,6 +25,8 @@ done
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$here/../.."
 chromium="${CHROMIUM:-$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v google-chrome-stable)}"
+node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+[ "$node_major" -ge 22 ] || { echo "check.sh needs Node 22 or newer for browser.mjs (found: ${node_major})" >&2; exit 2; }
 port="${PORT:-5099}"
 out="$(mktemp -d)"
 server=""
@@ -31,8 +34,7 @@ trap '[ -z "$server" ] || kill "$server" 2>/dev/null || true; rm -rf "$out"' EXI
 
 staticlib="${STATICLIB:-}"
 if [ -z "$staticlib" ]; then
-  toolchain="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("wasm", {}).get("toolchain", "stable"))' "$repo/.github/hyper.json")"
-  (cd "$repo/rust" && cargo +"$toolchain" wasm-staticlib)
+  (cd "$repo/rust" && RUSTC_BOOTSTRAP=1 cargo wasm-staticlib)
   staticlib="$repo/rust/target/wasm32-unknown-emscripten/release/libhypertabular.a"
 fi
 dest="$here/../HyperTabular/runtimes/browser-wasm/nativeassets/net11.0"
@@ -51,17 +53,29 @@ run() {
   # The legs share bin/ and obj/ as well.
   rm -rf "${here:?}/obj" "${here:?}/bin" "${out:?}/$leg"
   (cd "$here" && dotnet publish "$@" -o "$out/$leg")
-  (cd "$out/$leg/wwwroot" && exec python3 -m http.server "$port" >/dev/null 2>&1) &
+  (cd "$out/$leg/wwwroot" && exec python3 -m http.server "$port" --bind 127.0.0.1 >/dev/null 2>&1) &
   server=$!
   sleep 1
-  "$chromium" --headless=new --no-sandbox --disable-gpu --virtual-time-budget=60000 \
-    --dump-dom "http://localhost:$port/" 2>/dev/null > "$out/$leg.html"
+  # A port already taken (a server left from another run) would serve some other app here.
+  kill -0 "$server" 2>/dev/null || { echo "== $leg: port $port is in use (PORT=<n> to pick another)"; server=""; return 1; }
+  # Real time, not --dump-dom's virtual time, which ran out while a Debug build was still
+  # compiling its unstripped module and dumped the page at 97% (browser.mjs has the detail).
+  local loaded=0
+  node "$here/browser.mjs" "$chromium" "http://127.0.0.1:$port/" 120 > "$out/$leg.html" || loaded=$?
   kill "$server" 2>/dev/null || true
   wait "$server" 2>/dev/null || true
   server=""
   echo "== $leg: results"
   sed -n '/id="results"/,/<\/pre>/p' "$out/$leg.html"
-  grep -q '<title>PASS</title>' "$out/$leg.html" || { echo "== $leg: FAIL"; return 1; }
+  [ "$loaded" -eq 0 ] && grep -q '<title>PASS</title>' "$out/$leg.html" && return 0
+  # What the page reached instead: its title, how far Blazor's loader had got (the percentage
+  # it writes on <html>), whether its error banner was shown, and the size.
+  echo "== $leg: FAIL"
+  echo "   title: $(grep -o '<title>[^<]*</title>' "$out/$leg.html" | head -1)"
+  echo "   load:  $(grep -o 'blazor-load-percentage: [0-9.]*%' "$out/$leg.html" | head -1 || echo 'not started')"
+  echo "   error banner: $(grep -o '<div id="blazor-error-ui"[^>]*>' "$out/$leg.html" | head -1)"
+  echo "   dom bytes: $(wc -c < "$out/$leg.html")"
+  return 1
 }
 
 for leg in "${legs[@]}"; do

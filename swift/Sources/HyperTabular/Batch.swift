@@ -1,6 +1,11 @@
 import Foundation
 import HyperTabularCore
 
+/// The bit of a span's `len` that says its text is in the arena (`HyperTabularSpan_FLAG`),
+/// as the field's own type: the header spells it as a plain literal, which Swift imports as
+/// `Int`.
+let spanFlag = UInt32(HyperTabularSpan_FLAG)
+
 /// The rows one ``DelimitedReader/read()`` or ``Sheet/read()`` delivered, as typed columns:
 /// the same type for delimited text and for a sheet of a workbook.
 ///
@@ -35,7 +40,7 @@ public final class Batch {
     // The batch in hand, as the core left it: the table that locates each cell — perRow
     // entries a row, the last of them the row's line — what an unflagged span indexes (the
     // window of input, or a workbook's shared strings), and what a flagged one indexes.
-    private var cells: UnsafeBufferPointer<hypertabular_span> = UnsafeBufferPointer(start: nil, count: 0)
+    private var cells: UnsafeBufferPointer<HyperTabularSpan> = UnsafeBufferPointer(start: nil, count: 0)
     private var perRow = 0
     private var base: UnsafeRawPointer?
     private var arena: UnsafeRawPointer?
@@ -52,7 +57,7 @@ public final class Batch {
 
     /// Makes the batch the rows the core just wrote.
     func fill(
-        rows: Int, cells: UnsafeMutableBufferPointer<hypertabular_span>, perRow: Int,
+        rows: Int, cells: UnsafeMutableBufferPointer<HyperTabularSpan>, perRow: Int,
         base: UnsafeRawPointer?, arena: UnsafeMutableBufferPointer<UInt8>
     ) -> Batch {
         self.rows = rows
@@ -154,10 +159,10 @@ public final class Batch {
     }
 
     /// The bytes a span names: in the arena when it is flagged, in the base when not.
-    private func located(_ span: hypertabular_span) -> UnsafeRawBufferPointer {
-        let from = span.len & HYPERTABULAR_SPAN_FLAG != 0 ? arena : base
+    private func located(_ span: HyperTabularSpan) -> UnsafeRawBufferPointer {
+        let from = span.len & spanFlag != 0 ? arena : base
         return UnsafeRawBufferPointer(
-            start: from.map { $0 + Int(span.offset) }, count: Int(span.len & ~HYPERTABULAR_SPAN_FLAG))
+            start: from.map { $0 + Int(span.offset) }, count: Int(span.len & ~spanFlag))
     }
 
     /// The cell of a ``Door/text`` column: its bytes, untrimmed — quotes resolved for
@@ -174,7 +179,7 @@ public final class Batch {
         guard verdict(column, row: row).isOk else {
             return nil
         }
-        return located(load(column, row, as: hypertabular_span.self))
+        return located(load(column, row, as: HyperTabularSpan.self))
     }
 
     /// The cell of a ``Door/text`` column as a `String`, or `nil` for an empty cell.
@@ -197,9 +202,9 @@ public final class Batch {
         if workbook {
             return located(cell)
         }
-        let length = Int(cell.len & ~HYPERTABULAR_SPAN_FLAG)
+        let length = Int(cell.len & ~spanFlag)
         let written = UnsafeRawBufferPointer(start: base.map { $0 + Int(cell.offset) }, count: length)
-        guard cell.len & HYPERTABULAR_SPAN_FLAG != 0 else {
+        guard cell.len & spanFlag != 0 else {
             return written
         }
         // A quoted cell with an escaped quote in it: unescaped, as the core cast it.

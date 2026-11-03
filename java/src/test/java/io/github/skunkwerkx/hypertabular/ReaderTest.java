@@ -211,7 +211,7 @@ final class ReaderTest {
     @Test
     void textIsAViewOfTheCallersOwnMemory() {
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment input = arena.allocateFrom(ValueLayout.JAVA_BYTE, utf8("plain,\"say \"\"hi\"\"\"\n"));
+            MemorySegment input = nativeCopy(arena, utf8("plain,\"say \"\"hi\"\"\"\n"));
             List<Column> plan = List.of(Column.text(0), Column.text(1));
             try (DelimitedReader reader = DelimitedReader.of(input, Dialect.CSV.withHeader(false), plan)) {
                 assertNull(reader.header());
@@ -406,7 +406,7 @@ final class ReaderTest {
             for (int row = 0; row < 1000; row++) {
                 text.append(row).append(",x\n");
             }
-            MemorySegment input = arena.allocateFrom(ValueLayout.JAVA_BYTE, utf8(text.toString()));
+            MemorySegment input = nativeCopy(arena, utf8(text.toString()));
             List<Column> plan = List.of(Column.i32(0));
             Dialect dialect = Dialect.CSV.withHeader(false);
             try (DelimitedReader reader = DelimitedReader.windowed(input, dialect, plan, 64, 17)) {
@@ -421,8 +421,7 @@ final class ReaderTest {
                 assertEquals(499_500, sum);
             }
             // A record no window can hold cannot be read, and says so — once, for good.
-            MemorySegment wide =
-                    arena.allocateFrom(ValueLayout.JAVA_BYTE, utf8("1,x\n2,a very long cell indeed\n3,x\n"));
+            MemorySegment wide = nativeCopy(arena, utf8("1,x\n2,a very long cell indeed\n3,x\n"));
             try (DelimitedReader reader = DelimitedReader.windowed(wide, dialect, plan, 64, 17)) {
                 assertEquals(1, reader.read().rows());
                 TabularException failure = assertThrows(TabularException.class, reader::read);
@@ -661,7 +660,7 @@ final class ReaderTest {
         Files.write(file, ORDERS);
         Watched stream = new Watched(ORDERS);
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment memory = arena.allocateFrom(ValueLayout.JAVA_BYTE, ORDERS);
+            MemorySegment memory = nativeCopy(arena, ORDERS);
             List<DelimitedReader> readers = List.of(
                     DelimitedReader.of(ORDERS, Dialect.CSV),
                     DelimitedReader.of(memory, Dialect.CSV),
@@ -830,5 +829,12 @@ final class ReaderTest {
                 }
             }
         }
+    }
+
+    // By hand rather than Arena.allocateFrom, which JDK 21 lacks: testFloor runs this too.
+    private static MemorySegment nativeCopy(Arena arena, byte[] bytes) {
+        MemorySegment copy = arena.allocate(bytes.length);
+        MemorySegment.copy(bytes, 0, copy, ValueLayout.JAVA_BYTE, 0, bytes.length);
+        return copy;
     }
 }

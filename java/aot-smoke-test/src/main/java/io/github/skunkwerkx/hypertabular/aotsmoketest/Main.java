@@ -20,9 +20,11 @@ import io.github.skunkwerkx.hypertabular.TabularFailure;
 import io.github.skunkwerkx.hypertabular.Workbook;
 import io.github.skunkwerkx.hypertabular.WorkbookFormat;
 import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.foreign.ValueLayout;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -31,6 +33,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -38,9 +41,10 @@ import java.util.UUID;
 /**
  * Crosses every native entry point the binding declares — the version probe, the header,
  * the fill through every door, the unescape behind a raw read, and every workbook entry point — against the real
- * native library: on an ordinary JVM ({@code ./gradlew :aot-smoke-test:run}) and as a
- * GraalVM Native Image binary ({@code :aot-smoke-test:nativeRun}). Exit code 0 only if
- * every cell lands as expected.
+ * native library: on an ordinary JVM ({@code ./gradlew :aot-smoke-test:run}, where JDK 25
+ * takes the jar's FFM path), on the floor JDK ({@code :aot-smoke-test:runFloor}, where its JNI
+ * base loads) and as a GraalVM Native Image binary ({@code :aot-smoke-test:nativeRun}). Exit
+ * code 0 only if every cell lands as expected.
  */
 public final class Main {
     private Main() {}
@@ -82,6 +86,10 @@ public final class Main {
         if (!Tabular.isAvailable()) {
             System.out.println("smoke test FAILED: the native library did not load.");
             System.exit(1);
+        }
+        requireExpectedBackend();
+        if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) {
+            requireNoJniLibraryEmbedded();
         }
         String version = Tabular.nativeVersion();
         expect("native library " + version, version.matches("\\d+\\.\\d+\\.\\d+"));
@@ -278,5 +286,68 @@ public final class Main {
 
         System.out.println(failures == 0 ? "smoke test passed." : "smoke test FAILED (" + failures + ").");
         System.exit(failures == 0 ? 0 : 1);
+    }
+
+    // The path the JDK picked from the multi-release jar: FFM on 25 and later, the JNI base
+    // below that, told apart by Native's natives and, on a JVM, its class file major.
+    private static void requireExpectedBackend() {
+        boolean ffm = Runtime.version().feature() >= 25;
+        String expected = ffm ? "ffm" : "jni";
+        Class<?> core;
+        try {
+            core = Class.forName("io.github.skunkwerkx.hypertabular.Native");
+        } catch (ClassNotFoundException e) {
+            throw new AssertionError("Native is not loadable", e);
+        }
+        long natives = Arrays.stream(core.getDeclaredMethods())
+                .filter(m -> Modifier.isNative(m.getModifiers()))
+                .count();
+        require(natives == (ffm ? 0 : 15), expected + " expected, but Native declares " + natives + " natives");
+        String major = "n/a (image)";
+        if (System.getProperty("org.graalvm.nativeimage.imagecode") == null) {
+            try (InputStream in = core.getResourceAsStream("Native.class")) {
+                require(in != null, "Native.class is not readable as a resource");
+                DataInputStream data = new DataInputStream(in);
+                data.readInt();
+                data.readUnsignedShort();
+                int found = data.readUnsignedShort();
+                require(found == (ffm ? 69 : 65), expected + " expected, but Native is class file major " + found);
+                major = Integer.toString(found);
+            } catch (IOException e) {
+                throw new AssertionError("Native.class is unreadable", e);
+            }
+        }
+        System.out.println("backend: " + expected + " (" + natives + " natives, class major " + major + ")");
+    }
+
+    // The image must not carry the JNI library: only the FFM path survives into it (the base
+    // Native is unreachable), and the resource globs cover the core library alone. The JNI
+    // library names are the three the Java side resolves, for each of the eight RIDs.
+    private static void requireNoJniLibraryEmbedded() {
+        String[] rids = {
+            "win-x64",
+            "win-arm64",
+            "osx-x64",
+            "osx-arm64",
+            "linux-x64",
+            "linux-arm64",
+            "linux-musl-x64",
+            "linux-musl-arm64"
+        };
+        String[] names = {"libhypertabular_jni.so", "libhypertabular_jni.dylib", "hypertabular_jni.dll"};
+        for (String rid : rids) {
+            for (String name : names) {
+                require(
+                        Main.class.getResource("/native/" + rid + "/" + name) == null,
+                        "the image embeds the JNI library /native/" + rid + "/" + name);
+            }
+        }
+        System.out.println("image: no JNI library embedded");
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) {
+            throw new AssertionError(message);
+        }
     }
 }

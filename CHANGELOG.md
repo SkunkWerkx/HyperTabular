@@ -1,16 +1,55 @@
 # Changelog
 
-All eight packages in this repository — the `hypertabular` crate and the C#, Java, Go,
-Python, Ruby, PHP and Swift bindings — share one coordinated version, so one changelog covers
-all of them. Each entry marks which packages it actually affects.
+Every package in this repository — the `hypertabular` crate, the C#, Java, Go, Python, Ruby,
+PHP, Swift, TypeScript and R bindings, and the C archives with their C++ header — shares one
+coordinated version, so one changelog covers all of them. Each entry marks which packages it
+actually affects.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Every binding now needs HyperCast 1.1.0, whose own release comes first: its NuGet package,
+jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C archive.
+
 ### Added
 
+- **A TypeScript binding for Node and Bun, on npm as `@skunkwerkx/hypertabular`.** A napi-rs
+  addon over the core, ten packages: the root, eight platform addons and the WebAssembly
+  fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.13.0 || >=23.5.0` and Bun.
+  Every cell is a `@skunkwerkx/hypercast` verdict, `{ ok: true, value }` or `{ ok: false,
+  fault }`; opening, binding and reading return an `Outcome<T>` whose structural and argument
+  errors are values, never thrown. Batches are copied out of the reader, and readers and sheets
+  have `close()`. `@skunkwerkx/hypercast` `^1.1.0` is a peer dependency. Under the fallback
+  on Windows, opening by path is a recorded loss (an `io` error; `fromBytes` reads the same
+  file). *(TypeScript)*
+- **An R binding, as the source package `hypertabular`.** A C shim over the core's C ABI,
+  built from a vendored copy of the core and HyperCast with Rust 1.89 or newer; R 4.2 and
+  later. Every cell is a hypercast `hypercast_verdict` with the faulted text beside its span,
+  and a structural failure is a `hypertabular_failure` value; declaration misuse is an error,
+  as in Python and PHP. Positions count from 1. Requires hypercast 1.1.0 on CRAN, which is
+  submitted first. *(R)*
+- **C: one archive per platform on the GitHub Release.** `hypertabular-<version>-<rid>.tar.gz`
+  (`.zip` on Windows) for the eight desktop RIDs, android-arm64, android-x64, iOS, the iOS
+  simulator, Mac Catalyst on both architectures, and wasi-wasm32 (the Apple mobile and
+  WebAssembly ones static only): the generated header, the shared and static libraries,
+  `hypertabularConfig.cmake` and `hypertabular.pc`. The C header stands alone: it carries
+  HyperCast's value types and numeric format under the HyperTabular prefix. *(C)*
+- **C++: `hypertabular.hpp` in every C archive.** A header-only C++17 binding over the C header
+  and HyperCast's `hypercast.hpp` (1.1.0 or later): every cell is a `hypercast::Verdict<T>`,
+  and opening, binding and reading return a `hypertabular::Result<T>`, everything `noexcept`.
+  A C++ program finds both archives; it links HyperCast's library only if it calls HyperCast's
+  own doors. *(C++)*
+- **Python: a source distribution.** `hypertabular-<version>.tar.gz` now ships with the
+  wheels, so where no wheel fits, pip falls back to building from source (Rust 1.89 or newer
+  and a C linker), with HyperCast's own sdist beside it where HyperCast has no wheel; CI
+  proves that build on x86-64 glibc 2.17 and on musl. Attested like the wheels. *(Python)*
+- **Release plumbing for npm, CRAN, PIE and the C archives.** The preparation run packs,
+  attests and preserves the ten npm tarballs, the R source tarball (both corpora and every
+  workbook fixture they read), the 18 PHP extension zips and the C archives; the tag publishes
+  npm through Trusted Publishing and attaches the zips and archives to the GitHub Release, and
+  the R tarball goes to CRAN by hand from the preserved bytes. *(repository only)*
 - **C# — .NET 10 is supported, on desktop, server and in the browser.** The package builds
   `net10.0` and `net11.0` from one source, and package validation holds their public APIs
   identical. On .NET 10 it covers Windows, Linux (glibc and musl) and macOS, framework-dependent
@@ -26,6 +65,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **PHP — breaking: the package is a native extension, installed with PIE.** `pie install
+  skunkwerkx/hypercast:<version>` and then `pie install skunkwerkx/hypertabular:<version>`
+  install `ext-hypertabular`, an ext-php-rs extension that requires `ext-hypercast` 1.1 and
+  hands out its classes for every cell; 18 pre-packaged zips (PHP 8.3, 8.4 and 8.5 on Linux
+  x64 and arm64, glibc and musl, macOS arm64 and Windows x64; no Intel macOS), attached to the
+  GitHub Release. `ext-ffi`, `php/src` and its committed libraries are gone, and the floor is
+  PHP 8.3. The API keeps its names and behaviour, with these differences: `Batch`, `Row`,
+  `Sheet` and `Header` cannot be constructed; rows come through a forward-only `RowIterator`;
+  `Workbook::sheet()` raises a `TypeError` for anything but an int or a string; and
+  `Tabular::isAvailable()` is true only when ext-hypercast is loaded. Stubs ship in
+  `php/stubs/`. *(PHP)*
+- **Rust — minimum Rust is now 1.89** (was 1.88), the floor the Hyper* crates share. Builds
+  from this repository and the Python sdist need `rustc` 1.89. *(Rust, Python)*
+- **Go — one backend: the core translated to Go source, no cgo, no binary in git.** wasm2go
+  translates the core's `wasm32-wasip1` build into `go/internal/core/core.go`, so
+  `CGO_ENABLED=0` builds every GOOS and GOARCH, TinyGo and stock Go's `js` and `wasip1`
+  included. `staticlib/`, the static and TinyGo backends, the `unsupported` files, the core
+  freshness test and the `hypertabular_local` tag are gone. Each reader runs its own instance
+  of the core; text in memory is copied in by chunks, and a buffer past the core's 4 GiB is an
+  error. It is slower than the cgo binding it replaces, measured on an Apple M6 on 2026-11-01:
+  2–3.7x per read (delimited 64.3 ms against 17.5 ms, an xlsx read 736 ms against 274 ms),
+  with several times the memory (126 MiB against 21.7 MiB for the xlsx read); `go/README.md`
+  has every row. The corpus tests are now `TestCorpus*`. Requires HyperCast's Go module
+  v1.1.0. *(Go)*
+- **Java runs on JDK 21.** The jar is multi-release: its base reaches the core through JNI,
+  from a library (`libhypertabular_jni`) built for every platform, and JDK 25 and later keep
+  FFM. The API, verdicts, exceptions and messages are the same on both, except that the load
+  failure names the path's own library. On JDK 21, code that names `MemorySegment` needs
+  `--enable-preview`; on the module path, `--enable-native-access` names
+  `io.github.skunkwerkx.hypercast` as well. Requires HyperCast 1.1.0. *(Java)*
+- **Swift — the core comes from the GitHub Release, not from git.** The root `Package.swift`
+  takes `HyperTabularCore.artifactbundle.zip` and `HyperTabularCoreApple.xcframework.zip` by
+  URL and checksum, written at release by the preparation run; `HYPERTABULAR_LOCAL_CORE` and
+  the core freshness test are gone (`.github/scripts/local-core.sh` builds the checkout's own).
+  Requires HyperCast 1.1.0. *(Swift)*
+- **Python — requires `hypercast>=1.1.0`.** *(Python)*
+- **The C header is generated.** `include/hypertabular.h` comes from the core's exports and
+  the types they take, by cbindgen, with every ABI layout pinned and carried as a `*_SIZE`
+  constant; Swift's bundle carries the same file, and Swift now uses its names. `Span::FLAG` is
+  written as the literal it is. *(core, Swift)*
+- **One dispatch prepares and attests, one tag publishes.** `prepare-release.yml` bumps, dates
+  the CHANGELOG heading, runs the full board, packs every registry input, attests each package
+  and the inventory, preserves them for 90 days and commits the staging commit; pushing
+  `vX.Y.Z` at it verifies the preserved bytes, signs the release attestation from the tag and
+  publishes. `stage-native-binaries.yml` is gone, with every committed binary; CodeQL runs on
+  the preparation commit and must leave no open alert before the staging commit exists.
+  *(repository only)*
+- **The pull-request board runs only what the pull request could have broken.** The Rust core
+  on all seven hosts first, then one job per host and binding, each started only when its
+  tree, the core or the workflows changed, after its lint passed once on a Linux arm64 runner;
+  `pr-board` is the one status to read. The release-mode board keeps its coverage and adds the
+  core's suite, both corpora included, on big-endian s390x under QEMU. *(repository only)*
+- **The Blazor archive is built on stable Rust**, with `-Zbuild-std` under `RUSTC_BOOTSTRAP=1`
+  for that one build, no longer on a pinned nightly. *(repository only)*
 - **Python — the `cp314-cp314t` wheel is gone.** Each platform ships two wheels where it
   shipped three, `cp311-abi3` for CPython 3.11 and newer with the GIL and `cp315-abi3.abi3t`
   for 3.15 and newer with or without it: 17 wheels a release where 1.0.0 had 25. The
@@ -49,16 +142,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The static library links without dead-stripping.** A plain `cc app.c libhypertabular.a`
+  failed with an undefined `rust_eh_personality`; the static library now carries a weak hidden
+  definition, so two Hyper* archives, or a Rust program with std's own, link as one. *(core)*
+- **The shared library names itself.** Its macOS install name is
+  `@rpath/libhypertabular.dylib` and its Linux and Android soname `libhypertabular.so`, so a
+  program linked against it finds it through its rpath or the loader's search path. *(core)*
 - **C# — a Debug Blazor WebAssembly build loads** (the same failure as
   [HyperUuid#50](https://github.com/SkunkWerkx/HyperUuid/issues/50)). Chromium refused an
   unstripped Debug build's `dotnet.native.wasm` with "module uses a mix of legacy and new
   exception handling instructions": the package translated the archive's legacy exception
   handling with a `wasm-opt` pass that rides the SDK's post-link step, and the SDK skips that
-  step for an unstripped module. The archive no longer needs translating: it is built on a
-  pinned nightly with `-Zbuild-std`, for plain wasm, so it holds no exception-handling
-  instructions and none of the features .NET 10's toolchain rejects (dotnet/runtime#132858),
-  and the package's `--translate-to-exnref` item is gone. The same build is what lets .NET 10
-  link it, and the archive in the package shrinks from 3.6 MB to 663 KB. *(C#)*
+  step for an unstripped module. The archive no longer needs translating: it is built with
+  `-Zbuild-std`, on stable Rust with `RUSTC_BOOTSTRAP=1` for that one build, for plain wasm,
+  so it holds no exception-handling instructions and none of the features .NET 10's toolchain
+  rejects (dotnet/runtime#132858), and the package's `--translate-to-exnref` item is gone. The
+  same build is what lets .NET 10 link it, and the archive in the package shrinks from 3.6 MB
+  to 663 KB. *(C#)*
+- **Ruby — `require "hypertabular"` is silent under `ruby -w`.** 1.0.0 printed "method
+  redefined" and "previous definition" lines for `Runtime::Delimited.start`, its `.version`
+  and `Runtime.unescape` whenever the Magnus extension loaded: the Fiddle definitions sat on
+  the singleton classes, where the extension then defined its own. They now live in
+  `FiddleBackend` modules those owners extend, so the extension's definitions go in front of
+  them through the ancestor chain and nothing is redefined, as in HyperUuid and HyperCast.
+  Method lookup and both backends' behaviour are unchanged; `spec/native_backend_spec.rb`
+  requires the gem under warnings and requires an empty stderr. *(ruby)*
 
 ## [1.0.0] — 2026-10-25
 

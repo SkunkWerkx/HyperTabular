@@ -45,12 +45,23 @@ php-ext = "rustc --release --lib --crate-type cdylib --features php --target-dir
 ruby-ext = "rustc --release --lib --crate-type cdylib --features ruby --target-dir target/ruby"
 # The static library the NuGet package links into a Blazor WebAssembly app, without std, so
 # that it links beside another Hyper* library's. `-Zbuild-std` compiles core and
-# compiler_builtins with the target section's flags above, so it needs the nightly
-# `.github/hyper.json` pins as `wasm.toolchain`, with rust-src: `cargo +<pin> wasm-staticlib`.
-# On stable it stops at cargo's nightly-only error. Output:
+# compiler_builtins with the target section's flags above. It is a nightly flag, which stable
+# cargo takes only with RUSTC_BOOTSTRAP=1 set for that one command, and it needs rust-src:
+# `RUSTC_BOOTSTRAP=1 cargo wasm-staticlib`. Without the variable it stops at cargo's
+# nightly-only error. The flag carries no stability promise, so CI's archive guard and Blazor
+# legs are what prove each new stable release still builds it. Cargo caches rustc's target
+# cfg in target/.rustc_info.json without regard to the variable, so after any plain cargo
+# command for this target the build quietly loses the unstable cfgs (compiler_builtins drops
+# its f16 and f128 intrinsics), and keeps what its build script made of them. CI's build is
+# the first cargo command in a fresh checkout; locally, delete that file and
+# target/wasm32-unknown-emscripten/ before building. Output:
 # target/wasm32-unknown-emscripten/release/libhypertabular.a.
 wasm-staticlib = "rustc -Zbuild-std=core,compiler_builtins --release --lib --target wasm32-unknown-emscripten --crate-type staticlib --no-default-features --features staticlib"
-# The static library the bindings that link the core take.
+# The same no_std static library for any other target: `cargo staticlib --target <triple>`.
+# Consumers that link one rather than load the shared library (Swift on Linux and
+# WebAssembly, a C# Native AOT publish, a C program) take it, and the forge's
+# static-libs/build-static-libs.sh runs this for each target. Built on the `staticlib` profile (Cargo.toml), which is release plus panics that
+# abort.
 staticlib = "rustc --profile staticlib --lib --crate-type staticlib --no-default-features --features staticlib"
 # The proof that no export can panic. With std and unwinding, or it would prove nothing.
 no-panic = "rustc --release --lib --crate-type cdylib --features no-panic --target-dir target/no-panic -- -C link-arg=-Wl,--no-undefined"

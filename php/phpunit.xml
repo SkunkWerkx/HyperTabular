@@ -5,6 +5,11 @@
          colors="true"
          failOnWarning="true"
          failOnRisky="true">
+    <php>
+        <!-- The workbook corpus, decoded, is some 40 MB, and its data provider and the replay
+             with every buffer starting at one element each hold a copy. -->
+        <ini name="memory_limit" value="512M"/>
+    </php>
     <testsuites>
         <testsuite name="hypertabular">
             <directory>tests</directory>

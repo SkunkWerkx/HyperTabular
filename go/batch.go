@@ -32,8 +32,10 @@ type Batch struct {
 	base     []byte
 	arena    []byte
 	workbook bool
-	// scratch is where Raw unescapes a quoted delimited cell.
+	// scratch is where Raw unescapes a quoted delimited cell, and core the delimited
+	// reader's instance of the core, which does the unescaping.
 	scratch []byte
+	core    *native
 }
 
 // fill makes the batch the rows the core just wrote.
@@ -287,7 +289,7 @@ func (b *Batch) Raw(column, row int) []byte {
 	if len(b.scratch) < len(raw) {
 		b.scratch = make([]byte, max(len(raw), 256))
 	}
-	written := nativeUnescape(raw, b.scratch)
+	written := b.core.unescape(raw, b.scratch)
 	return b.scratch[:written:written]
 }
 

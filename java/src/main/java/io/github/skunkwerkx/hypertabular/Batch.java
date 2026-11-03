@@ -177,7 +177,7 @@ public final class Batch implements Iterable<Row> {
      */
     public int line(int row) {
         Objects.checkIndex(row, rows);
-        long entry = ((long) row * perRow + perRow - 1) * Native.SPAN_BYTES;
+        long entry = ((long) row * perRow + perRow - 1) * Abi.SPAN_BYTES;
         return cells.get(INT, entry + (workbook ? 0 : 4));
     }
 
@@ -188,12 +188,12 @@ public final class Batch implements Iterable<Row> {
     /** The reason code of the cell at ({@code column}, {@code row}): {@code 0} when it cast. */
     private int code(int column, int row) {
         Objects.checkIndex(row, rows);
-        return columns.verdicts[column].get(INT, row * Native.VERDICT_BYTES + 8);
+        return columns.verdicts[column].get(INT, row * Abi.VERDICT_BYTES + 8);
     }
 
     private <T> Fault<T> fault(int column, int row) {
         MemorySegment verdict = columns.verdicts[column];
-        long at = row * Native.VERDICT_BYTES;
+        long at = row * Abi.VERDICT_BYTES;
         return NativeValues.fault(verdict.get(INT, at + 8), verdict.get(INT, at), verdict.get(INT, at + 4));
     }
 
@@ -234,7 +234,7 @@ public final class Batch implements Iterable<Row> {
      * @return the column's verdict array
      */
     public MemorySegment verdicts(int column) {
-        return columns.verdicts[column].asSlice(0, rows * Native.VERDICT_BYTES).asReadOnly();
+        return columns.verdicts[column].asSlice(0, rows * Abi.VERDICT_BYTES).asReadOnly();
     }
 
     /**
@@ -355,7 +355,7 @@ public final class Batch implements Iterable<Row> {
     /** The bytes a span names, read-only: the arena's when it is flagged, the base's when not. */
     private MemorySegment bytes(int offset, int span) {
         MemorySegment bytes =
-                span < 0 ? arena.asSlice(offset, span & Native.SPAN_LENGTH) : base.asSlice(baseStart + offset, span);
+                span < 0 ? arena.asSlice(offset, span & Abi.SPAN_LENGTH) : base.asSlice(baseStart + offset, span);
         return bytes.asReadOnly();
     }
 
@@ -424,7 +424,7 @@ public final class Batch implements Iterable<Row> {
         MemorySegment value = columns.values[column];
         int offset = value.get(INT, row * 8L);
         int span = value.get(INT, row * 8L + 4);
-        int length = span & Native.SPAN_LENGTH;
+        int length = span & Abi.SPAN_LENGTH;
         // UTF-16 never takes more units than UTF-8 takes bytes, a replacement included.
         if (chars == null || chars.length - charsUsed < length) {
             // A view handed out earlier keeps the old array alive and unchanged; the new one
@@ -469,7 +469,7 @@ public final class Batch implements Iterable<Row> {
         MemorySegment value = columns.values[column];
         int at = value.get(INT, row * 8L);
         int span = value.get(INT, row * 8L + 4);
-        int length = span & Native.SPAN_LENGTH;
+        int length = span & Abi.SPAN_LENGTH;
         int room = destination.length - offset;
         return span < 0
                 ? decode(arena, at, length, destination, offset, room)
@@ -580,14 +580,14 @@ public final class Batch implements Iterable<Row> {
         Objects.checkIndex(row, rows);
         Objects.checkIndex(column, columns.plan.length);
         int at = workbook ? column : columns.plan[column].ordinal();
-        long entry = ((long) row * perRow + at) * Native.SPAN_BYTES;
+        long entry = ((long) row * perRow + at) * Abi.SPAN_BYTES;
         int offset = cells.get(INT, entry);
         int span = cells.get(INT, entry + 4);
         if (workbook || span >= 0) {
             return bytes(offset, span);
         }
         // A quoted cell with an escaped quote in it: unescaped, as the core cast it.
-        int length = span & Native.SPAN_LENGTH;
+        int length = span & Abi.SPAN_LENGTH;
         if (scratch == null) {
             scratch = new Block(Math.max(length, 256), 1);
         } else if (scratch.bytes() < length) {

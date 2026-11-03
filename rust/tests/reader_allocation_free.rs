@@ -3,23 +3,32 @@
 //! batches; after them a read allocates nothing, whether the text is a slice, a stream,
 //! or a sheet of a workbook. A counting allocator watches.
 //!
-//! One `#[test]` function on purpose: the counter is process-wide and `cargo test` spawns
-//! a thread per test function.
+//! The count is the test thread's own: a reader runs on its caller's thread and starts
+//! none, while the harness's threads allocate as they please (a process-wide count once
+//! caught four of theirs on linux-arm64).
 
 #[path = "support/packages.rs"]
 mod packages;
 
 use hypertabular::{Column, DateOrder, DelimitedReader, Dialect, SheetOptions, Workbook};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // Const-initialised and without a destructor, so reading it never allocates.
+    static COUNTED: Cell<bool> = const { Cell::new(false) };
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        if COUNTED.try_with(Cell::get).unwrap_or(false) {
+            ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -50,6 +59,7 @@ fn steady<E: std::fmt::Debug>(
 
 #[test]
 fn a_read_allocates_nothing_once_the_reader_is_warm() {
+    COUNTED.set(true);
     let mut text = b"id,amount,when,name,note\n".to_vec();
     for row in 0..20_000 {
         text.extend_from_slice(

@@ -167,8 +167,8 @@ func TestAFarOrdinalWithoutAHeaderIsReadInBoundedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.cells) != far+2 {
-		t.Errorf("a cell table of %d entries, not one row of %d", len(r.cells), far+2)
+	if r.cellsCap != far+2 {
+		t.Errorf("a cell table of %d entries, not one row of %d", r.cellsCap, far+2)
 	}
 	rows := 0
 	for {

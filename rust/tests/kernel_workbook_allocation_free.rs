@@ -7,8 +7,9 @@
 //! `check-core.sh` proves the same of the shipped library a different way (it imports no
 //! allocator); this is the proof for the code as the test suite builds it.
 //!
-//! One `#[test]` function on purpose: the counter is process-wide and `cargo test` spawns
-//! a thread per test function.
+//! The count is the test thread's own: the core runs on its caller's thread and starts
+//! none, while the harness's threads allocate as they please (a process-wide count once
+//! caught four of theirs on linux-arm64).
 
 #[path = "support/packages.rs"]
 mod packages;
@@ -21,15 +22,23 @@ use hypertabular::kernel::abi::{
 use hypertabular::kernel::door::Door;
 use hypertabular::kernel::workbook::{Memory, State, book, rows};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // Const-initialised and without a destructor, so reading it never allocates.
+    static COUNTED: Cell<bool> = const { Cell::new(false) };
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        if COUNTED.try_with(Cell::get).unwrap_or(false) {
+            ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -182,6 +191,7 @@ impl Room {
 
 #[test]
 fn allocation_free() {
+    COUNTED.set(true);
     // Everything the caller owns, allocated before the count starts.
     let xlsx = packages::xlsx_generated(5, 400, u64::from(WIDTH), true);
     let stored = packages::xlsx_generated(6, 400, u64::from(WIDTH), false);

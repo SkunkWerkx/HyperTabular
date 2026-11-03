@@ -71,16 +71,23 @@ module HyperTabular
       # The cell-table entries the reader holds.
       def cell_entries = @cells_cap
 
-      # The loaded core's version word, major << 16 | minor << 8 | patch.
-      def self.version
-        Runtime.function(:hypertabular_version).call
+      # The two entry points the Magnus extension also defines, in a module this class extends
+      # so the extension's definitions go in front of them instead of redefining them (see
+      # Runtime::FiddleBackend).
+      module FiddleBackend
+        # The loaded core's version word, major << 16 | minor << 8 | patch.
+        def version
+          Runtime.function(:hypertabular_version).call
+        end
+
+        # +dialect+ is the four bytes of a RawDialect. Nil when the core refuses it.
+        def start(dialect)
+          reader = new
+          reader.send(:init, dialect) ? reader : nil
+        end
       end
 
-      # +dialect+ is the four bytes of a RawDialect. Nil when the core refuses it.
-      def self.start(dialect)
-        reader = new
-        reader.send(:init, dialect) ? reader : nil
-      end
+      extend FiddleBackend
 
       def initialize
         @header = Runtime.function(:hypertabular_delimited_header)

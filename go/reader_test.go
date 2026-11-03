@@ -3,7 +3,7 @@ package hypertabular
 // Binding-level behavior the corpus can't express: the plan as a projection, text handed out
 // without copying, the raw text of a cell, the errors a caller's own mistakes get, how a
 // broken input and a failing source end a read, and the paths the reader takes only for
-// unusual shapes — a plan wider than the shim's stack table, a header wider than the first
+// unusual shapes — a wide plan of 300 columns, a header wider than the first
 // name table, an escaped cell larger than the arena, a record larger than the row ceiling.
 
 import (
@@ -55,8 +55,8 @@ func end(t *testing.T, r *DelimitedReader) {
 	}
 }
 
-// The version the linked core reports is the crate's own: the archive on the link line is
-// the one this checkout builds. A device run (Android, through
+// The version the compiled-in core reports is the crate's own: internal/core/core.go is the
+// translation of the crate this checkout builds. A device run (Android, through
 // .github/scripts/android_device_test.sh) has no source tree and is handed the version.
 func TestNativeVersionIsTheCratesVersion(t *testing.T) {
 	if want := os.Getenv("HYPERTABULAR_CRATE_VERSION"); want != "" {
@@ -112,7 +112,8 @@ func TestAPlanIsAProjection(t *testing.T) {
 
 // Every door, on the same text HyperCast's own Go door is asked about directly: the value
 // and the fault have to be the ones it gives. Both cores are in this binary — this
-// module's archive and the one the hypercast package links — and this is them agreeing.
+// module's translated core and the one the hypercast package translates — and this is them
+// agreeing.
 func TestEveryDoorSaysWhatHyperCastSays(t *testing.T) {
 	euro := hypercast.NumFormat{DecimalSep: ",", GroupSep: ".", Styles: hypercast.AllStyles, Currency: "€"}
 	type door struct {
@@ -469,7 +470,11 @@ func TestASourcesErrorEndsTheRead(t *testing.T) {
 }
 
 func TestOpenDelimitedOwnsItsFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "orders.tsv")
+	directory, ok := tempDir(t)
+	if !ok {
+		t.Skip("no temporary directory to write a file in")
+	}
+	path := filepath.Join(directory, "orders.tsv")
 	if err := os.WriteFile(path, []byte("id\tname\n1\talice\n2\tbob\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +503,7 @@ func TestOpenDelimitedOwnsItsFile(t *testing.T) {
 		t.Errorf("the slices kept past Close: %q", names)
 	}
 
-	if _, err := OpenDelimited(filepath.Join(t.TempDir(), "missing.csv"), CSV, nil); !errors.Is(err, os.ErrNotExist) {
+	if _, err := OpenDelimited(missingPath(t, "missing.csv"), CSV, nil); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a missing file: %v", err)
 	}
 	// A plan the constructor refuses does not leave the file open behind it (on Windows, an
@@ -545,9 +550,9 @@ func TestAnEmptyPlanCountsRows(t *testing.T) {
 	}
 }
 
-// A plan wider than the fill shim's stack table takes its other path: the column table on
-// the C heap for the length of the call.
-func TestAPlanWiderThanTheShimsStackTable(t *testing.T) {
+// A wide plan: three hundred columns, every one of them laid out in the core's memory and
+// read back each batch, with the collector running between batches.
+func TestAWidePlan(t *testing.T) {
 	const width, rows = 150, 40
 	var input strings.Builder
 	for row := 0; row < rows; row++ {

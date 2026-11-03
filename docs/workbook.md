@@ -251,17 +251,35 @@ best of five); it decodes the whole document at open, so its read is its open.
 | Binding (harness) | xlsx open | xlsx read | ods open | ods read | numbers open | numbers read |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Rust (Criterion) | 32 ms | 565 ms | 322 ms | 1.19 s | 820 ms | 1.16 s |
-| C# (BenchmarkDotNet) | 31 ms | 586 ms | 332 ms | 1.23 s | 873 ms | 1.22 s |
-| Java (JMH) | 39 ms | 606 ms | 343 ms | 1.25 s | 884 ms | 1.25 s |
-| Go (`go test -bench`) | 30 ms | 593 ms | 329 ms | 1.20 s | 842 ms | 1.21 s |
+| C# (BenchmarkDotNet) † | 31 ms | 586 ms | 332 ms | 1.23 s | 873 ms | 1.22 s |
+| Java (JMH), FFM on JDK 25 | 39 ms | 606 ms | 343 ms | 1.25 s | 884 ms | 1.25 s |
+| Go (`go test -bench`), the cgo binding ‡ | 30 ms | 593 ms | 329 ms | 1.20 s | 842 ms | 1.21 s |
 | Swift (package-benchmark) | 31 ms | 617 ms | 341 ms | 1.24 s | 942 ms | 1.32 s |
 | Python (pyperf) | 39 ms | 625 ms | 337 ms | 1.24 s | 845 ms | 1.22 s |
 | Ruby (benchmark-ips), Magnus | 29 ms | 1.00 s | 341 ms | 1.64 s | 827 ms | 1.62 s |
 | Ruby (benchmark-ips), Fiddle | 34 ms | 995 ms | 343 ms | 1.68 s | 885 ms | 1.69 s |
-| PHP (phpbench) | 41 ms | 775 ms | 345 ms | 1.42 s | 890 ms | 1.44 s |
+| PHP (phpbench), 1.0's FFI package § | 41 ms | 775 ms | 345 ms | 1.42 s | 890 ms | 1.44 s |
 | numbers-parser 4.22.0 (Python) | | | | | 66.8 s | 68.1 s |
 
-C#, Java, Go and Swift hand out views of the reader's buffers, so their read is the core's.
+Three rows predate what ships now; they stand as the receipts they are until their harness is
+run again on this machine.
+
+- † C# was measured with BenchmarkDotNet's in-process toolchain, before the harness moved to
+  running each benchmark in its own process.
+- ‡ **Go's row predates the translated core.** It measured the cgo binding, which linked the core
+  as a static archive and which Go no longer has. Its replacement is slower: on an Apple M6
+  (Mac18,5) on 2026-11-01, six runs of each interleaved in one session, every row a loss —
+  this xlsx read 736 ms against the cgo binding's 274 ms (2.7x), the ods read 1.40 s against
+  627 ms (2.2x), the numbers read 1.43 s against 722 ms (2.0x), the opens 1.9–2.8x, and a
+  300 000-row delimited read 3.7x — with several times the memory (126 MiB against 21.7 MiB
+  for the xlsx read). [`go/README.md`](../go/README.md#benchmarks) has every row. Not this
+  table's machine, so not comparable with the rows above.
+- § **PHP's row predates the extension.** It measured 1.0's Composer package over `ext-ffi`,
+  not the PIE extension that replaced it.
+- TypeScript, R and C++ have no benchmark harness yet.
+
+C#, Java, Go and Swift handed out views of the reader's buffers when this was taken, so their
+read was the core's.
 The build is layout-sensitive: Criterion's binary has read the ODS file about 10% slower
 than the same read in a plain release program, and compiling with every function and branch
 target aligned
@@ -304,18 +322,17 @@ To run them: `cargo bench --bench workbook_benchmarks` (rust/), `dotnet run -c R
 --project HyperTabular.Benchmarks` (csharp/), `./gradlew :benchmarks:jmh` (java/),
 `go test -run '^$' -bench Workbook -benchmem` (go/), `swift package benchmark`
 (swift/Benchmarks/), `python bench_workbook.py --fast` (python/), `ruby
-benchmark/workbook_benchmark.rb` (ruby/), `vendor/bin/phpbench run --report=aggregate` (php/);
-`python bench_numbers_parser.py` (python/, `pip install numbers-parser` first) is the
+benchmark/workbook_benchmark.rb` (ruby/), `composer bench` (php/, after `cargo php-ext` in
+rust/); `python bench_numbers_parser.py` (python/, `pip install numbers-parser` first) is the
 numbers-parser row. Each reads the files from `corpus/generate/out/`, or from
-`HYPERTABULAR_BENCH_DIR`. For a table taken on one core, build it from the checkout for the
-three bindings that otherwise link or load a committed binary
-(`.github/scripts/local-core.sh`, then Go with `-tags hypertabular_local`, Swift with
-`HYPERTABULAR_LOCAL_CORE=1` and PHP with `HYPERTABULAR_NATIVE_LIBRARY` naming
-`rust/target/release/libhypertabular.so`), and clear any library staged earlier under
-`csharp/HyperTabular/runtimes/`, `java/src/main/resources/native/`, `ruby/lib/hypertabular/native/`
-or `ruby/lib/hypertabular/<minor>/` (the Magnus extension `rake native:dev` stages): those are
-git-ignored, loaded in preference to `rust/target/release/`, and a stale one reads as a core
-that does not know the newest format.
+`HYPERTABULAR_BENCH_DIR`. For a table taken on one core, start from
+`.github/scripts/local-clean.sh`, which removes every library a binding stages and a later run
+would load in preference to `rust/target/release/` (a stale one reads as a core that does not
+know the newest format), then build each binding's core from the checkout as its README says:
+`cargo cdylib` in rust/ for the bindings that load the shared library (and `cargo build
+--release --locked --lib` in java/jni/ beside it for Java),
+`.github/scripts/local-core.sh` for Swift, `cargo php-ext` for PHP, and `go generate` in go/
+after any change to rust/, since Go's core is the committed translation.
 
 ## Parked
 

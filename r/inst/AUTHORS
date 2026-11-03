@@ -1,0 +1,1 @@
+No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only the hypertabular core and the hypercast crate it judges every cell with, both the work of this package's authors (Skunk Werkx, MIT).

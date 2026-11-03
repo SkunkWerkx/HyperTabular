@@ -53,7 +53,7 @@ public final class Sheet implements AutoCloseable {
                         ? new Workbook.Scratch(arena, 1, 1, 1, bound.width)
                         : new Workbook.Scratch(
                                 arena,
-                                Native.WINDOW_MIN,
+                                Abi.WINDOW_MIN,
                                 4096,
                                 Math.multiplyExact((long) options.batchRows(), checked.length + 1),
                                 bound.width);
@@ -66,7 +66,7 @@ public final class Sheet implements AutoCloseable {
                 // for, and the slots grow with it (Scratch.drive) while the header is read.
                 made = Workbook.stingy
                         ? new Workbook.Scratch(arena, 1, 1, 1, 1)
-                        : new Workbook.Scratch(arena, Native.WINDOW_MIN, 4096, 64, 64);
+                        : new Workbook.Scratch(arena, Abi.WINDOW_MIN, 4096, 64, 64);
             }
             scratch = made;
             // A copy of the opened state, which the core allows, so that this sheet's read is its own.
@@ -107,17 +107,17 @@ public final class Sheet implements AutoCloseable {
     }
 
     private Header readHeader() {
-        Workbook.Scratch.Answer answer = scratch.drive(book, state, Native.Book.HEADER, null, columns == null);
+        Workbook.Scratch.Answer answer = scratch.drive(book, state, Abi.Book.HEADER, null, columns == null);
         MemorySegment filled = Workbook.settle(answer.code(), answer.filled());
-        int count = (int) filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS);
+        int count = (int) filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ROWS);
         Header.Builder names = new Header.Builder(count);
         MemorySegment cells = scratch.cells.segment;
         for (int index = 0; index < count; index++) {
-            int offset = cells.get(ValueLayout.JAVA_INT, index * Native.SPAN_BYTES);
-            int span = cells.get(ValueLayout.JAVA_INT, index * Native.SPAN_BYTES + 4);
+            int offset = cells.get(ValueLayout.JAVA_INT, index * Abi.SPAN_BYTES);
+            int span = cells.get(ValueLayout.JAVA_INT, index * Abi.SPAN_BYTES + 4);
             names.add(
                     span < 0
-                            ? scratch.arena.segment.asSlice(offset, span & Native.SPAN_LENGTH)
+                            ? scratch.arena.segment.asSlice(offset, span & Abi.SPAN_LENGTH)
                             : book.strings().asSlice(offset, span));
         }
         return names.build();
@@ -147,7 +147,7 @@ public final class Sheet implements AutoCloseable {
         // what they hold is a header row the sheet may yet repeat.
         long cells = Math.multiplyExact((long) options.batchRows(), checked.length + 1);
         if (!Workbook.stingy && scratch.cellEntries() < cells) {
-            scratch.cells.resize(Math.multiplyExact(cells, Native.SPAN_BYTES), scratch.cells.bytes());
+            scratch.cells.resize(Math.multiplyExact(cells, Abi.SPAN_BYTES), scratch.cells.bytes());
         }
         scratch.growRow(bound.width);
         attach(bound);
@@ -221,12 +221,12 @@ public final class Sheet implements AutoCloseable {
         }
         Workbook.Scratch.Answer answer = scratch.drive(book, state, null, columns, false);
         MemorySegment filled = answer.filled();
-        int rows = (int) filled.get(ValueLayout.JAVA_LONG, Native.FILLED_ROWS);
-        if (answer.code() != Native.OK) {
-            if (answer.code() != Native.ERR_STRUCTURE) {
+        int rows = (int) filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_ROWS);
+        if (answer.code() != Abi.OK) {
+            if (answer.code() != Abi.ERR_STRUCTURE) {
                 throw new IllegalStateException(Workbook.CONTRACT_VIOLATION);
             }
-            TabularException broken = TabularException.from(filled, Native.FAILURE_CODE);
+            TabularException broken = TabularException.from(filled, Abi.FAILURE_CODE);
             if (rows == 0) {
                 throw failure = broken;
             }

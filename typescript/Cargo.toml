@@ -1,0 +1,45 @@
+[package]
+name = "hypertabular-napi"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The Rust binding over the core (rust/src: the readers, the workbook, the batch), as an rlib
+# without the `exports` feature: the addon calls the readers as Rust functions, so none of the
+# core's `hypertabular_*` C ABI symbols is exported from the .node (rust/Cargo.toml's `exports`
+# comment). `std` is named again, as that comment asks of a consumer that turns the defaults
+# off; it is the Rust binding, which the core alone is not.
+hypertabular = { path = "../rust", default-features = false, features = ["std"] }
+# The judge, for the two things the Rust binding does not re-export: the `RawNumFormat` a
+# HyperCast `NumFormat` crosses as (its `packed` bytes), and the version it reports. The same
+# crate the core links (Cargo unifies them), so a cell's verdict is that HyperCast's.
+hypercast = { version = "1.1.0", default-features = false }
+# napi6 for BigInt: the i64 and u64 doors answer a `bigint`, as HyperCast's own package does.
+napi = { version = "3", default-features = false, features = ["napi6"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# catch_unwind on every #[napi] function needs an unwinder to catch with, so this stays
+# explicit rather than inherited. The core is proven no-panic; the Rust binding over it panics
+# only on its own bug (a column read through another door's type), which this crate never asks.
+panic = "unwind"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# The WASI build only (`npm run build:wasi`). wasm32-wasip1's std ships no unwinder: rustc
+# refuses `-C panic=unwind` for it, and cargo never passes that flag for a profile that says
+# "unwind" (it emits `-C panic` only for abort), so the release profile's unwind above is
+# silently the target's abort there. This profile says abort explicitly, so the rustc line
+# carries `-C panic=abort` and a verbose build proves the strategy instead of relying on a
+# default. Panics abort in the .wasm and `catch_unwind` has nothing to catch; the README says so.
+[profile.wasi]
+inherits = "release"
+panic = "abort"

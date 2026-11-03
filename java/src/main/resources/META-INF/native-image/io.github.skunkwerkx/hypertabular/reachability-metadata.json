@@ -1,6 +1,8 @@
 {
   "resources": [
-    { "glob": "native/*/*" }
+    { "glob": "native/*/libhypertabular.so" },
+    { "glob": "native/*/libhypertabular.dylib" },
+    { "glob": "native/*/hypertabular.dll" }
   ],
   "foreign": {
     "downcalls": [

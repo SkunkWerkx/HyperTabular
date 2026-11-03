@@ -1052,10 +1052,17 @@ fn numbers_are_said_as_rust_says_them() {
     }
 }
 
-/// The core reads a number as Rust does, where what Rust reads is finite.
+/// The core reads a number as Rust does, where what Rust reads is finite, but for zero: every
+/// spelling of it is read (`-0`, `+0.00000000`, an underflow such as `-1e-999`), and the core
+/// only ever returns unsigned zero (HyperCast's contract: zero carries no sign).
 #[test]
 fn numbers_are_read_as_rust_reads_them() {
-    let expected = |text: &str| text.parse::<f64>().ok().filter(|value| value.is_finite());
+    let expected = |text: &str| {
+        text.parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| if value == 0.0 { 0.0 } else { value })
+    };
     let same = |text: &str| {
         let (ours, theirs) = (parse_f64(text.as_bytes()), expected(text));
         assert_eq!(
@@ -1070,6 +1077,10 @@ fn numbers_are_read_as_rust_reads_them() {
         "0",
         "-0",
         "+0",
+        "+0.00000000",
+        "-0.0",
+        "-.0e5",
+        "-0e-999",
         "5.",
         ".5",
         "+.5",
@@ -1092,6 +1103,7 @@ fn numbers_are_read_as_rust_reads_them() {
         "1e999",
         "-1e999",
         "1e-999",
+        "-1e-999",
         "4.9e-324",
         "2.4e-324",
         "1,234",

@@ -2,7 +2,11 @@
 
 Delimited text — CSV, TSV, any single-byte ASCII separator — and workbooks — XLSX, ODS and Numbers —
 read a batch at a time into typed columns, with a
-[HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell.
+[HyperCast](https://github.com/SkunkWerkx/HyperCast) `Verdict` for every cell, calling the
+native `libhypertabular` core in-process: through JNI on JDK 21 to 24, and through
+`java.lang.foreign` (FFM) downcalls on JDK 25 and later, from one multi-release jar. The API,
+the verdicts, the exceptions and their messages are the same on both. JDK 21 is the floor,
+as it is for HyperCast's jar.
 
 ```kotlin
 implementation("io.github.skunkwerkx:hypertabular:<version>")
@@ -20,7 +24,9 @@ id,name,score
 
 and `people.xlsx`, a workbook with one sheet named `People` holding the same table, header
 row first (open `people.csv` in a spreadsheet app, rename the sheet and save it as `.xlsx`).
-Run the program with `--enable-native-access=ALL-UNNAMED` ([below](#the-native-library)).
+Run the program with `--enable-native-access=ALL-UNNAMED` ([below](#the-native-library)). It
+names `MemorySegment`, which on JDK 21 means compiling and running it with `--enable-preview`
+([below](#memorysegment-on-jdk-21)); the row and cell accessors alone need nothing.
 
 ```java
 import io.github.skunkwerkx.hypercast.*;
@@ -225,26 +231,90 @@ Asking for another type is an `IllegalStateException`. Every numeric factory als
 ## The native library
 
 The jar bundles a native build for every supported platform (Linux glibc, Linux musl,
-macOS, Windows × x64/arm64) under `/native/{rid}/` and picks the right one at runtime.
+macOS, Windows × x64/arm64) under `/native/{rid}/` — the core, `libhypertabular`, and the JNI
+library built from it, `libhypertabular_jni` — and picks the right one at runtime.
 `Tabular.isAvailable()` and `Tabular.nativeVersion()` answer whether it resolved, and
 which version answered, without the first read being what finds out.
 
-JDK 25 is the floor, as it is for HyperCast's jar. The FFM downcalls are restricted
-methods: run with `--enable-native-access=ALL-UNNAMED` (or
-`--enable-native-access=io.github.skunkwerkx.hypertabular` on the module path).
+Which library loads is the JDK's choice, made by the multi-release jar: JDK 25 and later read
+`META-INF/versions/25` and call the core through FFM downcalls; JDK 21 to 24 read the base and
+load the JNI library, which holds the core inside it and hands each call the addresses of the
+same native buffers. JDK 21 is the floor, as it is for HyperCast's jar: Temurin builds no JDK 17
+for Windows arm64 or Alpine (musl) arm64, so a 17 floor could not be tested on every platform
+this jar ships. JDK 22 to 24 take the JNI path; they are past end of life and not tested.
+
+HyperCast's own jar (the dependency every verdict type comes from) loads a library of its own
+only when one of its doors is called; it and this jar's share a process on either path, each
+with its own copy of HyperCast's core.
+
+### Native access
+
+Loading native code is a restricted operation. On JDK 21 to 23 nothing is printed without the
+grant; from 24 a JVM without it prints a warning naming the method that loads native code —
+`java.lang.System::load` on 24, where the JNI path loads the library, and
+`java.lang.foreign.SymbolLookup::libraryLookup` on 25 and later. Grant it where the JVM is
+launched: `--enable-native-access=ALL-UNNAMED` on the class path, or on the module path
+`--enable-native-access=io.github.skunkwerkx.hypertabular,io.github.skunkwerkx.hypercast` (on
+25 HyperCast's `NativePlatform` opens this jar's library, so both modules are named).
+
+### Shaded and fat jars
+
+Keep `Multi-Release: true` (maven-shade's `ManifestResourceTransformer`, Shadow's
+`manifest`). Without it JDK 25 reads only the base and runs the JNI path: correct, and its
+warning names `System::load`.
+
+### `MemorySegment` on JDK 21
+
+`java.lang.foreign` is a preview API in JDK 21, so `javac --release 21` refuses code that
+names `MemorySegment` or `ValueLayout` unless it is compiled with `--enable-preview` (and run
+with it). The jar itself needs neither flag: the readers' buffers are native memory from
+`java.lang.foreign`'s memory API, which JDK 21 runs from ordinary class files. Code on 21 that
+reads through `get`, `verdict`, `string`, `chars` and `Row` and never names a segment compiles
+and runs as on any other JDK.
 
 ## Building
 
+The jar carries two native libraries per platform, so build both before Gradle runs: `cargo
+cdylib` in `rust/`, then `cargo build --release --locked --lib` in `java/jni/`. Gradle stages
+them into the jar and refuses a stale one: the build fails when either library is older than a
+source cargo read for it (its dep-info), or when one is built without the other, and the
+message gives the rebuild commands.
+
+Gradle, Spotless, javadoc and publishing run on JDK 25. `./gradlew test` runs the suite — the
+conformance corpus included — against the built jar on JDK 25 (the FFM path); `testFloor` runs
+the same suite on JDK 21 (the JNI path end to end, under `-Xcheck:jni`), `checkSuiteParity`
+fails unless both ran the same tests with none skipped, and `checkFloorApi` fails if the base
+references any JDK class, method or field that JDK 21 lacks: the base compiles
+`-source/-target 21` against JDK 25's API rather than `--release 21`, because `--release 21`
+refuses `java.lang.foreign` as preview. `gradle.properties` turns toolchain auto-download off,
+so pass the JDK 21 explicitly:
+
 ```sh
-cd ../rust; cargo cdylib      # the native library, staged from rust/target/release
-cd ../java
-./gradlew test javadoc        # the suite — the conformance corpus included — and the doc gate
-./gradlew :aot-smoke-test:run # every native entry point, crossed once, on a plain JVM
+cd ../rust; cargo cdylib                              # the core
+cd ../java/jni; cargo build --release --locked --lib  # the JNI library
+cd ..
+./gradlew test testFloor checkSuiteParity javadoc \
+  -Porg.gradle.java.installations.paths=<path to a JDK 21> \
+  -Porg.gradle.java.installations.auto-detect=false
+./gradlew :aot-smoke-test:run :aot-smoke-test:runFloor  # every native entry point, on 25 and on 21
 ```
 
-`./gradlew :aot-smoke-test:nativeRun` under a GraalVM `JAVA_HOME` runs the same program as
-a Native Image binary; the downcall signatures and the resource glob it needs ship inside
-the jar (`META-INF/native-image/`), so a consumer's own image needs no configuration.
+The JNI library's own checks run in `java/jni/`: `cargo fmt --check`, `cargo clippy --release
+--locked --all-targets -- -D warnings`, `cargo test --locked` (which also holds the table to
+`Native.java`'s declarations and every entry point to the no-panic attribute), and the proof
+that no native can panic, which needs GNU ld (Linux, or a Linux container):
+
+```sh
+CARGO_PROFILE_RELEASE_PANIC=unwind cargo build --release --locked --example no_panic --features no-panic
+```
+
+`./gradlew :aot-smoke-test:nativeRun` under a GraalVM `JAVA_HOME` runs the smoke program as
+a Native Image binary; the downcall signatures and the resource globs it needs (the core
+library's three names, never the JNI library's) ship inside the jar
+(`META-INF/native-image/`), so a consumer's own image needs no configuration. Native Image is
+built on GraalVM for JDK 25 and always takes the FFM path, and the smoke program fails if the
+image embeds the JNI library. `./gradlew :benchmarks:jmh -PjmhJdk=21` forks the benchmarks on
+the floor.
 
 ## Verifying provenance
 

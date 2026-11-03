@@ -543,23 +543,23 @@ public final class DelimitedReader implements AutoCloseable {
         // Asked of the library before anything is allocated: this is the call that loads
         // it, and a library that will not load must not leave an arena behind.
         long stateBytes = Native.stateSize();
-        if (stateBytes < Native.STATE_READ_BYTES) {
+        if (stateBytes < Abi.STATE_READ_BYTES) {
             throw new IllegalStateException("libhypertabular's state block is " + stateBytes
-                    + " bytes; this binding reads " + Native.STATE_READ_BYTES + " of it.");
+                    + " bytes; this binding reads " + Abi.STATE_READ_BYTES + " of it.");
         }
         this.arena = Arena.ofConfined();
         try {
             state = arena.allocate(stateBytes, 8);
-            filled = arena.allocate(Native.FILLED_BYTES, 8);
-            buffers = arena.allocate(Native.BUFFERS_BYTES, 8);
+            filled = arena.allocate(Abi.FILLED_BYTES, 8);
+            buffers = arena.allocate(Abi.BUFFERS_BYTES, 8);
             unescaped = new Block(4096, 1);
 
-            MemorySegment raw = arena.allocate(Native.DIALECT_BYTES, 1);
+            MemorySegment raw = arena.allocate(Abi.DIALECT_BYTES, 1);
             raw.set(BYTE, 0, (byte) dialect.separator());
             raw.set(BYTE, 1, (byte) (dialect.quoting() ? 1 : 0));
             raw.set(BYTE, 2, (byte) (dialect.skipBlankLines() ? 1 : 0));
             raw.set(BYTE, 3, (byte) 0);
-            if (Native.init(state, raw) != Native.OK) {
+            if (Native.init(state, raw) != Abi.OK) {
                 throw new IllegalArgumentException(
                         "Separator '" + dialect.separator() + "' is not tab or printable ASCII other than '\"'.");
             }
@@ -579,7 +579,7 @@ public final class DelimitedReader implements AutoCloseable {
         // for the row's line, for as many rows as the budget holds: at most 2^20 + 1 entries a
         // row, as an ordinal is below 2^20.
         long width = Columns.reach(plan) + 1;
-        long bytes = cellRows(width, batchRows) * width * Native.SPAN_BYTES;
+        long bytes = cellRows(width, batchRows) * width * Abi.SPAN_BYTES;
         Columns bound = new Columns(plan, batchRows, arena);
         Block table = new Block(bytes, 4);
         perRow = width;
@@ -590,7 +590,7 @@ public final class DelimitedReader implements AutoCloseable {
 
     /** The cell-table entries the reader holds, for the suite. */
     long cellEntries() {
-        return cells == null ? 0 : cells.bytes() / Native.SPAN_BYTES;
+        return cells == null ? 0 : cells.bytes() / Abi.SPAN_BYTES;
     }
 
     /** The rows of {@code perRow} entries the cell table holds: the batch, within the budget. */
@@ -604,7 +604,7 @@ public final class DelimitedReader implements AutoCloseable {
      * and nothing is refused.
      */
     private void refusePastWidth(Column[] plan) {
-        int width = state.get(INT, Native.STATE_EXPECTED);
+        int width = state.get(INT, Abi.STATE_EXPECTED);
         if (width == 0) {
             return;
         }
@@ -726,7 +726,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the record width, or empty
      */
     public OptionalInt columnCount() {
-        int expected = closed ? expectedAtClose : state.get(INT, Native.STATE_EXPECTED);
+        int expected = closed ? expectedAtClose : state.get(INT, Abi.STATE_EXPECTED);
         return expected == 0 ? OptionalInt.empty() : OptionalInt.of(expected);
     }
 
@@ -755,7 +755,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the record count
      */
     public long records() {
-        return closed ? recordsAtClose : state.get(LONG, Native.STATE_RECORDS);
+        return closed ? recordsAtClose : state.get(LONG, Abi.STATE_RECORDS);
     }
 
     /** The memory the core reads next from: the caller's, or the read buffer. */
@@ -766,9 +766,9 @@ public final class DelimitedReader implements AutoCloseable {
     private TabularException tooLong() {
         return failure = new TabularException(
                 TabularFailure.ROW_TOO_LONG,
-                state.get(LONG, Native.STATE_RECORDS),
-                state.get(INT, Native.STATE_LINE),
-                state.get(LONG, Native.STATE_OFFSET),
+                state.get(LONG, Abi.STATE_RECORDS),
+                state.get(INT, Abi.STATE_LINE),
+                state.get(LONG, Abi.STATE_OFFSET),
                 0,
                 0);
     }
@@ -807,14 +807,14 @@ public final class DelimitedReader implements AutoCloseable {
     }
 
     private TabularException structural() {
-        return failure = TabularException.from(filled, Native.FAILURE_CODE);
+        return failure = TabularException.from(filled, Abi.FAILURE_CODE);
     }
 
     private void readHeader() {
         // The name table is the header's alone, and gone when it has been read.
         try (Arena scope = Arena.ofConfined()) {
             long capacity = 64;
-            MemorySegment names = scope.allocate(capacity * Native.SPAN_BYTES, 4);
+            MemorySegment names = scope.allocate(capacity * Abi.SPAN_BYTES, 4);
             while (true) {
                 long length = Math.min(end - start, maxWindow);
                 boolean last = eof && start + length == end;
@@ -834,18 +834,18 @@ public final class DelimitedReader implements AutoCloseable {
                         unescaped.bytes(),
                         filled);
                 switch (code) {
-                    case Native.OK -> {
-                        long consumed = filled.get(LONG, Native.FILLED_CONSUMED);
-                        int count = (int) filled.get(LONG, Native.FILLED_ROWS);
+                    case Abi.OK -> {
+                        long consumed = filled.get(LONG, Abi.FILLED_CONSUMED);
+                        int count = (int) filled.get(LONG, Abi.FILLED_ROWS);
                         if (count > 0) {
                             Header.Builder found = new Header.Builder(count);
                             for (int index = 0; index < count; index++) {
-                                int offset = names.get(INT, index * Native.SPAN_BYTES);
-                                int span = names.get(INT, index * Native.SPAN_BYTES + 4);
+                                int offset = names.get(INT, index * Abi.SPAN_BYTES);
+                                int span = names.get(INT, index * Abi.SPAN_BYTES + 4);
                                 // A flagged name had "" inside, and is in the arena, unescaped.
                                 found.add(
                                         span < 0
-                                                ? unescaped.segment.asSlice(offset, span & Native.SPAN_LENGTH)
+                                                ? unescaped.segment.asSlice(offset, span & Abi.SPAN_LENGTH)
                                                 : base.asSlice(start + offset, span));
                             }
                             header = found.build();
@@ -862,12 +862,12 @@ public final class DelimitedReader implements AutoCloseable {
                             refill();
                         }
                     }
-                    case Native.ERR_CELLS -> {
-                        capacity = filled.get(LONG, Native.FILLED_NEEDED);
-                        names = scope.allocate(Math.multiplyExact(capacity, Native.SPAN_BYTES), 4);
+                    case Abi.ERR_CELLS -> {
+                        capacity = filled.get(LONG, Abi.FILLED_NEEDED);
+                        names = scope.allocate(Math.multiplyExact(capacity, Abi.SPAN_BYTES), 4);
                     }
-                    case Native.ERR_ARENA -> unescaped.resize(filled.get(LONG, Native.FILLED_NEEDED), 0);
-                    case Native.ERR_STRUCTURE -> throw structural();
+                    case Abi.ERR_ARENA -> unescaped.resize(filled.get(LONG, Abi.FILLED_NEEDED), 0);
+                    case Abi.ERR_STRUCTURE -> throw structural();
                     default -> throw new IllegalStateException(CONTRACT_VIOLATION);
                 }
             }
@@ -915,10 +915,10 @@ public final class DelimitedReader implements AutoCloseable {
             }
             MemorySegment base = base();
             // The cells and the arena may have moved since the last call.
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_CELLS, cells.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_CELLS + 8, cells.bytes() / Native.SPAN_BYTES);
-            buffers.set(ValueLayout.ADDRESS, Native.BUFFERS_ARENA, unescaped.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Native.BUFFERS_ARENA + 8, unescaped.bytes());
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_CELLS, cells.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_CELLS + 8, cells.bytes() / Abi.SPAN_BYTES);
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_ARENA, unescaped.segment);
+            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_ARENA + 8, unescaped.bytes());
             int code = Native.fill(
                     state,
                     base.asSlice(start, length),
@@ -931,9 +931,9 @@ public final class DelimitedReader implements AutoCloseable {
                     buffers,
                     filled);
             switch (code) {
-                case Native.OK -> {
-                    long consumed = filled.get(LONG, Native.FILLED_CONSUMED);
-                    long count = filled.get(LONG, Native.FILLED_ROWS);
+                case Abi.OK -> {
+                    long consumed = filled.get(LONG, Abi.FILLED_CONSUMED);
+                    long count = filled.get(LONG, Abi.FILLED_ROWS);
                     long at = start;
                     start += consumed;
                     if (count > 0) {
@@ -941,7 +941,7 @@ public final class DelimitedReader implements AutoCloseable {
                         // Short of what the cell table holds, not of the batch: a plan reaching
                         // past the budget is short by design.
                         long fits = Math.min(batchRows, cellEntries() / perRow);
-                        cramped = rows < fits && filled.get(LONG, Native.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
+                        cramped = rows < fits && filled.get(LONG, Abi.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
                         return batch.fill(rows, cells.segment, perRow, base, at, unescaped.segment);
                     }
                     if (last && (consumed == length || consumed == 0)) {
@@ -953,14 +953,14 @@ public final class DelimitedReader implements AutoCloseable {
                 }
                 // The core says how many entries one row takes; the table holds a batch of them,
                 // within the budget.
-                case Native.ERR_CELLS -> {
-                    long needed = filled.get(LONG, Native.FILLED_NEEDED);
+                case Abi.ERR_CELLS -> {
+                    long needed = filled.get(LONG, Abi.FILLED_NEEDED);
                     perRow = Math.max(perRow, needed);
-                    cells.resize(cellRows(needed, batchRows) * needed * Native.SPAN_BYTES, 0);
+                    cells.resize(cellRows(needed, batchRows) * needed * Abi.SPAN_BYTES, 0);
                 }
-                case Native.ERR_ARENA ->
-                    unescaped.resize(Math.max(filled.get(LONG, Native.FILLED_NEEDED), unescaped.bytes() * 2), 0);
-                case Native.ERR_STRUCTURE -> throw structural();
+                case Abi.ERR_ARENA ->
+                    unescaped.resize(Math.max(filled.get(LONG, Abi.FILLED_NEEDED), unescaped.bytes() * 2), 0);
+                case Abi.ERR_STRUCTURE -> throw structural();
                 default -> throw new IllegalStateException(CONTRACT_VIOLATION);
             }
         }
@@ -1018,8 +1018,8 @@ public final class DelimitedReader implements AutoCloseable {
         if (closed) {
             return;
         }
-        recordsAtClose = state.get(LONG, Native.STATE_RECORDS);
-        expectedAtClose = state.get(INT, Native.STATE_EXPECTED);
+        recordsAtClose = state.get(LONG, Abi.STATE_RECORDS);
+        expectedAtClose = state.get(INT, Abi.STATE_EXPECTED);
         closed = true;
         release();
         if (source != null) {

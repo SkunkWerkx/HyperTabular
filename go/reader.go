@@ -41,14 +41,6 @@ func BufferBytes(bytes int) Option {
 	return func(o *options) { o.bufferBytes = bytes }
 }
 
-// core is what the native core writes that is not a column: its state block and the result
-// of the last call. Its own allocation, free of Go pointers, so that a pointer into it can
-// be handed to C without the reader — which is full of them — being what C is pointed at.
-type core struct {
-	state  rawState
-	filled rawFilled
-}
-
 // DelimitedReader reads delimited text — CSV, TSV, any single-byte ASCII separator — a batch
 // at a time into typed columns, every cell a HyperCast verdict.
 //
@@ -75,11 +67,15 @@ type DelimitedReader struct {
 	// plus two, or more if the core asked for more.
 	perRow int
 
-	// What the core is handed beside the plan's buffers, all of it Go memory with no Go
-	// pointer inside it.
-	core  *core
-	cells []rawSpan
-	arena []byte
+	// core is the reader's instance of the core (core.go): its state, its last report, and
+	// the buffers it fills, which live in the instance's memory.
+	core *native
+	// cells and arena are the cell table and the arena as the last call left them, views of
+	// the instance's memory; cellsCap and arenaCap are the entries and bytes each holds.
+	cells    []rawSpan
+	cellsCap int
+	arena    []byte
+	arenaCap int
 	// cramped is whether the last batch ended early because the arena filled: the next one
 	// starts with it doubled, so that escaped text costs a few batches, not one per row.
 	cramped bool
@@ -127,10 +123,11 @@ func newStreamReader(source io.Reader, dialect Dialect, plan []Column, bound boo
 	return r.begin(dialect)
 }
 
-// NewDelimitedReaderBytes reads UTF-8 delimited text already in memory, in place — nothing
-// is copied, so the text must not change while the reader is in use. When the dialect
-// declares a header it is read here, so a header that is structurally broken is this
-// function's error.
+// NewDelimitedReaderBytes reads UTF-8 delimited text already in memory, in place: a Text cell
+// is a slice of it, and the core reads it a chunk at a time, each byte copied into the core's
+// memory once, as it is reached — so the text must not change while the reader is in use.
+// When the dialect declares a header it is read here, so a header that is structurally
+// broken is this function's error.
 func NewDelimitedReaderBytes(utf8 []byte, dialect Dialect, plan []Column, opts ...Option) (*DelimitedReader, error) {
 	return newBytesReader(utf8, dialect, plan, true, opts)
 }
@@ -196,14 +193,13 @@ func newReader(dialect Dialect, plan []Column, bound bool, opts []Option) (*Deli
 	r := &DelimitedReader{
 		dialect:     dialect,
 		batchRows:   o.batchRows,
-		core:        new(core),
-		arena:       make([]byte, 4096),
+		arenaCap:    4096,
 		maxRowBytes: o.maxRowBytes,
 	}
 	switch r.nativeInit(dialect) {
 	case codeOK:
 	case errStateSize:
-		return nil, o, errors.New("hypertabular: the linked libhypertabular's state block is not the one this module mirrors — the archive and the module are from different versions")
+		return nil, o, errors.New("hypertabular: the core's state block is not the one this package mirrors — internal/core/core.go is not this module's core")
 	default:
 		return nil, o, fmt.Errorf("hypertabular: separator %q is not tab or printable ASCII other than '\"'", dialect.Separator)
 	}
@@ -249,18 +245,19 @@ func (r *DelimitedReader) Bind(plan []Column) error {
 	// every column's door and notation, and touches nothing else — not the header read
 	// before it, nor the state the next fill goes on from.
 	r.set = set
+	r.perRow = perRow
+	r.cellsCap = 0
 	switch r.nativeFill(nil, false, 0) {
 	case codeOK:
-	case errShimMemory:
+	case errGuestMemory:
 		r.set = nil
-		return shimMemory(len(plan))
+		return guestMemory(len(plan))
 	default:
 		r.set = nil
 		return errors.New("hypertabular: the core refused the plan: a column's door, declared parameter or numeric format is not one it can honour")
 	}
-	r.batch = Batch{columns: set}
-	r.perRow = perRow
-	r.cells = make([]rawSpan, perRow*cellRows(perRow, r.batchRows))
+	r.batch = Batch{columns: set, core: r.core}
+	r.cellsCap = perRow * cellRows(perRow, r.batchRows)
 	return nil
 }
 
@@ -298,10 +295,10 @@ func (r *DelimitedReader) withinHeader(plan []Column) error {
 // IsBound says whether the reader has a plan: always, for a reader opened with one.
 func (r *DelimitedReader) IsBound() bool { return r.set != nil }
 
-// shimMemory is the error for a fill that could not allocate its column table (see
-// backend_static.go's ht_fill): only a plan wider than the shim's stack table asks for one.
-func shimMemory(columns int) error {
-	return fmt.Errorf("hypertabular: out of memory for the column table of a %d-column plan", columns)
+// guestMemory is the error for buffers the core's memory cannot hold: everything a reader
+// fills lives in its instance of the core, whose memory WebAssembly caps at 4 GiB (core.go).
+func guestMemory(columns int) error {
+	return fmt.Errorf("hypertabular: the buffers of a %d-column plan do not fit the core's 4 GiB memory", columns)
 }
 
 // begin reads the header, when the dialect declares one.
@@ -374,6 +371,7 @@ func (r *DelimitedReader) refill() error {
 	}
 	pending := r.end - r.start
 	if r.start > 0 {
+		r.core.forget() // the bytes the core's copy mirrors move
 		copy(r.buffer, r.buffer[r.start:r.end])
 		r.start, r.end = 0, pending
 	}
@@ -385,6 +383,7 @@ func (r *DelimitedReader) refill() error {
 		larger := make([]byte, min(2*len(r.buffer), r.maxRowBytes))
 		copy(larger, r.buffer[:r.end])
 		r.buffer = larger
+		r.core.forget()
 	}
 	for empty := 0; ; empty++ {
 		n, err := r.source.Read(r.buffer[r.end:])
@@ -408,7 +407,7 @@ func (r *DelimitedReader) refill() error {
 
 // readHeader reads the first record as the header.
 func (r *DelimitedReader) readHeader() error {
-	names := make([]rawSpan, 64)
+	namesCap := 64
 	filled := &r.core.filled
 	for {
 		window, last := r.next()
@@ -418,7 +417,8 @@ func (r *DelimitedReader) readHeader() error {
 			}
 			continue
 		}
-		switch r.nativeHeader(window, last, names) {
+		code, names := r.nativeHeader(window, last, namesCap)
+		switch code {
 		case codeOK:
 			consumed := int(filled.consumed)
 			r.start += consumed
@@ -446,11 +446,13 @@ func (r *DelimitedReader) readHeader() error {
 				}
 			}
 		case errCells:
-			names = make([]rawSpan, filled.needed)
+			namesCap = int(filled.needed)
 		case errArena:
-			r.arena = make([]byte, filled.needed)
+			r.arenaCap = int(filled.needed)
 		case errStructure:
 			return structural(filled.failure)
+		case errGuestMemory:
+			return guestMemory(0)
 		default:
 			panic(contractViolation)
 		}
@@ -479,7 +481,7 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 		return nil, r.err
 	}
 	if r.cramped {
-		r.arena = make([]byte, 2*len(r.arena))
+		r.arenaCap *= 2
 		r.cramped = false
 	}
 	filled := &r.core.filled
@@ -499,7 +501,7 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 			if rows := int(filled.rows); rows > 0 {
 				// Short of what the cell table holds, not of BatchRows: a table of fewer rows
 				// (see cellBudget) ends every batch early, and that is no reason to grow the arena.
-				r.cramped = rows < min(r.set.batchRows, len(r.cells)/r.perRow) && filled.arenaUsed*2 >= uint64(len(r.arena))
+				r.cramped = rows < min(r.set.batchRows, r.cellsCap/r.perRow) && filled.arenaUsed*2 >= uint64(r.arenaCap)
 				return r.batch.fill(rows, r.cells, r.perRow, window, r.arena), nil
 			}
 			if last && (consumed == len(window) || consumed == 0) {
@@ -514,14 +516,14 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 			}
 		case errCells:
 			r.perRow = max(r.perRow, int(filled.needed))
-			r.cells = make([]rawSpan, r.perRow*cellRows(r.perRow, r.set.batchRows))
+			r.cellsCap = r.perRow * cellRows(r.perRow, r.set.batchRows)
 		case errArena:
-			r.arena = make([]byte, max(int(filled.needed), 2*len(r.arena)))
+			r.arenaCap = max(int(filled.needed), 2*r.arenaCap)
 		case errStructure:
 			r.err = structural(filled.failure)
 			return nil, r.err
-		case errShimMemory:
-			r.err = shimMemory(len(r.set.plan))
+		case errGuestMemory:
+			r.err = guestMemory(len(r.set.plan))
 			return nil, r.err
 		default:
 			panic(contractViolation)
@@ -530,8 +532,8 @@ func (r *DelimitedReader) Read() (*Batch, error) {
 }
 
 // Close releases the reader: the batch in hand is over, and a file opened by OpenDelimited
-// is closed. A reader built over an io.Reader or over memory holds nothing that needs
-// releasing — every buffer is ordinary Go memory — and does not close its source.
+// is closed. A reader built over an io.Reader or over memory holds nothing else that needs
+// releasing — its instance of the core is ordinary Go memory — and does not close its source.
 func (r *DelimitedReader) Close() error {
 	if r.closed {
 		return nil

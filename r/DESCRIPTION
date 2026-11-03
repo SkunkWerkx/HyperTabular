@@ -1,0 +1,32 @@
+Package: hypertabular
+Type: Package
+Title: Forward-Only Reads of Delimited Text and Workbooks, Every Cell a Verdict
+Version: 1.0.0
+Authors@R: c(
+    person("Brian", "Buvinghausen", email = "buvinghausen@gmail.com",
+           role = c("aut", "cre")),
+    person("Skunk Werkx", role = "cph")
+  )
+Description: Reads delimited text and 'XLSX', 'ODS' and 'Numbers' workbooks a batch at a
+    time into typed columns, under a dialect, a plan of columns and the formats, field
+    orders, precisions and epochs the caller declares rather than guesses. Every cell is
+    judged by the 'hypercast' package's casts and comes back as its verdict: the value, or a
+    closed reason (empty, malformed, out of range) with the offending span of the cell's
+    text. A file that is structurally broken comes back as a failure value after every
+    intact row before it. The work is done by a compiled 'Rust' core shared with the
+    project's bindings for other languages, which neither allocates nor panics; no read
+    signals an error for its data.
+License: MIT + file LICENSE
+URL: https://github.com/SkunkWerkx/HyperTabular
+BugReports: https://github.com/SkunkWerkx/HyperTabular/issues
+Depends: R (>= 4.2)
+Imports:
+    hypercast (>= 1.1.0)
+Suggests:
+    testthat (>= 3.0.0),
+    jsonlite
+SystemRequirements: Cargo (Rust's package manager), rustc
+Config/testthat/edition: 3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+Config/roxygen2/version: 8.1.1

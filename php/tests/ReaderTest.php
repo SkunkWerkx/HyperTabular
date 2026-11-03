@@ -73,11 +73,7 @@ final class ReaderTest extends TestCase
     public function testEveryVerdictIsTheOneHyperCastGives(): void
     {
         // HyperCast is the judge: each cell through this reader is what HyperCast's own
-        // door says of the same text, carrier and all. This binding needs HyperCast's types,
-        // not its native library; where that library does not load there is nothing to ask.
-        if (!Cast::isAvailable()) {
-            $this->markTestSkipped("HyperCast's own native library did not load on this platform");
-        }
+        // door says of the same text, carrier and all.
         $cells = [
             'yes', '-12', '1,234', '(7)', '9e2', '200', '65535', '0xFFFFFFFF', '18446744073709551615',
             '2.5', '-1e-3', '79228162514264337593543950335', '6BA7B810-9DAD-11D1-80B4-00C04FD430C8',
@@ -247,11 +243,12 @@ final class ReaderTest extends TestCase
             new Dialect(',', hasHeader: false),
             [Column::text(0), Column::i64((1 << 20) - 1)]
         );
-        // One row of 1,048,577 spans, not a batch of 4096 of them (about 34 GB).
-        $this->assertSame((1 << 20) + 1, (new \ReflectionProperty($reader, 'cellsCap'))->getValue($reader));
+        // One row of 1,048,577 spans, not a batch of 4096 of them (about 34 GB): every batch
+        // is the one row the cell table holds.
         $firsts = [];
         $empties = 0;
         while (($batch = $reader->read()) !== null) {
+            $this->assertSame(1, $batch->rows());
             for ($row = 0; $row < $batch->rows(); $row++) {
                 $firsts[] = $batch->values(0)[$row];
                 $this->assertEquals(new Fault(CastFailure::Empty, 0, 0), $batch->get(1, $row));

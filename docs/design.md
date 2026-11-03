@@ -16,8 +16,8 @@ languages:
 - Two provider archives each carried Rust's standard library, and two such archives cannot
   be linked into one program (`duplicate symbol: rust_eh_personality`). Each also carried
   HyperCast's C symbols (22 of them at the time), so neither linked beside `libhypercast.a` either
-  (`multiple definition of cast_bool`). That is every binding that links the core rather
-  than loads it: Go, Swift, C# Native AOT.
+  (`multiple definition of cast_bool`). That is every consumer that links the core rather
+  than loads it: Swift, C# Native AOT, and a C or C++ program on the static archive.
 - The code a binding needs to read a batch — the plan, the verdicts, the column buffers —
   is the same for both formats, and had no package to live in.
 
@@ -37,7 +37,7 @@ binding calls. It reads bytes the caller hands it and writes into buffers the ca
 it. It has no standard library, allocates nothing, and cannot panic.
 
 **The Rust API** (everything else, behind the default `std` feature) is one binding among
-eight: readers that own their buffers, and files. It allocates, in Rust's own idiom,
+eleven: readers that own their buffers, and files. It allocates, in Rust's own idiom,
 exactly as the C# binding allocates in C#'s. Nothing in it is in the library.
 
 From Rust, the core is reached through `kernel::abi`, `kernel::door`, `kernel::exports`,
@@ -127,7 +127,7 @@ a number through, read an integral double's bits instead.
 ### The Rust API is a binding
 
 `DelimitedReader`, and `Workbook` with its `Sheet`s, are the Rust binding over those
-calls, and the model for the other seven. A reader owns everything the core is handed —
+calls, and the model for the other ten. A reader owns everything the core is handed —
 the input buffer and the reads that fill it, the column arrays, the cell table, the
 arena, a workbook's window and its shared strings — allocated once and reused; it makes
 the call, grows the buffer the core names when one is too small, and puts what the core
@@ -396,25 +396,46 @@ call is made again from the same input; for a workbook the read stopped where it
 the call resumes once the buffer has been grown with its contents kept.
 
 No build of the crate exports anything else, and `check-core.sh` holds the whole crate to
-that: the layers above the core are Rust API, not symbols.
+that: the layers above the core are Rust API, not symbols. (`hypertabular_canary`, the export
+that can panic, is compiled only for the proof's negative control and is in no shipped
+library.) The C header, `include/hypertabular.h`, is generated from those exports and the
+types they take by cbindgen, with every layout pinned by an assert and carried as a `*_SIZE`
+constant; `.github/scripts/check_exports.py` holds every binding that calls the C ABI to
+exactly these fourteen.
 
 ### The bindings, side by side
 
 Every binding mirrors the Rust API — one `Batch` from `read()`, a per-cell getter, `line`,
-`raw`, `Workbook`/`Sheet` — in its own language's grain. Two things differ on purpose.
+`raw`, `Workbook`/`Sheet` — in its own language's grain: C#, Java, Go, Swift, Python, Ruby,
+PHP, TypeScript, R and C++ (`include/hypertabular.hpp`), with C itself driving the exports
+directly. Three things differ on purpose.
 
-**How long a batch lives.** C#, Java, Go and Swift hand out a batch as a view of the
+**How long a batch lives.** C#, Java, Go, Swift and C++ hand out a batch as a view of the
 reader's buffers, valid until the next `read()`: no copy per batch, and a language that can
-say "valid until" says it. Python, Ruby and PHP copy what the core wrote into the batch
-as it is made, so a batch outlives the reader's next read: a garbage-collected dynamic
-language has no way to hold a caller to "until the next read", and `list(reader)` is the
-first thing anyone writes.
+say "valid until" says it. Python, Ruby, PHP, TypeScript and R copy what the core wrote into
+the batch as it is made, so a batch outlives the reader's next read: a garbage-collected
+dynamic language has no way to hold a caller to "until the next read", and `list(reader)` is
+the first thing anyone writes.
 
 **What a fault's span counts in.** HyperCast's rule, kept here: a span is in the units of
-the text you were handed. Where `raw` is bytes — C#, Java, Go, Swift, Python, PHP — the
-span is bytes, as the core wrote it. Ruby's `raw` is a String, so its span is in the
-characters `String#[]` slices by, as HyperCast's own gem reports it. A helper that turns
-`raw` into a string for display (Java's `rawString`) does not move the span.
+the text you were handed. Where `raw` is bytes — C#, Java, Go, Swift, Python, PHP,
+TypeScript (a `Uint8Array`), C and C++ — the span is bytes, as the core wrote it. Ruby's
+`raw` is a String, so its span is in the characters `String#[]` slices by, as HyperCast's own
+gem reports it. R's `raw` is a string too, and its span counts in the units `substr()` counts
+it in: characters for UTF-8, bytes for a cell that is not valid UTF-8 (marked `"bytes"`). A
+helper that turns `raw` into a string for display (Java's and TypeScript's `rawString`) does
+not move the span.
+
+**How a broken file arrives.** Every binding hands a cell's verdict back as HyperCast's own
+union and never raises for one; a structural failure is the language's error idiom, with the
+same kind, record, line and byte. An exception in C# and Java (`TabularException`), Python
+and Ruby (`TabularError`) and PHP (`TabularException`), a thrown `TabularError` in Swift, and
+a returned `*hypertabular.Failure` in Go. Where an exception is not the idiom it is a value:
+TypeScript's `Outcome<T>`, `{ ok: false, error }` with `kind: 'structure'`, for opening,
+binding and reading alike; R's `hypertabular_failure`, a list `failure()` holds and
+`read_delimited()` and `read_sheet()` return beside the rows before it; C's
+`HYPERTABULAR_ERR_STRUCTURE` with `out->failure` filled in; and C++'s
+`hypertabular::Result<T>`, everything `noexcept`.
 
 **Header first, plan after.** Every binding opens a delimited source and a sheet without a
 plan, reads the header, and takes the plan once through `bind`. The native calls are
@@ -438,13 +459,18 @@ first in every binding, and `generated-a.ods` is the case that fails without it.
 | Python | `ordinal` / `get` | `plan=None` | `iter(batch)`, `rows()` | — | asyncio |
 | Ruby | `ordinal` / `find_ordinal` | `plan = nil` | `Enumerable` | — | — |
 | PHP | `ordinal` / `find` | `?array $plan = null` | `IteratorAggregate`, `rows()` | — | — |
+| TypeScript | `require` / `ordinal` | plan omitted | iterable `Batch`, `rows()` | — | — |
+| R | a plan column named by its header (`col_i32("id")`) | `plan = NULL` | — (`as.data.frame`) | — | — |
+| C++ | `require` / `ordinal` | overloads | range-`for` over `Batch`, `for_each_row` | `text` (`std::string_view`) | — |
 
-A dash is a decision, not a gap. Swift, Python, Ruby and PHP strings are their own
-allocations, and their text accessors already hand out the native string or a zero-copy
-byte view. Go has no async: cancellation is the `io.Reader`'s (a request's context, a
-deadline). A Java reader is confined to its thread, and on virtual threads a blocking read
-is the idiom. Ruby's IO reads yield under a Fiber scheduler already, and PHP has no event
-loop. Where there is async, the core still never waits: only the binding's refill is
+A dash is a decision, not a gap. Swift, Python, Ruby, PHP, TypeScript and R strings are
+their own allocations, and their text accessors already hand out the native string or a
+byte view. R reads a whole batch as columns, so a row view would be a data frame row, which
+`as.data.frame()` makes. Go has no async: cancellation is the `io.Reader`'s (a request's
+context, a deadline). A Java reader is confined to its thread, and on virtual threads a
+blocking read is the idiom. Ruby's IO reads yield under a Fiber scheduler already, PHP has
+no event loop, every TypeScript call is synchronous, and C++ reads from a source function
+the caller can block in. Where there is async, the core still never waits: only the binding's refill is
 awaited, and each one counts its bytes as they land, so a cancelled read loses nothing.
 
 **A whole column, as the core wrote it.** Rust lends every door but text as a typed slice,
@@ -455,13 +481,16 @@ other temporal doors as HyperCast's `Raw*` layouts. Java lends every door but te
 the time door as `UInt64` nanoseconds. A UUID column is read a cell at a time in C#, and
 everything past the primitives and time in Swift: `Guid`, Foundation's `Decimal`, `UUID`,
 `Date` and `DateComponents` and the standard library's `Duration` are not laid out as the
-core writes the value. Python, Ruby and PHP copy a column into the batch, as their own
-values (a `memoryview` of the door's item type in Python).
+core writes the value. C++ reads every column a cell at a time, as HyperCast's `Verdict<T>`.
+Python, Ruby, PHP, TypeScript and R copy a column into the batch, as their own values (a
+`memoryview` of the door's item type in Python, an array of verdicts in TypeScript, a
+`hypercast_verdict` data frame in R).
 
 Each binding also replays `corpus/workbook.json` with every buffer a workbook call works in
-starting at one element (C#, Java, Go, Swift, Ruby and PHP behind a test-only switch;
-Python reads through the Rust `Sheet`, whose buffers are `Vec`s grown by `resize`), so the
-grow-and-keep path above runs mid-part thousands of times against the corpus.
+starting at one element (C#, Java, Go, Swift, Ruby, PHP, R and C++ behind a test-only
+switch; Python and TypeScript read through the Rust `Sheet`, whose buffers are `Vec`s grown
+by `resize`), so the grow-and-keep path above runs mid-part thousands of times against the
+corpus.
 
 ## Parked, deliberately
 

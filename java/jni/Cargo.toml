@@ -1,0 +1,48 @@
+[package]
+name = "hypertabular-jni"
+version = "0.0.0"
+edition = "2024"
+# The core's own floor (rust/Cargo.toml), which this crate cannot go below.
+rust-version = "1.88"
+description = "The JNI library the Java binding loads below JDK 25: one native per C export of the HyperTabular core."
+license = "MIT"
+publish = false
+
+# A cdylib is what the JVM loads; the rlib is what examples/no_panic.rs links to prove the
+# natives cannot panic (a cdylib alone gives an example nothing to import).
+[lib]
+name = "hypertabular_jni"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The core linked in, without std: `cdylib` brings its panic handler, its
+# rust_eh_personality stub and the C library link, and implies `exports`, so the fourteen C
+# exports ride along in this library as they do in libhypertabular. HyperCast comes with
+# it, its own `exports` off, as in every library built from this crate.
+hypertabular = { path = "../../rust", default-features = false, features = ["cdylib"] }
+jni-sys = "0.4"
+no-panic = { version = "0.1", optional = true }
+
+# The tests and the no-panic example link std. Edition 2024's resolver applies
+# dev-dependency features to test and example builds only, so the shipped `--lib` build
+# stays no_std (the Forge's lint holds it to libc.so.6 alone).
+[dev-dependencies]
+hypertabular = { path = "../../rust", default-features = false, features = ["cdylib", "std"] }
+
+[features]
+no-panic = ["dep:no-panic"]
+
+[[example]]
+name = "no_panic"
+required-features = ["no-panic"]
+
+# Every shipping build aborts on a panic; the no-panic proof alone overrides this with
+# CARGO_PROFILE_RELEASE_PANIC=unwind, because under abort it cannot see a panic path.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

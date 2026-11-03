@@ -102,7 +102,7 @@ public final class Workbook {
 
     // The workbook's tables, which every read of a sheet is handed.
     let strings: UnsafeMutableBufferPointer<UInt8>
-    private let table: UnsafeMutableBufferPointer<hypertabular_span>
+    private let table: UnsafeMutableBufferPointer<HyperTabularSpan>
     private let kinds: UnsafeMutableBufferPointer<UInt8>
 
     /// Opens a workbook held in memory: an array, a `Data`. The bytes are copied once, so
@@ -249,14 +249,14 @@ public final class Workbook {
             ? Scratch(window: 1, arena: 1, cells: 1, row: 0)
             : Scratch(window: Self.windowMin, arena: 1024, cells: 64, row: 0)
         var strings = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: 0)
-        var table = UnsafeMutableBufferPointer<hypertabular_span>.allocate(capacity: 0)
+        var table = UnsafeMutableBufferPointer<HyperTabularSpan>.allocate(capacity: 0)
         var kinds = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: 0)
         do {
-            var opened = hypertabular_opened()
+            var opened = HyperTabularOpened()
             open: while true {
                 var buffers = scratch.buffers()
                 switch hypertabular_workbook_open(
-                    state.baseAddress, Self.address(container), UInt(container.count), &buffers, &opened)
+                    OpaquePointer(state.baseAddress), Self.address(container), UInt(container.count), &buffers, &opened)
                 {
                 case HYPERTABULAR_OK:
                     break open
@@ -344,7 +344,7 @@ public final class Workbook {
 
     /// What a call's code means: done, or a structural failure. Anything else is this
     /// binding's bug.
-    static func settled(_ answer: (code: Int32, filled: hypertabular_filled)) throws -> hypertabular_filled {
+    static func settled(_ answer: (code: Int32, filled: HyperTabularFilled)) throws -> HyperTabularFilled {
         switch answer.code {
         case HYPERTABULAR_OK:
             return answer.filled
@@ -359,7 +359,7 @@ public final class Workbook {
     var containerBytes: UnsafeMutableRawBufferPointer { container }
 
     /// The workbook's tables in a buffers block, for a call that reads a sheet.
-    func tables(_ buffers: inout hypertabular_buffers) {
+    func tables(_ buffers: inout HyperTabularBuffers) {
         buffers.strings = UnsafePointer(strings.baseAddress)
         buffers.strings_len = UInt(strings.count)
         buffers.table = UnsafePointer(table.baseAddress)
@@ -428,8 +428,8 @@ public final class Workbook {
     final class Scratch {
         var window: UnsafeMutableBufferPointer<UInt8>
         var arena: UnsafeMutableBufferPointer<UInt8>
-        var cells: UnsafeMutableBufferPointer<hypertabular_span>
-        var row: UnsafeMutableBufferPointer<hypertabular_slot>
+        var cells: UnsafeMutableBufferPointer<HyperTabularSpan>
+        var row: UnsafeMutableBufferPointer<HyperTabularSlot>
 
         init(window: Int, arena: Int, cells: Int, row: Int) {
             self.window = .allocate(capacity: window)
@@ -445,8 +445,8 @@ public final class Workbook {
             row.deallocate()
         }
 
-        func buffers() -> hypertabular_buffers {
-            var buffers = hypertabular_buffers()
+        func buffers() -> HyperTabularBuffers {
+            var buffers = HyperTabularBuffers()
             buffers.window = window.baseAddress
             buffers.window_cap = UInt(window.count)
             buffers.arena = arena.baseAddress
@@ -468,22 +468,24 @@ public final class Workbook {
         func drive(
             _ call: Call, _ state: UnsafeMutableRawBufferPointer, _ container: UnsafeMutableRawBufferPointer,
             tables: Workbook?, columns: Columns? = nil, rowFollowsCells: Bool = false
-        ) -> (code: Int32, filled: hypertabular_filled) {
+        ) -> (code: Int32, filled: HyperTabularFilled) {
+            // The state block is opaque to the header: `HyperTabularWorkbookState *`.
+            let block = OpaquePointer(state.baseAddress)
             let input = Workbook.address(container)
             let length = UInt(container.count)
             while true {
-                var filled = hypertabular_filled()
+                var filled = HyperTabularFilled()
                 var buffers = self.buffers()
                 tables?.tables(&buffers)
                 let code: Int32 =
                     switch call {
-                    case .sheets: hypertabular_workbook_sheets(state.baseAddress, input, length, &buffers, &filled)
-                    case .strings: hypertabular_workbook_strings(state.baseAddress, input, length, &buffers, &filled)
-                    case .styles: hypertabular_workbook_styles(state.baseAddress, input, length, &buffers, &filled)
-                    case .header: hypertabular_workbook_header(state.baseAddress, input, length, &buffers, &filled)
+                    case .sheets: hypertabular_workbook_sheets(block, input, length, &buffers, &filled)
+                    case .strings: hypertabular_workbook_strings(block, input, length, &buffers, &filled)
+                    case .styles: hypertabular_workbook_styles(block, input, length, &buffers, &filled)
+                    case .header: hypertabular_workbook_header(block, input, length, &buffers, &filled)
                     case .fill:
                         hypertabular_workbook_fill(
-                            state.baseAddress, input, length, columns!.specs, columns!.buffers,
+                            block, input, length, columns!.specs, columns!.buffers,
                             UInt(columns!.plan.count), UInt(columns!.batchRows), &buffers, &filled)
                     }
                 switch code {
@@ -562,11 +564,11 @@ public final class Sheet {
             try bind(plan)
         }
 
-        var filled = hypertabular_filled()
+        var filled = HyperTabularFilled()
         let container = book.containerBytes
         let code = info.part.withUnsafeBufferPointer { part in
             hypertabular_workbook_sheet(
-                state.baseAddress, Workbook.address(container), UInt(container.count), part.baseAddress,
+                OpaquePointer(state.baseAddress), Workbook.address(container), UInt(container.count), part.baseAddress,
                 UInt(part.count), info.index, options.hasHeader ? 1 : 0, options.skipEmptyRows ? 1 : 0, &filled)
         }
         _ = try Workbook.settled((code, filled))
@@ -594,8 +596,8 @@ public final class Sheet {
         header = Header(
             bytes: (0..<Int(filled.rows)).map { index in
                 let name = scratch.cells[index]
-                let length = Int(name.len & ~HYPERTABULAR_SPAN_FLAG)
-                let from = name.len & HYPERTABULAR_SPAN_FLAG != 0 ? scratch.arena : book.strings
+                let length = Int(name.len & ~spanFlag)
+                let from = name.len & spanFlag != 0 ? scratch.arena : book.strings
                 return Array(from[Int(name.offset)..<Int(name.offset) + length])
             })
     }
