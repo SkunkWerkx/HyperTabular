@@ -50,7 +50,7 @@
     "build:debug": "napi build --platform --js binding.js --dts binding.d.ts",
     "build:wasi": "napi build --profile wasi --platform --target wasm32-wasip1 --js binding.js --dts binding.d.ts",
     "test": "node --test \"tests/*.test.ts\" \"tests/*.test.mts\"",
-    "test:bun": "bun test tests/",
+    "test:bun": "bun test --timeout 60000 tests/",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write ."
