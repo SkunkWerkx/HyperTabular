@@ -16,7 +16,8 @@ use super::guard;
 
 // JSON's interface, part of every PHP build since 8.0, read from the binary's exported data
 // symbol as SPL's are (`errors.rs`).
-#[cfg_attr(windows, link(name = "php8"))]
+#[cfg_attr(all(windows, not(php_zts)), link(name = "php8"))]
+#[cfg_attr(all(windows, php_zts), link(name = "php8ts"))]
 unsafe extern "C" {
     static php_json_serializable_ce: *mut ext_php_rs::ffi::zend_class_entry;
 }

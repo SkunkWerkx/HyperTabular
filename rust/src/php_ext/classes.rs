@@ -33,7 +33,8 @@ use ext_php_rs::zend::{ClassEntry, ExecuteData, ExecutorGlobals};
 use super::errors::{error, pending, runtime};
 
 // Engine functions bindgen doesn't carry (`zend_API.h`, PHP 8.3 to 8.5).
-#[cfg_attr(windows, link(name = "php8"))]
+#[cfg_attr(all(windows, not(php_zts)), link(name = "php8"))]
+#[cfg_attr(all(windows, php_zts), link(name = "php8ts"))]
 unsafe extern "C" {
     fn zend_declare_typed_property(
         ce: *mut zend_class_entry,

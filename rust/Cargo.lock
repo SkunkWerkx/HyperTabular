@@ -767,6 +767,7 @@ dependencies = [
  "criterion",
  "csv",
  "ext-php-rs",
+ "ext-php-rs-build",
  "flate2",
  "futures-io",
  "hypercast",

@@ -87,9 +87,9 @@ Swift's root [`Package.swift`](../Package.swift) exists for the same reason.
   ([Ruby in the browser](../ruby/README.md#ruby-in-the-browser)).
 - **Python:** 17 wheels (`cp311-abi3` and `cp315-abi3.abi3t` on each of eight platforms, and
   one for Pyodide) and the sdist, which pip builds where no wheel fits (Rust 1.89 or newer).
-- **PHP:** 18 extension zips on the GitHub Release, NTS only: PHP 8.3, 8.4 and 8.5 on Linux x64
-  and arm64 (glibc and musl), macOS arm64 and Windows x64. PIE reads the package from
-  Packagist and downloads the zip for the platform and PHP minor
+- **PHP:** 36 extension zips on the GitHub Release, NTS and ZTS: PHP 8.3, 8.4 and 8.5 on Linux
+  x64 and arm64 (glibc and musl), macOS arm64 and Windows x64. PIE reads the package from
+  Packagist and downloads the zip for the platform, PHP minor and thread safety
   ([`php/README.md`](../php/README.md#install)).
 - **TypeScript:** ten npm packages: the root `@skunkwerkx/hypertabular`, eight platform
   packages `@skunkwerkx/hypertabular-<platform>`, one addon each, which the root names in
