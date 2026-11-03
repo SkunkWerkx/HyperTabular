@@ -690,7 +690,7 @@ fn the_header_is_one_record_located_like_text() {
     let specs = [ColumnSpec::new(0, 4, 0), ColumnSpec::new(2, 18, 0)];
     let (code, mut out, values, verdicts, _) = call(&mut state, rest, true, &specs, 10);
     assert_eq!((code, out.rows), (OK, 1));
-    assert_eq!(i32::from_le_bytes(values[0][..4].try_into().unwrap()), 1);
+    assert_eq!(i32::from_ne_bytes(values[0][..4].try_into().unwrap()), 1);
     assert!(verdicts[0][0].is_ok() && verdicts[1][0].is_ok());
 
     // An input with no record has no header, and says so by having no names.

@@ -96,8 +96,13 @@ run_program() {
 }
 
 cmake_build() {
-  local name="$1" static="$2" build="$work/cmake-$1"
-  cmake -S "$here" -B "$build" -DCMAKE_PREFIX_PATH="$pkg;$hypercast" -DHYPERTABULAR_SMOKE_STATIC="$static" \
+  local name="$1" static="$2" build="$work/cmake-$1" prefixes="$pkg;$hypercast"
+  # Git Bash turns a lone /d/... argument into D:/... for a native program, but leaves a
+  # ;-joined list as it is, which CMake on Windows cannot resolve: each prefix is converted here.
+  if [ "$os" = windows ]; then
+    prefixes="$(cygpath -m "$pkg")${hypercast:+;$(cygpath -m "$hypercast")}"
+  fi
+  cmake -S "$here" -B "$build" -DCMAKE_PREFIX_PATH="$prefixes" -DHYPERTABULAR_SMOKE_STATIC="$static" \
     ${cmake_arch[@]+"${cmake_arch[@]}"} -DHYPERTABULAR_SMOKE_HYPERCAST="$hypercast_wanted" \
     -DHYPERTABULAR_SMOKE_CXX="$([ "${SMOKE_CXX:-}" = 1 ] && echo ON || echo OFF)" \
     -DCMAKE_BUILD_TYPE=Release >"$work/$name.log" 2>&1 || { cat "$work/$name.log"; fail "cmake configure ($name)"; }
