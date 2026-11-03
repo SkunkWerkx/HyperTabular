@@ -6,23 +6,32 @@
 //! `check-core.sh` proves the same thing of the shipped library a different way (it
 //! imports no allocator); this is the proof for the code as the test suite builds it.
 //!
-//! One `#[test]` function on purpose: the counter is process-wide and `cargo test`
-//! spawns a thread per test function.
+//! The count is the test thread's own: the core runs on its caller's thread and starts
+//! none, while the harness's threads allocate as they please (a process-wide count once
+//! caught four of theirs on linux-arm64).
 
 use hypertabular::kernel::abi::{
     CellVerdict, ColumnBuffer, ColumnSpec, ERR_STRUCTURE, Filled, OK, Span,
 };
 use hypertabular::kernel::delimited::fill::{self, RawDialect, State};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // Const-initialised and without a destructor, so reading it never allocates.
+    static COUNTED: Cell<bool> = const { Cell::new(false) };
+}
+
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        if COUNTED.try_with(Cell::get).unwrap_or(false) {
+            ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -38,6 +47,7 @@ const ROWS: usize = 256;
 
 #[test]
 fn allocation_free() {
+    COUNTED.set(true);
     // Everything the caller owns, allocated before the count starts.
     let mut text = b"\xEF\xBB\xBFid,amount,when,name,flag,note\n".to_vec();
     for row in 0..5_000 {
