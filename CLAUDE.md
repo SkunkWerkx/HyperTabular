@@ -124,9 +124,9 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
   `@skunkwerkx/hypercast` is a peer. The first publish of every package is the owner's, by
   hand with a granular token: npm Trusted Publishing attaches only to a package that exists,
   and `release.yml` is registered as its trusted publisher after.
-- The Node floor: `engines.node` (`^22.13.0 || >=23.5.0`, the WASI runtime's floor) in
+- The Node floor: `engines.node` (`^22.14.0 || >=23.6.0`, Node-API 10's floor; the WASI runtime's is lower) in
   `typescript/package.json`, the same string in the Forge's `npm_package.py`, its
-  `node_floor_versions` default, `FLOOR_IMAGE`'s default `node:22.13.0-alpine` and
+  `node_floor_versions` default, `FLOOR_IMAGE`'s default `node:22.14.0-alpine` and
   `LOCKFILE_NPM` in `typescript/consumer-tests/run.sh`, and the floor sentences in
   `typescript/README.md`, `README.md` and the CHANGELOG. Node 22 reaches EOL on 2027-04-30:
   then drop it from all of them.

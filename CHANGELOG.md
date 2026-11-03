@@ -17,7 +17,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
 
 - **A TypeScript binding for Node and Bun, on npm as `@skunkwerkx/hypertabular`.** A napi-rs
   addon over the core, ten packages: the root, eight platform addons and the WebAssembly
-  fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.13.0 || >=23.5.0` and Bun.
+  fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.14.0 || >=23.6.0` and Bun.
   Every cell is a `@skunkwerkx/hypercast` verdict, `{ ok: true, value }` or `{ ok: false,
   fault }`; opening, binding and reading return an `Outcome<T>` whose structural and argument
   errors are values, never thrown. Batches are copied out of the reader, and readers and sheets
