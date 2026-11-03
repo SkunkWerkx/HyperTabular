@@ -37,8 +37,8 @@ only when no native addon fits.
 | Windows (`win32-*-msvc`) | ✓ | ✓ |
 | Everything else: the WebAssembly fallback (`wasm32-wasip1`) | ✓ | ✓ |
 
-It runs on Node 22.13 or newer (`^22.13.0 || >=23.5.0`, the floor of the WebAssembly
-runtime), or Bun. An install run with `--omit=optional`, or on a platform outside the eight,
+It runs on Node 22.14 or newer (`^22.14.0 || >=23.6.0`, the first releases with Node-API
+10), or Bun. An install run with `--omit=optional`, or on a platform outside the eight,
 gets the fallback instead of the addon ([below](#when-no-native-addon-fits)).
 
 ## Usage
@@ -307,7 +307,7 @@ same, the suite is the same, and `isAvailable()` is `true`. What differs:
 `NAPI_RS_FORCE_WASI=error` in the environment loads the fallback even where an addon is
 installed and fails rather than falling back further; that is how CI runs the whole suite
 against it, and how to try it locally. The consumer smoke runs from the packed tarballs on
-Alpine, at the exact floor, Node 22.13.0, and on the floating Node 22 and 24 images; the Node
+Alpine, at the exact floor, Node 22.14.0, and on the floating Node 22 and 24 images; the Node
 floor is enforced (`engines`), not advisory.
 
 **Big-endian hosts** (s390x, tested in `node:24-alpine` for `linux/s390x` under QEMU) are a

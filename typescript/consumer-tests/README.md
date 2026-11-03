@@ -51,7 +51,7 @@ REGISTRY_HOST=host.docker.internal typescript/consumer-tests/run.sh /tmp/npm-loc
 ```
 
 Negative controls: `CORPUS_DIR=$(mktemp -d) run.sh <dir> plain` fails on the corpus read;
-`FLOOR_IMAGE=node:22.12.0-alpine run.sh <dir> floor` fails the install with `EBADENGINE`.
+`FLOOR_IMAGE=node:22.13.0-alpine run.sh <dir> floor` fails the install with `EBADENGINE`.
 
 ## What the runs established (2026-11-01, Apple M6, Node 26.13.0, npm 11.20.0, Docker 29.9.2)
 
