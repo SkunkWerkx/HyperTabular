@@ -675,8 +675,8 @@ void replay_delimited(const Json &item, const std::filesystem::path &scratch) {
             continue;
           }
           if (!bound) {
-            const auto bound = reader.bind(*plan);
-            if (const ht::Error *error = bound.error_if()) {
+            const auto binding = reader.bind(*plan);
+            if (const ht::Error *error = binding.error_if()) {
               failed("bind: " + error->message());
               continue;
             }
@@ -787,8 +787,8 @@ void replay_workbook(const Json &item, const std::filesystem::path &corpus) {
               failed("an unbound sheet is bound");
               continue;
             }
-            const auto bound = sheet.value().bind(*plan);
-            if (const ht::Error *error = bound.error_if()) {
+            const auto binding = sheet.value().bind(*plan);
+            if (const ht::Error *error = binding.error_if()) {
               failed("bind: " + error->message());
               continue;
             }
