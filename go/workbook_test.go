@@ -215,6 +215,7 @@ func bindSheet(t *testing.T, label string, sheet *Sheet, plan []Column) {
 // cells, and how the sheet ended.
 func replaySheet(t *testing.T, label string, c *workbookCase, sheet *Sheet, batchRows int) {
 	t.Helper()
+	boundHeap()
 	switch header := sheet.Header(); {
 	case c.Header == nil:
 		if header != nil {

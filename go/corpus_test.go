@@ -552,6 +552,7 @@ func assertFailure(t *testing.T, label string, actual error, expected *corpusFai
 // header, every cell, and how the input ended.
 func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Column) (*DelimitedReader, error)) {
 	t.Helper()
+	boundHeap()
 	dialect := Dialect{
 		Separator:      c.Dialect.Separator[0],
 		Quoting:        c.Dialect.Quoting,
