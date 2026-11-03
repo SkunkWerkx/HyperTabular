@@ -356,8 +356,11 @@ jobs:
 
   # PIE itself installs the extension the finalizer just attached: from Packagist and this
   # GitHub Release, on every platform and PHP minor, each leg holding PHP and the pinned PIE
-  # only, then a fresh `php` checks it. A red leg is fixed with a patch release, never by
-  # renaming, repacking or re-attesting an asset of this one (RELEASING.md).
+  # only, then a fresh `php` checks it. composer.json requires ext-hypercast, so PIE installs
+  # HyperCast's released extension first, as a consumer must: the Forge takes the companion
+  # from .github/hyper.json's block, and its released package, never the pin's run. A red leg
+  # is fixed with a patch release, never by renaming, repacking or re-attesting an asset of
+  # this one (RELEASING.md).
   pie-acceptance:
     needs: [find-ci-run, finalize-release]
     if: >-
@@ -371,6 +374,3 @@ jobs:
       package: skunkwerkx/hypertabular
       extension: hypertabular
       package_version: ${{ needs.find-ci-run.outputs.version }}
-      # composer.json requires ext-hypercast: PIE installs HyperCast's extension first, as a
-      # consumer must.
-      companions: skunkwerkx/hypercast

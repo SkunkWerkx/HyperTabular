@@ -125,13 +125,29 @@ jobs:
             python3 .github/scripts/pr_changes.py --all | tee -a "$GITHUB_OUTPUT"
           fi
 
+  # HyperCast, the companion, from the run .github/hyper.json pins (the Forge's
+  # hyper-companions.yml). In companion mode, every event but a purpose=release dispatch, it
+  # mints a read-only token from the companion GitHub App, re-checks the pin and mirrors the
+  # pinned run's artifacts into this run as companion-hypercast, which every leg's
+  # fetch-companions takes with this run's own token. In release mode it mints nothing: it
+  # refuses any companion override and requires the version the manifests name to be live on
+  # every registry but CRAN. Never gated, since a skipped need fails GitHub's implicit
+  # success() and would skip every job below whatever its own `if:` admits; every board job
+  # needs it. The one job that sees the App's key.
+  companions:
+    uses: SkunkWerkx/.github/.github/workflows/hyper-companions.yml@master
+    permissions:
+      contents: read
+    secrets:
+      HYPER_COMPANION_APP_KEY: ${{ secrets.HYPER_COMPANION_APP_KEY }}
+
   # The core on the seven hosts: cargo cdylib, the crate's suite and corpus, the glibc floor,
   # the cdylib's exports held to rust/src/ffi.rs and loaded by .github/scripts/cdylib_smoke.py,
   # this leg's static archive, the C archive assembled from both and c/smoke/ built against
   # it, and native-<rid> uploaded (attested off pull requests). It never skips on a code
   # change: a binding change can touch nothing here and still needs a core to test against.
   core:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.docs_only != 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-core.yml@master
     # A reusable workflow can never escalate beyond what the calling job was granted, so the
@@ -150,7 +166,7 @@ jobs:
   # The cross-target bundle (Apple, Android, the archives the NuGet targets link), one
   # producer of static-libs: C#'s and Swift's suites and the NuGet consumer test download it.
   build-static:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' || needs.changes.outputs.swift == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@master
     permissions:
@@ -165,7 +181,7 @@ jobs:
       android: true
 
   build-android:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-android.yml@master
     permissions:
@@ -191,7 +207,7 @@ jobs:
   # included, on s390x under QEMU.
   # The bindings' own lints are the lint-<binding> jobs below. None of it waits on the core legs.
   core-checks:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-core-checks.yml@master
     permissions:
@@ -209,7 +225,7 @@ jobs:
   # committed-core regeneration check; lint-go-full adds the cross-compile sweep and the race
   # run beside the suites, gating nothing.
   lint-csharp:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-csharp.yml@master
     permissions:
@@ -220,7 +236,7 @@ jobs:
       project: HyperTabular
 
   lint-java:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-java.yml@master
     permissions:
@@ -232,7 +248,7 @@ jobs:
       lint_java_jni: true
 
   lint-python:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-python.yml@master
     permissions:
@@ -243,7 +259,7 @@ jobs:
       project: HyperTabular
 
   lint-ruby:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-ruby.yml@master
     permissions:
@@ -254,7 +270,7 @@ jobs:
       project: HyperTabular
 
   lint-php:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-php.yml@master
     permissions:
@@ -265,7 +281,7 @@ jobs:
       project: HyperTabular
 
   lint-swift:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-swift.yml@master
     permissions:
@@ -276,7 +292,7 @@ jobs:
       project: HyperTabular
 
   lint-typescript:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-typescript.yml@master
     permissions:
@@ -288,7 +304,7 @@ jobs:
       lint_node: true
 
   lint-r:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-r.yml@master
     permissions:
@@ -300,7 +316,7 @@ jobs:
       lint_r: true
 
   lint-go:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
     permissions:
@@ -312,7 +328,7 @@ jobs:
       linters: fast
 
   lint-go-full:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
     permissions:
@@ -329,7 +345,7 @@ jobs:
   # (jni-<rid>, node-<rid>, ruby-native-<rid>-<abi>, php-ext-<rid>-<minor>) hand down the two
   # scopes, as core does.
   test-csharp:
-    needs: [changes, lint-csharp, core, build-static]
+    needs: [changes, companions, lint-csharp, core, build-static]
     if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-csharp.yml@master
     permissions:
@@ -355,7 +371,7 @@ jobs:
       # pipeline's explicit per-leg placement for in-repo testing.
       csharp_runtimes_dir: csharp/HyperTabular/runtimes
   test-java:
-    needs: [changes, lint-java, core]
+    needs: [changes, companions, lint-java, core]
     if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-java.yml@master
     permissions:
@@ -374,7 +390,7 @@ jobs:
       java_jni: true
       jdk_floor_version: "21"
   test-python:
-    needs: [changes, lint-python, core]
+    needs: [changes, companions, lint-python, core]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-python.yml@master
     permissions:
@@ -384,7 +400,7 @@ jobs:
       crate: hypertabular
       project: HyperTabular
   test-ruby:
-    needs: [changes, lint-ruby, core]
+    needs: [changes, companions, lint-ruby, core]
     if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-ruby.yml@master
     permissions:
@@ -407,7 +423,7 @@ jobs:
       # it's there for.
       ruby_compat_version: "3.4"
   test-php:
-    needs: [changes, lint-php, core]
+    needs: [changes, companions, lint-php, core]
     if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-php-extension.yml@master
     permissions:
@@ -423,12 +439,12 @@ jobs:
       # floor through setup-php (the floor's Windows build takes another toolset). Release
       # mode ignores pr_legs and builds every minor on six RIDs.
       php_floor_version: "8.3"
+      # The suite judges every cell with ext-hypercast's classes, which the companions block
+      # in .github/hyper.json names: the pinned run's extension in companion mode, built from
+      # the registry release Cargo.lock pins in release mode, loaded beside this one.
       pr_legs: two-paths
-      # The suite judges every cell with ext-hypercast's classes: the Forge builds HyperCast's
-      # extension from the registry release Cargo.lock pins and loads it beside this one.
-      php_companions: hypercast
   test-swift:
-    needs: [changes, lint-swift, core, build-static]
+    needs: [changes, companions, lint-swift, core, build-static]
     if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift.yml@master
     permissions:
@@ -438,7 +454,7 @@ jobs:
       crate: hypertabular
       project: HyperTabular
   test-typescript:
-    needs: [changes, lint-typescript, core]
+    needs: [changes, companions, lint-typescript, core]
     if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-typescript.yml@master
     permissions:
@@ -450,7 +466,7 @@ jobs:
       crate: hypertabular
       project: HyperTabular
   test-r:
-    needs: [changes, lint-r, core]
+    needs: [changes, companions, lint-r, core]
     if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-r.yml@master
     permissions:
@@ -460,7 +476,7 @@ jobs:
       crate: hypertabular
       project: HyperTabular
   test-go:
-    needs: [changes, lint-go]
+    needs: [changes, companions, lint-go]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-go.yml@master
     permissions:
@@ -475,7 +491,7 @@ jobs:
   # formatter in core-checks, so this is the pack alone; the Apple mobile smoke takes the
   # packed archives in test-apple-mobile.
   pack-c:
-    needs: [changes, core, build-static, build-android]
+    needs: [changes, companions, core, build-static, build-android]
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-c.yml@master
     permissions:
@@ -488,7 +504,7 @@ jobs:
   # C#/NuGet's WASM support is a shipped surface (Norse Architecture needs it), so it's
   # built on every pull request that can reach it, not just at release time.
   build-wasm:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' || needs.changes.outputs.typescript == 'true' || needs.changes.outputs.go == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wasm.yml@master
     # Handed down for the same reason as core's: the ruby.wasm job attests the archives the
@@ -538,7 +554,7 @@ jobs:
   # distribution too: built, `pip install`ed at exactly `rust-version` on manylinux2014 and
   # Alpine (one minor lower must fail), attested and uploaded as `pypi-wheels-sdist`.
   build-wheels:
-    needs: [changes]
+    needs: [changes, companions]
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-wheels.yml@master
     # Same two scopes core hands down, for the same reason: the forge attests each wheel and
@@ -591,7 +607,7 @@ jobs:
   # app also writes what it prints to a file in its container (SmokeLog.cs) and that file is
   # what is checked.
   test-apple-mobile:
-    needs: [changes, build-static, pack-c]
+    needs: [changes, companions, build-static, pack-c]
     # Start when the static archives and the packed C archives are ready; release board only.
     if: github.event_name != 'pull_request'
     # The .NET 11 RC2 ios and maccatalyst workloads (27.0.x) are built against Xcode 27.0 and
@@ -615,6 +631,38 @@ jobs:
         with:
           name: static-libs
           path: .
+
+      - name: Check out the Forge at master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: master
+          path: .hyperforge
+          persist-credentials: false
+
+      # The SDK global.json names, as the Forge's C# legs take it; before the fetch, whose C#
+      # wiring packs the pinned HyperCast with it.
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      # Before the fetch, whose Go wiring runs `go mod edit` and `go list` with it.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # The pinned HyperCast (.github/hyper.json's companions block) for all four bindings that
+      # take it here: its static-libs packed into the C# package the app restores, its C
+      # archives for the smoke, its Swift bundle and XCFramework under the pin both manifests
+      # are rewritten to take by path, and its Go module replaced by the pin's source (the
+      # fetch proves that replace; the Go suites build nothing else of HyperCast's). Before the
+      # step below, whose xcodebuild resolves the package graph. Without a block it does nothing.
+      - name: Fetch the companions
+        id: companions
+        uses: ./.hyperforge/.github/actions/fetch-companions
+        with:
+          leg: ci.yml:test-apple-mobile
 
       - name: What is installed, and what was staged
         run: |
@@ -677,11 +725,35 @@ jobs:
           fi
           arch -x86_64 /usr/bin/true
 
+      # HYPERCAST_PACKAGES, which the smoke's c/smoke/hypercast.sh reads, names the pinned
+      # archives, and the script reports them for each of the four platforms.
+      - name: C — the smoke takes the pinned companion
+        if: ${{ !cancelled() && steps.companions.outputs.active == 'true' }}
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: >-
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py c --root . --installed --rid ios-arm64
+          --rid iossimulator-arm64 --rid maccatalyst-arm64 --rid maccatalyst-x64
+
       - name: C — the four Apple mobile archives, built against and run
         if: ${{ !cancelled() }}
         env:
           VERSION: ${{ steps.unpack.outputs.version }}
         run: c/smoke/apple-mobile.sh unpacked "$VERSION"
+
+      # As the Forge's test-swift proves its legs: each package graph takes the pin by path, and
+      # a fresh verbose build links the archives extracted from its swift-release-assets.
+      - name: Swift — the suite takes the pinned companion
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: '"$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py swift --root . --dir swift --installed'
+
+      - name: Swift — the root manifest takes the pinned companion
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: '"$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py swift --root . --dir . --installed'
 
       - name: Swift — macOS, with the XCFramework declared
         run: |
@@ -692,26 +764,51 @@ jobs:
           (cd swift && swift test)
           swift build
 
+      # Each xcodebuild's output is kept: an Apple mobile build processes HyperCast's
+      # XCFramework, which no `swift build` reaches, so its log is the proof that the pin's was
+      # the one processed and linked (companion_origin.py's --xcodebuild-log).
       - name: Swift — the suite on the iOS simulator
+        id: swift_ios_simulator
         if: ${{ !cancelled() }}
         working-directory: swift
-        run: xcodebuild test -scheme HyperTabular -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}"
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          set -euo pipefail
+          xcodebuild test -scheme HyperTabular -destination "platform=iOS Simulator,id=$UDID" 2>&1 | tee "$RUNNER_TEMP/xcodebuild-ios-simulator.log"
+
+      # Only after its build passed: a failed one's partial log would add an origin error to
+      # the real one.
+      - name: Swift — the iOS simulator build took the pinned companion
+        if: ${{ !cancelled() && steps.swift_ios_simulator.outcome == 'success' && steps.companions.outputs.active == 'true' }}
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: >-
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py swift --root . --dir swift --installed
+          --xcodebuild-log "$RUNNER_TEMP/xcodebuild-ios-simulator.log"
 
       - name: Swift — the suite as a Mac Catalyst process
+        id: swift_mac_catalyst
         if: ${{ !cancelled() }}
         working-directory: swift
-        run: xcodebuild test -scheme HyperTabular -destination "platform=macOS,variant=Mac Catalyst"
+        run: |
+          set -euo pipefail
+          xcodebuild test -scheme HyperTabular -destination "platform=macOS,variant=Mac Catalyst" 2>&1 | tee "$RUNNER_TEMP/xcodebuild-mac-catalyst.log"
+
+      # Only after its build passed: a failed one's partial log would add an origin error to
+      # the real one.
+      - name: Swift — the Mac Catalyst build took the pinned companion
+        if: ${{ !cancelled() && steps.swift_mac_catalyst.outcome == 'success' && steps.companions.outputs.active == 'true' }}
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: >-
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py swift --root . --dir swift --installed
+          --xcodebuild-log "$RUNNER_TEMP/xcodebuild-mac-catalyst.log"
 
       - name: Swift — the package builds for an iOS device
         if: ${{ !cancelled() }}
         working-directory: swift
         run: xcodebuild build -scheme HyperTabular -destination "generic/platform=iOS"
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: ${{ !cancelled() }}
-        with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
 
       - name: Go — the suite in the iOS simulator
         if: ${{ !cancelled() }}
@@ -750,15 +847,20 @@ jobs:
             || { echo "::error::the iOS device build of the Go suite produced no binary"; exit 1; }
           echo "the Go suite builds for an iOS device"
 
-      # The SDK global.json names, as the Forge's C# legs take it.
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        if: ${{ !cancelled() }}
-        with:
-          global-json-file: global.json
-
       - name: Install the .NET iOS and Mac Catalyst workloads
         if: ${{ !cancelled() }}
         run: dotnet workload install ios maccatalyst
+
+      # The app restored as the builds below restore it, then the global packages folder's
+      # HyperCast proven to be the job's feed's, byte for byte, before the first build.
+      - name: C# — the app restores the pinned companion
+        if: ${{ !cancelled() && steps.companions.outputs.active == 'true' }}
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: |
+          set -euo pipefail
+          dotnet restore "$SMOKE_PROJECT" -p:ValidateXcodeVersion=false
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py csharp --root . --installed
 
       - name: C# — a Mac Catalyst app, built and run
         if: ${{ !cancelled() }}
@@ -859,7 +961,7 @@ jobs:
   # android_device_test.sh. The
   # aarch64 builds are linked, not run. Swift's SDK for Android needs Swift 6.3 or later.
   test-android:
-    needs: [changes, build-static, build-android]
+    needs: [changes, companions, build-static, build-android]
     # Release board only: an emulator run is minutes a pull request's own suites already cover.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-26.04
@@ -883,6 +985,14 @@ jobs:
           name: static-libs
           path: .
 
+      - name: Check out the Forge at master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: master
+          path: .hyperforge
+          persist-credentials: false
+
       - name: Stage runtimes/android-{rid}/native/
         run: |
           set -euo pipefail
@@ -896,6 +1006,55 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+
+      # Before the fetch, whose Go wiring runs `go mod edit` and `go list` with it.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # The pinned HyperCast (.github/hyper.json's companions block), in two passes, since Swift
+      # can't be on PATH until after the APKs. This one: the C# package, packed with its Android
+      # libraries into the job's feed, which the HyperTabular package below then requires
+      # exactly (after setup-dotnet, since the wiring packs with the SDK); and the Go module,
+      # replaced by the pin's source, which the fetch proves (the Go suite builds nothing else of
+      # HyperCast's). Swift's pass follows setup-swift. Without a block it does nothing.
+      - name: Fetch the companions
+        id: companions
+        uses: ./.hyperforge/.github/actions/fetch-companions
+        with:
+          leg: ci.yml:test-android
+          ecosystems: csharp go
+
+      # The wiring's nuget.config maps HyperCast to the pin's feed and every other id to
+      # nuget.org, and NuGet considers no source a mapping leaves out, so the local feed the
+      # packed HyperTabular is restored from (RestoreAdditionalProjectSources) would go unread
+      # (NU1101). Every later restore reads this copy of that config instead (MSBuild takes
+      # RestoreConfigFile from the environment): the same sources and mapping, plus that feed
+      # mapped to HyperTabular alone. The root nuget.config is left as the wiring wrote it,
+      # which the origin proof requires.
+      - name: The local HyperTabular feed beside the pin's
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/feed"
+          "$FETCH_PYTHON" - "$RUNNER_TEMP/feed" "$RUNNER_TEMP/nuget.config" <<'PY'
+          import sys
+          from xml.sax.saxutils import quoteattr
+          feed, out = sys.argv[1:]
+          text = open('nuget.config', encoding='utf-8').read()
+          source, mapping = '    <add key="nuget.org" ', '    <packageSource key="nuget.org">'
+          if text.count(source) != 1 or text.count(mapping) != 1:
+              sys.exit("::error::nuget.config is not the one the companion wiring writes")
+          text = text.replace(source, f'    <add key="hypertabular" value={quoteattr(feed)} />\n' + source)
+          text = text.replace(mapping, '    <packageSource key="hypertabular">\n'
+                              '      <package pattern="HyperTabular" />\n    </packageSource>\n' + mapping)
+          open(out, 'w', encoding='utf-8').write(text)
+          PY
+          cat "$RUNNER_TEMP/nuget.config"
+          echo "RestoreConfigFile=$RUNNER_TEMP/nuget.config" >> "$GITHUB_ENV"
 
       # The android workload's build tasks run on a JDK.
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
@@ -918,6 +1077,18 @@ jobs:
                       staticlibs/android-arm64/libhypertabular.a staticlibs/android-x64/libhypertabular.a; do
             grep -q " $path\$" "$RUNNER_TEMP/nupkg.txt" || { echo "::error::the package has no $path"; exit 1; }
           done
+
+      # The app restored as its publishes restore it, then the global packages folder's
+      # HyperCast proven to be the job's feed's, byte for byte, before the first APK.
+      - name: The smoke test restores the pinned companion
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: |
+          set -euo pipefail
+          dotnet restore "$SMOKE_PROJECT" -r android-x64 \
+            -p:HyperTabularVersion="$HYPERTABULAR_VERSION" -p:RestoreAdditionalProjectSources="$HYPERTABULAR_FEED"
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py csharp --root . --installed
 
       # Each build from a clean tree, since the CoreCLR and Native AOT builds of one RID share
       # bin/ and obj/; the signed APK is copied out under a name that says which it is.
@@ -975,15 +1146,29 @@ jobs:
             echo "$rid: the CoreCLR APK carries lib/$abi/libhypertabular.so; the Native AOT APK links the core in; both pass zipalign -P 16"
           done
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
-
       # After the APKs: setup-swift puts its toolchain's clang first on PATH.
       - uses: SwiftyLab/setup-swift@d60245579ea3836a3f2fa65ebbe1e8891d577c76 # v1.14.2
         with:
           swift-version: "6.4"
+
+      # The leg's second pass, now that Swift is on PATH (its proof asks SwiftPM for the package
+      # graph): the pin's bundle, its *-unknown-linux-android variants included, under the pin
+      # the suite's manifest is rewritten to take by path. The first pass's C# and Go wiring
+      # stay (.companions/env keeps their lines; the pin's tree isn't cleaned).
+      - name: Fetch the companions, Swift
+        id: companions_swift
+        uses: ./.hyperforge/.github/actions/fetch-companions
+        with:
+          leg: ci.yml:test-android
+          ecosystems: swift
+
+      # Right before the cross-build, with the native build system it builds with: a host build
+      # of the suite links the archives extracted from the pin's swift-release-assets.
+      - name: Swift — the suite takes the pinned companion
+        if: steps.companions_swift.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions_swift.outputs.python }}
+        run: '"$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py swift --root . --dir swift --installed --build-system native'
 
       - name: Go and Swift — cross-build the suites for Android
         run: |
@@ -1027,7 +1212,7 @@ jobs:
   #    installs no wasm workload.
   # The runner image's SDK is not assumed to be the only one: the job logs which are there.
   test-nuget-package:
-    needs: [changes, core, build-static]
+    needs: [changes, companions, core, build-static]
     if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -1051,6 +1236,14 @@ jobs:
           name: static-libs
           path: .
 
+      - name: Check out the Forge at master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SkunkWerkx/.github
+          ref: master
+          path: .hyperforge
+          persist-credentials: false
+
       - name: Stage runtimes/linux-x64/native/
         run: |
           set -euo pipefail
@@ -1062,6 +1255,46 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+
+      # The pinned HyperCast (.github/hyper.json's companions block), packed with its linux-x64
+      # libraries into the job's feed, which the HyperTabular package below then requires
+      # exactly; after setup-dotnet, since the wiring packs with the SDK. Without a block it
+      # does nothing.
+      - name: Fetch the companions
+        id: companions
+        uses: ./.hyperforge/.github/actions/fetch-companions
+        with:
+          leg: ci.yml:test-nuget-package
+
+      # The wiring's nuget.config maps HyperCast to the pin's feed and every other id to
+      # nuget.org, and NuGet considers no source a mapping leaves out, so the local feed the
+      # packed HyperTabular is restored from (RestoreAdditionalProjectSources) would go unread
+      # (NU1101). Every later restore reads this copy of that config instead (MSBuild takes
+      # RestoreConfigFile from the environment): the same sources and mapping, plus that feed
+      # mapped to HyperTabular alone. The root nuget.config is left as the wiring wrote it,
+      # which the origin proof requires.
+      - name: The local HyperTabular feed beside the pin's
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/feed"
+          "$FETCH_PYTHON" - "$RUNNER_TEMP/feed" "$RUNNER_TEMP/nuget.config" <<'PY'
+          import sys
+          from xml.sax.saxutils import quoteattr
+          feed, out = sys.argv[1:]
+          text = open('nuget.config', encoding='utf-8').read()
+          source, mapping = '    <add key="nuget.org" ', '    <packageSource key="nuget.org">'
+          if text.count(source) != 1 or text.count(mapping) != 1:
+              sys.exit("::error::nuget.config is not the one the companion wiring writes")
+          text = text.replace(source, f'    <add key="hypertabular" value={quoteattr(feed)} />\n' + source)
+          text = text.replace(mapping, '    <packageSource key="hypertabular">\n'
+                              '      <package pattern="HyperTabular" />\n    </packageSource>\n' + mapping)
+          open(out, 'w', encoding='utf-8').write(text)
+          PY
+          cat "$RUNNER_TEMP/nuget.config"
+          echo "RestoreConfigFile=$RUNNER_TEMP/nuget.config" >> "$GITHUB_ENV"
 
       - name: Which SDKs are here
         run: |
@@ -1087,6 +1320,18 @@ jobs:
             echo "::error::the package carries a build/net11.0 or buildTransitive/net11.0 folder; the targets file is under net10.0 only"
             exit 1
           fi
+
+      # The smoke test restored from the package, as the publishes below restore it, then the
+      # global packages folder's HyperCast proven to be the job's feed's, byte for byte.
+      - name: The package restores the pinned companion
+        if: steps.companions.outputs.active == 'true'
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: |
+          set -euo pipefail
+          dotnet restore "$SMOKE_PROJECT" -r linux-x64 \
+            -p:HyperTabularVersion="$HYPERTABULAR_VERSION" -p:RestoreAdditionalProjectSources="$HYPERTABULAR_FEED"
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py csharp --root . --installed
 
       # Package mode: the smoke test takes the .nupkg from the feed, so NuGet makes the
       # targets import. One TFM at a time (without -f a multi-targeted publish fails with
@@ -1188,11 +1433,11 @@ jobs:
   # asserted, not hidden) and two bundlers. Bun runs the forced-WASI suite too, and its result is
   # recorded in the step summary without failing the job: Bun's node:wasi cannot initialise
   # the module today (the design spec's Bun decision); native Bun stays green on the TypeScript legs.
-  # The Forge is checked out at master here, as release.yml does, for the pack script; the
-  # workflow calls above resolve the same way.
+  # The Forge is checked out at master here, as release.yml does, for the pack script,
+  # fetch-companions and companion_origin.py; the workflow calls above resolve the same way.
   test-npm-package:
     # node-<rid> comes from the TypeScript legs, node-wasm32-wasip1 from build-wasm.
-    needs: [changes, core, build-wasm, test-typescript]
+    needs: [changes, companions, core, build-wasm, test-typescript]
     if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     strategy:
       fail-fast: false
@@ -1215,6 +1460,17 @@ jobs:
         with:
           node-version: "26"
 
+      # The pinned HyperCast (.github/hyper.json's companions block): typescript/'s
+      # devDependency rewritten to its packed tarball and the peer to its exact version, the
+      # lock regenerated before `npm ci` below, and the whole set its release publishes packed
+      # for the consumer tests' Verdaccio, named by HYPERCAST_TARBALLS (run.sh publishes it after
+      # this package and its natives). Without a block it does nothing.
+      - name: Fetch the companions
+        id: companions
+        uses: ./.hyperforge/.github/actions/fetch-companions
+        with:
+          leg: ci.yml:test-npm-package
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
@@ -1227,13 +1483,20 @@ jobs:
 
       # The module and its loaders beside binding.js, where the loader's first WASI candidate
       # looks; no .node is built or downloaded into the checkout, and the forced mode never
-      # consults one anyway.
+      # consults one anyway. With a pin, the install is proven right after it, before the suite
+      # (as the Forge's TypeScript legs do): the pinned HyperCast packages and nothing else.
       - name: The conformance suite against the WASI module, native refused
         shell: bash
         working-directory: typescript
+        env:
+          COMPANIONS_ACTIVE: ${{ steps.companions.outputs.active }}
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
         run: |
           set -euo pipefail
           npm ci
+          if [ "$COMPANIONS_ACTIVE" = true ]; then
+            "$FETCH_PYTHON" ../.hyperforge/.github/scripts/companion_origin.py npm --root .. --dir typescript --installed
+          fi
           cp ../artifacts/node/node-wasm32-wasip1/* .
           ls -l hypertabular.wasm32-wasip1.wasm
           NAPI_RS_FORCE_WASI=error npm test
@@ -1308,6 +1571,28 @@ jobs:
           negative-unpublished plain omit-optional absent-native forced-wasi
           negative-deleted-package negative-deleted-wasm bundlers
 
+      # Every scenario's lock, under the directories run.sh installed into (its `consumer`
+      # names: omit-optional's is "consumer two"), resolves each HyperCast package with the
+      # integrity of the pinned set the wiring packed. negative-unpublished's install fails and
+      # leaves none; the container scenarios install inside their images.
+      - name: Every scenario installed the pinned companion
+        if: matrix.os == 'ubuntu-26.04' && steps.companions.outputs.active == 'true'
+        shell: bash
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: >-
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py npm --root .
+          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers,mac-lockfile"
+
+      - name: The scenarios this OS ran installed the pinned companion
+        if: matrix.os != 'ubuntu-26.04' && steps.companions.outputs.active == 'true'
+        shell: bash
+        env:
+          FETCH_PYTHON: ${{ steps.companions.outputs.python }}
+        run: >-
+          "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py npm --root .
+          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers"
+
   # The release tail. A release's run is dispatched by prepare-release.yml at master once the
   # bump is pushed as A; pull requests and the weekly schedule never reach it. Everything below
   # needs every board job above, through `forge`, so nothing is packed from a red board.
@@ -1320,7 +1605,7 @@ jobs:
   # name contains head, sha, commit, branch or ref as a pull request head, and in a read-only
   # job it reports the checkout as a cache-poisoning step (actions/cache-poisoning/poisonable-step).
   forge:
-    needs: [changes, core, build-static, build-android, core-checks, lint-csharp, lint-java,
+    needs: [changes, companions, core, build-static, build-android, core-checks, lint-csharp, lint-java,
             lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
             lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
             test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,
@@ -1614,7 +1899,7 @@ jobs:
   # cancelled, or was skipped while `changes` said it should run (a too-narrow classifier
   # would otherwise be invisible); .github/scripts/pr_board.py has the gates, one per job.
   pr-board:
-    needs: [changes, core, build-static, build-android, core-checks, lint-csharp, lint-java,
+    needs: [changes, companions, core, build-static, build-android, core-checks, lint-csharp, lint-java,
             lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
             lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
             test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,

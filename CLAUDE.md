@@ -59,6 +59,25 @@ root `composer.json` (`ext-hypercast`), both `Package.swift` files and
 `r/DESCRIPTION`'s Imports, and the C++ header's minimum. After the core's HyperCast moves,
 `go generate` in `go/` and the header test re-run. Dependabot ignores HyperCast everywhere.
 
+HyperCast is HyperTabular's companion. The board (every pull request, the weekly schedule and a
+`purpose=board` dispatch) never takes it from a registry: `.github/hyper.json`'s `companions`
+block pins one HyperCast commit and the green full-board run of its `ci.yml` that proved it.
+`ci.yml`'s `companions` job (the Forge's `hyper-companions.yml`, never gated, the one job that
+holds the companion App's key) mirrors that run's artifacts into this run, and every leg's
+`fetch-companions`, the Forge's and this repo's four own jobs' (`test-apple-mobile`,
+`test-android`, `test-nuget-package`, `test-npm-package`), wires them into the job's tree only
+and proves where each install came from. A HyperCast artifact renamed in its `ci.yml` is a Forge
+`companion_map.py` change. The manifests keep requiring what the code needs, one version across
+all of them (the wiring sets each to the pin's exact version in the job's tree). A release takes
+HyperCast from the registries instead, so the order is: HyperCast releases, live everywhere but
+CRAN, with the Forge attaching its CRAN tarball to its GitHub Release; then this repo's
+`prepare-release.yml`, whose `companions` job gates on exactly that
+(`python3 ../HyperForge/.github/scripts/companion_gate.py --root .` checks it beforehand); CRAN
+last, HyperCast's then this. `.github/RELEASING.md` and the Forge's runbook have moving the pin.
+The `companions` job takes the Forge as the run was queued, the four own jobs check it out at
+`master` when they start: a Forge merge that changes the mirror's layout while a board run is in
+flight can fail their fetch, so don't merge one then, and re-run the whole board if it happened.
+
 ## Lists that move together
 
 - Exports: `rust/src/kernel/exports.rs` (cbindgen generates `include/hypertabular.h` from it),
@@ -76,6 +95,16 @@ root `composer.json` (`ext-hypercast`), both `Package.swift` files and
   Rust API). The Blazor archive needs no export list: the SDK's pinvoke table links every
   P/Invoke by symbol. Every ABI struct's layout is pinned by `offset_of!` asserts in the
   kernel and carried by the header as `*_SIZE`; the bindings restate them.
+- The companion pin: the `companions` block in `.github/hyper.json` (`repo`, `commit`, `run`,
+  moved only by the Forge's `companion_pin.py`, never by hand), `ci.yml`'s `companions` job and
+  its place in every board job's `needs` (`pr_board.py`'s `JOBS` and the contract tests hold
+  both), the fetch and origin steps of the four own jobs above, whose legs are the Forge's
+  `companion_map.py` `ci.yml` entries (each mirrors that job's download steps and names every
+  binding the job builds against HyperCast, its Go and Swift suites included, so a changed
+  download or suite there is a Forge change; `test-android` fetches in two passes, Swift's after
+  setup-swift), and `.companions/` in `.gitignore`. A pinned run's
+  artifacts expire after 90 days; the `companions` job then names the `purpose=board` dispatch
+  to make and pin.
 - The shared library's own name is set in three places that must agree: `rust/build.rs`
   (install name `@rpath/libhypertabular.dylib`, soname `libhypertabular.so`; `cdylib` feature
   only), `IMPORTED_SONAME` in `c/cmake/hypertabularConfig.cmake`, and the `needed` check in
@@ -369,10 +398,11 @@ variable); the Forge's `wasm_archive_guard.py` checks the result.
 
 ## Open follow-ups (as of 2026-11-01)
 
-- The next release waits on HyperCast 1.1.0 on every registry, then the bump above:
-  `rust/Cargo.toml` still requires `hypercast` 1.0.0 and its lockfiles pin it, so CI is red
-  until then (the C# restore, Maven, Go module, PyPI, npm, CRAN and ext-hypercast all need
-  1.1.0).
+- The next release waits on HyperCast 1.1.0 on every registry. Every manifest requires 1.1.0,
+  but its lockfiles (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `java/jni/`) and
+  `swift/Benchmarks/Package.resolved` still name 1.0.0, which only the bump above can move
+  once 1.1.0 is published; the board meanwhile runs on the pin, whose wiring relocks each job's
+  tree.
 - The next release is the first with npm, CRAN, C archives, PIE zips, the Swift zips and the
   JNI jar; what only it can prove is the same list as HyperCast's.
 - Benchmark tables were measured on the WSL2 i9-11900H box, Go's and PHP's new receipts on an

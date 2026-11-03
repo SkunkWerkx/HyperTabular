@@ -49,13 +49,15 @@ class GateTests(unittest.TestCase):
     def test_one_binding_gates_its_lint_and_test_and_nothing_else(self):
         gates = pr_board.gates(outputs(java=True), 'pull_request')
         on = {name for name, gate in gates.items() if gate}
-        self.assertEqual(on, {'changes', 'core', 'lint-java', 'test-java'})
+        self.assertEqual(on, {'changes', 'companions', 'core', 'lint-java', 'test-java'})
         gates = pr_board.gates(outputs(csharp=True), 'pull_request')
         on = {name for name, gate in gates.items() if gate}
-        self.assertEqual(on, {'changes', 'core', 'lint-csharp', 'test-csharp', 'build-static', 'build-wasm', 'test-nuget-package'})
+        self.assertEqual(on, {'changes', 'companions', 'core', 'lint-csharp', 'test-csharp', 'build-static', 'build-wasm',
+                              'test-nuget-package'})
         gates = pr_board.gates(outputs(typescript=True), 'pull_request')
         on = {name for name, gate in gates.items() if gate}
-        self.assertEqual(on, {'changes', 'core', 'lint-typescript', 'test-typescript', 'build-wasm', 'test-npm-package'})
+        self.assertEqual(on, {'changes', 'companions', 'core', 'lint-typescript', 'test-typescript', 'build-wasm',
+                              'test-npm-package'})
         gates = pr_board.gates(outputs(python=True), 'pull_request')
         self.assertTrue(gates['build-wheels'])
         gates = pr_board.gates(outputs(swift=True), 'pull_request')
@@ -111,7 +113,7 @@ class GateTests(unittest.TestCase):
                 head = jobs[name].split('    steps:')[0]
                 gate = re.search(r'^    if: (.*)$', head, re.M)
                 classes = set(re.findall(r"needs\.changes\.outputs\.([a-z_]+) == 'true'", gate[1])) if gate else set()
-                if name == 'changes':
+                if name in ('changes', 'companions'):
                     self.assertIsNone(gate)
                     continue
                 if name in pr_board.TAIL:
@@ -138,35 +140,36 @@ class VerdictTests(unittest.TestCase):
 
     def test_skipped_but_gated_on_is_red(self):
         gates = pr_board.gates(outputs(java=True), 'pull_request')
-        ok, why = pr_board.verdict(results(**{name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'core', 'lint-java')}), gates)
+        ok, why = pr_board.verdict(results(**{name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'companions', 'core', 'lint-java')}), gates)
         self.assertFalse(ok)
         self.assertEqual(why, 'test-java skipped but gated on')
 
     def test_skipped_and_gated_off_is_green(self):
         gates = pr_board.gates(outputs(java=True), 'pull_request')
-        skipped = {name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'core', 'lint-java', 'test-java')}
+        skipped = {name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'companions', 'core', 'lint-java', 'test-java')}
         self.assertEqual(pr_board.verdict(results(**skipped), gates), (True, 'ok'))
 
     def test_docs_only_board_is_green_with_everything_skipped(self):
         gates = pr_board.gates(outputs(docs_only=True), 'pull_request')
-        skipped = {name: 'skipped' for name in pr_board.JOBS if name != 'changes'}
+        skipped = {name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'companions')}
         self.assertEqual(pr_board.verdict(results(**skipped), gates), (True, 'ok'))
 
     def test_lint_failure_is_named_before_the_skipped_suites(self):
         gates = pr_board.gates(outputs(java=True), 'pull_request')
         given = {'test-java': 'skipped', 'lint-java': 'failure'}
-        given.update({name: 'skipped' for name in pr_board.JOBS if name not in given and name not in ('changes', 'core')})
+        given.update({name: 'skipped' for name in pr_board.JOBS if name not in given and name not in ('changes', 'companions', 'core')})
         ok, why = pr_board.verdict(results(**given), gates)
         self.assertEqual((ok, why), (False, 'lint-java failed'))
 
     def test_a_failed_classifier_is_red(self):
         gates = pr_board.gates(outputs(), 'pull_request')
-        ok, why = pr_board.verdict(results(**{name: 'skipped' for name in pr_board.JOBS if name != 'changes'}, changes='failure'), gates)
+        ok, why = pr_board.verdict(results(**{name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'companions')},
+                                                   changes='failure'), gates)
         self.assertEqual((ok, why), (False, 'changes failed'))
 
     def test_a_job_the_gates_do_not_know_is_gated_on(self):
         gates = pr_board.gates(outputs(docs_only=True), 'pull_request')
-        given = results(**{name: 'skipped' for name in pr_board.JOBS if name != 'changes'})
+        given = results(**{name: 'skipped' for name in pr_board.JOBS if name not in ('changes', 'companions')})
         given['test-new-binding'] = 'skipped'
         ok, why = pr_board.verdict(given, gates)
         self.assertEqual((ok, why), (False, 'test-new-binding skipped but gated on'))

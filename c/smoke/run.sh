@@ -91,14 +91,14 @@ check_static_link() {
 run_program() {
   local how="$1" program="$2" linkage="$3" output
   if [ "$linkage" = static ]; then check_static_link "$program"; else check_shared_link "$program"; fi
-  output="$("${run_as[@]}" "$program" "$corpus")" || fail "$program ($how) failed"
+  output="$(${run_as[@]+"${run_as[@]}"} "$program" "$corpus")" || fail "$program ($how) failed"
   check_version "hypertabular_version() ($how)" "$(printf '%s' "$output" | tr -d '\r')"
 }
 
 cmake_build() {
   local name="$1" static="$2" build="$work/cmake-$1"
   cmake -S "$here" -B "$build" -DCMAKE_PREFIX_PATH="$pkg;$hypercast" -DHYPERTABULAR_SMOKE_STATIC="$static" \
-    "${cmake_arch[@]}" -DHYPERTABULAR_SMOKE_HYPERCAST="$hypercast_wanted" \
+    ${cmake_arch[@]+"${cmake_arch[@]}"} -DHYPERTABULAR_SMOKE_HYPERCAST="$hypercast_wanted" \
     -DHYPERTABULAR_SMOKE_CXX="$([ "${SMOKE_CXX:-}" = 1 ] && echo ON || echo OFF)" \
     -DCMAKE_BUILD_TYPE=Release >"$work/$name.log" 2>&1 || { cat "$work/$name.log"; fail "cmake configure ($name)"; }
   cmake --build "$build" --config Release >>"$work/$name.log" 2>&1 || { cat "$work/$name.log"; fail "cmake build ($name)"; }
@@ -148,19 +148,19 @@ if [ "$os" != windows ]; then
   check_version "pkg-config --modversion" "$(pkg-config --modversion hypertabular)"
   libdir="$(pkg-config --variable=libdir hypertabular)"
   # shellcheck disable=SC2046 # pkg-config's flags are meant to split
-  cc "${arch_flags[@]}" -o "$work/pc-shared" "$here/main.c" $(pkg-config --cflags --libs hypertabular) -Wl,-rpath,"$libdir"
+  cc ${arch_flags[@]+"${arch_flags[@]}"} -o "$work/pc-shared" "$here/main.c" $(pkg-config --cflags --libs hypertabular) -Wl,-rpath,"$libdir"
   run_program "pkg-config, shared" "$work/pc-shared" shared
   # shellcheck disable=SC2046
-  cc "${arch_flags[@]}" -o "$work/pc-static" "$here/main.c" $(pkg-config --cflags hypertabular) "$libdir/libhypertabular.a"
+  cc ${arch_flags[@]+"${arch_flags[@]}"} -o "$work/pc-static" "$here/main.c" $(pkg-config --cflags hypertabular) "$libdir/libhypertabular.a"
   run_program "pkg-config, static" "$work/pc-static" static
   if command -v c++ >/dev/null && [ -n "$hypercast" ]; then
     hypercast_libdir="$(pkg-config --variable=libdir hypercast)"
     # shellcheck disable=SC2046
-    c++ "${arch_flags[@]}" -std=c++17 -o "$work/pc-cxx-shared" "$here/main.cpp" \
+    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 -o "$work/pc-cxx-shared" "$here/main.cpp" \
       $(pkg-config --cflags --libs hypertabular hypercast) -Wl,-rpath,"$libdir" -Wl,-rpath,"$hypercast_libdir"
     run_program "pkg-config, C++, shared" "$work/pc-cxx-shared" shared
     # shellcheck disable=SC2046
-    c++ "${arch_flags[@]}" -std=c++17 -o "$work/pc-cxx-static" "$here/main.cpp" \
+    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 -o "$work/pc-cxx-static" "$here/main.cpp" \
       $(pkg-config --cflags hypertabular hypercast) "$libdir/libhypertabular.a" "$hypercast_libdir/libhypercast.a"
     run_program "pkg-config, C++, static" "$work/pc-cxx-static" static
   elif [ "${SMOKE_CXX:-}" = 1 ]; then

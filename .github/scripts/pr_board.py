@@ -14,15 +14,16 @@ import os
 import sys
 
 BINDINGS = ['csharp', 'java', 'python', 'ruby', 'php', 'swift', 'typescript', 'r', 'go']
-# Every job but the two aggregates, in the order a failure is named: a red lint before the
-# suites it skipped, the core before what waits on it.
+# Every job but the two aggregates, in the order a failure is named: the companions mirror,
+# never gated, before every job that needs it, a red lint before the suites it skipped, the core
+# before what waits on it.
 # The release tail, in dependency order: the Forge resolver, the eight pack jobs, the
 # inventory, CodeQL and B. Run on a master dispatch with purpose=release only
 # (prepare-release.yml's), never on a pull request, the weekly schedule or a purpose=board
 # dispatch, whatever changed.
 TAIL = ['forge', 'nuget-org-pack', 'crate-pack', 'maven-pack', 'ruby-pack', 'npm-pack', 'r-pack', 'c-pack', 'pypi-pack',
         'release-prepare', 'codeql', 'stage-release']
-JOBS = (['changes'] + [f'lint-{b}' for b in BINDINGS] + ['lint-go-full', 'core', 'core-checks', 'build-static', 'build-android']
+JOBS = (['changes', 'companions'] + [f'lint-{b}' for b in BINDINGS] + ['lint-go-full', 'core', 'core-checks', 'build-static', 'build-android']
         + [f'test-{b}' for b in BINDINGS]
         + ['pack-c', 'build-wasm', 'build-wheels', 'test-nuget-package', 'test-npm-package', 'test-apple-mobile', 'test-android']
         + TAIL)
@@ -38,7 +39,7 @@ def gates(outputs, event, ref='', purpose=''):
         return on.get(name, False) or core_or_ci
 
     release = event != 'pull_request'
-    result = {'changes': True, 'core': not on.get('docs_only', False),
+    result = {'changes': True, 'companions': True, 'core': not on.get('docs_only', False),
               'build-static': core_or_ci or on.get('csharp', False) or on.get('swift', False),
               'build-android': core_or_ci, 'core-checks': core_or_ci, 'pack-c': core_or_ci,
               'build-wasm': core_or_ci or on.get('csharp', False) or on.get('typescript', False) or on.get('go', False),

@@ -254,7 +254,8 @@ ATTESTING = {'hyper-core.yml', 'hyper-build-static.yml', 'hyper-build-android.ym
              'hyper-build-wheels.yml', 'hyper-build-php-extension.yml', 'hyper-test-java.yml',
              'hyper-test-typescript.yml', 'hyper-test-ruby.yml',
              'hyper-pack-nuget.yml', 'hyper-pack-crate.yml', 'hyper-pack-maven.yml'}
-NO_MODE = {'hyper-core-checks.yml', 'hyper-pack-nuget.yml', 'hyper-pack-crate.yml', 'hyper-pack-maven.yml'}
+NO_MODE = {'hyper-core-checks.yml', 'hyper-companions.yml', 'hyper-pack-nuget.yml', 'hyper-pack-crate.yml',
+           'hyper-pack-maven.yml'}
 # The release tail of ci.yml, in dependency order (pr_board.py's TAIL): the Forge resolver, the
 # eight pack jobs, the inventory, CodeQL and B; gated on prepare-release.yml's master dispatch
 # with purpose=release (the default), so a purpose=board dispatch runs the board alone.
@@ -301,8 +302,8 @@ class CiTests(unittest.TestCase):
         # Release board only, both of them; the C smoke's simulator run joins test-apple-mobile,
         # which is why it waits for the packed archives.
         apple, android = self.jobs['test-apple-mobile'], self.jobs['test-android']
-        self.assertEqual(self.needs(apple), {'changes', 'build-static', 'pack-c'})
-        self.assertEqual(self.needs(android), {'changes', 'build-static', 'build-android'})
+        self.assertEqual(self.needs(apple), {'changes', 'companions', 'build-static', 'pack-c'})
+        self.assertEqual(self.needs(android), {'changes', 'companions', 'build-static', 'build-android'})
         for job in (apple, android):
             self.assertIn("    if: github.event_name != 'pull_request'\n", header(job))
         self.assertNotIn('test-swift-static', self.jobs, "Swift's static suite is its Linux test legs' now")
@@ -358,7 +359,7 @@ class CiTests(unittest.TestCase):
 
     def test_nuget_package_job_proves_the_packed_layout(self):
         job = self.jobs['test-nuget-package']
-        self.assertEqual(self.needs(job), {'changes', 'core', 'build-static'})
+        self.assertEqual(self.needs(job), {'changes', 'companions', 'core', 'build-static'})
         self.assertIn('    runs-on: ubuntu-26.04\n', header(job))
         self.assertEqual(self.gate(job), self.g('csharp', 'core', 'ci'))
         self.assertIn('setup-dotnet', job)
@@ -370,7 +371,7 @@ class CiTests(unittest.TestCase):
 
     def test_npm_package_job_proves_the_fallback_in_consumers(self):
         job = self.jobs['test-npm-package']
-        self.assertEqual(self.needs(job), {'changes', 'core', 'build-wasm', 'test-typescript'},
+        self.assertEqual(self.needs(job), {'changes', 'companions', 'core', 'build-wasm', 'test-typescript'},
                          'node-<rid> comes from the TypeScript legs, node-wasm32-wasip1 from build-wasm')
         self.assertIn('    runs-on: ${{ matrix.os }}\n', header(job))
         self.assertIn('        os: [ubuntu-26.04, xcode-27, windows-2025-vs2026]\n', header(job))
@@ -448,7 +449,7 @@ class CiTests(unittest.TestCase):
         self.assertNotIn('go/staticlib', ci)
         go = self.jobs['test-go']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-test-go.yml@master', go)
-        self.assertEqual(self.needs(go), {'changes', 'lint-go'})
+        self.assertEqual(self.needs(go), {'changes', 'companions', 'lint-go'})
         self.assertIn('      linters: fast\n', self.jobs['lint-go'])
         self.assertIn('      linters: full\n', self.jobs['lint-go-full'])
         self.assertEqual({name for name, job in self.jobs.items() if 'lint-go-full' in self.needs(job)},
@@ -491,7 +492,7 @@ class CiTests(unittest.TestCase):
     def test_core_checks_is_the_forge_matrix_with_the_core_inputs(self):
         core = self.jobs['core-checks']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-core-checks.yml@master', core)
-        self.assertEqual(self.needs(core), {'changes'})
+        self.assertEqual(self.needs(core), {'changes', 'companions'})
         self.assertEqual(self.gate(core), self.g('core', 'ci'))
         self.assertEqual(with_block(core), {'core_script', 'extra_features', 'no_panic', 'corpus_oracle', 'big_endian'})
         self.assertIn('big_endian: s390x-unknown-linux-gnu', core)
@@ -513,10 +514,12 @@ class CiTests(unittest.TestCase):
     # The board's shape: every gate reads `changes`, every suite waits for its lint and the core,
     # the two consumer tests and the two mobile jobs keep their inputs, and pr-board reads it all.
 
-    def test_changes_and_pr_board_are_the_only_unconditional_jobs(self):
+    def test_changes_companions_and_pr_board_are_the_only_unconditional_jobs(self):
+        # `companions` is the third: a skipped need fails GitHub's implicit success(), so a gated
+        # companions job would skip every board job whatever its own `if:` admits.
         for name, job in self.jobs.items():
             with self.subTest(job=name):
-                if name in ('changes',):
+                if name in ('changes', 'companions'):
                     self.assertIsNone(self.gate(job))
                 elif name == 'pr-board':
                     self.assertEqual(self.gate(job), 'always()')
@@ -525,30 +528,231 @@ class CiTests(unittest.TestCase):
 
     def test_every_job_that_reads_changes_needs_it(self):
         for name, job in self.jobs.items():
-            if name == 'changes':
+            if name in ('changes', 'companions'):
                 continue
             with self.subTest(job=name):
                 self.assertIn('changes', self.needs(job))
 
+    # HyperCast, the companion, comes from the run .github/hyper.json pins: `companions` (the
+    # Forge's hyper-companions.yml) mirrors that run's artifacts into this one in companion mode
+    # and gates the release on the registries in release mode, and every board job waits for it.
+
+    def test_companions_is_one_forge_call_holding_the_app_key(self):
+        job = self.jobs['companions']
+        self.assertIn('    uses: SkunkWerkx/.github/.github/workflows/hyper-companions.yml@master\n', job)
+        self.assertEqual(self.needs(job), set(), 'it reads no class of the pull request: it never skips')
+        self.assertIsNone(self.gate(job))
+        self.assertIn('    permissions:\n      contents: read\n', header(job))
+        self.assertIn('    secrets:\n      HYPER_COMPANION_APP_KEY: ${{ secrets.HYPER_COMPANION_APP_KEY }}\n', job)
+        self.assertEqual(re.findall(r'^      ([A-Za-z_]+):', job.split('    secrets:\n', 1)[1], re.M),
+                         ['HYPER_COMPANION_APP_KEY'])
+        self.assertEqual(with_block(job), set())
+        self.assertEqual([name for name, j in self.jobs.items() if 'workflows/hyper-companions.yml@' in j], ['companions'])
+
+    def test_the_companion_app_key_reaches_companions_alone(self):
+        for path in sorted(WORKFLOWS.glob('*.yml')):
+            for name, job in jobs(path).items():
+                with self.subTest(file=path.name, job=name):
+                    if path.name == 'ci.yml' and name == 'companions':
+                        self.assertEqual(job.count('HYPER_COMPANION_APP_KEY'), 2)
+                    else:
+                        self.assertNotIn('HYPER_COMPANION_APP_KEY', job)
+                    self.assertNotIn('secrets: inherit', job)
+
+    def test_every_board_job_needs_companions(self):
+        # The Forge callers fetch the mirror in each leg (fetch-companions), and this repo's own
+        # four board jobs fetch it themselves; the tail waits for it through `forge`.
+        for name, job in self.jobs.items():
+            if name in ('changes', 'companions') or name in TAIL[1:]:
+                continue
+            with self.subTest(job=name):
+                self.assertIn('companions', self.needs(job))
+
+    def test_no_legacy_companion_inputs(self):
+        # The block in .github/hyper.json names the companions now; the inputs that named them
+        # before (ci.yml's php_companions, release.yml's PIE `companions:`) are gone.
+        self.assertNotIn('php_companions', (WORKFLOWS / 'ci.yml').read_text())
+        pie = jobs(WORKFLOWS / 'release.yml')['pie-acceptance']
+        self.assertNotIn('companions', with_block(pie))
+        self.assertNotRegex(pie, r'(?m)^      companions:')
+
+    def test_own_board_jobs_fetch_the_companion_and_prove_its_origin(self):
+        # This repo's own jobs that install HyperCast: each checks the Forge out, runs
+        # fetch-companions as its own leg (companion_map.py's ci.yml legs), and proves what it
+        # installs with companion_origin.py, run by the fetch's Python, when it took a pin. A job
+        # whose toolchains can't all be on PATH at the fetch fetches in passes (test-android:
+        # Swift only after the APKs), each later one naming its ecosystems, together the leg's.
+        # Go's proof is the fetch's own (`go list -m` on the replace), so setup-go precedes the
+        # pass that wires Go.
+        legs = {'test-apple-mobile': ('csharp', 'c', 'swift', 'go'), 'test-android': ('csharp', 'go', 'swift'),
+                'test-nuget-package': ('csharp',), 'test-npm-package': ('npm',)}
+        for name, ecosystems in legs.items():
+            with self.subTest(job=name):
+                job = self.jobs[name]
+                steps = re.split(r'\n      - ', job)[1:]
+                fetches = [i for i, step in enumerate(steps) if 'uses: ./.hyperforge/.github/actions/fetch-companions' in step]
+                self.assertTrue(fetches)
+                self.assertIn('id: companions\n', steps[fetches[0]])
+                wired = {}
+                for i in fetches:
+                    step = steps[i]
+                    self.assertIn(f'          leg: ci.yml:{name}\n', step)
+                    step_id = re.search(r'(?m)^        id: (\w+)$', step).group(1)
+                    named = re.search(r'(?m)^          ecosystems: (.+)$', step)
+                    if len(fetches) > 1:
+                        self.assertTrue(named, 'a job fetching in passes names each pass\'s ecosystems')
+                    for eco in (named.group(1).split() if named else ecosystems):
+                        self.assertNotIn(eco, wired, f'{eco} wired twice')
+                        wired[eco] = (i, step_id)
+                self.assertEqual(sorted(wired), sorted(ecosystems))
+                forge = next(i for i, s in enumerate(steps) if 'path: .hyperforge' in s)
+                self.assertIn('repository: SkunkWerkx/.github', steps[forge])
+                self.assertIn('persist-credentials: false', steps[forge])
+                self.assertLess(forge, fetches[0])
+                self.assertTrue(steps[0].startswith('uses: actions/checkout@'), 'the fetch comes after the checkout')
+                if 'csharp' in ecosystems:
+                    # The C# wiring packs the pin with the SDK: setup-dotnet comes first.
+                    dotnet = next(i for i, s in enumerate(steps) if 'actions/setup-dotnet@' in s)
+                    self.assertLess(dotnet, wired['csharp'][0])
+                if 'go' in ecosystems:
+                    go = next(i for i, s in enumerate(steps) if 'actions/setup-go@' in s)
+                    self.assertLess(go, wired['go'][0], 'the Go wiring and its proof run go')
+                if 'swift' in ecosystems and name == 'test-android':
+                    swift = next(i for i, s in enumerate(steps) if 'setup-swift@' in s)
+                    self.assertLess(swift, wired['swift'][0], 'the Swift proof asks SwiftPM for the graph')
+                if 'npm' in ecosystems:
+                    node = next(i for i, s in enumerate(steps) if 'actions/setup-node@' in s)
+                    install = next(i for i, s in enumerate(steps) if 'npm ci\n' in s)
+                    self.assertLess(node, wired['npm'][0])
+                    self.assertLess(wired['npm'][0], install, 'the wiring rewrites the lock npm ci installs')
+                    # Every install of a package requiring HyperCast is proven right after it,
+                    # before its suite (the consumer-test harness's own tooling requires none).
+                    for step in (s for s in steps if 'npm ci\n' in s):
+                        where = re.search(r'(?m)^        working-directory: (\S+)$', step)
+                        manifest = ROOT / (where.group(1) if where else '.') / 'package.json'
+                        if '@skunkwerkx/hypercast' not in manifest.read_text():
+                            continue
+                        run = step[step.index('npm ci\n'):]
+                        self.assertIn('companion_origin.py npm', run.split('npm test')[0].split('npm run')[0])
+                proofs = [s for s in steps if 'companion_origin.py' in s]
+                for eco in ecosystems:
+                    if eco == 'go':
+                        continue
+                    with self.subTest(job=name, ecosystem=eco):
+                        step_id = wired[eco][1]
+                        mine = [s for s in proofs if f'companion_origin.py {eco} ' in s]
+                        self.assertTrue(mine, f'no {eco} origin proof')
+                        for proof in mine:
+                            if f"steps.{step_id}.outputs.active == 'true'" not in proof:
+                                # Inside the step that installs, right after the install.
+                                self.assertIn(f'COMPANIONS_ACTIVE: ${{{{ steps.{step_id}.outputs.active }}}}', proof)
+                                self.assertIn('if [ "$COMPANIONS_ACTIVE" = true ]; then', proof)
+                            self.assertIn(f'FETCH_PYTHON: ${{{{ steps.{step_id}.outputs.python }}}}', proof)
+                            self.assertRegex(proof, r'"\$FETCH_PYTHON" (\.\./)?\.hyperforge/\.github/scripts/companion_origin\.py')
+                            self.assertRegex(proof, r'--install(s|ed)\b' if eco == 'npm' else r'--installed\b')
+
+    def test_npm_consumer_tests_prove_every_scenario_lock(self):
+        # Each scenario directory run.sh installs into with a lock (its `consumer` names), after
+        # the scenarios ran: HYPERCAST_TARBALLS, which the wiring sets, put the pinned set in the
+        # job's Verdaccio.
+        steps = re.split(r'\n      - ', self.jobs['test-npm-package'])[1:]
+        titles = [step.splitlines()[0] for step in steps]
+        proof = next(i for i, s in enumerate(steps) if 'companion_origin.py npm' in s and '--installs ' in s)
+        self.assertGreater(proof, max(i for i, s in enumerate(steps) if 'consumer-tests/run.sh' in s))
+        self.assertIn('--installs typescript/consumer-tests/work', steps[proof])
+        run_sh = (ROOT / 'typescript/consumer-tests/run.sh').read_text()
+        self.assertIn('"$(cd "$HYPERCAST_TARBALLS" && pwd)"/skunkwerkx-hypercast-*.tgz', run_sh)
+        named = set(re.findall(r'dir="\$\(consumer "?([^")]+)"?\)"', run_sh))
+        expected = {'plain', 'consumer two', 'absent-native', 'forced-wasi', 'negative-deleted-package',
+                    'negative-deleted-wasm', 'bundlers'}
+        self.assertLessEqual(expected, named)
+        for leg in ("matrix.os == 'ubuntu-26.04'", "matrix.os != 'ubuntu-26.04'"):
+            with self.subTest(leg=leg):
+                step = next(s for s in steps[proof:] if 'companion_origin.py npm' in s and leg in s)
+                listed = set(re.search(r'--expect "([^"]+)"', step)[1].split(','))
+                self.assertEqual(listed, expected | ({'mac-lockfile'} if '==' in leg else set()))
+
+    def test_csharp_jobs_restore_and_prove_before_they_build(self):
+        # Each C# job restores what it builds, then proves the restore took the pinned HyperCast
+        # from the job's feed, before the first build that would link it.
+        for name, first in (('test-apple-mobile', 'name: C# — a Mac Catalyst app, built and run'),
+                            ('test-android', 'name: Build the four APKs'),
+                            ('test-nuget-package', 'name: Native AOT from the package, on net10.0 and net11.0')):
+            with self.subTest(job=name):
+                steps = re.split(r'\n      - ', self.jobs[name])[1:]
+                titles = [step.splitlines()[0] for step in steps]
+                proof = next(i for i, s in enumerate(steps) if 'companion_origin.py csharp' in s)
+                self.assertIn('dotnet restore', steps[proof])
+                self.assertLess(steps[proof].index('dotnet restore'), steps[proof].index('companion_origin.py csharp'))
+                self.assertLess(proof, titles.index(first))
+
+    def test_local_package_feeds_are_mapped_beside_the_pin(self):
+        # The wiring's nuget.config maps HyperCast to the pin's feed and every other id to
+        # nuget.org, and NuGet considers no source a mapping leaves out, so the local feed the
+        # packed HyperTabular is restored from (RestoreAdditionalProjectSources) would be skipped
+        # (NU1101). Its copy of that config, with the feed mapped to HyperTabular alone, is the
+        # one every later restore reads.
+        for name in ('test-android', 'test-nuget-package'):
+            with self.subTest(job=name):
+                steps = re.split(r'\n      - ', self.jobs[name])[1:]
+                fetch = next(i for i, s in enumerate(steps) if 'fetch-companions' in s)
+                mapped = next(i for i, s in enumerate(steps) if 'RestoreConfigFile=' in s)
+                pack = next(i for i, s in enumerate(steps) if 'dotnet pack csharp/HyperTabular/HyperTabular.csproj' in s)
+                self.assertLess(fetch, mapped)
+                self.assertLess(mapped, pack)
+                step = steps[mapped]
+                self.assertIn("if: steps.companions.outputs.active == 'true'", step)
+                self.assertIn('<package pattern="HyperTabular" />', step)
+                self.assertIn('mkdir -p "$RUNNER_TEMP/feed"', step)
+                self.assertIn('echo "RestoreConfigFile=$RUNNER_TEMP/nuget.config" >> "$GITHUB_ENV"', step)
+                self.assertIn('-o "$RUNNER_TEMP/feed"', steps[pack])
+
+    def test_apple_mobile_proves_the_swift_and_c_links(self):
+        # C: the smoke's HYPERCAST_PACKAGES names the pinned archives, right before the smoke.
+        # Swift: the macOS suite and the root manifest as the Forge's test-swift proves them, and
+        # each xcodebuild test's own log (an Apple mobile build processes the XCFramework, which no
+        # `swift build` reaches) read back for the XCFramework it processed and linked.
+        steps = re.split(r'\n      - ', self.jobs['test-apple-mobile'])[1:]
+        titles = [step.splitlines()[0] for step in steps]
+        smoke = titles.index('name: C — the four Apple mobile archives, built against and run')
+        c = next(i for i, s in enumerate(steps) if 'companion_origin.py c ' in s)
+        self.assertLess(c, smoke)
+        for rid in ('ios-arm64', 'iossimulator-arm64', 'maccatalyst-arm64', 'maccatalyst-x64'):
+            self.assertIn(f'--rid {rid}', steps[c])
+        for destination in ('platform=iOS Simulator', 'platform=macOS,variant=Mac Catalyst'):
+            with self.subTest(destination=destination):
+                build = next(i for i, s in enumerate(steps) if 'xcodebuild test' in s and destination in s)
+                self.assertIn('set -euo pipefail', steps[build])
+                log = re.search(r'\| tee "(\$RUNNER_TEMP/xcodebuild-[a-z-]+\.log)"', steps[build])[1]
+                proof = steps[build + 1]
+                self.assertIn('companion_origin.py swift --root . --dir swift --installed', proof)
+                self.assertIn(f'--xcodebuild-log "{log}"', proof)
+        macos = titles.index('name: Swift — macOS, with the XCFramework declared')
+        for directory in ('swift', '.'):
+            with self.subTest(directory=directory):
+                proof = next(i for i, s in enumerate(steps)
+                             if f"companion_origin.py swift --root . --dir {directory} --installed'" in s)
+                self.assertLess(proof, macos)
+
     def test_core_is_one_forge_core_call_gated_on_docs_only(self):
         core = self.jobs['core']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-core.yml@master', core)
-        self.assertEqual(self.needs(core), {'changes'})
+        self.assertEqual(self.needs(core), {'changes', 'companions'})
         self.assertEqual(self.gate(core), "needs.changes.outputs.docs_only != 'true'")
         self.assertEqual(with_block(core), {'mode', 'crate', 'project'})
         self.assertEqual(set(re.findall(r'^      ([a-z-]+): write$', header(core), re.M)), {'id-token', 'attestations'})
         self.assertEqual([name for name, job in self.jobs.items() if 'workflows/hyper-core.yml@master' in job], ['core'])
 
-    def test_every_lint_caller_needs_only_changes(self):
+    def test_every_lint_caller_needs_only_changes_and_companions(self):
         for binding in BINDINGS:
             with self.subTest(binding=binding):
                 lint = self.jobs[f'lint-{binding}']
-                self.assertEqual(self.needs(lint), {'changes'})
+                self.assertEqual(self.needs(lint), {'changes', 'companions'})
                 self.assertEqual(self.gate(lint), self.g(binding, 'core', 'ci'))
                 self.assertIn(f'uses: SkunkWerkx/.github/.github/workflows/hyper-lint-{binding}.yml@master', lint)
                 self.assertFalse(re.findall(r'^      [a-z-]+: write$', header(lint), re.M), 'a lint attests nothing')
         full = self.jobs['lint-go-full']
-        self.assertEqual(self.needs(full), {'changes'})
+        self.assertEqual(self.needs(full), {'changes', 'companions'})
         self.assertEqual(self.gate(full), self.g('go', 'core', 'ci'))
 
     def test_every_test_caller_needs_its_lint_and_core(self):
@@ -559,7 +763,7 @@ class CiTests(unittest.TestCase):
             with self.subTest(binding=binding):
                 test = self.jobs[f'test-{binding}']
                 core = set() if binding == 'go' else {'core'}
-                self.assertEqual(self.needs(test), {'changes', f'lint-{binding}'} | core | extra.get(binding, set()))
+                self.assertEqual(self.needs(test), {'changes', 'companions', f'lint-{binding}'} | core | extra.get(binding, set()))
                 self.assertEqual(self.gate(test), self.g(binding, 'core', 'ci'))
                 self.assertIn(f'uses: SkunkWerkx/.github/.github/workflows/{workflow[binding]}@master', test)
 
@@ -587,17 +791,17 @@ class CiTests(unittest.TestCase):
     def test_pack_c_runs_the_pack_alone_in_this_runs_mode(self):
         pack = self.jobs['pack-c']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-test-c.yml@master', pack)
-        self.assertEqual(self.needs(pack), {'changes', 'core', 'build-static', 'build-android'})
+        self.assertEqual(self.needs(pack), {'changes', 'companions', 'core', 'build-static', 'build-android'})
         self.assertEqual(self.gate(pack), self.g('core', 'ci'))
         self.assertEqual(re.findall(r'^      (smokes|lint): (\w+)$', pack, re.M), [('smokes', 'false'), ('lint', 'false')])
         self.assertIn('      mode: ' + MODE + '\n', pack)
 
     def test_build_static_runs_for_the_bindings_that_link_it(self):
         static = self.jobs['build-static']
-        self.assertEqual(self.needs(static), {'changes'})
+        self.assertEqual(self.needs(static), {'changes', 'companions'})
         self.assertEqual(self.gate(static), self.g('core', 'ci', 'csharp', 'swift'))
         android = self.jobs['build-android']
-        self.assertEqual(self.needs(android), {'changes'})
+        self.assertEqual(self.needs(android), {'changes', 'companions'})
         self.assertEqual(self.gate(android), self.g('core', 'ci'))
 
     def test_php_pr_legs_are_two_paths(self):
@@ -607,14 +811,14 @@ class CiTests(unittest.TestCase):
 
     def test_build_wasm_inputs_are_gated(self):
         wasm = self.jobs['build-wasm']
-        self.assertEqual(self.needs(wasm), {'changes'})
+        self.assertEqual(self.needs(wasm), {'changes', 'companions'})
         self.assertEqual(self.gate(wasm), self.g('core', 'ci', 'csharp', 'typescript', 'go'))
         self.assertIn('      archive: ${{ ' + self.g('core', 'ci', 'csharp') + ' }}\n', wasm, 'the archive itself, not only its check')
         self.assertIn("      blazor_check: ${{ (" + self.g('core', 'ci', 'csharp') + ") && 'csharp/HyperTabular.WasmSmokeTest/check.sh' || '' }}\n", wasm)
         self.assertIn("      rust_browser_test: ${{ (" + self.g('core', 'ci') + ") && 'rust/browser-test' || '' }}\n", wasm)
         self.assertIn('      ruby_wasm_smoke: ruby/wasm-smoke\n', wasm)
         wheels = self.jobs['build-wheels']
-        self.assertEqual(self.needs(wheels), {'changes'})
+        self.assertEqual(self.needs(wheels), {'changes', 'companions'})
         self.assertEqual(self.gate(wheels), self.g('python', 'core', 'ci'))
 
     def test_no_job_excludes_release_mode(self):

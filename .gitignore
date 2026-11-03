@@ -158,13 +158,20 @@ go/testdata/corpus/
 /wasm-emscripten-staticlib/
 /wasm-wasip1-module/
 
+# The pinned HyperCast a board leg works with (the Forge's fetch-companions writes its source,
+# its artifacts, the wiring's env and the job-local package folders here); never committed,
+# and the release-mode guard fails a release whose checkout holds one.
+.companions/
+
 # What Windows attaches to a downloaded file, when the file is copied into WSL.
 *:Zone.Identifier
 # What Finder writes into any folder it opens.
 .DS_Store
 
 # A library's pins are its consumers' to make: HyperCast is resolved fresh from the range
-# the manifests declare, by CI as by anyone depending on this package.
+# the manifests declare, by a release as by anyone depending on this package (a board run
+# takes the pinned HyperCast run of .github/hyper.json instead, its manifests rewritten in the
+# job only).
 /Package.resolved
 /swift/Package.resolved
 /swift/StaticSmokeTest/Package.resolved
