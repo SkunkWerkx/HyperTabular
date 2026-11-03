@@ -55,6 +55,11 @@ pyo3 = { version = "0.30", features = ["extension-module", "abi3-py311", "abi3t-
 magnus = { version = "0.9", features = ["rb-sys"], optional = true }
 rb-sys = { version = "0.9", optional = true }
 
+[build-dependencies]
+# The `php` feature's build script asks the PHP that ext-php-rs builds against whether it is
+# thread-safe, with ext-php-rs's own lookup (`PHP`, else `php` on PATH): build.rs has why.
+ext-php-rs-build = { version = "0.1.1", optional = true }
+
 [features]
 # On by default for the crates.io consumer, the test suite and the benchmarks: the Rust
 # API over the core — the Rust binding: readers that own their buffers, and files.
@@ -81,7 +86,7 @@ cdylib = ["staticlib"]
 # which the Forge builds, load-checks and packs for PIE, and which judges every cell with
 # HyperCast's own extension at runtime. Off by default, and outside src/kernel, which no
 # feature reaches.
-php = ["dep:ext-php-rs", "std"]
+php = ["dep:ext-php-rs", "dep:ext-php-rs-build", "std"]
 # Proves at link time that no C ABI export can panic: `cargo no-panic` fails with an
 # undefined symbol naming any export the optimizer could not clear of every panic path.
 # Built with std, because the proof needs the unwind edge a panic leaves and a no_std

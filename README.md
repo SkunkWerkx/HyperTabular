@@ -209,7 +209,7 @@ Every file a release ships verifies from the tag alone. One release attestation,
 this repository's own `release.yml` at the tag, names every registry package (the `.nupkg` as
 packed and as nuget.org serves it, the gems, the wheels and the sdist, the crate, the Maven
 files, the ten npm tarballs and the R source tarball), Swift's two zips, the fifteen C archives
-and the 18 PHP extension zips on the GitHub Release, and its predicate is the release
+and the 36 PHP extension zips on the GitHub Release, and its predicate is the release
 inventory: every file's path, size, SHA-256, the commit it was built from and the repository
 that signed its build provenance. One command, any file:
 

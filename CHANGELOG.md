@@ -47,7 +47,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   proves that build on x86-64 glibc 2.17 and on musl. Attested like the wheels. *(Python)*
 - **Release plumbing for npm, CRAN, PIE and the C archives.** The preparation run packs,
   attests and preserves the ten npm tarballs, the R source tarball (both corpora and every
-  workbook fixture they read), the 18 PHP extension zips and the C archives; the tag publishes
+  workbook fixture they read), the 36 PHP extension zips (NTS and ZTS) and the C archives; the tag publishes
   npm through Trusted Publishing and attaches the zips and archives to the GitHub Release, and
   the R tarball goes to CRAN by hand from the preserved bytes. *(repository only)*
 - **C# — .NET 10 is supported, on desktop, server and in the browser.** The package builds
@@ -68,9 +68,10 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
 - **PHP — breaking: the package is a native extension, installed with PIE.** `pie install
   skunkwerkx/hypercast:<version>` and then `pie install skunkwerkx/hypertabular:<version>`
   install `ext-hypertabular`, an ext-php-rs extension that requires `ext-hypercast` 1.1 and
-  hands out its classes for every cell; 18 pre-packaged zips (PHP 8.3, 8.4 and 8.5 on Linux
-  x64 and arm64, glibc and musl, macOS arm64 and Windows x64; no Intel macOS), attached to the
-  GitHub Release. `ext-ffi`, `php/src` and its committed libraries are gone, and the floor is
+  hands out its classes for every cell; 36 pre-packaged zips (PHP 8.3, 8.4 and 8.5, NTS and ZTS,
+  on Linux x64 and arm64, glibc and musl, macOS arm64 and Windows x64; no Intel macOS),
+  attached to the GitHub Release. On a ZTS PHP it loads from php.ini only: a `dl()` stops the
+  script with a warning naming the `extension=` line. `ext-ffi`, `php/src` and its committed libraries are gone, and the floor is
   PHP 8.3. The API keeps its names and behaviour, with these differences: `Batch`, `Row`,
   `Sheet` and `Header` cannot be constructed; rows come through a forward-only `RowIterator`;
   `Workbook::sheet()` raises a `TypeError` for anything but an int or a string; and

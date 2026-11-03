@@ -21,7 +21,8 @@ use super::enums::{Door, TabularFailure, WorkbookFormat};
 
 // The engine's hook for work after every MINIT and before any request (`zend.h`), which
 // bindgen doesn't carry. Read and written only during startup, on the one startup thread.
-#[cfg_attr(windows, link(name = "php8"))]
+#[cfg_attr(all(windows, not(php_zts)), link(name = "php8"))]
+#[cfg_attr(all(windows, php_zts), link(name = "php8ts"))]
 unsafe extern "C" {
     static mut zend_post_startup_cb: Option<unsafe extern "C" fn() -> i32>;
 }
@@ -30,7 +31,7 @@ unsafe extern "C" {
 static PREVIOUS_POST_STARTUP: Mutex<Option<unsafe extern "C" fn() -> i32>> = Mutex::new(None);
 
 /// `MODULE_PERSISTENT` (`zend_modules.h`): loaded at startup, as opposed to by `dl()`.
-const MODULE_PERSISTENT: i32 = 1;
+pub(crate) const MODULE_PERSISTENT: i32 = 1;
 
 /// Arranges for [`finish`] to run before any request. Called from MINIT.
 pub(crate) fn schedule(module_type: i32) {
@@ -82,7 +83,8 @@ fn finish() {
     .flatten()
     {
         // SAFETY: a live, registered class entry, written before any request on the startup
-        // thread (or in a `dl()` load's own RINIT; NTS only).
+        // thread (or in a `dl()` load's own RINIT, which only an NTS PHP gets: MINIT refuses
+        // a thread-safe PHP's `dl()`).
         unsafe { (*ce).ce_flags |= ZEND_ACC_FINAL };
     }
 }

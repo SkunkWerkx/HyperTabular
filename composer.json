@@ -21,7 +21,7 @@
     "php-ext": {
         "extension-name": "hypertabular",
         "support-nts": true,
-        "support-zts": false,
+        "support-zts": true,
         "download-url-method": ["pre-packaged-binary"],
         "os-families": ["linux", "darwin", "windows"]
     }
