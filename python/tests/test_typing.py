@@ -10,6 +10,7 @@ import inspect
 import os
 import platform
 import sysconfig
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -84,6 +85,24 @@ def test_the_stub_and_the_loaded_backend_name_the_same_surface():
     }
 
 
+def _parameters(target: Callable[..., object]) -> list[str]:
+    """A callable's parameter names, as ``inspect`` reads them."""
+    return list(inspect.signature(target).parameters)
+
+
+def _constructor_parameters(cls: type) -> list[str]:
+    """A class's constructor parameters, from the signature the extension gives the class.
+
+    CPython's ``inspect.signature(cls)`` reads this same text. PyPy's goes through the class's
+    builtin ``__new__``, which carries none, and raises, so the text is read here on both.
+    """
+    text = getattr(cls, "__text_signature__", None)
+    assert text, f"{cls.__name__} carries no signature"
+    namespace: dict[str, Callable[..., object]] = {}
+    exec(f"def constructor{text}: pass", namespace)
+    return _parameters(namespace["constructor"])
+
+
 def test_the_stub_and_the_loaded_backend_agree_on_parameter_names():
     """Parameter names are part of the surface — a keyword call must work."""
     for name, node in _functions(STUB.body).items():
@@ -102,7 +121,10 @@ def test_the_stub_and_the_loaded_backend_agree_on_parameter_names():
             expected = [arg.arg for arg in args.args + args.kwonlyargs]
             if not _is_static(declared):
                 expected = expected[1:]
-            actual = [p for p in inspect.signature(target).parameters if p not in ("self", "cls")]
+            parameters = (
+                _constructor_parameters(cls) if method == "__new__" else _parameters(target)
+            )
+            actual = [p for p in parameters if p not in ("self", "cls")]
             assert actual == expected, f"{name}.{method} on the extension"
 
 

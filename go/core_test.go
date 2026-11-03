@@ -327,7 +327,12 @@ func TestBuffersPastTheCoresMemoryAreAnError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := unbound.Bind(plan); err != nil {
-		t.Fatal(err)
+		// Where int is 32 bits (TinyGo's wasm), the plan's buffers outgrow the address space
+		// before the core is asked, so binding refuses it; with 64 bits, binding takes it.
+		if strconv.IntSize == 64 || !strings.Contains(err.Error(), "is too large") {
+			t.Fatal(err)
+		}
+		return
 	}
 	batch, err := unbound.Read()
 	if batch != nil || err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
