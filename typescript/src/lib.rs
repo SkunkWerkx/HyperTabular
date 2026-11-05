@@ -903,13 +903,7 @@ impl Column {
         let door = code(&precision)
             .and_then(hc::UnixPrecision::from_code)
             .map(ht::Door::Unix);
-        Column::make(
-            env,
-            Door::Unix,
-            &ordinal,
-            door,
-            Some(hc::NumFormat::STRICT),
-        )
+        Column::make(env, Door::Unix, &ordinal, door, Some(hc::NumFormat::STRICT))
     }
 
     /// An Excel date serial in the declared `ExcelEpoch`.
