@@ -439,7 +439,7 @@ static SEXP decimal_string(const HyperTabularDecimal *d) {
 }
 
 static SEXP uuid_string(const uint8_t b[16]) {
-  static const char HEX[16] = "0123456789abcdef";
+  static const char HEX[17] = "0123456789abcdef";
   char buf[36];
   int o = 0;
   for (int k = 0; k < 16; k++) {
@@ -575,7 +575,8 @@ static void row_ok(struct columns *c, R_xlen_t i, uint32_t door, const uint8_t *
   case 22: {
     HyperTabularTimestamp t;
     memcpy(&t, v, sizeof t);
-    c->real[i] = (double)t.seconds + (double)t.nanos / 1e9;
+    /* Cut to the millisecond, as hypercast does: a double would round the last nanoseconds up. */
+    c->real[i] = (double)t.seconds + (double)(t.nanos / 1000000) / 1e3;
     c->extra_real[0][i] = (double)t.seconds;
     c->extra_int[i] = t.nanos;
     break;
@@ -598,14 +599,14 @@ static void row_ok(struct columns *c, R_xlen_t i, uint32_t door, const uint8_t *
   case 16: {
     uint64_t nanos;
     memcpy(&nanos, v, sizeof nanos);
-    c->real[i] = (double)nanos / 1e9;
+    c->real[i] = (double)(nanos / 1000000u) / 1e3;
     c->extra_real[0][i] = (double)nanos;
     break;
   }
   case 17: {
     HyperTabularDuration d;
     memcpy(&d, v, sizeof d);
-    c->real[i] = (double)d.seconds + (double)d.nanos / 1e9;
+    c->real[i] = (double)d.seconds + (double)(d.nanos / 1000000) / 1e3;
     c->extra_real[0][i] = (double)d.seconds;
     c->extra_int[i] = d.nanos;
     break;

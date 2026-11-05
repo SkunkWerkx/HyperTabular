@@ -35,7 +35,12 @@ lines <- vapply(pkgs, function(p) {
 if (!length(lines)) {
   lines <- paste("No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only",
                  "the hypertabular core and the hypercast crate it judges every cell with, both",
-                 "the work of this package's authors (Skunk Werkx, MIT).")
+                 "the work of this package's authors (Skunk Werkx, MIT),",
+                 "but for the Unicode data below.")
 }
 dir.create("inst", showWarnings = FALSE)
-writeLines(lines, "inst/AUTHORS", useBytes = TRUE)
+# The core also carries Unicode's case folding data, so it is credited on every run.
+unicode <- paste("The vendored hypercast crate's case folding (unicode/CaseFolding-17.0.0.txt and",
+                 "src/fold_table.rs, generated from it) is from the Unicode Character Database,",
+                 "(c) Unicode, Inc., Unicode License v3: https://www.unicode.org/license.txt")
+writeLines(c(lines, unicode), "inst/AUTHORS", useBytes = TRUE)

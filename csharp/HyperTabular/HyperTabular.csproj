@@ -12,7 +12,7 @@
     <RootNamespace>HyperTabular</RootNamespace>
     <Description>Forward-only delimited text (CSV, TSV, any ASCII separator) and workbooks (XLSX, ODS, Numbers) read into typed column batches with a HyperCast Verdict for every cell — AOT/trim-friendly P/Invoke bindings into a native Rust core (libhypertabular) that owns no memory: this assembly allocates the buffers, the core fills them, once per batch.</Description>
     <Authors>Brian Buvinghausen</Authors>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT AND Unicode-3.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/SkunkWerkx/HyperTabular</PackageProjectUrl>
     <RepositoryUrl>https://github.com/SkunkWerkx/HyperTabular</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -52,6 +52,7 @@
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="\" />
     <None Include="../../LICENSE" Pack="true" PackagePath="\" />
+    <None Include="../../LICENSE-UNICODE" Pack="true" PackagePath="\" />
     <!-- Standard NuGet RID-specific native asset layout, populated by CI before packing. -->
     <None Include="runtimes/**" Pack="true" PackagePath="runtimes" CopyToOutputDirectory="PreserveNewest" />
     <!-- The same files flattened into the output root, where an in-repo ProjectReference

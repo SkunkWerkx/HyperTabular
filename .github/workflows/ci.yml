@@ -11,17 +11,15 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('CI purpose={0}
 # docs_only false — so the release-mode board is the whole board, and pr-board, the one
 # status to read, is red when any needed job failed or was skipped while its gate said run.
 #
-# A pull request asks whether the code broke: each touched binding's lint, then its suite through
-# the corpus on linux-x64, PHP included. Everything else (the other platforms, musl, wheels,
-# wasm, Android, the packed-package jobs, the core's source checks) runs on the board and a
-# release, a cost paid by dispatching it.
-#
-# The forge is one canonical pipeline, and this repo conforms to it rather than the other
-# way round. When the forge assumes something HyperUuid's crate has and this one lacks,
-# this crate gets the same thing — never a forge input, opt-out, or auto-detection to
-# route around the difference. The one check that is this repo's own is rust/check-core.sh,
-# which core-checks runs: on the library itself, the core has no standard library, no
-# allocation and no panic.
+# A pull request asks whether the code broke: the core compiled, its suite run and its thesis
+# proven (no_std, no allocator, no panic path), then the corpus
+# through the bindings it can reach, each on one leg (linux-x64; Swift on xcode-27, PHP on ZTS).
+# Each binding is one job: its toolchain once, then lint, then its suite. A core change lints Rust and
+# runs every binding's suite, linting none of them but Go's regeneration proof, without which test-go
+# would pass on a stale committed core. A binding change builds the core and lints and runs that
+# binding, linting no Rust. Off a pull request nothing lints in those jobs: it already did to reach master. Everything else (the other platforms, musl,
+# floors, static targets beyond Swift's one, wheels, wasm, Android, iOS, the packed-package jobs,
+# the core's other source checks) runs on the board and a release, a cost paid by dispatching it.
 #
 # CI's job is build, test, and upload reusable artifacts. Every native leg builds+tests
 # fresh, and the raw outputs (the plain FFI libhypertabular.so/.dylib/.dll, the compiled Ruby
@@ -101,6 +99,16 @@ jobs:
       core: ${{ steps.classify.outputs.core }}
       ci: ${{ steps.classify.outputs.ci }}
       docs_only: ${{ steps.classify.outputs.docs_only }}
+      lint_rust: ${{ steps.classify.outputs.lint_rust }}
+      lint_csharp: ${{ steps.classify.outputs.lint_csharp }}
+      lint_java: ${{ steps.classify.outputs.lint_java }}
+      lint_python: ${{ steps.classify.outputs.lint_python }}
+      lint_ruby: ${{ steps.classify.outputs.lint_ruby }}
+      lint_php: ${{ steps.classify.outputs.lint_php }}
+      lint_swift: ${{ steps.classify.outputs.lint_swift }}
+      lint_typescript: ${{ steps.classify.outputs.lint_typescript }}
+      lint_r: ${{ steps.classify.outputs.lint_r }}
+      lint_go: ${{ steps.classify.outputs.lint_go }}
       csharp: ${{ steps.classify.outputs.csharp }}
       java: ${{ steps.classify.outputs.java }}
       python: ${{ steps.classify.outputs.python }}
@@ -149,7 +157,7 @@ jobs:
   # The core on the seven hosts: cargo cdylib, the crate's suite and corpus, the glibc floor,
   # the cdylib's exports held to rust/src/ffi.rs and loaded by .github/scripts/cdylib_smoke.py,
   # this leg's static archive, the C archive assembled from both and c/smoke/ built against
-  # it, and native-<rid> uploaded (attested off pull requests). It never skips on a code
+  # it, and native-<rid> uploaded (attested on a release dispatch). It never skips on a code
   # change: a binding change can touch nothing here and still needs a core to test against.
   core:
     needs: [changes, companions]
@@ -165,14 +173,20 @@ jobs:
       attestations: write
     with:
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      # rustfmt, clippy, actionlint and the C lint ahead of the build, on a pull request that moved
+      # the core or .github/. What reached master has been linted.
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_rust == 'true' }}
+      extra_features: async
       crate: hypertabular
       project: HyperTabular
 
   # The cross-target bundle (Apple, Android, the archives the NuGet targets link), one
-  # producer of static-libs: C#'s and Swift's suites and the NuGet consumer test download it.
+  # producer of static-libs: C#'s and Swift's suites and the NuGet consumer test download it. On a
+  # pull request it builds the one archive Swift's leg links: `cargo cdylib` already compiled the
+  # same no_std source, so only a target-specific break waits for a board.
   build-static:
     needs: [changes, companions]
-    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' || needs.changes.outputs.swift == 'true'
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.swift == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-static.yml@master
     permissions:
       contents: read
@@ -197,20 +211,32 @@ jobs:
       crate: hypertabular
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
 
+  # The thesis, on every pull request that builds the core: no_std, no allocator and no panic path,
+  # with the canary that shows the no-panic proof can reject. A binding relies on all three, so a
+  # commit that breaks one must not reach master. Off a pull request core-checks runs them.
+  core-proofs:
+    needs: [changes, companions]
+    if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+    uses: SkunkWerkx/.github/.github/workflows/hyper-core-proofs.yml@master
+    permissions:
+      contents: read
+    with:
+      core_script: rust/check-core.sh
+      no_panic: false
+
   # Every static check on the core, in one Forge job on three hosts (hyper-core-checks.yml):
-  # rustfmt and clippy, the C ABI held to rust/src/kernel/exports.rs by
+  # the C ABI held to rust/src/kernel/exports.rs by
   # .github/scripts/check_exports.py, the release checks, cargo-semver-checks against the last
   # crates.io release, the MSRV, the no_std consumer build, the crate's whole suite on
-  # wasm32-wasip1 under a pinned wasmtime, actionlint over this directory with the
-  # workflow-contract, ABI-probe and text-file tests in .github/scripts/tests, and
-  # clang-format and shellcheck over c/smoke/ and the C++ header. The inputs are what is
+  # wasm32-wasip1 under a pinned wasmtime, and the
+  # workflow-contract, ABI-probe and text-file tests in .github/scripts/tests. The inputs are what is
   # HyperTabular about it: rust/check-core.sh on both architectures proves the core has no
   # standard library, no allocation and no panic, running `cargo no-panic` and its canary
   # itself, so the Forge's own no-panic job is off; the async feature is built, tested,
   # linted and checked on the MSRV too; there is no conformance oracle to re-derive (the
   # corpus is generated, not derived); and `big_endian` runs the core's suite, both corpora
   # included, on s390x under QEMU.
-  # The bindings' own lints are the lint-<binding> jobs below. None of it waits on the core legs.
+  # The bindings' own lints run in their test-<binding> jobs below. None of it waits on the core legs.
   core-checks:
     needs: [changes, companions]
     if: github.event_name != 'pull_request'
@@ -224,138 +250,20 @@ jobs:
       corpus_oracle: ""
       big_endian: s390x-unknown-linux-gnu
 
-  # Each binding's formatter and linter, once, on ubuntu-26.04-arm, ahead of its suites. The
-  # Forge's lint_node, lint_r and lint_java_jni default false until the siblings carry those
-  # bindings; everything else defaults on. Go's fast gate is gofmt, go vet, revive and the
-  # committed-core regeneration check; lint-go-full adds the cross-compile sweep and the race
-  # run beside the suites, gating nothing.
-  lint-csharp:
-    needs: [changes, companions]
-    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-csharp.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-
-  lint-java:
-    needs: [changes, companions]
-    if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-java.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-      lint_java_jni: true
-
-  lint-python:
-    needs: [changes, companions]
-    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-python.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-
-  lint-ruby:
-    needs: [changes, companions]
-    if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-ruby.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-
-  lint-php:
-    needs: [changes, companions]
-    if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-php.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-
-  lint-swift:
-    needs: [changes, companions]
-    if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-swift.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-
-  lint-typescript:
-    needs: [changes, companions]
-    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-typescript.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-      lint_node: true
-
-  lint-r:
-    needs: [changes, companions]
-    if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-r.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-      lint_r: true
-
-  lint-go:
-    needs: [changes, companions]
-    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-      linters: fast
-
-  lint-go-full:
-    needs: [changes, companions]
-    if: github.event_name != 'pull_request'
-    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-go.yml@master
-    permissions:
-      contents: read
-    with:
-      mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
-      crate: hypertabular
-      project: HyperTabular
-      linters: full
-
-  # Each binding's suite on the hosts it ships on, after its lint and the core legs (Go waits
-  # for its lint alone: its core is committed Go source). The inputs are the ones the native
+  # Each binding's job: on a pull request that touched it, its linters on one leg ahead of its
+  # suite; off one no lint, since what reached master has been linted. Its suite runs on the hosts
+  # it ships on, after the core legs (Go waits for nothing: its core is committed Go source). The inputs are the ones the native
   # workflow took for the binding; the jobs whose Forge workflow attests what it uploads
   # (jni-<rid>, node-<rid>, ruby-native-<rid>-<abi>, php-ext-<rid>-<minor>) hand down the two
   # scopes, as core does.
   test-csharp:
-    needs: [changes, companions, lint-csharp, core, build-static]
-    if: needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core, build-static]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.build-static.result == 'success' || needs.build-static.result == 'skipped') && (needs.changes.outputs.csharp == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-csharp.yml@master
     permissions:
       contents: read
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_csharp == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
@@ -376,14 +284,15 @@ jobs:
       # pipeline's explicit per-leg placement for in-repo testing.
       csharp_runtimes_dir: csharp/HyperTabular/runtimes
   test-java:
-    needs: [changes, companions, lint-java, core]
-    if: needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.java == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-java.yml@master
     permissions:
       contents: read
       id-token: write
       attestations: write
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_java == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
@@ -395,24 +304,26 @@ jobs:
       java_jni: true
       jdk_floor_version: "21"
   test-python:
-    needs: [changes, companions, lint-python, core]
-    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-python.yml@master
     permissions:
       contents: read
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_python == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
   test-ruby:
-    needs: [changes, companions, lint-ruby, core]
-    if: needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.ruby == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-ruby.yml@master
     permissions:
       contents: read
       id-token: write
       attestations: write
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_ruby == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
@@ -428,14 +339,15 @@ jobs:
       # it's there for.
       ruby_compat_version: "3.4"
   test-php:
-    needs: [changes, companions, lint-php, core]
-    if: needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.php == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-build-php-extension.yml@master
     permissions:
       contents: read
       id-token: write
       attestations: write
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_php == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       # The floor composer.json declares; explicit while the Forge's default is still 8.2,
@@ -447,44 +359,50 @@ jobs:
       # in .github/hyper.json names: the pinned run's extension in companion mode, built from
       # the registry release Cargo.lock pins in release mode, loaded beside this one.
   test-swift:
-    needs: [changes, companions, lint-swift, core, build-static]
-    if: needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core, build-static]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && needs.build-static.result == 'success' && (needs.changes.outputs.swift == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-swift.yml@master
     permissions:
       contents: read
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_swift == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
   test-typescript:
-    needs: [changes, companions, lint-typescript, core]
-    if: needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.typescript == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-typescript.yml@master
     permissions:
       contents: read
       id-token: write
       attestations: write
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_typescript == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
   test-r:
-    needs: [changes, companions, lint-r, core]
-    if: needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
+    needs: [changes, companions, core]
+    if: ${{ !cancelled() && needs.companions.result == 'success' && needs.core.result == 'success' && (needs.changes.outputs.r == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') }}
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-r.yml@master
     permissions:
       contents: read
     with:
+      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_r == 'true' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
   test-go:
-    needs: [changes, companions, lint-go]
+    needs: [changes, companions]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true'
     uses: SkunkWerkx/.github/.github/workflows/hyper-test-go.yml@master
     permissions:
       contents: read
     with:
+      # On a pull request gofmt, go vet and revive when go/ moved, the regeneration proof always:
+      # test-go would pass on a stale committed core. Off one, no lint: the proof, the sweep and the race run.
+      linters: ${{ github.event_name != 'pull_request' && 'sweep' || needs.changes.outputs.lint_go == 'true' && 'fast' || 'core' }}
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       go_version_file: go/go.mod
@@ -1619,11 +1537,10 @@ jobs:
   # name contains head, sha, commit, branch or ref as a pull request head, and in a read-only
   # job it reports the checkout as a cache-poisoning step (actions/cache-poisoning/poisonable-step).
   forge:
-    needs: [changes, companions, core, build-static, build-android, core-checks, lint-csharp, lint-java,
-            lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
-            lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
-            test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,
-            test-nuget-package, test-npm-package, test-apple-mobile, test-android]
+    needs: [changes, companions, core, build-static, build-android, core-checks, test-csharp,
+            test-java, test-python, test-ruby, test-php, test-swift, test-typescript, test-r,
+            test-go, pack-c, build-wasm, build-wheels, test-nuget-package, test-npm-package,
+            test-apple-mobile, test-android]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.purpose == 'release'
     runs-on: ubuntu-26.04
     permissions:
@@ -1870,7 +1787,7 @@ jobs:
           set -euo pipefail
           run_id=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
             "repos/$GITHUB_REPOSITORY/actions/workflows/codeql.yml/dispatches" \
-            -f ref=master -f "inputs[ci_run_id]=${{ github.run_id }}" --jq '.workflow_run_id')
+            -f ref=master --jq '.workflow_run_id')
           [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || { echo "::error::codeql.yml dispatch returned no run id"; exit 1; }
           scanned=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)
           [ "$scanned" = "$GITHUB_SHA" ] || { echo "::error::codeql.yml scanned $scanned, not this commit: master moved beyond A; prepare again"; exit 1; }
@@ -1913,13 +1830,12 @@ jobs:
   # cancelled, or was skipped while `changes` said it should run (a too-narrow classifier
   # would otherwise be invisible); .github/scripts/pr_board.py has the gates, one per job.
   pr-board:
-    needs: [changes, companions, core, build-static, build-android, core-checks, lint-csharp, lint-java,
-            lint-python, lint-ruby, lint-php, lint-swift, lint-typescript, lint-r, lint-go,
-            lint-go-full, test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
-            test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels,
-            test-nuget-package, test-npm-package, test-apple-mobile, test-android, forge,
-            nuget-org-pack, crate-pack, maven-pack, ruby-pack, npm-pack, r-pack, c-pack,
-            pypi-pack, release-prepare, codeql, stage-release]
+    needs: [changes, companions, core, build-static, build-android, core-checks, core-proofs,
+            test-csharp, test-java, test-python, test-ruby, test-php, test-swift,
+            test-typescript, test-r, test-go, pack-c, build-wasm, build-wheels, test-nuget-package,
+            test-npm-package, test-apple-mobile, test-android, forge, nuget-org-pack, crate-pack,
+            maven-pack, ruby-pack, npm-pack, r-pack, c-pack, pypi-pack, release-prepare, codeql,
+            stage-release]
     if: always()
     runs-on: ubuntu-26.04
     permissions:

@@ -36,6 +36,10 @@ def header(job):
     return job.split('    steps:')[0]
 
 
+def with_lines(job):
+    return [line for line in job.split('    with:\n', 1)[1].splitlines() if line.startswith('      ')]
+
+
 def with_block(text):
     """The `with:` keys of one job or step body."""
     match = re.search(r'^( +)with:\n((?:\1  .*\n?)+)', text, re.M)
@@ -202,34 +206,35 @@ class PreparationFlowTests(unittest.TestCase):
         self.assertIn('group: release-source-${{ github.repository }}', text)
         self.assertIn('actions: write', job)
 
-    def test_codeql_swift_leg_stages_the_preparation_runs_core(self):
-        # No checkout carries a Swift core since it left git (2026-10-30), so the Swift leg builds
-        # against the zips a release-mode ci.yml run attested: the one the preparation run names,
-        # or the newest green one on master for the weekly scan.
+    def test_codeql_swift_leg_builds_the_commit_it_scans(self):
+        # No checkout carries a Swift core, so the leg builds one with the repo's own script, before
+        # init so the tracer never sees cargo. It takes nothing from a CI run: that cost as long
+        # and failed when the run's core and the checkout's header differed.
         text = (WORKFLOWS / 'codeql.yml').read_text()
-        self.assertRegex(text, r'\n      ci_run_id:\n(?:        .*\n)*        required: false\n')
-        self.assertIn('attestations: read', text)
         job = jobs(WORKFLOWS / 'codeql.yml')['analyze']
+        for gone in ('ci_run_id', 'attestations: read', 'download-artifact', 'gh attestation', 'swift_release'):
+            self.assertNotIn(gone, text, gone)
         names = re.findall(r'^      - name: (.*)$', job, re.M)
-        wanted = ['Resolve the release-mode run whose core to build against', "Stage that run's attested Swift core",
-                  'Build the Swift library']
+        wanted = ['Build the core from this commit', 'Initialize CodeQL', 'Build the Swift library']
         self.assertEqual([n for n in names if n in wanted], wanted)
+        self.assertIn('run: .github/scripts/local-core.sh', job)
+        self.assertIn('FORGE: ${{ github.workspace }}/.hyperforge', job)
         # The Swift leg stays on macos-latest (macOS 26, Xcode 26.6), the image the scan has
         # passed on. On xcode-27 (macOS 27, Xcode 27.1) CodeQL 2.27.3's tracer broke SwiftPM's
         # manifest compile with "posix_spawn error: Bad CPU type in executable" (2026-11-01,
         # run 41280444097); the build legs' image is not this leg's until CodeQL proves it.
         self.assertIn('          - language: swift\n            build-mode: manual\n            runner: macos-latest\n', text)
         self.assertNotIn('runner: xcode-27', text)
-        for needle in ("if: matrix.build-mode == 'manual'", 'name: swift-release-assets', 'run-id: ${{ steps.run.outputs.id }}',
-                       '--signer-repo SkunkWerkx/.github', '--source-digest', 'swift_release.py" unpack --assets'):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, job)
-        resolve = job.split('      - name: Resolve the release-mode run whose core to build against\n')[1].split('\n\n')[0]
-        self.assertIn('inputs.ci_run_id', resolve)
-        for needle in ('--workflow ci.yml', '--branch master', '--status success', '"workflow_dispatch" or .event == "schedule"'):
-            self.assertIn(needle, resolve)
         self.assertIn('repository: SkunkWerkx/.github', job)
-        self.assertEqual(job.count("if: matrix.build-mode == 'manual'"), 5, 'the Forge checkout, resolve, download, stage and build')
+        self.assertEqual(job.count("if: matrix.build-mode == 'manual'"), 7,
+                         'the Forge checkout, the toolchain, the pin, its checkout, its wiring, the core and the build')
+        # HyperCast comes from the pin, never a registry: the manifests name its next version.
+        wanted = ['The HyperCast commit hyper.json pins', 'Take HyperCast from the pin', 'Build the core from this commit']
+        self.assertEqual([n for n in names if n in wanted], wanted)
+        self.assertIn('ref: ${{ steps.pin.outputs.commit }}', job)
+        self.assertIn('path: .companions/hypercast', job)
+        self.assertIn('companion_fetch.py" wire --root . --ecosystems=rust', job)
+        self.assertIn('companion_wire.py" swift --root . --source', job)
 
     def test_only_codeql_may_start_a_workflow(self):
         # Least privilege across the board: the attesting callers and the pack jobs hold the two
@@ -254,7 +259,7 @@ ATTESTING = {'hyper-core.yml', 'hyper-build-static.yml', 'hyper-build-android.ym
              'hyper-build-wheels.yml', 'hyper-build-php-extension.yml', 'hyper-test-java.yml',
              'hyper-test-typescript.yml', 'hyper-test-ruby.yml',
              'hyper-pack-nuget.yml', 'hyper-pack-crate.yml', 'hyper-pack-maven.yml'}
-NO_MODE = {'hyper-core-checks.yml', 'hyper-companions.yml', 'hyper-pack-nuget.yml', 'hyper-pack-crate.yml',
+NO_MODE = {'hyper-core-checks.yml', 'hyper-core-proofs.yml', 'hyper-companions.yml', 'hyper-pack-nuget.yml', 'hyper-pack-crate.yml',
            'hyper-pack-maven.yml'}
 # The release tail of ci.yml, in dependency order (pr_board.py's TAIL): the Forge resolver, the
 # eight pack jobs, the inventory, CodeQL and B; gated on prepare-release.yml's master dispatch
@@ -346,7 +351,7 @@ class CiTests(unittest.TestCase):
                                  cwd=ROOT, check=True, stdout=subprocess.PIPE).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
             top = {name.split('/')[0] for name in tar.getnames() if name != 'pax_global_header'}
-        self.assertEqual(top, {'composer.json', 'LICENSE', 'README.md', 'go'})
+        self.assertEqual(top, {'composer.json', 'LICENSE', 'LICENSE-UNICODE', 'README.md', 'go'})
 
     def test_no_php_sources_in_working_tree(self):
         self.assertFalse((ROOT / 'php' / 'src').exists())
@@ -441,26 +446,21 @@ class CiTests(unittest.TestCase):
         self.assertIn('if grep -qF "HYPERTABULAR003"', step)
 
     def test_typescript_and_r_callers(self):
-        # The Forge's lint_node and lint_r default false until the siblings carry the bindings;
-        # the test workflows' toggles default true.
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-test-typescript.yml@master', self.jobs['test-typescript'])
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-test-r.yml@master', self.jobs['test-r'])
-        self.assertIn('      lint_node: true\n', self.jobs['lint-typescript'])
-        self.assertIn('      lint_r: true\n', self.jobs['lint-r'])
 
     def test_go_caller_and_wasm_legs(self):
         # Go's core is Go source (go/internal/core, translated from the wasm32-wasip1 build):
-        # no archive is staged for it anywhere, its suites wait for nothing but its lint, and
+        # no archive is staged for it anywhere, its suites wait for nothing, and
         # the wasm workflow runs its whole suite under TinyGo and stock Go beside the browser build.
         ci = (WORKFLOWS / 'ci.yml').read_text()
         self.assertNotIn('go/staticlib', ci)
         go = self.jobs['test-go']
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-test-go.yml@master', go)
-        self.assertEqual(self.needs(go), {'changes', 'companions', 'lint-go'})
-        self.assertIn('      linters: fast\n', self.jobs['lint-go'])
-        self.assertIn('      linters: full\n', self.jobs['lint-go-full'])
-        self.assertEqual({name for name, job in self.jobs.items() if 'lint-go-full' in self.needs(job)},
-                         {'forge', 'pr-board'}, 'the full Go lint gates nothing but the two aggregates')
+        self.assertEqual(self.needs(go), {'changes', 'companions'})
+        # The regeneration proof on every pull request, the linters when go/ moved, the sweep and
+        # the race run off one.
+        self.assertIn("      linters: ${{ github.event_name != 'pull_request' && 'sweep' || needs.changes.outputs.lint_go == 'true' && 'fast' || 'core' }}\n", go)
         wasm = self.jobs['build-wasm']
         go_gate = self.g('core', 'ci', 'go')
         self.assertIn('      go_wasm_suite: ${{ ' + go_gate + ' }}\n', wasm)
@@ -494,7 +494,15 @@ class CiTests(unittest.TestCase):
         java = self.jobs['test-java']
         self.assertIn('      java_jni: true\n', java)
         self.assertIn('      jdk_floor_version: "21"\n', java)
-        self.assertIn('      lint_java_jni: true\n', self.jobs['lint-java'])
+
+    def test_the_proofs_gate_a_pull_request_with_what_core_checks_proves(self):
+        proofs = self.jobs['core-proofs']
+        self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-core-proofs.yml@master', proofs)
+        self.assertEqual(self.gate(proofs), "github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'")
+        self.assertEqual(self.needs(proofs), self.needs(self.jobs['core-checks']))
+        self.assertIn('core-proofs', self.needs(self.jobs['pr-board']))
+        for line in with_lines(proofs):
+            self.assertIn(line, self.jobs['core-checks'])
 
     def test_core_checks_is_the_forge_matrix_with_the_core_inputs(self):
         core = self.jobs['core-checks']
@@ -518,7 +526,7 @@ class CiTests(unittest.TestCase):
             if name.startswith('lint-'):
                 self.assertIn('    uses: SkunkWerkx/.github/.github/workflows/hyper-lint-', self.jobs[name], name)
 
-    # The board's shape: every gate reads `changes`, every suite waits for its lint and the core,
+    # The board's shape: every gate reads `changes`, every suite waits for the core,
     # the two consumer tests and the two mobile jobs keep their inputs, and pr-board reads it all.
 
     def test_changes_companions_and_pr_board_are_the_only_unconditional_jobs(self):
@@ -746,23 +754,22 @@ class CiTests(unittest.TestCase):
         self.assertIn('uses: SkunkWerkx/.github/.github/workflows/hyper-core.yml@master', core)
         self.assertEqual(self.needs(core), {'changes', 'companions'})
         self.assertEqual(self.gate(core), "needs.changes.outputs.docs_only != 'true'")
-        self.assertEqual(with_block(core), {'mode', 'crate', 'project'})
+        self.assertEqual(with_block(core), {'mode', 'crate', 'project', 'lint', 'extra_features'})
+        self.assertIn("      lint: ${{ github.event_name == 'pull_request' && needs.changes.outputs.lint_rust == 'true' }}\n", core)
         self.assertEqual(set(re.findall(r'^      ([a-z-]+): write$', header(core), re.M)), {'id-token', 'attestations'})
         self.assertEqual([name for name, job in self.jobs.items() if 'workflows/hyper-core.yml@master' in job], ['core'])
 
-    def test_every_lint_caller_needs_only_changes_and_companions(self):
+    def test_every_binding_lints_in_its_own_job_and_only_on_a_pull_request(self):
+        # What reached master has been linted, and a second job would set the toolchain up twice.
         for binding in BINDINGS:
             with self.subTest(binding=binding):
-                lint = self.jobs[f'lint-{binding}']
-                self.assertEqual(self.needs(lint), {'changes', 'companions'})
-                self.assertEqual(self.gate(lint), self.g(binding, 'core', 'ci'))
-                self.assertIn(f'uses: SkunkWerkx/.github/.github/workflows/hyper-lint-{binding}.yml@master', lint)
-                self.assertFalse(re.findall(r'^      [a-z-]+: write$', header(lint), re.M), 'a lint attests nothing')
-        full = self.jobs['lint-go-full']
-        self.assertEqual(self.needs(full), {'changes', 'companions'})
-        self.assertEqual(self.gate(full), OFF_A_PULL_REQUEST)
+                self.assertNotIn(f'lint-{binding}', self.jobs)
+                if binding != 'go':
+                    self.assertIn(f"      lint: ${{{{ github.event_name == 'pull_request' && needs.changes.outputs.lint_{binding} == 'true' }}}}\n",
+                                  self.jobs[f'test-{binding}'])
+        self.assertNotIn('lint-go-full', self.jobs)
 
-    def test_every_test_caller_needs_its_lint_and_core(self):
+    def test_every_test_caller_needs_the_core(self):
         extra = {'csharp': {'build-static'}, 'swift': {'build-static'}}
         workflow = {binding: f'hyper-test-{binding}.yml' for binding in BINDINGS}
         workflow['php'] = 'hyper-build-php-extension.yml'
@@ -770,8 +777,12 @@ class CiTests(unittest.TestCase):
             with self.subTest(binding=binding):
                 test = self.jobs[f'test-{binding}']
                 core = set() if binding == 'go' else {'core'}
-                self.assertEqual(self.needs(test), {'changes', 'companions', f'lint-{binding}'} | core | extra.get(binding, set()))
-                self.assertEqual(self.gate(test), self.g(binding, 'core', 'ci'))
+                self.assertEqual(self.needs(test), {'changes', 'companions'} | core | extra.get(binding, set()))
+                gate = self.gate(test)
+                self.assertIn(f"({self.g(binding, 'core', 'ci')})", gate) if binding != 'go' else self.assertEqual(gate, self.g(binding, 'core', 'ci'))
+                if binding != 'go':
+                    self.assertTrue(gate.startswith('${{ !cancelled() && '), gate)
+                    self.assertIn("needs.core.result == 'success'", gate)
                 self.assertIn(f'uses: SkunkWerkx/.github/.github/workflows/{workflow[binding]}@master', test)
 
     def test_attesting_callers_hold_the_write_scopes(self):
@@ -806,7 +817,7 @@ class CiTests(unittest.TestCase):
     def test_build_static_runs_for_the_bindings_that_link_it(self):
         static = self.jobs['build-static']
         self.assertEqual(self.needs(static), {'changes', 'companions'})
-        self.assertEqual(self.gate(static), self.g('core', 'ci', 'csharp', 'swift'))
+        self.assertEqual(self.gate(static), self.g('core', 'ci', 'swift'))
         android = self.jobs['build-android']
         self.assertEqual(self.needs(android), {'changes', 'companions'})
         self.assertEqual(self.gate(android), OFF_A_PULL_REQUEST)
@@ -831,12 +842,15 @@ class CiTests(unittest.TestCase):
     def test_no_job_excludes_release_mode(self):
         for name, job in self.jobs.items():
             with self.subTest(job=name):
-                self.assertNotIn("event_name == 'pull_request'", self.gate(job) or '')
+                # core-proofs alone: off a pull request core-checks does the same.
+                if name != 'core-proofs':
+                    self.assertNotIn("event_name == 'pull_request'", self.gate(job) or '')
 
     def test_the_tail_replaces_request_staging(self):
         self.assertNotIn('request-staging', self.jobs)
         self.assertFalse((WORKFLOWS / 'stage-native-binaries.yml').exists())
-        board = set(self.jobs) - set(TAIL) - {'pr-board'}
+        # core-proofs is a pull request's alone; forge would skip on them.
+        board = set(self.jobs) - set(TAIL) - {'pr-board', 'core-proofs'}
         self.assertEqual(self.needs(self.jobs['forge']), board)
         for name in TAIL:
             with self.subTest(job=name):
@@ -881,7 +895,7 @@ class CiTests(unittest.TestCase):
 
     def test_codeql_is_dispatched_on_this_run_and_must_leave_no_open_alert(self):
         step = self.jobs['codeql']
-        for needle in ('actions/workflows/codeql.yml/dispatches', 'ref=master', 'inputs[ci_run_id]=${{ github.run_id }}',
+        for needle in ('actions/workflows/codeql.yml/dispatches', 'ref=master',
                        'X-GitHub-Api-Version: 2026-03-10', '.workflow_run_id', 'gh run watch', '--exit-status',
                        'code-scanning/alerts?state=open&ref=refs/heads/master', 'security-events: read',
                        # The dispatched run must have scanned this commit: master must still be A.
@@ -907,8 +921,9 @@ class CiTests(unittest.TestCase):
         self.assertIn('    permissions:\n      contents: read\n      pull-requests: read\n', header(job))
         self.assertIn('persist-credentials: false', job)
         outputs = re.findall(r'^      ([a-z_]+): \$\{\{ steps\.classify\.outputs\.([a-z_]+) \}\}$', header(job), re.M)
-        self.assertEqual([a for a, _ in outputs], ['core', 'ci', 'docs_only', 'csharp', 'java', 'python', 'ruby', 'php',
-                                                   'swift', 'typescript', 'r', 'go'])
+        bindings = ['csharp', 'java', 'python', 'ruby', 'php', 'swift', 'typescript', 'r', 'go']
+        self.assertEqual([a for a, _ in outputs], ['core', 'ci', 'docs_only', 'lint_rust',
+                                                   *(f'lint_{binding}' for binding in bindings), *bindings])
         self.assertTrue(all(a == b for a, b in outputs))
         step = next(step for step in re.split(r'\n      - ', job)[1:] if 'id: classify' in step)
         for needle in ('set -euo pipefail', '--paginate', 'tee -a "$GITHUB_OUTPUT"', 'python3 .github/scripts/pr_changes.py',

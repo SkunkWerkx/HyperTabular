@@ -15,7 +15,7 @@ repositories {
 }
 
 dependencies {
-    implementation(rootProject)
+    implementation(project(":"))
 }
 
 application {
@@ -27,7 +27,7 @@ application {
 // The library's own floor, from the root project so the two cannot drift. Gradle and every
 // compiler stay on 25 (a JDK 21 javac rejects the library's java25 tree), so only the
 // launcher below runs on the floor.
-val jdkFloor: Int by rootProject.extra
+val jdkFloor = rootProject.extra["jdkFloor"] as Int
 
 // Compiled for the floor the way the library's base is, -source/-target rather than
 // --release, and for the same reason: this program reads MemorySegment views, and

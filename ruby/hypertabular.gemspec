@@ -14,7 +14,7 @@ Gem::Specification.new do |spec|
     platform gem matches, and stdlib Fiddle everywhere else. No compile on install.
   DESC
   spec.authors = ["Brian Buvinghausen"]
-  spec.license = "MIT"
+  spec.licenses = ["MIT", "Unicode-3.0"]
   spec.homepage = "https://github.com/SkunkWerkx/HyperTabular"
   # The same floor as hypercast, whose Data case types this gem hands out.
   spec.required_ruby_version = ">= 3.3"
@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
   # "../LICENSE" entry with the `..` intact, a path-traversal entry no installer accepts.
   #
   # native/*/* is exactly the staged binaries, one directory per RID.
-  spec.files = Dir["lib/**/*.rb"] + Dir["lib/hypertabular/native/*/*"] + ["README.md", "LICENSE"]
+  spec.files = Dir["lib/**/*.rb"] + Dir["lib/hypertabular/native/*/*"] + ["README.md", "LICENSE", "LICENSE-UNICODE"]
   spec.require_paths = ["lib"]
 
   # HyperCast is the judge: the verdict, fault, number-format and decimal types and the

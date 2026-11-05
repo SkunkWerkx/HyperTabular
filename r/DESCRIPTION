@@ -5,7 +5,9 @@ Version: 1.0.0
 Authors@R: c(
     person("Brian", "Buvinghausen", email = "buvinghausen@gmail.com",
            role = c("aut", "cre")),
-    person("Skunk Werkx", role = "cph")
+    person("Skunk Werkx", role = "cph"),
+    person("Unicode, Inc.", role = "cph",
+           comment = "case folding data in the vendored core; see inst/AUTHORS")
   )
 Description: Reads delimited text and 'XLSX', 'ODS' and 'Numbers' workbooks a batch at a
     time into typed columns, under a dialect, a plan of columns and the formats, field

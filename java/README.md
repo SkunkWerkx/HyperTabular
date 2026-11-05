@@ -294,8 +294,8 @@ cd ../rust; cargo cdylib                              # the core
 cd ../java/jni; cargo build --release --locked --lib  # the JNI library
 cd ..
 ./gradlew test testFloor checkSuiteParity javadoc \
-  -Porg.gradle.java.installations.paths=<path to a JDK 21> \
-  -Porg.gradle.java.installations.auto-detect=false
+  -Dorg.gradle.java.installations.paths=<path to a JDK 21> \
+  -Dorg.gradle.java.installations.auto-detect=false
 ./gradlew :aot-smoke-test:run :aot-smoke-test:runFloor  # every native entry point, on 25 and on 21
 ```
 

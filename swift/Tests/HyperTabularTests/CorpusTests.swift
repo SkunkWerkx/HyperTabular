@@ -248,7 +248,9 @@ final class CorpusTests: XCTestCase {
     /// The value the corpus states for an `ok` cell, as the Swift type the door presents.
     func expectedValue(_ door: Door, _ cell: Cell) -> AnyHashable {
         func instant() -> Date {
-            Date(timeIntervalSince1970: Double(cell.seconds!) + Double(cell.nanos!) / 1_000_000_000)
+            // The Double nearest the instant, but never one in the next second.
+            let rounded = Double(cell.seconds!) + Double(cell.nanos!) / 1_000_000_000
+            return Date(timeIntervalSince1970: rounded < Double(cell.seconds! + 1) ? rounded : rounded.nextDown)
         }
         func day() -> DateComponents {
             DateComponents(year: cell.year!, month: cell.month!, day: cell.day!)

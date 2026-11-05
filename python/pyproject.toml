@@ -13,9 +13,9 @@ dynamic = ["version"]
 description = "Delimited text — CSV, TSV, any single-byte separator — and XLSX, ODS and Numbers workbooks read a batch at a time into typed columns, with a HyperCast verdict for every cell. A PyO3 native extension linking a Rust core directly into CPython: the boundary is crossed once per batch, columns arrive as typed memoryviews rather than a call per cell, and no compiler is needed to install on supported platforms."
 # The package page on PyPI: this binding's own README, not the repo root's.
 readme = "README.md"
-license = "MIT"
+license = "MIT AND Unicode-3.0"
 # A local copy, not a path up to the repo root: PEP 639 globs forbid `..` outright.
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "LICENSE-UNICODE"]
 authors = [{ name = "Brian Buvinghausen" }]
 # 3.11 floor, as HyperCast's package: `match`/`case` over Success | Fault, `typing.assert_never`
 # in the standard library, and the extension is built abi3-py311, so one wheel per platform
