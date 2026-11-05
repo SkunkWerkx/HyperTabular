@@ -66,7 +66,8 @@ block pins one HyperCast commit and the green full-board run of its `ci.yml` tha
 holds the companion App's key) mirrors that run's artifacts into this run, and every leg's
 `fetch-companions`, the Forge's and this repo's four own jobs' (`test-apple-mobile`,
 `test-android`, `test-nuget-package`, `test-npm-package`), wires them into the job's tree only
-and proves where each install came from. A HyperCast artifact renamed in its `ci.yml` is a Forge
+and proves where each install came from. `codeql.yml`'s Swift leg takes the same commit from source for
+the core it builds, on every run, so a scan never waits on a registry. A HyperCast artifact renamed in its `ci.yml` is a Forge
 `companion_map.py` change. The manifests keep requiring what the code needs, one version across
 all of them (the wiring sets each to the pin's exact version in the job's tree). A release takes
 HyperCast from the registries instead, so the order is: HyperCast releases, live everywhere but
@@ -134,7 +135,7 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
 - The JDK floor: `jdkFloor` (`21`) in `java/build.gradle.kts`, `jdk_floor_version` in
   `ci.yml`, the HyperCast jar (1.1.0 or later, the first multi-release one), and the floor
   sentences in `java/README.md` and the README. JDK 21 reaches EOL at Temurin on 2029-12-31:
-  then the floor is 25, and `java/jni/`, `java_jni`, `lint_java_jni`, the JNI sites in
+  then the floor is 25, and `java/jni/`, `java_jni`, the JNI sites in
   `check_exports.py` and `checkFloorApi` go, the compile goes back to `--release`, and the FFM
   `Native` moves back into the base.
 - The .NET floor: `TargetFrameworks` in `csharp/Directory.Build.props` (the Apple and Android
@@ -232,14 +233,15 @@ promise, so every stable bump is re-proven by the legs that use it.
   that packed, and the tag run requires its own Forge to descend from it. Don't merge Forge
   changes while a preparation is in flight.
 - The board is one Forge workflow per concern: `core` (`hyper-core.yml`, the seven core legs,
-  each with its cdylib export check and C smoke), `core-checks` (`hyper-core-checks.yml`, the
+  each with its cdylib export check and C smoke), `core-proofs` (`hyper-core-proofs.yml`, the
+  no_std, no-allocator and no-panic proofs, on every pull request that builds the core), `core-checks` (`hyper-core-checks.yml`, the
   static checks on three hosts, s390x included, running `rust/check-core.sh` with the async
   feature beside the default and the Forge's own no-panic job off, since check-core.sh proves
-  it with its canary), `lint-<binding>` (one job on `ubuntu-26.04-arm`) and `test-<binding>`
-  (the binding's suite on its hosts), gated on what the pull request touched (`changes`, from
+  it with its canary) and `test-<binding>` (one job per binding: its toolchain once, on a pull request that touched
+  its tree or `.github/` its linters on one leg, then its suite on its hosts), gated on what the pull request touched (`changes`, from
   `.github/scripts/pr_changes.py`; `pr-board` is the one status to read, red when a job failed
   or was skipped while its gate said run). Off a pull request nothing is gated and the whole
-  release-mode board runs. A new binding is one `lint-` and one `test-` caller, one class in
+  release-mode board runs. A new binding is one `test-` caller, one class in
   `pr_changes.py` and one gate in `pr_board.py` (its tests hold the three together).
 - `prepare-release.yml` and ci.yml's `core-checks` are one `uses:` each of a Forge reusable
   workflow; this repo keeps triggers, permissions and gates. `.github/hyper.json` is what the
@@ -271,8 +273,9 @@ promise, so every stable bump is re-proven by the legs that use it.
 
 ## Local loop
 
-The PR board runs a binding's lint and suite only when its tree, the core (`rust/`,
-`include/`, `c/`, `corpus/`), or `.github/` changed; `python3 .github/scripts/pr_changes.py`
+The PR board always builds the core and proves its thesis (`core-proofs`). A binding's suite runs when its tree, the core (`rust/`,
+`include/`, `c/`, `corpus/`) or `.github/` changed, with its linters ahead of it when its tree or `.github/` did;
+Rust's lint, in `core`, when the core or `.github/` did; `python3 .github/scripts/pr_changes.py`
 classifies a `filename<TAB>previous_filename` list from stdin the way the `changes` job does
 (`--all` is the release board), and `python3 .github/scripts/pr_board.py` with `NEEDS`,
 `CHANGES` and `GITHUB_EVENT_NAME` set gives the verdict.
@@ -325,7 +328,7 @@ needed).
 Java's JNI path needs its own library: `cargo build --release --locked --lib` in `java/jni/`,
 after `cargo cdylib`. Gradle stages both and refuses a stale one. Then, from `java/`,
 `./gradlew test testFloor checkSuiteParity javadoc` with a JDK 21 passed through
-`-Porg.gradle.java.installations.paths=<jdk21>`.
+`-Dorg.gradle.java.installations.paths=<jdk21>`.
 
 TypeScript builds its own addon, a napi-rs crate path-depending on `rust/`: from
 `typescript/`, `bun install --frozen-lockfile && bun run build && bun run test`, then `bun run test:bun` and `bun run

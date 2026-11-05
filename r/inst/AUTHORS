@@ -1,1 +1,2 @@
-No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only the hypertabular core and the hypercast crate it judges every cell with, both the work of this package's authors (Skunk Werkx, MIT).
+No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only the hypertabular core and the hypercast crate it judges every cell with, both the work of this package's authors (Skunk Werkx, MIT), but for the Unicode data below.
+The vendored hypercast crate's case folding (unicode/CaseFolding-17.0.0.txt and src/fold_table.rs, generated from it) is from the Unicode Character Database, (c) Unicode, Inc., Unicode License v3: https://www.unicode.org/license.txt

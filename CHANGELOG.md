@@ -64,6 +64,10 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   a .NET 10 Native AOT publish links the core in. *(C#)*
 
 ### Changed
+- **Unicode is credited.** HyperCast's core carries Unicode's case folding data, so every package
+  names `MIT AND Unicode-3.0` and carries `LICENSE-UNICODE` where its format allows; PHP's release zips
+  and Swift's hold only the library, and the README is their notice. R names Unicode, Inc. in
+  `Authors@R` and `inst/AUTHORS`.
 
 - **The JavaScript toolchain is Bun.** Every dependency tree here (`typescript/`, its browser
   smoke and consumer-test harness, `ruby/wasm-smoke/`) is locked by `bun.lock` and installed with

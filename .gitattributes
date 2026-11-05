@@ -21,7 +21,7 @@
 # What a `git archive` of this repository leaves out. PIE (the PHP extension installer) reads
 # the Composer package from Packagist, which serves GitHub's archive of the tag, and takes
 # only its metadata from it: the extension itself is a pre-packaged binary attached to the
-# release. So the archive carries composer.json, LICENSE, README.md and go/, nothing else,
+# release. So the archive carries composer.json, LICENSE, LICENSE-UNICODE, README.md and go/, nothing else,
 # and `test_git_archive_is_metadata_only` pins that set.
 #
 # A deny-list on purpose, and `go/` is deliberately not on it: the Go module proxy builds

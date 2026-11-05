@@ -10,12 +10,13 @@
     "binding.js",
     "binding.d.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "LICENSE-UNICODE"
   ],
   "engines": {
     "node": "^22.14.0 || >=23.6.0"
   },
-  "license": "MIT",
+  "license": "MIT AND Unicode-3.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SkunkWerkx/HyperTabular.git"

@@ -130,7 +130,7 @@ frame HyperCast's own R doors return, with one row per row read, read by
 `hypercast::is_ok()`, `hypercast::faults()` and `hypercast::optional()` as theirs are. Its
 `door` attribute names the factory (`"col_i32"`). Values come back in the R types hypercast
 gives them (a 32-bit integer as a double, a 64-bit one and a decimal as their exact text,
-an instant as `POSIXct` with its exact `seconds` and `nanos` beside it, and so on; see
+an instant as `POSIXct`, cut to the millisecond so it cannot round into the next second, with its exact `seconds` and `nanos` beside it, and so on; see
 hypercast's README).
 
 Each verdict here carries one column more, `raw`: the text of each faulted cell (`NA` where

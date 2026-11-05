@@ -13,7 +13,7 @@
         "extension",
         "rust"
     ],
-    "license": "MIT",
+    "license": "(MIT and Unicode-3.0)",
     "authors": [
         {
             "name": "Brian Buvinghausen"

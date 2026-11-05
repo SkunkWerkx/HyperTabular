@@ -3,7 +3,7 @@
     "description": "Delimited text (CSV, TSV) and workbooks (XLSX, ODS, Numbers) read a batch at a time into typed columns, every cell a HyperCast Success/Fault verdict — a PHP extension over a Rust core, installed with PIE.",
     "type": "php-ext",
     "keywords": ["csv", "tsv", "xlsx", "ods", "parser", "tabular", "validation", "extension", "rust"],
-    "license": "MIT",
+    "license": "(MIT and Unicode-3.0)",
     "authors": [
         {
             "name": "Brian Buvinghausen"
