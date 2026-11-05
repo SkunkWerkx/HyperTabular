@@ -55,7 +55,7 @@ first and a bump touches every manifest: `rust/Cargo.toml` (then `cargo update -
 and the lockfiles below), the csproj, `build.gradle.kts`, `pyproject.toml`, the gemspec, the
 root `composer.json` (`ext-hypercast`), both `Package.swift` files and
 `swift/Benchmarks/Package.resolved`, `go/go.mod` and `go.sum`, `typescript/package.json`
-(peer and dev) with its two lockfiles and `typescript/Cargo.lock`, `java/jni/Cargo.lock`,
+(peer and dev) with its two `bun.lock`s and `typescript/Cargo.lock`, `java/jni/Cargo.lock`,
 `r/DESCRIPTION`'s Imports, and the C++ header's minimum. After the core's HyperCast moves,
 `go generate` in `go/` and the header test re-run. Dependabot ignores HyperCast everywhere.
 
@@ -187,11 +187,11 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
   -run 'TestCoreIsCurrent|TestRegenerationCarriesTheCrateVersion' .` diffs it. Any change under
   `rust/src` that reaches the cdylib means regenerating it; `prepare-release.yml` regenerates
   it at the version (the version is a literal in it).
-- `typescript/binding.js` and `binding.d.ts` are napi-rs output: `npm run build` in
+- `typescript/binding.js` and `binding.d.ts` are napi-rs output: `bun run build` in
   `typescript/` rewrites them.
 - `php/stubs/hypertabular.stub.php` is generated from the extension by `php
   tools/generate-stubs.php` in `php/` (Linux or macOS), with cargo-php pinned to the
-  `CARGO_PHP_VERSION` that script names (0.2.1); `StubTest` regenerates and compares it when
+  `CARGO_PHP_VERSION` that script names (0.2.2); `StubTest` regenerates and compares it when
   `HYPERTABULAR_CHECK_STUBS=1`.
 - The root `Package.swift`'s release version and the two Swift zips' checksums are written by
   `ci.yml`'s `stage-release` job in the preparation run. No binary is committed anywhere.
@@ -328,9 +328,9 @@ after `cargo cdylib`. Gradle stages both and refuses a stale one. Then, from `ja
 `-Porg.gradle.java.installations.paths=<jdk21>`.
 
 TypeScript builds its own addon, a napi-rs crate path-depending on `rust/`: from
-`typescript/`, `npm ci && npm run build && npm test`, then `npm run test:bun` and `npm run
-lint`. The WebAssembly fallback (`rustup target add wasm32-wasip1`): `npm run build:wasi`, then
-`NAPI_RS_FORCE_WASI=error npm test`. The consumer tests are `typescript/consumer-tests/README.md`
+`typescript/`, `bun install --frozen-lockfile && bun run build && bun run test`, then `bun run test:bun` and `bun run
+lint`. The WebAssembly fallback (`rustup target add wasm32-wasip1`): `bun run build:wasi`, then
+`NAPI_RS_FORCE_WASI=error bun run test`. The consumer tests are `typescript/consumer-tests/README.md`
 (Verdaccio on port 4873; `floor` and `s390x` need Docker).
 
 R builds the core from its vendor tarball, never from `rust/` directly: `r/tools/vendor.sh`
@@ -361,6 +361,15 @@ add wasm32-unknown-emscripten`, emsdk on PATH, then `RUSTC_BOOTSTRAP=1 cargo was
 in `rust/`, after deleting `rust/target/.rustc_info.json` and
 `rust/target/wasm32-unknown-emscripten/` (cargo caches rustc's cfg without regard to the
 variable); the Forge's `wasm_archive_guard.py` checks the result.
+
+## Bun and npm
+
+Bun is the package manager and script runner for every JavaScript tree here, locked by `bun.lock`.
+npm is confined to the published packages: the Forge's `npm pkg set` and `npm pack`, `npm publish`,
+and the consumer scenarios that install as an npm user does (`bun-install` is the Bun user's; Bun
+has no s390x build, so the `s390x` scenario could not move in any case). Don't add another npm call.
+Bun's own runtime still can't load the WASI module, so `test:bun` under `NAPI_RS_FORCE_WASI=error`
+stays recorded, never gating. `bun run test` is the package script; `bun test` is Bun's runner.
 
 ## Working with the owner
 

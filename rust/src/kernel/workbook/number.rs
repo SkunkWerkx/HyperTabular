@@ -17,7 +17,7 @@ const PLAIN: NumFormat = NumFormat::new('.', ',', NumFormat::EXPONENT);
 
 /// A finite double from the text of a numeric cell, or `None` if the text is not one.
 pub fn parse_f64(bytes: &[u8]) -> Option<f64> {
-    // The door trims; this grammar does not.
+    // The door trims; this grammar does not. White space after a sign is the door's to read.
     let (first, last) = (*bytes.first()?, *bytes.last()?);
     if !(first.is_ascii_digit() || matches!(first, b'+' | b'-' | b'.'))
         || !(last.is_ascii_digit() || last == b'.')

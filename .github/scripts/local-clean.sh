@@ -57,8 +57,21 @@ remove "r/tools/vendor.sh" \
   r/src/rust/vendor.tar.xz r/src/rust/Cargo.lock r/src/include r/tests/testthat/corpus r/src/*.o r/src/*.so r/src/*.dll
 # TypeScript: the addon, the WASI module and its loaders, the browser page's bundle, and the
 # consumer tests' work directory.
-remove "npm run build and npm run build:wasi in typescript/" \
+remove "bun run build and bun run build:wasi in typescript/" \
   typescript/*.node typescript/hypertabular.wasm32-wasip1*.wasm typescript/hypertabular.wasip1* typescript/browser.js \
   typescript/browser-smoke/dist typescript/consumer-tests/work
 
 echo "local-clean: the checkout holds no staged binding artifact"
+
+# The machine's cruft too, on every retry: old agent scratch folders and Docker's stopped
+# containers, unused images and build cache, which once filled a 460 GB disk. Forge's
+# dev_purge.sh keeps a scratch folder written in the last hour, running containers and volumes.
+# A missing Forge checkout or a failed prune never stops a build. FORGE as in local-core.sh.
+purge="${FORGE:-}/.github/scripts/dev_purge.sh"
+[ -n "${FORGE:-}" ] || purge="$repo/../.github/.github/scripts/dev_purge.sh"
+[ -f "$purge" ] || purge="$repo/../HyperForge/.github/scripts/dev_purge.sh"
+if [ -f "$purge" ]; then
+  bash "$purge" --yes --only scratch,docker || echo "local-clean: dev_purge.sh failed; carrying on" >&2
+else
+  echo "local-clean: dev_purge.sh not found; set FORGE to the SkunkWerkx/.github checkout" >&2
+fi

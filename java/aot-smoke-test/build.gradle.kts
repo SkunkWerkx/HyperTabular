@@ -7,7 +7,7 @@
 // survive ahead-of-time compilation. The image keeps only the FFM path and no JNI library.
 plugins {
     application
-    id("org.graalvm.buildtools.native") version "1.1.17"
+    id("org.graalvm.buildtools.native") version "1.1.18"
 }
 
 repositories {

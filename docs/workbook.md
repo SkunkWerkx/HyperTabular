@@ -199,7 +199,8 @@ which a read allocates nothing (`tests/reader_allocation_free.rs`).
   table is held to what the part's bytes can inflate to before a caller sizes an arena by
   it.
 - Doubles: the core says and reads a double exactly as Rust's own formatter and parser
-  do, checked over hundreds of thousands of values.
+  do, but for white space after a leading sign, which HyperCast reads and Rust refuses,
+  checked over hundreds of thousands of values.
 - Numbers: generated packages in every layout the reader has to be indifferent to —
   deflated or stored parts, chunks of a few bytes or one, tiles of seven rows or 256,
   narrow or wide offsets, a segmented string list, rows left out — read stingy against

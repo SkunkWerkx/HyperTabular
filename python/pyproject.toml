@@ -51,7 +51,7 @@ Issues = "https://github.com/SkunkWerkx/HyperTabular/issues"
 
 [project.optional-dependencies]
 # mypy is what tests/test_typing.py checks a consumer's match with; those tests skip without it.
-test = ["pytest>=8.0", "mypy>=1.11"]
+test = ["pytest>=9.2.0", "mypy>=2.4.1"]
 
 [tool.maturin]
 manifest-path = "../rust/Cargo.toml"

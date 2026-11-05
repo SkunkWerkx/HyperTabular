@@ -256,7 +256,7 @@ and `NativeVersion()` reports the version compiled into that file from the crate
   panic and never a corrupted heap; the reader it happened in refuses every call after it.
   The guest stack is 64 KiB, HyperCast's size and HyperUuid's.
 
-wasm2go is pre-1.0 (v0.4.19 today) with one maintainer. It is pinned in a tool module of its
+wasm2go is pre-1.0 (v0.4.20 today) with one maintainer. It is pinned in a tool module of its
 own, [`internal/wasm2go/`](internal/wasm2go), so it never enters your module graph, and
 because its output is committed, a dead wasm2go would cost this repository its regeneration
 step and cost a consumer nothing.
