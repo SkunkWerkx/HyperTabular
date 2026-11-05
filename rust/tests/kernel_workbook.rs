@@ -1054,11 +1054,18 @@ fn numbers_are_said_as_rust_says_them() {
 
 /// The core reads a number as Rust does, where what Rust reads is finite, but for zero: every
 /// spelling of it is read (`-0`, `+0.00000000`, an underflow such as `-1e-999`), and the core
-/// only ever returns unsigned zero (HyperCast's contract: zero carries no sign).
+/// only ever returns unsigned zero (HyperCast's contract: zero carries no sign). And but for
+/// white space after a leading sign, which HyperCast's numeric doors read and Rust refuses: a
+/// spreadsheet doesn't write it, and what it means is not in doubt.
 #[test]
 fn numbers_are_read_as_rust_reads_them() {
     let expected = |text: &str| {
-        text.parse::<f64>()
+        let closed = match text.split_at_checked(1) {
+            Some((sign @ ("+" | "-"), rest)) => format!("{sign}{}", rest.trim_start()),
+            _ => text.to_string(),
+        };
+        closed
+            .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
             .map(|value| if value == 0.0 { 0.0 } else { value })
@@ -1139,6 +1146,10 @@ fn numbers_are_read_as_rust_reads_them() {
     ] {
         same(text);
     }
+    assert_eq!(parse_f64(b"+  4418"), Some(4418.0));
+    assert_eq!(parse_f64("-\u{a0}.5".as_bytes()), Some(-0.5));
+    assert_eq!(parse_f64(b" 4418"), None);
+    assert_eq!(parse_f64(b"4418 "), None);
     same(&("1".repeat(400) + "." + &"3".repeat(400) + "e-390"));
     same(&("0.".to_string() + &"0".repeat(400) + "1e390"));
     let alphabet: Vec<char> = "0123456789+-.eE ,x%()infa\u{0b}".chars().collect();

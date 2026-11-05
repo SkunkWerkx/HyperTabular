@@ -263,10 +263,16 @@ typedef struct HyperTabularSymbol_8 {
 // `руб.`). Empty is [`CurrencySymbol::NONE`]: nothing declared, nothing matched.
 //
 // The symbol is matched whole, at the edges of the numeric body — leading (before or
-// after a sign) or trailing, with optional ASCII whitespace between it and the digits —
+// after a sign) or trailing, with optional white space between it and the digits —
 // and only while [`NumFormat::CURRENCY`] is set. It never participates in the digit scan,
 // so a symbol that happens to contain a separator character (`kr.` under `.` grouping)
 // is fine.
+//
+// White space may sit inside a symbol (CLDR's `F CFA`, written with U+202F), never at its
+// edges, where the doors ignore it. Inside, `' '`, U+00A0 and U+202F stand for each other
+// in the input, one character for one: `F CFA` declared with any of them reads `F CFA`
+// written with any of them. Every other character, other white space included, matches
+// exactly; a run of spaces never matches one, and the space is never optional.
 //
 // ABI layout: the 16 bytes, then the length, 17 bytes with no alignment, as a [`Symbol`].
 typedef struct HyperTabularCurrencySymbol {
@@ -292,12 +298,14 @@ typedef struct HyperTabularCurrencySymbol {
 // 4-byte alignment; [`RawNumFormat`](crate::RawNumFormat) puts a size word ahead of it.
 typedef struct HyperTabularNumFormat {
   // Bitwise OR of the `GROUPING`/`PARENS`/`EXPONENT`/`RADIX_PREFIX`/`PERCENT`/`CURRENCY`/
-  // `TRAILING_SIGN` flags, plus the `SEPARATOR_DETECT` policy.
+  // `TRAILING_SIGN` flags, plus the `SEPARATOR_DETECT` policy and, in bits 8 and 9, the
+  // grouping policy (`GROUPING_LEGACY`, `GROUPING_WESTERN` or `GROUPING_INDIAN`).
   uint32_t flags;
   // Native digits read beside ASCII `0`–`9`. [`NativeDigits::NONE`] declares none.
   HyperTabularNativeDigits digits;
   // The declared decimal separator (`.` invariant, `,` in eurozone-style text): one or
-  // two characters. An empty symbol matches nothing, so no fraction can be written.
+  // two characters, with no white space in them (a numeral admits white space only as a
+  // group separator). An empty symbol matches nothing, so no fraction can be written.
   struct HyperTabularSymbol_8 decimal_sep;
   // The declared digit-group separator (`,` invariant, `.` or U+00A0 elsewhere). Must
   // differ from `decimal_sep`; the doors check the decimal separator first, so a caller
@@ -306,8 +314,8 @@ typedef struct HyperTabularNumFormat {
   struct HyperTabularSymbol_8 group_sep;
   // The decimal separator of a currency amount — read in place of `decimal_sep` when the
   // declared symbol is present in the text, as the BCL switches to a culture's
-  // `CurrencyDecimalSeparator` when it sees the symbol. [`Symbol::NONE`] keeps
-  // `decimal_sep`.
+  // `CurrencyDecimalSeparator` when it sees the symbol, and with no white space in it
+  // either. [`Symbol::NONE`] keeps `decimal_sep`.
   struct HyperTabularSymbol_8 currency_decimal_sep;
   // The group separator of a currency amount, likewise. [`Symbol::NONE`] keeps `group_sep`.
   struct HyperTabularSymbol_8 currency_group_sep;
@@ -324,9 +332,11 @@ typedef struct HyperTabularNumFormat {
   // set. [`CurrencySymbol::NONE`] declares nothing.
   struct HyperTabularCurrencySymbol currency;
 } HyperTabularNumFormat;
-// Permit `group_sep` between digits (group sizes are not validated — a separator must
-// simply sit between two digits, HyperCast's own deterministic rule where .NET's
-// `AllowThousands` deferred to per-culture quirks).
+// Permit `group_sep` between digits. Under the legacy grouping policy group sizes are not
+// validated — a separator must simply sit between two digits, HyperCast's own
+// deterministic rule where .NET's `AllowThousands` deferred to per-culture quirks; a
+// strict policy ([`GROUPING_WESTERN`](Self::GROUPING_WESTERN),
+// [`GROUPING_INDIAN`](Self::GROUPING_INDIAN)) judges every group.
 #define HyperTabularNumFormat_GROUPING (1 << 0)
 // Permit accounting parentheses as negation: `(1,234)` is -1234.
 #define HyperTabularNumFormat_PARENS (1 << 1)
@@ -353,14 +363,14 @@ typedef struct HyperTabularNumFormat {
 #define HyperTabularNumFormat_SEPARATOR_DETECT (1 << 5)
 // Permit the declared [`currency`](Self::currency) symbol at either edge of the
 // numeric body — leading (`$5`, `-$5`, `$ -5`) or trailing (`5 €`, `1.234,50 kr.`),
-// once, with optional ASCII whitespace between symbol and digits; accounting
+// once, with optional white space between symbol and digits; accounting
 // parentheses wrap the symbol along with the digits (`($5)`, `(1.234,50 kr.)`). With
 // [`CurrencySymbol::NONE`] declared the flag matches nothing and changes nothing.
 // Integer and real doors.
 #define HyperTabularNumFormat_CURRENCY (1 << 6)
 // Permit the sign after the digits (`5-`, `5 -`, `5 €-`, `5- €`), the way a culture
 // whose negative pattern is `n-` writes it and .NET's `AllowTrailingSign` reads it:
-// ASCII `-`/`+` or the declared signs, once, with optional ASCII whitespace before it,
+// ASCII `-`/`+` or the declared signs, once, with optional white space before it,
 // and never beside a leading sign or inside accounting parentheses. Not part of
 // [`ALL`](Self::ALL): a bridge sets it from the culture's own negative pattern.
 #define HyperTabularNumFormat_TRAILING_SIGN (1 << 7)
@@ -368,6 +378,28 @@ typedef struct HyperTabularNumFormat {
 // is declared from a culture's pattern rather than assumed ([`SEPARATOR_DETECT`](Self::SEPARATOR_DETECT)
 // is a separator *policy*, not a lenience, and is deliberately not included either).
 #define HyperTabularNumFormat_ALL (((((HyperTabularNumFormat_GROUPING | HyperTabularNumFormat_PARENS) | HyperTabularNumFormat_EXPONENT) | HyperTabularNumFormat_RADIX_PREFIX) | HyperTabularNumFormat_PERCENT) | HyperTabularNumFormat_CURRENCY)
+// Grouping policy `00`, legacy: a group separator anywhere between two digits, whatever
+// the group sizes (`12,34` is 1234). What a format declaring no policy has: the C ABI's
+// null format, a 1.0 layout, [`new`](Self::new) with no policy bits, and
+// [`INVARIANT`](Self::INVARIANT).
+#define HyperTabularNumFormat_GROUPING_LEGACY 0
+// Grouping policy `01`, strict Western: once a numeral uses a group separator, its
+// integer part is groups of exactly three digits counted leftward from the decimal
+// separator (or the numeral's end), the leftmost group one to three. An ungrouped
+// numeral stays valid; grouping after the decimal separator or in an exponent never is.
+// Digits are counted as digits, native ones included, never bytes, and the rule holds for
+// the currency group separator and each space-like separator alike. A policy only
+// judges groups: with [`GROUPING`](Self::GROUPING) off, a group separator stays forbidden.
+#define HyperTabularNumFormat_GROUPING_WESTERN (1 << 8)
+// Grouping policy `10`, strict Indian (lakh and crore): as
+// [`GROUPING_WESTERN`](Self::GROUPING_WESTERN), but the group next to the decimal
+// separator has three digits, every group to its left two, and the leftmost one or two
+// (`12,34,567`).
+#define HyperTabularNumFormat_GROUPING_INDIAN (2 << 8)
+// The two policy bits, 8 and 9, within `flags`. Policy `11` is refused by
+// [`check`](Self::check). Set a policy with [`with_grouping`](Self::with_grouping), which
+// replaces the field.
+#define HyperTabularNumFormat_GROUPING_POLICY (3 << 8)
 
 // [`NumFormat`] as it crosses the ABI — the size-tagged layout of 0.9.0: a size word, then
 // the format itself, byte for byte, 92 bytes with 4-byte alignment. The core reads the

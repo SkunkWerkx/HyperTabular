@@ -765,7 +765,7 @@ pub struct Column {
 /// 92-byte layout `@skunkwerkx/hypercast`'s `NumFormat` hands out, as the core reads them.
 fn format_of(env: &Env, value: &Unknown<'_>) -> Option<hc::NumFormat> {
     if is_absent(value) {
-        return Some(hc::NumFormat::INVARIANT);
+        return Some(hc::NumFormat::STRICT);
     }
     let object = match value.get_type() {
         Ok(ValueType::Object | ValueType::Function) => unsafe { value.cast::<Object>() }.ok(),
@@ -829,7 +829,7 @@ macro_rules! plain_columns {
             #[doc = $doc]
             #[napi(catch_unwind, ts_args_type = "ordinal: number")]
             pub fn $name(env: &Env, ordinal: Unknown<'_>) -> Column {
-                Column::make(env, Door::$door, &ordinal, Some(ht::Door::$door), Some(hc::NumFormat::INVARIANT))
+                Column::make(env, Door::$door, &ordinal, Some(ht::Door::$door), Some(hc::NumFormat::STRICT))
             }
         }
     )+};
@@ -908,7 +908,7 @@ impl Column {
             Door::Unix,
             &ordinal,
             door,
-            Some(hc::NumFormat::INVARIANT),
+            Some(hc::NumFormat::STRICT),
         )
     }
 
@@ -923,7 +923,7 @@ impl Column {
             Door::ExcelSerial,
             &ordinal,
             door,
-            Some(hc::NumFormat::INVARIANT),
+            Some(hc::NumFormat::STRICT),
         )
     }
 
@@ -938,7 +938,7 @@ impl Column {
             Door::DateOrdered,
             &ordinal,
             door,
-            Some(hc::NumFormat::INVARIANT),
+            Some(hc::NumFormat::STRICT),
         )
     }
 
@@ -953,7 +953,7 @@ impl Column {
             Door::Datetime,
             &ordinal,
             door,
-            Some(hc::NumFormat::INVARIANT),
+            Some(hc::NumFormat::STRICT),
         )
     }
 

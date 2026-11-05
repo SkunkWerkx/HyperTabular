@@ -70,6 +70,14 @@ test_that("values come out typed as hypercast types them", {
   expect_identical(c$dt$date, as.Date("2026-07-01"))
 })
 
+test_that("a numeric column with no format reads as hypercast's invariant notation does", {
+  t <- read_delimited(csv("\"1,5\",\"1,234\"\n"), list(col_f64(1), col_f64(2)),
+                      delimited_dialect(has_header = FALSE))
+  expect_false(t$columns[[1]]$ok)
+  expect_false(hypercast::cast_f64("1,5", hypercast::num_format())$ok)
+  expect_identical(t$columns[[2]]$value, 1234)
+})
+
 test_that("number formats and declared parameters reach the door", {
   fr <- hypercast::num_format(",", "\u202f", "grouping")
   t <- read_delimited(csv("\"1\u202f234,5\"\n"), list(col_f64(1, fr), col_f64(1)),

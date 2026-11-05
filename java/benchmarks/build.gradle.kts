@@ -3,7 +3,7 @@
 // 300 000-row files of corpus/README.md. Run by hand with `./gradlew :benchmarks:jmh`.
 plugins {
     java
-    id("me.champeau.jmh") version "0.7.3"
+    id("me.champeau.jmh") version "0.7.4"
 }
 
 repositories {

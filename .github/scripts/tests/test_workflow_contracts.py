@@ -379,7 +379,7 @@ class CiTests(unittest.TestCase):
         self.assertIn('        os: [ubuntu-26.04, xcode-27, windows-2025-vs2026]\n', header(job))
         self.assertIn('      fail-fast: false\n', header(job))
         self.assertEqual(self.gate(job), self.g('typescript', 'core', 'ci'))
-        for needle in ('npm_package.py" pack', 'NAPI_RS_FORCE_WASI=error npm test', 'npm run typecheck',
+        for needle in ('npm_package.py" pack', 'NAPI_RS_FORCE_WASI=error bun run test', 'bun run typecheck',
                        'node-wasm32-wasip1', 'run.sh', 'setup-qemu-action', 'path: .hyperforge',
                        'repository: SkunkWerkx/.github', 'ref: master', 'persist-credentials: false',
                        'node-version: "26"', 'oven-sh/setup-bun@', 'merge-multiple: false', 'GITHUB_STEP_SUMMARY'):
@@ -405,7 +405,7 @@ class CiTests(unittest.TestCase):
         # annotations per leg on the 1.1.0 preparation. Commands are off for its output, resumed
         # before the exit status is returned, so the step after still records the result.
         self.assertIn('echo "::stop-commands::$token"', bun)
-        self.assertIn('NAPI_RS_FORCE_WASI=error npm run test:bun || status=$?', bun)
+        self.assertIn('NAPI_RS_FORCE_WASI=error bun run test:bun || status=$?', bun)
         self.assertIn('echo "::$token::"\n          exit "$status"', bun)
         self.assertEqual(job.count('continue-on-error: true'), 1, 'nothing but Bun is tolerated')
         for step in re.split(r'\n      - ', job)[1:]:
@@ -624,18 +624,18 @@ class CiTests(unittest.TestCase):
                     self.assertLess(swift, wired['swift'][0], 'the Swift proof asks SwiftPM for the graph')
                 if 'npm' in ecosystems:
                     node = next(i for i, s in enumerate(steps) if 'actions/setup-node@' in s)
-                    install = next(i for i, s in enumerate(steps) if 'npm ci\n' in s)
+                    install = next(i for i, s in enumerate(steps) if 'bun install --frozen-lockfile\n' in s)
                     self.assertLess(node, wired['npm'][0])
-                    self.assertLess(wired['npm'][0], install, 'the wiring rewrites the lock npm ci installs')
+                    self.assertLess(wired['npm'][0], install, 'the wiring rewrites the lock the install takes')
                     # Every install of a package requiring HyperCast is proven right after it,
                     # before its suite (the consumer-test harness's own tooling requires none).
-                    for step in (s for s in steps if 'npm ci\n' in s):
+                    for step in (s for s in steps if 'bun install --frozen-lockfile\n' in s):
                         where = re.search(r'(?m)^        working-directory: (\S+)$', step)
                         manifest = ROOT / (where.group(1) if where else '.') / 'package.json'
                         if '@skunkwerkx/hypercast' not in manifest.read_text():
                             continue
-                        run = step[step.index('npm ci\n'):]
-                        self.assertIn('companion_origin.py npm', run.split('npm test')[0].split('npm run')[0])
+                        run = step[step.index('bun install --frozen-lockfile\n'):]
+                        self.assertIn('companion_origin.py npm', run.split('bun run')[0])
                 proofs = [s for s in steps if 'companion_origin.py' in s]
                 for eco in ecosystems:
                     if eco == 'go':
@@ -666,7 +666,7 @@ class CiTests(unittest.TestCase):
         self.assertIn('"$(cd "$HYPERCAST_TARBALLS" && pwd)"/skunkwerkx-hypercast-*.tgz', run_sh)
         named = set(re.findall(r'dir="\$\(consumer "?([^")]+)"?\)"', run_sh))
         expected = {'plain', 'consumer two', 'absent-native', 'forced-wasi', 'negative-deleted-package',
-                    'negative-deleted-wasm', 'bundlers'}
+                    'negative-deleted-wasm', 'bundlers', 'bun-install'}
         self.assertLessEqual(expected, named)
         for leg in ("matrix.os == 'ubuntu-26.04'", "matrix.os != 'ubuntu-26.04'"):
             with self.subTest(leg=leg):

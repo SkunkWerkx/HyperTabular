@@ -17,7 +17,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
 
 - **A TypeScript binding for Node and Bun, on npm as `@skunkwerkx/hypertabular`.** A napi-rs
   addon over the core, ten packages: the root, eight platform addons and the WebAssembly
-  fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.14.0 || >=23.6.0` and Bun.
+  fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.14.0 || >=23.6.0` and Bun. npm or `bun add` installs it, and Node runs either.
   Every cell is a `@skunkwerkx/hypercast` verdict, `{ ok: true, value }` or `{ ok: false,
   fault }`; opening, binding and reading return an `Outcome<T>` whose structural and argument
   errors are values, never thrown. Batches are copied out of the reader, and readers and sheets
@@ -65,6 +65,17 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
 
 ### Changed
 
+- **The JavaScript toolchain is Bun.** Every dependency tree here (`typescript/`, its browser
+  smoke and consumer-test harness, `ruby/wasm-smoke/`) is locked by `bun.lock` and installed with
+  `bun install --frozen-lockfile`, and CI, the local loop and Dependabot follow. npm keeps what
+  publishing needs: `npm pack` and `npm publish`, and the consumer scenarios that install as an
+  npm user does. Node still runs the suite, and the packages install from npm with either tool.
+- **Numbers read as HyperCast 1.1 reads them.** White space after a leading sign is now part
+  of a number in a delimited cell and in an XLSX or ODS numeric cell, so `- 12` is -12 where it
+  was `Malformed`. A numeric column given no format reads HyperCast's invariant format, strict
+  Western grouping included, so `1,5` is `Malformed` where the group size went unchecked; in
+  Rust, `NumFormat::INVARIANT` keeps the unchecked reading and `NumFormat::STRICT` declares the
+  strict one. *(all packages)*
 - **PHP — breaking: the package is a native extension, installed with PIE.** `pie install
   skunkwerkx/hypercast:<version>` and then `pie install skunkwerkx/hypertabular:<version>`
   install `ext-hypertabular`, an ext-php-rs extension that requires `ext-hypercast` 1.1 and

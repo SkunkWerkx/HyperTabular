@@ -34,10 +34,11 @@ check_source <- function(source) {
 }
 
 # The 92 bytes of HyperCast's RawNumFormat the core reads a numeric column with: the
-# format's own (num_format()'s `packed`), or all zeros for the invariant notation.
+# format's own (num_format()'s `packed`), or for none the invariant notation's: hypercast's,
+# with its strict grouping (all zeros would be the C ABI's legacy reading).
 packed_format <- function(format) {
   if (is.null(format)) {
-    return(raw(92L))
+    return(hypercast::num_format()$packed)
   }
   if (!inherits(format, "hypercast_num_format") || !is.raw(format$packed) ||
         length(format$packed) != 92L) {

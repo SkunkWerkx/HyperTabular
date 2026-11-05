@@ -18,7 +18,8 @@ and the same API under Node and Bun, and a WebAssembly fallback where no addon f
 npm install @skunkwerkx/hypertabular@<version>
 ```
 
-`@skunkwerkx/hypercast` is a peer dependency (`^1.1.0`), which npm installs beside it: a cell's
+`bun add @skunkwerkx/hypertabular@<version>` installs the same packages, and Node runs the result.
+`@skunkwerkx/hypercast` is a peer dependency (`^1.1.0`), which npm and Bun install beside it: a cell's
 verdict and its values are HyperCast's own types, and a numeric column's `NumFormat` is
 HyperCast's own class.
 
@@ -347,20 +348,20 @@ whole suite. The WebAssembly fallback does not load on Bun 1.4.4
 From `typescript/`, with a Rust toolchain installed:
 
 ```sh
-npm ci
-npm run build       # the release addon for this machine, plus binding.js and binding.d.ts
-npm test            # node --test: the corpus, never-throws, the types, the declarations
-npm run test:bun    # bun test
-npm run typecheck
-npm run lint
+bun install --frozen-lockfile
+bun run build       # the release addon for this machine, plus binding.js and binding.d.ts
+bun run test        # node --test: the corpus, never-throws, the types, the declarations
+bun run test:bun    # bun test
+bun run typecheck
+bun run lint
 cargo fmt --check && cargo clippy --release -- -D warnings
 ```
 
 The WebAssembly fallback needs the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`):
 
 ```sh
-npm run build:wasi                  # hypertabular.wasm32-wasip1.wasm and the hypertabular.wasip1* loaders
-NAPI_RS_FORCE_WASI=error npm test   # the same suite on the fallback, failing rather than falling back
+bun run build:wasi                  # hypertabular.wasm32-wasip1.wasm and the hypertabular.wasip1* loaders
+NAPI_RS_FORCE_WASI=error bun run test   # the same suite on the fallback, failing rather than falling back
 ```
 
 `tests/corpus.test.ts` replays `corpus/delimited.json` from memory, from a string and from a

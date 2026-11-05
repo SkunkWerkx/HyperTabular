@@ -1,4 +1,4 @@
-// A cell's verdict and a reader's outcome as a TypeScript caller holds them. `npm run
+// A cell's verdict and a reader's outcome as a TypeScript caller holds them. `bun run
 // typecheck` compiles this file, so the `@ts-expect-error` lines are assertions too: each must
 // be an error, or tsc fails with "Unused '@ts-expect-error' directive". Narrowing on `ok` is
 // what makes `value`, `fault` and `error` reachable; a cell's verdict is @skunkwerkx/hypercast's

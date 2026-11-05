@@ -642,7 +642,7 @@ jobs:
 
       # The SDK global.json names, as the Forge's C# legs take it; before the fetch, whose C#
       # wiring packs the pinned HyperCast with it.
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
 
@@ -1003,7 +1003,7 @@ jobs:
               || { echo "::error::static-libs has no csharp/HyperTabular/staticlibs/$rid/libhypertabular.a"; exit 1; }
           done
 
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
 
@@ -1057,7 +1057,7 @@ jobs:
           echo "RestoreConfigFile=$RUNNER_TEMP/nuget.config" >> "$GITHUB_ENV"
 
       # The android workload's build tasks run on a JDK.
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: "25"
@@ -1252,7 +1252,7 @@ jobs:
           [ -f csharp/HyperTabular/staticlibs/linux-x64/libhypertabular.a ] \
             || { echo "::error::static-libs has no csharp/HyperTabular/staticlibs/linux-x64/libhypertabular.a"; exit 1; }
 
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
 
@@ -1430,7 +1430,8 @@ jobs:
   # the documented way; on Linux also npm/cli#4828's damaged lockfile, the exact Node floor
   # in node:22.14.0-alpine with engine-strict, an emulated s390x host (QEMU, so no native
   # package fits; big-endian, so the smoke's checks pass and the documented exit hang is
-  # asserted, not hidden) and two bundlers. Bun runs the forced-WASI suite too, and its result is
+  # asserted, not hidden), two bundlers and, on every OS, a `bun add` whose result Node loads,
+  # its lock agreeing with npm's. Bun runs the forced-WASI suite too, and its result is
   # recorded in the step summary without failing the job: Bun's node:wasi cannot initialise
   # the module today (the design spec's Bun decision); native Bun stays green on the TypeScript legs.
   # The Forge is checked out at master here, as release.yml does, for the pack script,
@@ -1459,10 +1460,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
 
       # The pinned HyperCast (.github/hyper.json's companions block): typescript/'s
       # devDependency rewritten to its packed tarball and the peer to its exact version, the
-      # lock regenerated before `npm ci` below, and the whole set its release publishes packed
+      # lock regenerated before the install below, and the whole set its release publishes packed
       # for the consumer tests' Verdaccio, named by HYPERCAST_TARBALLS (run.sh publishes it after
       # this package and its natives). Without a block it does nothing.
       - name: Fetch the companions
@@ -1470,10 +1474,6 @@ jobs:
         uses: ./.hyperforge/.github/actions/fetch-companions
         with:
           leg: ci.yml:test-npm-package
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: latest
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -1493,14 +1493,14 @@ jobs:
           FETCH_PYTHON: ${{ steps.companions.outputs.python }}
         run: |
           set -euo pipefail
-          npm ci
+          bun install --frozen-lockfile
           if [ "$COMPANIONS_ACTIVE" = true ]; then
             "$FETCH_PYTHON" ../.hyperforge/.github/scripts/companion_origin.py npm --root .. --dir typescript --installed
           fi
           cp ../artifacts/node/node-wasm32-wasip1/* .
           ls -l hypertabular.wasm32-wasip1.wasm
-          NAPI_RS_FORCE_WASI=error npm test
-          npm run typecheck
+          NAPI_RS_FORCE_WASI=error bun run test
+          bun run typecheck
 
       # Bun's runner prints each failure as a `::error` workflow command when it sees GitHub
       # Actions, and Bun 1.4.4 cannot load the WASI module, so this tolerated step posted ten
@@ -1517,7 +1517,7 @@ jobs:
           token="$(node -e 'console.log(require("node:crypto").randomBytes(16).toString("hex"))')"
           echo "::stop-commands::$token"
           status=0
-          NAPI_RS_FORCE_WASI=error npm run test:bun || status=$?
+          NAPI_RS_FORCE_WASI=error bun run test:bun || status=$?
           echo "::$token::"
           exit "$status"
 
@@ -1549,7 +1549,7 @@ jobs:
       - name: The consumer-test harness
         shell: bash
         working-directory: typescript/consumer-tests
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       # s390x for the emulated-host scenario; the floor and s390x scenarios need Docker, which
       # only this leg has, and the lockfile scenario runs beside them.
@@ -1569,7 +1569,7 @@ jobs:
         run: >-
           bash typescript/consumer-tests/run.sh "$GITHUB_WORKSPACE/npm-packages"
           negative-unpublished plain omit-optional absent-native forced-wasi
-          negative-deleted-package negative-deleted-wasm bundlers
+          negative-deleted-package negative-deleted-wasm bundlers bun-install
 
       # Every scenario's lock, under the directories run.sh installed into (its `consumer`
       # names: omit-optional's is "consumer two"), resolves each HyperCast package with the
@@ -1582,7 +1582,7 @@ jobs:
           FETCH_PYTHON: ${{ steps.companions.outputs.python }}
         run: >-
           "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py npm --root .
-          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers,mac-lockfile"
+          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers,mac-lockfile,bun-install"
 
       - name: The scenarios this OS ran installed the pinned companion
         if: matrix.os != 'ubuntu-26.04' && steps.companions.outputs.active == 'true'
@@ -1591,7 +1591,7 @@ jobs:
           FETCH_PYTHON: ${{ steps.companions.outputs.python }}
         run: >-
           "$FETCH_PYTHON" .hyperforge/.github/scripts/companion_origin.py npm --root .
-          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers"
+          --installs typescript/consumer-tests/work --expect "plain,consumer two,absent-native,forced-wasi,negative-deleted-package,negative-deleted-wasm,bundlers,bun-install"
 
   # The release tail. A release's run is dispatched by prepare-release.yml at master once the
   # bump is pushed as A; pull requests and the weekly schedule never reach it. Everything below
