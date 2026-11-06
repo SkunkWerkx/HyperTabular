@@ -201,7 +201,7 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
 ## Claims are measured
 
 Benchmark tables are dated, machine-specific receipts; losses are printed next to wins, and
-a row that predates a change says so. Go's translated core is 2–3.7x slower than the cgo
+a row that predates a change says so. Go's translated core is 1.7–2.1x slower than the cgo
 binding it replaced (`go/README.md`): that loss stays printed. Don't adjust a number without
 re-running its harness, and don't drop a loss.
 

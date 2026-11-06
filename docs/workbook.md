@@ -269,10 +269,10 @@ run again on this machine.
   running each benchmark in its own process.
 - ‡ **Go's row predates the translated core.** It measured the cgo binding, which linked the core
   as a static archive and which Go no longer has. Its replacement is slower: on an Apple M6
-  (Mac18,5) on 2026-11-01, six runs of each interleaved in one session, every row a loss —
-  this xlsx read 736 ms against the cgo binding's 274 ms (2.7x), the ods read 1.40 s against
-  627 ms (2.2x), the numbers read 1.43 s against 722 ms (2.0x), the opens 1.9–2.8x, and a
-  300 000-row delimited read 3.7x — with several times the memory (126 MiB against 21.7 MiB
+  (Mac18,5) on 2026-11-05, six runs of each interleaved in one session, every row a loss —
+  this xlsx read 482 ms against the cgo binding's 254 ms (1.9x), the ods read 1.14 s against
+  577 ms (2.0x), the numbers read 1.12 s against 670 ms (1.7x), the opens 1.7–2.0x, and a
+  300 000-row delimited read 2.1x — with several times the memory (126 MiB against 21.7 MiB
   for the xlsx read). [`go/README.md`](../go/README.md#benchmarks) has every row. Not this
   table's machine, so not comparable with the rows above.
 - § **PHP's row predates the extension.** It measured 1.0's Composer package over `ext-ffi`,

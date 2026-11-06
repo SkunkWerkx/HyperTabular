@@ -252,7 +252,7 @@ and `NativeVersion()` reports the version compiled into that file from the crate
   `Read` rather than a run-time fault: a 4,096-row batch of a few hundred columns is
   nowhere near it.
 - **A panic is a bug, not a corruption.** wasm2go's code bounds-checks every memory access
-  and keeps the call stack in Go, so a core bug, a guest stack overflow included, is a Go
+  ([`internal/core/bounds_test.go`](internal/core/bounds_test.go) pins the checks) and keeps the call stack in Go, so a core bug, a guest stack overflow included, is a Go
   panic and never a corrupted heap; the reader it happened in refuses every call after it.
   The guest stack is 64 KiB, HyperCast's size and HyperUuid's.
 
@@ -362,7 +362,8 @@ go generate     # in go/: builds rust/ for wasm32-wasip1 and rewrites internal/c
 [`internal/wasm2go`](internal/wasm2go) is the generator: it builds the crate's `cargo cdylib`
 with the rustc named in its `rust-toolchain.toml` (1.99.1), a 64 KiB guest stack
 (`-C link-arg=-zstack-size=65536`) and wasi-libc for `memcmp`, `memcpy` and `memset` (`-l
-c`), then runs the wasm2go pinned in its own `go.mod`. The rustc is pinned as a
+c`), then runs the wasm2go pinned in its own `go.mod` with `-unsafe`, which replaces the memory helpers with `unsafe.Add` access behind a check of
+the access's last byte (CPUs without unaligned access keep the `encoding/binary` path). The rustc is pinned as a
 reproducibility constraint, not a floor: the wasm's bytes follow rustc's codegen, so one named
 toolchain makes the committed file reproducible, and a bump is a deliberate
 regenerate-and-commit. `HYPERTABULAR_CHECK_CORE=1 go test -count=1 -run
@@ -376,29 +377,31 @@ since the version is a literal in the file.
 
 `go test -run '^$' -bench 'Delimited|Workbook' -benchmem` (the workbook files come from
 `corpus/generate/out/` or `HYPERTABULAR_BENCH_DIR`; `docs/workbook.md` has what each does).
-Apple M6 (Mac18,5, 12 cores), macOS 27.2, Go 1.27.3, 2026-11-01: six runs of each binding
+Apple M6 (Mac18,5, 12 cores), macOS 27.2, Go 1.27.3, 2026-11-05: six runs of each binding
 interleaved in one session (the workbook benchmarks at three iterations a run), benchstat
 medians with benchstat's spread; every difference below is significant (p = 0.002). The cgo
 column is the binding this one replaced, at commit `93e0807` with its committed
 `darwin_arm64` archive (the 1.0.0 core) and HyperCast's cgo module v1.0.0, run with this
-same benchmark file. Other work shared the machine during the session.
+same benchmark file. Other work shared the machine during the session (load average 2.8 to
+3.4). The translated core does not yet carry the quote fix (the CRAN checklist's row 1), so these
+rows predate it.
 
 **Every row is a loss.** The translated core is bounds-checked Go, and nearly all of a read's
 time is in it (a CPU profile puts the binding's copying and decoding at a few percent), so
-the read is 2–3.7x slower than the native core was. The batch shape is unchanged — still
+the read is 1.7–2.1x slower than the native core was. The batch shape is unchanged — still
 one call per batch, still views, still no allocation a batch — but a reader that needs the
 native speed should take one of the bindings that load the shared library.
 
 | Benchmark | translated core | cgo binding | |
 | --- | ---: | ---: | --- |
-| Delimited, 300 000 rows × 8 columns (22.0 MB), from memory | 64.3 ms ±10% | 17.5 ms ±9% | **3.7x slower** |
-| Delimited, the same, from a stream | 64.3 ms ±5% | 17.8 ms ±6% | **3.6x slower** |
-| `excel-win-300k.xlsx`, open | 42.1 ms ±10% | 15.3 ms ±18% | **2.8x slower** |
-| `excel-win-300k.xlsx`, read | 736 ms ±10% | 274 ms ±11% | **2.7x slower** |
-| `libreoffice-300k.ods`, open | 384 ms ±10% | 201 ms ±6% | **1.9x slower** |
-| `libreoffice-300k.ods`, read | 1.40 s ±8% | 627 ms ±6% | **2.2x slower** |
-| `numbers-300k.numbers`, open | 991 ms ±9% | 505 ms ±10% | **2.0x slower** |
-| `numbers-300k.numbers`, read | 1.43 s ±8% | 722 ms ±7% | **2.0x slower** |
+| Delimited, 300 000 rows × 8 columns (22.0 MB), from memory | 33.8 ms ±1% | 15.9 ms ±0% | **2.1x slower** |
+| Delimited, the same, from a stream | 33.5 ms ±1% | 16.2 ms ±0% | **2.1x slower** |
+| `excel-win-300k.xlsx`, open | 27.3 ms ±3% | 14.2 ms ±3% | **1.9x slower** |
+| `excel-win-300k.xlsx`, read | 482 ms ±1% | 254 ms ±1% | **1.9x slower** |
+| `libreoffice-300k.ods`, open | 368 ms ±2% | 184 ms ±2% | **2.0x slower** |
+| `libreoffice-300k.ods`, read | 1.14 s ±2% | 577 ms ±1% | **2.0x slower** |
+| `numbers-300k.numbers`, open | 791 ms ±2% | 456 ms ±1% | **1.7x slower** |
+| `numbers-300k.numbers`, read | 1.12 s ±2% | 670 ms ±1% | **1.7x slower** |
 
 Memory a read allocates grows too, since every byte the core reads or writes now lives in a
 reader's instance as well as wherever it came from: the xlsx read allocates 126 MiB against
@@ -406,6 +409,11 @@ reader's instance as well as wherever it came from: the xlsx read allocates 126 
 workbook's instance to open it and into the sheet's to read it), and a delimited read from
 memory 7.9 MiB against 1.1 MiB. Allocation counts are unchanged, a few dozen a read and none a
 batch.
+
+`-unsafe` is most of what closed the gap. The same wasm translated with and without it, six
+interleaved runs in one session on the same day, gives delimited from memory 34.4 ms against 61.3
+ms, the xlsx read 485 ms against 700 ms, the ods read 1.16 s against 1.33 s and the Numbers read
+1.13 s against 1.31 s. The ods open is level, and memory and allocations don't move.
 
 The Go row of the "Through every binding" table in [`docs/workbook.md`](../docs/workbook.md)
 **predates the translated core**: it measured the cgo binding on the Linux i9-11900H on

@@ -100,11 +100,17 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   included. `staticlib/`, the static and TinyGo backends, the `unsupported` files, the core
   freshness test and the `hypertabular_local` tag are gone. Each reader runs its own instance
   of the core; text in memory is copied in by chunks, and a buffer past the core's 4 GiB is an
-  error. It is slower than the cgo binding it replaces, measured on an Apple M6 on 2026-11-01:
-  2–3.7x per read (delimited 64.3 ms against 17.5 ms, an xlsx read 736 ms against 274 ms),
+  error. It is slower than the cgo binding it replaces, measured on an Apple M6 on 2026-11-05:
+  1.7–2.1x per read (delimited 33.8 ms against 15.9 ms, an xlsx read 482 ms against 254 ms),
   with several times the memory (126 MiB against 21.7 MiB for the xlsx read); `go/README.md`
   has every row. The corpus tests are now `TestCorpus*`. Requires HyperCast's Go module
   v1.1.0. *(Go)*
+- **Go — the core is translated with wasm2go's `-unsafe`.** Against the same wasm translated
+  without it, delimited reads went from 61.3 to 34.4 ms and an xlsx read from 700 to 485 ms, with
+  memory and allocations unchanged; an ods open is level. Every memory access is still
+  bounds-checked, which `go/internal/core/bounds_test.go` now pins, and the whole suite runs on
+  s390x under QEMU to prove the big-endian path. It remains 1.7–2.1x slower than the cgo binding.
+  *(Go)*
 - **Java runs on JDK 21.** The jar is multi-release: its base reaches the core through JNI,
   from a library (`libhypertabular_jni`) built for every platform, and JDK 25 and later keep
   FFM. The API, verdicts, exceptions and messages are the same on both, except that the load
