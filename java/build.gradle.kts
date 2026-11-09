@@ -391,6 +391,7 @@ val testFloor = tasks.register<Test>("testFloor") {
 val checkSuiteParity = tasks.register("checkSuiteParity") {
     dependsOn(tasks.test, testFloor)
     val results = layout.buildDirectory.dir("test-results")
+    val header = layout.projectDirectory.file("../include/hypertabular.h").asFile
     doLast {
         fun read(suite: String): Pair<Set<String>, List<String>> {
             val dir = results.get().dir(suite).asFile
@@ -412,9 +413,13 @@ val checkSuiteParity = tasks.register("checkSuiteParity") {
         }
         val (onTest, skippedTest) = read("test")
         val (onFloor, skippedFloor) = read("testFloor")
-        // The one test that may skip, and it says so: it asks for more memory than a small host has.
-        val mayskip = "io.github.skunkwerkx.hypertabular.OptionsTest#aRecordIsReadUpToTheRealCeilingAndNoFurther()"
-        check((skippedTest + skippedFloor).all { it == mayskip }) {
+        // The tests that may skip, and say so: one asks for more memory than a small host has, and
+        // the header's sizes need include/, which a tree of java/ and corpus/ alone (Alpine's) lacks.
+        val mayskip = buildSet {
+            add("io.github.skunkwerkx.hypertabular.OptionsTest#aRecordIsReadUpToTheRealCeilingAndNoFurther()")
+            if (!header.exists()) add("io.github.skunkwerkx.hypertabular.NativeTest#everyShapeIsTheSizeTheHeaderSays()")
+        }
+        check((skippedTest + skippedFloor).all { it in mayskip }) {
             "skipped tests: test=$skippedTest testFloor=$skippedFloor"
         }
         check(onTest == onFloor) {

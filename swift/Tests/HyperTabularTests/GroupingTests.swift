@@ -124,8 +124,11 @@ final class GroupingTests: XCTestCase {
                         XCTAssertEqual(error as? PlanError, .unbound)
                     }
                 } else {
-                    let batch = try await reader.readAsync()
-                    XCTAssertEqual(batch?.rows, 2, "\(flags)")
+                    // Rows from a stream come as they arrive (under WASI, a line at a time), so
+                    // they are counted to the end, not taken from the first batch.
+                    var rows = 0
+                    while let batch = try await reader.readAsync() { rows += batch.rows }
+                    XCTAssertEqual(rows, 2, "\(flags)")
                 }
             }
 
