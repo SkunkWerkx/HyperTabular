@@ -17,6 +17,8 @@ import (
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
 )
 
+var keptLine int
+
 func assertAllocs(t *testing.T, name string, want float64, f func()) {
 	t.Helper()
 	if got := testing.AllocsPerRun(100, f); got != want {
@@ -62,6 +64,10 @@ func readBatch(t *testing.T, r *DelimitedReader, atLeast int) {
 	names, instants, amounts := b.Text(1), b.Timestamp(2), b.Exact(3)
 	days, notes, flags, civils, reals := b.DateOnly(4), b.Text(5), b.Bool(6), b.DateTime(7), b.F64(8)
 	for row := 0; row < b.Rows(); row++ {
+		// A note is read where the core wrote it.
+		if (b.Detail(0, row) != 0) == verdicts[row].OK() || b.Origin(0, row) != OriginCell {
+			t.Fatalf("row %d: detail %v, origin %v, verdict %v", row, b.Detail(0, row), b.Origin(0, row), verdicts[row])
+		}
 		if !verdicts[row].OK() && (ids[row] != 0 || verdicts[row].Reason() != hypercast.Malformed) {
 			t.Fatalf("row %d: id %d, verdict %v", row, ids[row], verdicts[row])
 		}
@@ -95,6 +101,38 @@ func TestABatchFromAStreamAllocatesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAllocs(t, "Read (stream)", 0, func() { readBatch(t, r, 1) })
+}
+
+// A batch's list of faults is read when it's asked for, a few entries at a time, and costs nothing
+// however long it is.
+func TestABatchsFaultsCostTheirIterator(t *testing.T) {
+	input, plan := allocationInput(1024)
+	r, err := NewDelimitedReaderBytes(input, CSV, plan, BatchRows(1024))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for range b.Faults() {
+		total++
+	}
+	if total <= 2*problemsHeld {
+		t.Fatalf("%d faults aren't many calls", total)
+	}
+	// TinyGo moves the loop's closures and what they capture to the heap, the batch's generation
+	// among them: four times a walk, and never an entry.
+	walk := 0.0
+	if runtime.Compiler == "tinygo" {
+		walk = 4
+	}
+	assertAllocs(t, "Faults", walk, func() {
+		for problem := range b.Faults() {
+			keptLine = problem.Line
+		}
+	})
 }
 
 // A cell's raw text is a slice of the input, and an escaped one is unescaped into a scratch
@@ -164,11 +202,12 @@ func TestRowsAllocateNothing(t *testing.T) {
 		t.Fatalf("Read returned %v, %v", b, err)
 	}
 	// What the loop reads is checked after it, so that nothing in it is boxed for a message.
-	// TinyGo moves the closures a range-over-func loop is built from to the heap: three
-	// allocations a loop, whatever its length, and none a row.
+	// TinyGo moves the closures a range-over-func loop is built from to the heap: five
+	// allocations a loop, whatever its length, and none a row — three for the loop, and two
+	// for the generation All captures, as Faults' does, to refuse after the next Read.
 	loop := 0.0
 	if runtime.Compiler == "tinygo" {
-		loop = 3
+		loop = 5
 	}
 	rows, sum, bad := 0, 0, 0
 	assertAllocs(t, "Batch.All", loop, func() {

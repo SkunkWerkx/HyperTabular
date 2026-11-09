@@ -122,7 +122,8 @@ public final class Workbook implements AutoCloseable {
     /**
      * Opens a workbook held in a memory segment. A native segment is read in place, and must
      * stay alive and unchanged for as long as the workbook is open; a heap segment is copied
-     * once.
+     * once, and so, on JDK 21 to 24, is a segment of a shared arena (or any other whose arena
+     * another thread could close), since that path's native calls can't hold the arena open.
      *
      * @param bytes the workbook's bytes
      * @return the workbook
@@ -133,7 +134,8 @@ public final class Workbook implements AutoCloseable {
         Arena arena = Arena.ofConfined();
         try {
             MemorySegment container = bytes;
-            if (!bytes.isNative()) {
+            // A heap segment, or on JDK 21 to 24 one another thread could free mid-call, is copied.
+            if (!bytes.isNative() || !Native.holdsInPlace(bytes)) {
                 container = arena.allocate(Math.max(bytes.byteSize(), 1)).asSlice(0, bytes.byteSize());
                 container.copyFrom(bytes);
             }
@@ -442,7 +444,14 @@ public final class Workbook implements AutoCloseable {
         final Block row;
 
         final MemorySegment buffers;
+        /** What a fill takes: {@link #buffers}'s fields, the sheet's tokens and the row widths. */
+        final MemorySegment buffersWith;
+
         final MemorySegment filled;
+        /** The sheet's tokens: {@link MemorySegment#NULL} for none. */
+        MemorySegment tokens = MemorySegment.NULL;
+
+        long tokensBytes;
         /** How many slots the core is told {@link #row} has. */
         long rowSlots;
 
@@ -452,6 +461,7 @@ public final class Workbook implements AutoCloseable {
             this.cells = new Block(cells * Abi.SPAN_BYTES, 4);
             this.row = new Block(Math.max(rowSlots, 1) * Abi.SLOT_BYTES, 8);
             this.buffers = owner.allocate(Abi.BUFFERS_BYTES, 8);
+            this.buffersWith = owner.allocate(Abi.BUFFERS_WITH_BYTES, 8);
             this.filled = owner.allocate(Abi.FILLED_BYTES, 8);
             this.rowSlots = rowSlots;
         }
@@ -491,6 +501,16 @@ public final class Workbook implements AutoCloseable {
             return buffers;
         }
 
+        /** This scratch as a fill takes it. */
+        MemorySegment buffersWith(Workbook book, Columns columns) {
+            MemorySegment.copy(buffers(book), 0, buffersWith, Abi.BUFFERS_WITH_FIELDS, Abi.BUFFERS_BYTES);
+            buffersWith.set(ValueLayout.JAVA_INT, 0, (int) Abi.BUFFERS_WITH_BYTES);
+            buffersWith.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_TOKENS, tokens);
+            buffersWith.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_WITH_TOKENS + 8, tokensBytes);
+            buffersWith.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_ROW_WIDTHS, columns.rowWidths);
+            return buffersWith;
+        }
+
         /**
          * Makes the call until it stops asking for room, growing the buffer it names each time
          * — with what the buffer held kept, which is what lets the core go on from where it
@@ -510,17 +530,16 @@ public final class Workbook implements AutoCloseable {
         Answer drive(Workbook book, MemorySegment state, Abi.Book call, Columns columns, boolean rowFollowsCells) {
             boolean tables = call == Abi.Book.HEADER || columns != null;
             while (true) {
-                MemorySegment handed = buffers(tables ? book : null);
                 int code = columns == null
-                        ? Native.book(call, state, book.container, handed, filled)
-                        : Native.bookFill(
+                        ? Native.book(call, state, book.container, buffers(tables ? book : null), filled)
+                        : Native.bookFillWith(
                                 state,
                                 book.container,
                                 columns.specs,
                                 columns.buffers,
                                 columns.plan.length,
                                 columns.batchRows,
-                                handed,
+                                buffersWith(book, columns),
                                 filled);
                 long needed = filled.get(ValueLayout.JAVA_LONG, Abi.FILLED_NEEDED);
                 switch (code) {

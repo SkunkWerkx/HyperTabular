@@ -8,6 +8,7 @@ import XCTest
 #elseif canImport(Musl)
     import Musl
 #endif
+import HyperTabularCore
 @testable import HyperTabular
 
 /// What the corpus does not reach: the binding's own surface. Nothing here but the file
@@ -552,8 +553,22 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(header, ["Region Code", "Region Name", "M49 Code", "Region Code"])
         XCTAssertEqual(header.count, 4)
         XCTAssertEqual(header[1], "Region Name")
-        // The first of two columns with one name; a string and its bytes find the same.
-        XCTAssertEqual(try header.ordinal(of: "Region Code"), 0)
+        // Two columns with one name: the lookup that may answer nil keeps the first, and the strict
+        // one says so, by string and by bytes, naming both positions.
+        XCTAssertEqual(header.firstIndex(of: "Region Code"), 0)
+        XCTAssertEqual(header.firstIndex(of: "Region Code".utf8), 0)
+        for refusal in [
+            { _ = try header.ordinal(of: "Region Code") }, { _ = try header.ordinal(of: Array("Region Code".utf8)) },
+        ] as [() throws -> Void] {
+            XCTAssertThrowsError(try refusal()) { error in
+                XCTAssertEqual(error as? AmbiguousColumn, AmbiguousColumn(name: "Region Code", first: 0, second: 3))
+                XCTAssertEqual(
+                    error.localizedDescription,
+                    "The header names two columns \"Region Code\", at positions 0 and 3: say which by position.")
+            }
+        }
+        // A string and its bytes find the same.
+        XCTAssertEqual(try header.ordinal(of: "M49 Code"), 2)
         XCTAssertEqual(try header.ordinal(of: Array("M49 Code".utf8)), 2)
         XCTAssertEqual(header.firstIndex(of: "M49 Code".utf8), 2)
         XCTAssertNil(header.firstIndex(of: "m49 code"), "exact, case included")
@@ -952,6 +967,7 @@ final class ReaderTests: XCTestCase {
         XCTAssertEqual(Door.bool.rawValue, 1)
         XCTAssertEqual(Door.excelSerial.rawValue, 22)
         XCTAssertEqual(Column.text(3).valueSize, 8)
+        XCTAssertEqual(Column.text(3).spec.size, UInt32(MemoryLayout<HyperTabularColumnSpecWith>.size))
         XCTAssertEqual(Column.unix(3, precision: .nanoseconds).spec.param, 4)
         XCTAssertEqual(Column.date(3, order: .dayMonthYear).spec.door, 20)
         XCTAssertEqual(Column.date(3, order: .dayMonthYear).spec.param, 3)

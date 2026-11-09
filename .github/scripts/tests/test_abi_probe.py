@@ -19,11 +19,14 @@ CONFIG = ROOT / '.github/hyper.json'
 BUNDLE_INCLUDE = ROOT / 'swift/HyperTabularCore.artifactbundle/include'
 EXPORTS = {
     'hypertabular_version',
-    'hypertabular_delimited_state_size', 'hypertabular_delimited_init', 'hypertabular_delimited_header',
-    'hypertabular_delimited_fill', 'hypertabular_delimited_unescape',
+    'hypertabular_delimited_state_size', 'hypertabular_delimited_init', 'hypertabular_delimited_init_with',
+    'hypertabular_delimited_header', 'hypertabular_delimited_fill', 'hypertabular_delimited_fill_with',
+    'hypertabular_delimited_unescape', 'hypertabular_transcode',
     'hypertabular_workbook_state_size', 'hypertabular_workbook_open', 'hypertabular_workbook_sheets',
     'hypertabular_workbook_strings', 'hypertabular_workbook_styles', 'hypertabular_workbook_sheet',
     'hypertabular_workbook_header', 'hypertabular_workbook_fill',
+    'hypertabular_workbook_sheet_with', 'hypertabular_workbook_fill_with', 'hypertabular_range_parse',
+    'hypertabular_faults', 'hypertabular_suggest', 'hypertabular_batch_check',
 }
 
 
@@ -45,7 +48,7 @@ class HyperConfigTests(unittest.TestCase):
         expected = sorted(p.name for p in (ROOT / 'corpus').glob('*.json')) + sorted(set(named))
         self.assertEqual(self.cfg['r_corpus'], expected)
 
-    def test_export_rule_reads_the_fourteen_exports_and_not_the_canary(self):
+    def test_export_rule_reads_every_export_and_not_the_canary(self):
         exports = self.cfg['exports']
         names = set()
         for source in exports['sources']:

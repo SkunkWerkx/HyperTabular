@@ -9,8 +9,8 @@
 #![allow(dead_code, clippy::needless_range_loop)]
 
 use hypertabular::kernel::abi::{
-    CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW,
-    Failure, Filled, OK, Opened, Slot, Span,
+    CellNote, CellVerdict, ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, ERR_ARENA,
+    ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Failure, Filled, OK, Opened, RawSheetOptions, Slot, Span,
 };
 use hypertabular::kernel::door::Door;
 use hypertabular::kernel::workbook::{Memory, State, book, rows};
@@ -24,6 +24,9 @@ pub enum Sizing {
     Stingy,
     /// Plenty from the start.
     Roomy,
+    /// One element of everything to start with, and only what each refusal asks for: what a
+    /// binding's replay starts from.
+    One,
 }
 
 /// One sheet as `sheets` listed it.
@@ -44,6 +47,10 @@ pub struct Read {
     pub failed: bool,
     /// The reading stopped at the harness's `row_limit` rather than at the sheet's end.
     pub truncated: bool,
+    /// Through `fill_with` (see [`Harness::through_with`]), each row's note per plan column.
+    pub notes: Vec<Vec<CellNote>>,
+    /// And each row's width.
+    pub widths: Vec<u32>,
 }
 
 pub struct Harness<'c> {
@@ -64,6 +71,11 @@ pub struct Harness<'c> {
     /// since a few bytes of ODS can repeat a row a million times.
     pub row_limit: usize,
     pub last_failure: Failure,
+    /// Read through `fill_with` rather than `fill`, taking notes and row widths, with this list
+    /// for a column to inherit.
+    pub through_with: Option<Vec<u8>>,
+    /// And through this plan, with what `specs` can't say.
+    pub plan_with: Option<Vec<ColumnSpecWith>>,
 }
 
 /// Grows `buffer` to `needed` elements the way the contract says: what it held is kept.
@@ -82,13 +94,17 @@ fn grow<T: Copy>(buffer: &mut Vec<T>, needed: u64, junk: T) {
 
 impl<'c> Harness<'c> {
     pub fn new(container: &'c [u8], sizing: Sizing) -> Harness<'c> {
-        let roomy = sizing == Sizing::Roomy;
+        let (bytes, spans) = match sizing {
+            Sizing::Stingy => (0, 0),
+            Sizing::One => (1, 1),
+            Sizing::Roomy => (1 << 20, 1 << 16),
+        };
         Harness {
             container,
             state: Box::new(State::new()),
-            window: vec![0xAA; if roomy { 1 << 20 } else { 0 }],
-            arena: vec![0xAA; if roomy { 1 << 20 } else { 0 }],
-            cells: vec![Span::default(); if roomy { 1 << 16 } else { 0 }],
+            window: vec![0xAA; bytes],
+            arena: vec![0xAA; bytes],
+            cells: vec![Span::default(); spans],
             row: Vec::new(),
             strings: Vec::new(),
             table: Vec::new(),
@@ -97,6 +113,8 @@ impl<'c> Harness<'c> {
             window_limit: 1 << 28,
             row_limit: usize::MAX,
             last_failure: Failure::default(),
+            through_with: None,
+            plan_with: None,
         }
     }
 
@@ -241,17 +259,41 @@ impl<'c> Harness<'c> {
             rows: Vec::new(),
             failed: false,
             truncated: false,
+            notes: Vec::new(),
+            widths: Vec::new(),
         };
         let mut out = Filled::default();
-        let code = rows::sheet(
-            &mut self.state,
-            self.container,
-            &listed.part,
-            listed.index,
-            options.has_header,
-            options.skip_empty_rows,
-            &mut out,
-        );
+        let code = if options.skip == 0 && options.header_row == 0 && options.range.is_none() {
+            rows::sheet(
+                &mut self.state,
+                self.container,
+                &listed.part,
+                listed.index,
+                options.has_header,
+                options.skip_empty_rows,
+                &mut out,
+            )
+        } else {
+            let range = options.range.unwrap_or_default();
+            rows::sheet_with(
+                &mut self.state,
+                self.container,
+                &listed.part,
+                listed.index,
+                &RawSheetOptions {
+                    size: RawSheetOptions::SIZE,
+                    has_header: u32::from(options.has_header),
+                    skip_empty_rows: u32::from(options.skip_empty_rows),
+                    skip: options.skip,
+                    header_row: options.header_row,
+                    first_row: range.first_row(),
+                    first_column: range.first_column(),
+                    last_row: range.last_row(),
+                    last_column: range.last_column(),
+                },
+                &mut out,
+            )
+        };
         if code != OK {
             assert_eq!(code, ERR_STRUCTURE);
             assert_ne!(out.failure.code, 0, "a failure names itself");
@@ -294,10 +336,54 @@ impl<'c> Harness<'c> {
                 verdicts: verdicts.as_mut_ptr(),
             })
             .collect();
+        let through_with = self.through_with.clone();
+        let specs_with: Vec<ColumnSpecWith> = self.plan_with.clone().unwrap_or_else(|| {
+            specs
+                .iter()
+                .map(|spec| ColumnSpecWith {
+                    format: spec.format,
+                    ..ColumnSpecWith::new(spec.ordinal, spec.door, spec.param)
+                })
+                .collect()
+        });
+        // Junk, so a note the core leaves unwritten shows.
+        let junk = CellNote {
+            detail: 0xAAAA,
+            origin: 0xAAAA,
+        };
+        let mut notes: Vec<Vec<CellNote>> = specs.iter().map(|_| vec![junk; max_rows]).collect();
+        let columns_with: Vec<ColumnBufferWith> = columns
+            .iter()
+            .zip(notes.iter_mut())
+            .map(|(column, notes)| ColumnBufferWith {
+                size: ColumnBufferWith::SIZE,
+                values: column.values,
+                verdicts: column.verdicts,
+                notes: notes.as_mut_ptr(),
+            })
+            .collect();
+        let mut widths = vec![0xAAAA_AAAAu32; max_rows];
         loop {
             let filled = self.drive(|state, container, memory, out| {
                 // SAFETY: every column's arrays hold `max_rows` elements.
-                unsafe { rows::fill(state, container, specs, &columns, max_rows, memory, out) }
+                unsafe {
+                    match &through_with {
+                        None => {
+                            rows::fill(state, container, specs, &columns, max_rows, memory, out)
+                        }
+                        Some(tokens) => rows::fill_with(
+                            state,
+                            container,
+                            &specs_with,
+                            &columns_with,
+                            max_rows,
+                            memory,
+                            tokens,
+                            &mut widths,
+                            out,
+                        ),
+                    }
+                }
             });
             let (out, failed) = match filled {
                 Ok(out) => (out, false),
@@ -322,13 +408,35 @@ impl<'c> Harness<'c> {
                 }
                 read.rows
                     .push((self.cells[row * per_row + specs.len()].offset, cells));
+                if through_with.is_some() {
+                    read.notes
+                        .push(notes.iter().map(|notes| notes[row]).collect());
+                    read.widths.push(widths[row]);
+                }
             }
             if failed {
                 read.failed = true;
                 // And it says so again.
                 let again = self.drive(|state, container, memory, out| {
                     // SAFETY: as above.
-                    unsafe { rows::fill(state, container, specs, &columns, max_rows, memory, out) }
+                    unsafe {
+                        match &through_with {
+                            None => {
+                                rows::fill(state, container, specs, &columns, max_rows, memory, out)
+                            }
+                            Some(tokens) => rows::fill_with(
+                                state,
+                                container,
+                                &specs_with,
+                                &columns_with,
+                                max_rows,
+                                memory,
+                                tokens,
+                                &mut widths,
+                                out,
+                            ),
+                        }
+                    }
                 });
                 assert_eq!(again.unwrap_err().rows, 0);
                 return read;

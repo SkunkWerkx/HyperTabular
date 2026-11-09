@@ -71,6 +71,21 @@ public enum Door {
         return code;
     }
 
+    private static final Door[] VALUES = values();
+
+    /** The door a core's code names, or {@code null} if it names none. */
+    static Door ofCode(int code) {
+        return code >= 1 && code <= VALUES.length ? VALUES[code - 1] : null;
+    }
+
+    /** Whether the door reads a numeric notation. */
+    boolean isNumeric() {
+        return switch (this) {
+            case I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, DECIMAL -> true;
+            default -> false;
+        };
+    }
+
     /** Bytes one value of this door takes in a column buffer. */
     int valueBytes() {
         return valueBytes;

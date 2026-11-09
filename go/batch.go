@@ -2,6 +2,7 @@ package hypertabular
 
 import (
 	"fmt"
+	"iter"
 	"time"
 	"unsafe"
 
@@ -32,10 +33,14 @@ type Batch struct {
 	base     []byte
 	arena    []byte
 	workbook bool
-	// scratch is where Raw unescapes a quoted delimited cell, and core the delimited
-	// reader's instance of the core, which does the unescaping.
+	// scratch is where Raw unescapes a quoted delimited cell, and core the reader's instance of
+	// the core, which does the unescaping and lists the faults.
 	scratch []byte
 	core    *native
+	// expected is the width a delimited read's rows are cut to under LongRowsReport, and firstColumn
+	// how far a sheet's range starts from its column A.
+	expected    uint32
+	firstColumn int
 }
 
 // fill makes the batch the rows the core just wrote.
@@ -89,6 +94,172 @@ func (b *Batch) Verdicts(column int) []CellVerdict {
 // cell that cast, otherwise the fault — the one allocation this makes.
 func (b *Batch) Fault(column, row int) *hypercast.Fault {
 	return b.Verdicts(column)[row].Fault()
+}
+
+// Origin is where a cell's verdict came from: the door, or something that spared it being asked.
+// The values are the core's codes. A later release may add one, so a switch over origins needs a
+// default arm.
+type Origin uint16
+
+const (
+	// OriginCell is a door's verdict on the cell's text: every cell that cast, and every refusal.
+	OriginCell Origin = 0
+	// OriginToken is a declared token: Empty, and no door asked.
+	OriginToken Origin = 1
+	// OriginPadded is a cell its row doesn't have, under ShortRowsPad or past a sheet row's last
+	// cell: Empty, and no door asked.
+	OriginPadded Origin = 2
+	// OriginUncached is a workbook formula with no cached value: Empty, and no door asked. The core
+	// never evaluates a formula.
+	OriginUncached Origin = 3
+)
+
+// String names the origin as the corpus does: "cell", "token", "padded", "uncached".
+func (o Origin) String() string {
+	switch o {
+	case OriginCell:
+		return "cell"
+	case OriginToken:
+		return "token"
+	case OriginPadded:
+		return "padded"
+	case OriginUncached:
+		return "uncached"
+	default:
+		return fmt.Sprintf("Origin(%d)", uint16(o))
+	}
+}
+
+// note is what the core wrote beside the verdict of the cell at (column, row): the zero note with
+// notes off.
+func (b *Batch) note(column, row int) rawNote {
+	b.checkRow(row)
+	c := &b.columns.columns[column]
+	if c.notes == nil {
+		return rawNote{}
+	}
+	return c.notes[row]
+}
+
+// Detail is what failed in the cell at (column, row), HyperCast's own name for it: 0, whose String
+// is "none", for a cell that cast and for an Empty no door gave, and for every cell with notes off
+// (Notes). A number this module's HyperCast doesn't name is kept, as Detail says. hypercast.Fault
+// has no room for this, so it's read here and on Faults' entries.
+func (b *Batch) Detail(column, row int) hypercast.Detail {
+	return hypercast.Detail(b.note(column, row).detail)
+}
+
+// Origin is where the verdict of the cell at (column, row) came from. With notes off (Notes) every
+// cell says OriginCell: a token's or a padded cell's verdict is still Empty, and nothing was kept
+// of why.
+func (b *Batch) Origin(column, row int) Origin {
+	return Origin(b.note(column, row).origin)
+}
+
+// Problem is one entry of Batch.Faults: a cell that went wrong, or a row longer than the width.
+type Problem struct {
+	// Row is the row in the batch, from zero.
+	Row int
+	// Line is where the row came from, as Batch.Line says.
+	Line int
+	// PlanColumn is the column of the plan, or -1 for an entry about the row as a whole.
+	PlanColumn int
+	// SourceColumn is the column in the source, from zero, or -1 for an entry about the row as a
+	// whole. For delimited text it's the plan column's ordinal, and for a sheet its own column, A
+	// being 0, wherever a range starts.
+	SourceColumn int
+	// Reason is the verdict's reason: Malformed, OutOfRange, or Empty for a formula with no cached
+	// value. It's zero, which is no CastFailure, for an entry about the row as a whole.
+	Reason hypercast.CastFailure
+	// Detail is what failed in the cell, as Batch.Detail says.
+	Detail hypercast.Detail
+	// Origin is where the verdict came from, as Batch.Origin says. An entry about the row as a whole
+	// has no verdict, and says OriginCell.
+	Origin Origin
+	// Offset is the byte offset of the fault's span within the cell's decoded, unescaped text, and
+	// Length its length: 0 where there's no span.
+	Offset int
+	Length int
+	// Expected and Found are a long row's widths, the width the first record fixed and the cells
+	// it had: 0 otherwise.
+	Expected int
+	Found    int
+}
+
+// Faults is what went wrong in this batch, in order by row and then by column, a row's own entry
+// first: cells at Malformed or OutOfRange, formulas with no cached value (OriginUncached), and rows
+// longer than the width under LongRowsReport. Blanks, declared tokens, padding and a row cut under
+// LongRowsTruncate aren't problems, and aren't listed.
+//
+//	for problem := range batch.Faults() { … }
+//
+// It reads what the fill already wrote, when it's asked for, a few entries at a time. A list ranged
+// over after the reader has moved on panics: stopping there would read as no more faults, and the
+// list can't answer for the next batch.
+//
+// With notes off (Notes) the list still holds every refused cell and long row, with no Detail, but
+// no formula with no cached value: nothing was kept to tell one from a blank.
+//
+// The list can't name a row it wasn't given. A row of a sheet whose only cells are formulas with
+// nothing spelled where a value goes is an empty row, so by default SkipEmptyRows leaves it out, and
+// it's in no batch. Turn that off to have those rows delivered and listed.
+func (b *Batch) Faults() iter.Seq[Problem] {
+	generation := b.generation
+	return func(yield func(Problem) bool) {
+		longRows := uint32(LongRowsReject)
+		if b.columns.widths && !b.workbook {
+			longRows = uint32(LongRowsReport)
+		}
+		var held [problemsHeld]rawProblem
+		var cursor uint64
+		for {
+			if b.generation != generation {
+				panic(staleFaults)
+			}
+			if b.rows == 0 {
+				return
+			}
+			next, written := b.core.faults(b.columns, b.rows, b.expected, longRows, cursor, held[:])
+			cursor = next
+			for index := range held[:written] {
+				if !yield(b.problem(&held[index])) {
+					return
+				}
+				if b.generation != generation {
+					panic(staleFaults)
+				}
+			}
+			if written < len(held) {
+				return
+			}
+		}
+	}
+}
+
+// staleFaults is what a list says when it's ranged over past its batch.
+const staleFaults = "hypertabular: the batch these faults belong to is over: the reader has read on"
+
+// problem is a list entry, with what only the batch knows.
+func (b *Batch) problem(raw *rawProblem) Problem {
+	row := int(raw.row)
+	problem := Problem{
+		Row:          row,
+		Line:         b.Line(row),
+		PlanColumn:   -1,
+		SourceColumn: -1,
+		Reason:       hypercast.CastFailure(raw.reason),
+		Detail:       hypercast.Detail(raw.detail),
+		Origin:       Origin(raw.origin),
+		Offset:       int(raw.offset),
+		Length:       int(raw.len),
+		Expected:     int(raw.expected),
+		Found:        int(raw.found),
+	}
+	if raw.planColumn != rowLevel {
+		problem.PlanColumn = int(raw.planColumn)
+		problem.SourceColumn = b.columns.columns[raw.planColumn].plan.ordinal + b.firstColumn
+	}
+	return problem
 }
 
 // of is the plan column at index column, checked against the doors the caller's accessor

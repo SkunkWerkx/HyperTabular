@@ -1,14 +1,15 @@
 //! `Batch`, `Row` and `RowIterator`: the rows one read delivered, as typed columns, the same
 //! classes for delimited text and for a sheet of a workbook.
 //!
-//! A batch owns what it shows: the arrays the core wrote are copied out of the reader's buffers
-//! as it is made, so it stays good after the reader has moved on. A column is lifted out of its
-//! arrays the first time it is asked for, into PHP values HyperCast's own interop surface builds
+//! A batch owns what it shows: the arrays the Rust reader's batch holds are copied out as it is
+//! made, so it stays good after the reader has moved on. A column is lifted out of its arrays the
+//! first time it is asked for, into PHP values HyperCast's own interop surface builds
 //! (`hypercast.rs`), and kept: the values as a list, null where a cell did not cast, and the
 //! faults keyed by row.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell, RefMut};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use ext_php_rs::convert::{FromZval, IntoZval};
 use ext_php_rs::error::Result as ZvalResult;
@@ -18,14 +19,17 @@ use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ZendClassObject, ZendHashTable, Zval};
 use ext_php_rs::zend::ce;
 
-use super::args::Int;
+use super::args::{Int, OptInt};
 use super::classes::{array_zval, bool_zval, bytes_zval, call, float_zval, int_zval, list_zval};
-use super::enums::Door;
-use super::errors::{contract_violation, out_of_range, pending};
+use super::enums::{Door, Origin};
+use super::errors::{contract_violation, logic, out_of_range, pending};
 use super::guard;
-use super::hypercast::Judge;
+use super::hypercast::{Judge, detailed_fault};
 use super::plan::Plan;
-use crate::kernel::abi::{CellVerdict, Span};
+use super::results::problem;
+use crate::kernel::abi::{
+    CellNote, CellVerdict, ColumnBufferWith, OK, RawDelimitedOptions, RawProblem, Span,
+};
 use crate::kernel::delimited::unescape::unescape_into;
 
 /// The low 31 bits of a span's length; the top bit is its flag.
@@ -67,6 +71,12 @@ typed_return!(
     /// `?Fault`.
     MaybeFault,
     "HyperCast\\Fault",
+    true
+);
+typed_return!(
+    /// `?DetailedFault`.
+    MaybeDetailedFault,
+    "HyperCast\\DetailedFault",
     true
 );
 typed_return!(
@@ -154,23 +164,64 @@ struct Decoded {
     fault_of: Vec<Option<Zval>>,
 }
 
+/// Where a batch's rows were read from, which says how the batch keeps what an unflagged span
+/// indexes.
+pub(crate) enum Holds<'a> {
+    /// The string a reader was given, shared and never copied.
+    Shared(&'a Rc<Vec<u8>>),
+    /// A stream, or a decoded string, whose window the next read overwrites: copied.
+    Window,
+    /// A workbook, whose shared strings every batch of every sheet indexes.
+    Book(&'a Arc<crate::Workbook<'static>>),
+}
+
+/// What an unflagged span indexes.
+enum Base {
+    Shared {
+        bytes: Rc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    },
+    Owned(Vec<u8>),
+    Book(Arc<crate::Workbook<'static>>),
+}
+
+impl Base {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Base::Shared { bytes, start, len } => start
+                .checked_add(*len)
+                .and_then(|end| bytes.get(*start..end))
+                .unwrap_or_default(),
+            Base::Owned(bytes) => bytes,
+            Base::Book(book) => book.strings(),
+        }
+    }
+}
+
 /// What a batch shows, shared by the batch and its rows.
 pub(crate) struct BatchCore {
     plan: Zval,
     doors: Vec<Door>,
     ordinals: Vec<usize>,
+    /// The source column each plan column reads, a sheet's own counted from its first.
+    sources: Vec<usize>,
     rows: usize,
     values: Vec<Vec<u8>>,
     verdicts: Vec<Vec<CellVerdict>>,
+    /// Each column's notes, or none for a column that has no fault or a read that takes no notes.
+    notes: Vec<Vec<CellNote>>,
     cells: Vec<Span>,
     per_row: usize,
-    /// What an unflagged span indexes: the input the rows were read from, or a workbook's
-    /// shared strings.
-    base: Rc<Vec<u8>>,
-    /// What a flagged span indexes.
+    base: Base,
+    /// What a flagged span indexes, as far as any of the batch's spans reach.
     arena: Vec<u8>,
     workbook: bool,
+    /// The width a read that reports long rows fixed, and each row's.
+    widths: Option<(u32, Vec<u32>)>,
     decoded: RefCell<Vec<Option<Rc<Decoded>>>>,
+    /// `faults()`, made the first time it is asked for.
+    problems: OnceCell<Zval>,
 }
 
 /// `length` bytes of `from` at `offset`, as much of them as there is, as PHP's `substr`.
@@ -197,30 +248,80 @@ fn i64_at(bytes: &[u8], at: usize) -> i64 {
 }
 
 impl BatchCore {
-    /// A batch of `rows` rows of `plan`, from what the core just wrote, copied.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        plan: &Plan,
-        rows: usize,
-        cells: Vec<Span>,
-        per_row: usize,
-        base: Rc<Vec<u8>>,
-        arena: Vec<u8>,
-        workbook: bool,
-    ) -> BatchCore {
+    /// A copy of the Rust reader's `batch`, read through `plan`.
+    pub(crate) fn of(plan: &Plan, batch: &crate::Batch<'_>, holds: Holds<'_>) -> BatchCore {
+        let (cells, per_row, base, arena) = batch.tables();
+        let workbook = matches!(holds, Holds::Book(_));
+        let count = plan.doors.len();
+        // The arena as far as any span of this batch reaches into it: text with an escaped quote
+        // in it, or for a sheet the text typed cells were said as, and the raw text of those that
+        // failed.
+        let mut reach = 0;
+        let mut values = Vec::with_capacity(count);
+        let mut verdicts = Vec::with_capacity(count);
+        let mut notes = Vec::with_capacity(count);
+        let mut sources = Vec::with_capacity(count);
+        for (index, door) in plan.doors.iter().enumerate() {
+            let (bytes, judged) = batch.column_bytes(index);
+            if matches!(door, Door::Text) {
+                for span in bytes.as_chunks::<{ size_of::<Span>() }>().0 {
+                    let (offset, length) = (u32_at(span, 0), u32_at(span, 4));
+                    if length & Span::FLAG != 0 {
+                        reach = reach.max(offset as usize + (length & SPAN_LENGTH) as usize);
+                    }
+                }
+            }
+            values.push(bytes.to_vec());
+            verdicts.push(judged.to_vec());
+            notes.push(if judged.iter().all(CellVerdict::is_ok) {
+                Vec::new()
+            } else {
+                batch.notes(index).to_vec()
+            });
+            sources.push(batch.source_column(index));
+        }
+        if workbook {
+            for cell in cells.iter().filter(|cell| cell.flagged()) {
+                reach = reach.max(cell.offset as usize + cell.len());
+            }
+        }
+        let base = match holds {
+            Holds::Shared(bytes) => Base::Shared {
+                start: (base.as_ptr() as usize).saturating_sub(bytes.as_ptr() as usize),
+                len: base.len(),
+                bytes: Rc::clone(bytes),
+            },
+            Holds::Window => {
+                // Every row's last entry says where it came from, and isn't in the text.
+                let end = cells
+                    .chunks_exact(per_row.max(1))
+                    .flat_map(|row| row.get(..per_row - 1).unwrap_or_default())
+                    .map(|cell| cell.offset as usize + cell.len())
+                    .max()
+                    .unwrap_or(0);
+                Base::Owned(base.get(..end).unwrap_or(base).to_vec())
+            }
+            Holds::Book(book) => Base::Book(Arc::clone(book)),
+        };
         BatchCore {
             plan: plan.list.shallow_clone(),
             doors: plan.doors.clone(),
             ordinals: plan.ordinals.clone(),
-            rows,
-            values: plan.values(rows),
-            verdicts: plan.verdicts(rows),
-            cells,
+            sources,
+            rows: batch.rows(),
+            values,
+            verdicts,
+            notes,
+            cells: cells.to_vec(),
             per_row,
             base,
-            arena,
+            arena: arena.get(..reach).unwrap_or(arena).to_vec(),
             workbook,
-            decoded: RefCell::new(vec![None; plan.count()]),
+            widths: batch
+                .reported_widths()
+                .map(|(width, widths)| (width, widths.to_vec())),
+            decoded: RefCell::new(vec![None; count]),
+            problems: OnceCell::new(),
         }
     }
 
@@ -261,12 +362,17 @@ impl BatchCore {
 
     pub(crate) fn line(&self, row: i64) -> PhpResult<i64> {
         let row = self.check_row(row)?;
+        Ok(i64::from(self.line_of(row)))
+    }
+
+    /// The line a row of the batch came from, or for a sheet its row number.
+    fn line_of(&self, row: usize) -> u32 {
         let entry = self.cell(row * self.per_row + self.per_row - 1);
-        Ok(i64::from(if self.workbook {
+        if self.workbook {
             entry.offset
         } else {
             entry.len
-        }))
+        }
     }
 
     /// The column, decoded, unless it already has been.
@@ -344,7 +450,7 @@ impl BatchCore {
                 bytes_zval(if length & Span::FLAG != 0 {
                     substr(&self.arena, offset, length & SPAN_LENGTH)
                 } else {
-                    substr(&self.base, offset, length)
+                    substr(self.base.bytes(), offset, length)
                 })
             }
             Door::Date | Door::DateOrdered => {
@@ -438,6 +544,94 @@ impl BatchCore {
             .and_then(|fault| fault.as_ref().map(Zval::shallow_clone)))
     }
 
+    /// The note of a cell known to be in the batch; none for a read that takes none.
+    fn note(&self, column: usize, row: usize) -> CellNote {
+        self.notes
+            .get(column)
+            .and_then(|notes| notes.get(row))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn origin(&self, column: i64, row: i64) -> PhpResult<Origin> {
+        let column = self.check_column(column)?;
+        let row = self.check_row(row)?;
+        Ok(Origin::from_code(self.note(column, row).origin))
+    }
+
+    pub(crate) fn detail(&self, column: i64, row: i64) -> PhpResult<Option<Zval>> {
+        let column = self.check_column(column)?;
+        let row = self.check_row(row)?;
+        let code = u32::from(self.note(column, row).detail);
+        let Some(verdict) = self.verdicts[column].get(row).filter(|_| code != 0) else {
+            return Ok(None);
+        };
+        detailed_fault(verdict.reason, verdict.offset, verdict.len, code).map(Some)
+    }
+
+    /// The batch's list of problems: the core's answer over this batch's own copies, so the same
+    /// whenever it's asked, and costing a read nothing until it is.
+    pub(crate) fn problems(&self) -> PhpResult<Zval> {
+        if let Some(done) = self.problems.get() {
+            return Ok(done.shallow_clone());
+        }
+        let columns: Vec<ColumnBufferWith> = self
+            .verdicts
+            .iter()
+            .zip(&self.notes)
+            .map(|(verdicts, notes)| ColumnBufferWith {
+                size: ColumnBufferWith::SIZE,
+                values: std::ptr::null_mut(),
+                verdicts: verdicts.as_ptr().cast_mut(),
+                notes: if notes.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    notes.as_ptr().cast_mut()
+                },
+            })
+            .collect();
+        let (widths, expected, long_rows) = match &self.widths {
+            Some((width, widths)) => (
+                widths.as_slice(),
+                *width,
+                RawDelimitedOptions::LONG_ROWS_REPORT,
+            ),
+            None => (&[][..], 0, RawDelimitedOptions::LONG_ROWS_REJECT),
+        };
+        let mut problems = Vec::new();
+        let mut cursor = 0;
+        let mut held = [RawProblem::default(); 64];
+        loop {
+            let mut written = 0;
+            // SAFETY: each column's verdicts are this batch's `rows` of them, and its notes either
+            // as many or null; the core only reads them, and a batch's copies are fixed once made.
+            let code = unsafe {
+                crate::kernel::faults::faults(
+                    &columns,
+                    self.rows,
+                    widths,
+                    expected,
+                    long_rows,
+                    &mut cursor,
+                    &mut held,
+                    &mut written,
+                )
+            };
+            if code != OK {
+                return Err(contract_violation());
+            }
+            for raw in held.get(..written).unwrap_or_default() {
+                let source = self.sources.get(raw.plan_column as usize).copied();
+                problems.push(problem(raw, self.line_of(raw.row as usize), source)?);
+            }
+            if written < held.len() {
+                break;
+            }
+        }
+        let list = list_zval(problems)?;
+        Ok(self.problems.get_or_init(|| list).shallow_clone())
+    }
+
     pub(crate) fn raw(&self, column: i64, row: i64) -> PhpResult<Vec<u8>> {
         let column = self.check_column(column)?;
         let row = self.check_row(row)?;
@@ -452,7 +646,7 @@ impl BatchCore {
             return Ok(if cell.len & Span::FLAG != 0 {
                 substr(&self.arena, cell.offset, cell.len & SPAN_LENGTH)
             } else {
-                substr(&self.base, cell.offset, cell.len)
+                substr(self.base.bytes(), cell.offset, cell.len)
             }
             .to_vec());
         }
@@ -460,7 +654,7 @@ impl BatchCore {
         if length == 0 {
             return Ok(Vec::new());
         }
-        let raw = substr(&self.base, cell.offset, length);
+        let raw = substr(self.base.bytes(), cell.offset, length);
         if cell.len & Span::FLAG == 0 {
             return Ok(raw.to_vec());
         }
@@ -517,7 +711,7 @@ pub(crate) fn batch_core(batch: &Zval) -> Option<Rc<BatchCore>> {
 /// ```
 ///
 /// Or read across, a `Row` at a time: a batch iterates its rows in order. A batch owns what it
-/// shows — the arrays the core wrote are copied out of the reader's buffers as it is made — so
+/// shows — the arrays the core wrote are copied out of the reader's as it is made — so
 /// it stays good after the reader has moved on. A value is the PHP carrier HyperCast's `Cast`
 /// returns for the column's door (`Door` lists them).
 #[php_class]
@@ -590,10 +784,23 @@ impl Batch {
         guard(|| self.core.values(column.0).map(Array))
     }
 
-    /// The cells of a column that did not cast: HyperCast's `Fault` for each, keyed by row. Empty
-    /// when every cell cast.
-    pub fn faults(&self, column: Int) -> PhpResult<Array> {
-        guard(|| self.core.faults(column.0).map(Array))
+    /// With no column, everything wrong in this batch, by row and then by column, a row's own entry
+    /// first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, a workbook's
+    /// formulas with no cached value, and rows a `LongRows::Report` dialect cut. Blanks, declared
+    /// tokens, padding and a row cut under `LongRows::Truncate` aren't. With notes off a refused
+    /// cell has no detail and a formula with no cached value isn't listed. A row the empty-row
+    /// filter dropped isn't in the batch to be named. Made the first time it is asked for.
+    ///
+    /// With a column, that column's cells that did not cast: HyperCast's `Fault` for each, keyed by
+    /// row, empty when every cell cast.
+    pub fn faults(&self, column: OptInt) -> PhpResult<Array> {
+        guard(|| {
+            match column.0 {
+                Some(column) => self.core.faults(column),
+                None => self.core.problems(),
+            }
+            .map(Array)
+        })
     }
 
     /// A column as verdicts, one per row: HyperCast's `Success` around the value, or its `Fault`.
@@ -606,6 +813,20 @@ impl Batch {
     /// cell's own text (`raw()`).
     pub fn get(&self, column: Int, row: Int) -> PhpResult<Verdict> {
         guard(|| self.core.get(column.0, row.0).map(|v| Verdict(Some(v))))
+    }
+
+    /// Where the verdict of the cell at (`$column`, `$row`) came from: a door, a declared token,
+    /// padding, or a workbook's formula with no cached value. With notes off a token or a padded
+    /// cell answers `Origin::Cell`: its verdict is still `Empty`, and nothing was kept of why.
+    pub fn origin(&self, column: Int, row: Int) -> PhpResult<Origin> {
+        guard(|| self.core.origin(column.0, row.0))
+    }
+
+    /// What failed in the cell at (`$column`, `$row`), as HyperCast's `DetailedFault`: its `Fault`'s
+    /// reason and span, and the `FaultDetail`. Null where the cell cast, where nothing failed in it
+    /// (a declared token, padding), and with notes off.
+    pub fn detail(&self, column: Int, row: Int) -> PhpResult<MaybeDetailedFault> {
+        guard(|| self.core.detail(column.0, row.0).map(MaybeDetailedFault))
     }
 
     /// The text a cell was cast from, whatever its door and whatever its verdict — what a fault's
@@ -705,6 +926,20 @@ impl Row {
         guard(|| self.core.fault_at(column.0, self.index).map(MaybeFault))
     }
 
+    /// Where the verdict of the cell in `$column` came from: `Batch::origin()`.
+    pub fn origin(&self, column: Int) -> PhpResult<Origin> {
+        guard(|| self.core.origin(column.0, self.index as i64))
+    }
+
+    /// What failed in the cell in `$column`: `Batch::detail()`.
+    pub fn detail(&self, column: Int) -> PhpResult<MaybeDetailedFault> {
+        guard(|| {
+            self.core
+                .detail(column.0, self.index as i64)
+                .map(MaybeDetailedFault)
+        })
+    }
+
     /// The text the cell in `$column` was cast from: `Batch::raw()`.
     pub fn raw(&self, column: Int) -> PhpResult<Bytes> {
         guard(|| self.core.raw(column.0, self.index as i64).map(Bytes))
@@ -728,6 +963,13 @@ enum Source {
 #[php(flags = ext_php_rs::flags::ClassFlags::Final)]
 #[php(implements(ce = ce::iterator, stub = "\\Iterator"))]
 pub struct RowIterator {
+    /// The iteration, borrowed for each call: reading a reader's next batch runs its stream's PHP,
+    /// and a call back into this iterator from there is refused.
+    state: RefCell<Iteration>,
+}
+
+/// Where an iteration is, behind its `RefCell`.
+struct Iteration {
     source: Source,
     /// The batch in hand, its zval and what it shows.
     batch: Option<(Zval, Rc<BatchCore>)>,
@@ -740,7 +982,7 @@ pub struct RowIterator {
 
 impl RowIterator {
     fn over_batch(batch: Zval, core: Rc<BatchCore>) -> PhpResult<Zval> {
-        let mut iterator = RowIterator {
+        let mut iterator = Iteration {
             source: Source::Batch,
             batch: Some((batch, core)),
             position: 0,
@@ -748,14 +990,16 @@ impl RowIterator {
             current: None,
         };
         iterator.settle()?;
-        ZendClassObject::new(iterator)
-            .into_zval(false)
-            .map_err(|_| pending("iterator"))
+        ZendClassObject::new(RowIterator {
+            state: RefCell::new(iterator),
+        })
+        .into_zval(false)
+        .map_err(|_| pending("iterator"))
     }
 
     /// Every row `reader` has left; nothing is read until the iteration starts.
     pub(crate) fn over_reader(reader: Zval) -> PhpResult<Zval> {
-        let iterator = RowIterator {
+        let iterator = Iteration {
             source: Source::Reader {
                 reader,
                 started: false,
@@ -765,11 +1009,22 @@ impl RowIterator {
             key: 0,
             current: None,
         };
-        ZendClassObject::new(iterator)
-            .into_zval(false)
-            .map_err(|_| pending("iterator"))
+        ZendClassObject::new(RowIterator {
+            state: RefCell::new(iterator),
+        })
+        .into_zval(false)
+        .map_err(|_| pending("iterator"))
     }
 
+    /// The iteration for a call; refused while another call, reading, holds it.
+    fn state(&self) -> PhpResult<RefMut<'_, Iteration>> {
+        self.state.try_borrow_mut().map_err(|_| {
+            logic("The row iterator is in the middle of a read; its reader's stream can't call back into it")
+        })
+    }
+}
+
+impl Iteration {
     /// Makes the row at `position` current, reading the reader's next batch when the one in
     /// hand has run out.
     fn settle(&mut self) -> PhpResult<()> {
@@ -842,11 +1097,12 @@ impl RowIterator {
     }
 
     /// The row in hand, or null past the last.
-    pub fn current(&mut self) -> PhpResult<MixedValue> {
+    pub fn current(&self) -> PhpResult<MixedValue> {
         guard(|| {
-            self.start()?;
+            let mut this = self.state()?;
+            this.start()?;
             Ok(MixedValue(
-                self.current
+                this.current
                     .as_ref()
                     .map(Zval::shallow_clone)
                     .unwrap_or_default(),
@@ -855,11 +1111,12 @@ impl RowIterator {
     }
 
     /// The row's key: its index in the batch, or its place in the whole read.
-    pub fn key(&mut self) -> PhpResult<MixedValue> {
+    pub fn key(&self) -> PhpResult<MixedValue> {
         guard(|| {
-            self.start()?;
-            Ok(MixedValue(if self.current.is_some() {
-                int_zval(self.key)
+            let mut this = self.state()?;
+            this.start()?;
+            Ok(MixedValue(if this.current.is_some() {
+                int_zval(this.key)
             } else {
                 Zval::new()
             }))
@@ -867,29 +1124,31 @@ impl RowIterator {
     }
 
     /// Moves to the next row, reading the next batch when this one has run out.
-    pub fn next(&mut self) -> PhpResult<()> {
+    pub fn next(&self) -> PhpResult<()> {
         guard(|| {
-            self.start()?;
-            if self.current.is_none() {
+            let mut this = self.state()?;
+            this.start()?;
+            if this.current.is_none() {
                 return Ok(());
             }
-            self.position += 1;
-            self.key += 1;
-            self.settle()
+            this.position += 1;
+            this.key += 1;
+            this.settle()
         })
     }
 
     /// Starts over: a batch's rows from the first; a reader's rows only before the iteration
     /// has moved past the first row.
-    pub fn rewind(&mut self) -> PhpResult<()> {
-        guard(|| self.do_rewind())
+    pub fn rewind(&self) -> PhpResult<()> {
+        guard(|| self.state()?.do_rewind())
     }
 
     /// Whether there is a row in hand.
-    pub fn valid(&mut self) -> PhpResult<bool> {
+    pub fn valid(&self) -> PhpResult<bool> {
         guard(|| {
-            self.start()?;
-            Ok(self.current.is_some())
+            let mut this = self.state()?;
+            this.start()?;
+            Ok(this.current.is_some())
         })
     }
 }

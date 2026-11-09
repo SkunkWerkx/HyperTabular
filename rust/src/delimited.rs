@@ -10,16 +10,91 @@
 //! The reader owns all of that and lends it: [`DelimitedReader::read`] returns a
 //! [`Batch`] that borrows the reader, so a batch's columns are the arrays the core wrote
 //! and its text is the input itself, and reading the next batch is what ends the last.
+//!
+//! A dialect that declares an [`Encoding`] adds one step ahead of the fill: a file's bytes go
+//! through the core's transcoder into the buffer the fill reads, and from there on the reader
+//! is the same reader, its text being the decoded text.
 
-use crate::batch::{Batch, Columns, Origin, Row};
-use crate::column;
+use crate::batch::{Batch, Columns, Home, Row};
+use crate::column::{self, zeroed};
 use crate::error::{Failure, FailureKind};
-use crate::kernel::abi::{ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, Filled, OK, Span};
-use crate::kernel::delimited::fill::{self, RawDialect, State};
+use crate::kernel::abi::{
+    ColumnSpecWith, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, Filled, OK, RawBatchCheck,
+    RawDelimitedOptions, RawTranscoded, Span,
+};
+use crate::kernel::delimited::fill::{self, State};
+use crate::kernel::size;
+use crate::kernel::transcode::transcode;
+use crate::suggest::{Sample, SampleSource, SuggestOptions, Suggestion, check_width};
 use crate::{Column, Error, Header};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+
+/// What a record with fewer cells than the width is.
+///
+/// New policies may be added in a minor release. Matches outside this crate need a wildcard arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShortRows {
+    /// A structural failure.
+    #[default]
+    Reject,
+    /// A row whose missing cells are `Empty`, at [`Origin::Padded`](crate::Origin::Padded).
+    Pad,
+}
+
+/// What a record with more cells than the width is.
+///
+/// New policies may be added in a minor release. Matches outside this crate need a wildcard arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LongRows {
+    /// A structural failure.
+    #[default]
+    Reject,
+    /// A row cut to the width, and listed by [`Batch::faults`](crate::Batch::faults) with the
+    /// width it had.
+    Report,
+    /// A row cut to the width, and nothing said.
+    Truncate,
+}
+
+/// What a file's bytes are, declared and never sniffed.
+///
+/// Anything but [`Encoding::Utf8`] is decoded ahead of the read, so that everything a batch says,
+/// its spans included, is about the decoded text. A unit that has no character is a structural
+/// failure, [`FailureKind::Encoding`], whose `byte` alone counts the original bytes: nothing is
+/// ever replaced. A workbook declares its own encoding, so this is delimited text's alone.
+///
+/// New encodings may be added in a minor release. Matches outside this crate need a wildcard arm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Encoding {
+    /// UTF-8, read without a copy. A cell that isn't valid is that cell's `Malformed` verdict.
+    #[default]
+    Utf8,
+    /// Windows-1252. The five bytes the code page leaves undefined are their C1 controls, as
+    /// WHATWG has them. `EF BB BF` is three characters here, not a byte-order mark.
+    Windows1252,
+    /// Latin-1 (ISO-8859-1): every byte the code point of its value.
+    Latin1,
+    /// UTF-16, little-endian, with or without a byte-order mark. A lone surrogate, or half a code
+    /// unit at the end of the input, is the failure.
+    Utf16Le,
+}
+
+impl Encoding {
+    /// The core's number for an encoding it has to decode.
+    const fn code(self) -> Option<u32> {
+        match self {
+            Encoding::Utf8 => None,
+            Encoding::Windows1252 => Some(RawTranscoded::WINDOWS_1252),
+            Encoding::Latin1 => Some(RawTranscoded::LATIN_1),
+            Encoding::Utf16Le => Some(RawTranscoded::UTF_16LE),
+        }
+    }
+}
 
 /// The caller-declared dialect. The same philosophy as HyperCast's `NumFormat`: no
 /// sniffing, no guessing — the separator is stated, quoting is stated, the header is
@@ -45,6 +120,20 @@ pub struct Dialect {
     pub has_header: bool,
     /// Whether a line with nothing on it is skipped rather than read as a record.
     pub skip_blank_lines: bool,
+    /// Physical lines to pass over after a byte-order mark, before anything is read of them: a
+    /// quote in one means nothing.
+    pub skip: u32,
+    /// Records to discard after that, ahead of the header if there is one. A blank line this
+    /// dialect skips isn't a record.
+    pub header_row: u32,
+    /// What a record with fewer cells than the width is.
+    pub short_rows: ShortRows,
+    /// What a record with more cells than the width is.
+    pub long_rows: LongRows,
+    /// What the input's bytes are.
+    pub encoding: Encoding,
+    /// What stands for no value in every column without tokens of its own: packed.
+    tokens: &'static [u8],
 }
 
 impl Dialect {
@@ -54,6 +143,12 @@ impl Dialect {
         quoting: true,
         has_header: true,
         skip_blank_lines: true,
+        skip: 0,
+        header_row: 0,
+        short_rows: ShortRows::Reject,
+        long_rows: LongRows::Reject,
+        encoding: Encoding::Utf8,
+        tokens: &[],
     };
     /// Tab-separated.
     pub const TSV: Dialect = Dialect {
@@ -91,6 +186,67 @@ impl Dialect {
             ..self
         }
     }
+
+    /// The same dialect passing over this many physical lines first.
+    pub const fn with_skip(self, skip: u32) -> Dialect {
+        Dialect { skip, ..self }
+    }
+
+    /// The same dialect discarding this many records after those.
+    pub const fn with_header_row(self, header_row: u32) -> Dialect {
+        Dialect { header_row, ..self }
+    }
+
+    /// The same dialect with another policy for short records.
+    pub const fn with_short_rows(self, short_rows: ShortRows) -> Dialect {
+        Dialect { short_rows, ..self }
+    }
+
+    /// The same dialect with another policy for long records.
+    pub const fn with_long_rows(self, long_rows: LongRows) -> Dialect {
+        Dialect { long_rows, ..self }
+    }
+
+    /// The same dialect reading input in another encoding.
+    pub const fn with_encoding(self, encoding: Encoding) -> Dialect {
+        Dialect { encoding, ..self }
+    }
+
+    /// The same dialect with these tokens for no value: a cell whose exact, unquoted bytes are one
+    /// of them is `Empty`, whatever its door, and [`Batch::origin`] says
+    /// [`Origin::Token`](crate::Origin::Token). A column's own replace them
+    /// ([`Column::tokens`]).
+    ///
+    /// Each distinct list is kept for the life of the process, so that a dialect can stay `Copy`: a
+    /// program building lists from request data grows without bound.
+    pub fn with_tokens(self, tokens: &[&str]) -> Dialect {
+        Dialect {
+            tokens: column::packed_tokens(tokens),
+            ..self
+        }
+    }
+
+    /// The dialect as the core's state takes it.
+    const fn raw(&self) -> RawDelimitedOptions {
+        RawDelimitedOptions {
+            size: RawDelimitedOptions::SIZE,
+            separator: self.separator,
+            quoting: self.quoting as u8,
+            skip_blank_lines: self.skip_blank_lines as u8,
+            engine: 0,
+            skip: self.skip,
+            header_row: self.header_row,
+            short_rows: match self.short_rows {
+                ShortRows::Reject => RawDelimitedOptions::SHORT_ROWS_REJECT,
+                ShortRows::Pad => RawDelimitedOptions::SHORT_ROWS_PAD,
+            },
+            long_rows: match self.long_rows {
+                LongRows::Reject => RawDelimitedOptions::LONG_ROWS_REJECT,
+                LongRows::Report => RawDelimitedOptions::LONG_ROWS_REPORT,
+                LongRows::Truncate => RawDelimitedOptions::LONG_ROWS_TRUNCATE,
+            },
+        }
+    }
 }
 
 /// How a reader sizes what it owns. [`DelimitedReader::options`] starts one; its
@@ -99,6 +255,7 @@ impl Dialect {
 pub struct DelimitedOptions {
     batch_rows: usize,
     buffer_bytes: usize,
+    notes: bool,
 }
 
 impl Default for DelimitedOptions {
@@ -113,13 +270,23 @@ impl DelimitedOptions {
         DelimitedOptions {
             batch_rows: 4096,
             buffer_bytes: 256 * 1024,
+            notes: true,
         }
     }
 
-    /// The most rows a batch holds (at least one). Every column's arrays are this long.
+    /// Whether a batch carries [`Batch::detail`] and [`Batch::origin`]: on unless this turns them
+    /// off, when every cell says `None` and [`Origin::Cell`](crate::Origin::Cell) and a read that
+    /// declares no tokens or date options runs the loop that doesn't ask a door for them.
+    pub const fn notes(self, notes: bool) -> DelimitedOptions {
+        DelimitedOptions { notes, ..self }
+    }
+
+    /// The most rows a batch holds. Every column's arrays are this long. Opening a reader refuses
+    /// `0`, and a batch of the plan asking for more than the core allows
+    /// ([`Error::ZeroBatchRows`], [`Error::BatchTooLarge`]).
     pub const fn batch_rows(self, rows: usize) -> DelimitedOptions {
         DelimitedOptions {
-            batch_rows: if rows == 0 { 1 } else { rows },
+            batch_rows: rows,
             ..self
         }
     }
@@ -127,12 +294,43 @@ impl DelimitedOptions {
     /// The input buffer a file or a stream is read through to begin with. It grows to
     /// hold the longest record, up to [`DelimitedReader::MAX_ROW_BYTES`], so this is a
     /// starting size and not a limit, and a request past the ceiling starts there; a slice
-    /// is read in place and has no buffer.
+    /// is read in place and has no buffer. Opening a reader refuses `0`
+    /// ([`Error::ZeroBufferBytes`]), a slice's as well.
     pub const fn buffer_bytes(self, bytes: usize) -> DelimitedOptions {
         DelimitedOptions {
-            buffer_bytes: if bytes == 0 { 1 } else { bytes },
+            buffer_bytes: bytes,
             ..self
         }
+    }
+
+    /// The core's answer on these sizes for `plan`, ahead of everything a reader allocates. A plan
+    /// that can't be honoured says so where it always has, so this judges the sizes without it.
+    pub(crate) fn checked(self, dialect: Dialect, plan: &[Column]) -> Result<RawBatchCheck, Error> {
+        self.checked_specs(dialect, &column::specs_with(plan).unwrap_or_default())
+    }
+
+    fn checked_specs(
+        self,
+        dialect: Dialect,
+        specs: &[ColumnSpecWith],
+    ) -> Result<RawBatchCheck, Error> {
+        column::check_sizes(
+            specs,
+            self.batch_rows,
+            self.buffer_bytes,
+            self.size_flags(dialect),
+        )
+    }
+
+    fn size_flags(self, dialect: Dialect) -> u32 {
+        let mut flags = 0;
+        if self.notes {
+            flags |= RawBatchCheck::NOTES;
+        }
+        if dialect.long_rows == LongRows::Report {
+            flags |= RawBatchCheck::WIDTHS;
+        }
+        flags
     }
 
     /// Opens the file at `path`, to be read through `plan`.
@@ -142,18 +340,26 @@ impl DelimitedOptions {
         dialect: Dialect,
         plan: &[Column],
     ) -> Result<DelimitedReader<'static>, Error> {
+        self.checked(dialect, plan)?;
         self.from_reader(File::open(path)?, dialect, plan)
     }
 
     /// Reads `bytes` in place through `plan`: nothing is copied, and a batch's text is
-    /// `bytes` itself.
+    /// `bytes` itself. A dialect that declares an [`Encoding`] has to be decoded, and reads
+    /// them as a stream instead.
     pub fn from_slice<'a>(
         self,
         bytes: &'a [u8],
         dialect: Dialect,
         plan: &[Column],
     ) -> Result<DelimitedReader<'a>, Error> {
-        DelimitedReader::build(Source::slice(bytes), dialect, Some(plan), self)
+        let sizes = self.checked(dialect, plan)?;
+        DelimitedReader::build(
+            self.slice(bytes, dialect, sizes)?,
+            dialect,
+            Some(plan),
+            self,
+        )
     }
 
     /// Reads from any byte source through `plan`.
@@ -163,7 +369,13 @@ impl DelimitedOptions {
         dialect: Dialect,
         plan: &[Column],
     ) -> Result<DelimitedReader<'a>, Error> {
-        DelimitedReader::build(self.stream(reader), dialect, Some(plan), self)
+        let sizes = self.checked(dialect, plan)?;
+        DelimitedReader::build(
+            self.stream(reader, dialect, sizes)?,
+            dialect,
+            Some(plan),
+            self,
+        )
     }
 
     /// Opens the file at `path` and reads its header, leaving the plan to be bound
@@ -173,6 +385,7 @@ impl DelimitedOptions {
         path: impl AsRef<Path>,
         dialect: Dialect,
     ) -> Result<DelimitedReader<'static>, Error> {
+        self.checked(dialect, &[])?;
         self.from_reader_unbound(File::open(path)?, dialect)
     }
 
@@ -183,7 +396,8 @@ impl DelimitedOptions {
         bytes: &[u8],
         dialect: Dialect,
     ) -> Result<DelimitedReader<'_>, Error> {
-        DelimitedReader::build(Source::slice(bytes), dialect, None, self)
+        let sizes = self.checked(dialect, &[])?;
+        DelimitedReader::build(self.slice(bytes, dialect, sizes)?, dialect, None, self)
     }
 
     /// [`DelimitedOptions::from_reader`], with the plan bound later: see
@@ -193,7 +407,8 @@ impl DelimitedOptions {
         reader: R,
         dialect: Dialect,
     ) -> Result<DelimitedReader<'a>, Error> {
-        DelimitedReader::build(self.stream(reader), dialect, None, self)
+        let sizes = self.checked(dialect, &[])?;
+        DelimitedReader::build(self.stream(reader, dialect, sizes)?, dialect, None, self)
     }
 
     /// Reads from an asynchronous byte source — the header as this is awaited, and each
@@ -206,13 +421,18 @@ impl DelimitedOptions {
         reader: R,
         dialect: Dialect,
     ) -> Result<DelimitedReader<'a>, Error> {
+        let sizes = self.checked(dialect, &[])?;
+        let size = sizes.buffer_bytes as usize;
         let source = Source::Async {
-            buf: vec![0; self.buffer_bytes.min(DelimitedReader::MAX_ROW_BYTES)],
+            buf: zeroed(size).ok_or(Error::NoMemory {
+                bytes: sizes.buffer_bytes,
+            })?,
             at: 0,
             end: 0,
             reader: Box::pin(reader),
             eof: false,
             ceiling: DelimitedReader::MAX_ROW_BYTES,
+            decoder: self.decoder(dialect, sizes)?,
         };
         let mut reader = DelimitedReader::start(source, dialect, None, self)?;
         if dialect.has_header {
@@ -225,16 +445,141 @@ impl DelimitedOptions {
         Ok(reader)
     }
 
-    fn stream<'a, R: Read + Send + 'a>(self, reader: R) -> Source<'a> {
-        let limit = self.buffer_bytes.min(DelimitedReader::MAX_ROW_BYTES);
-        Source::Stream {
-            buf: Vec::with_capacity(limit),
+    fn slice<'a>(
+        self,
+        bytes: &'a [u8],
+        dialect: Dialect,
+        sizes: RawBatchCheck,
+    ) -> Result<Source<'a>, Error> {
+        match dialect.encoding {
+            Encoding::Utf8 => Ok(Source::slice(bytes)),
+            _ => self.stream(bytes, dialect, sizes),
+        }
+    }
+
+    fn stream<'a, R: Read + Send + 'a>(
+        self,
+        reader: R,
+        dialect: Dialect,
+        sizes: RawBatchCheck,
+    ) -> Result<Source<'a>, Error> {
+        let limit = sizes.buffer_bytes as usize;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(limit).map_err(|_| Error::NoMemory {
+            bytes: sizes.buffer_bytes,
+        })?;
+        Ok(Source::Stream {
+            buf,
             at: 0,
             limit,
             reader: Box::new(reader),
             eof: false,
             ceiling: DelimitedReader::MAX_ROW_BYTES,
+            decoder: self.decoder(dialect, sizes)?,
+        })
+    }
+
+    /// What a dialect's encoding asks of a stream.
+    fn decoder(self, dialect: Dialect, sizes: RawBatchCheck) -> Result<Option<Decoder>, Error> {
+        match dialect.encoding.code() {
+            Some(encoding) => Decoder::new(encoding, sizes.buffer_bytes as usize).map(Some),
+            None => Ok(None),
         }
+    }
+}
+
+/// The most bytes of UTF-8 one character takes: with this much room, a transcode that writes
+/// nothing and doesn't fail wants more input.
+const MAX_CHARACTER: usize = 4;
+
+/// The step ahead of the fill, for a dialect that declares an encoding. A stream's reads land
+/// here, as the original bytes, and go through the core's transcoder into the stream's buffer,
+/// where the fill reads them as it would have read UTF-8.
+struct Decoder {
+    encoding: u32,
+    /// The original bytes read, `at..end` of them not yet decoded. Fixed in size: what's left
+    /// when more is wanted is less than a character.
+    raw: Vec<u8>,
+    at: usize,
+    end: usize,
+    /// The source has ended.
+    eof: bool,
+    /// Original bytes decoded so far: added to a call's `failure_at`, this is the input's offset.
+    offset: u64,
+    /// The original offset of a unit with no character. The failure is raised only when the fill
+    /// has had all that decoded ahead of it, and wants more.
+    failed_at: Option<u64>,
+}
+
+/// What one turn of the decoder came to.
+enum Decoded {
+    /// This many bytes of decoded text for the fill.
+    Wrote(usize),
+    /// The text ahead of a failure is all written.
+    Failed,
+    /// The source is over and decoded. The fill can be told it's the last.
+    Finished,
+    /// The next character wants more room than this.
+    Room,
+    /// A read's worth more of the source, please.
+    Input,
+}
+
+impl Decoder {
+    fn new(encoding: u32, size: usize) -> Result<Decoder, Error> {
+        let size = size.max(MAX_CHARACTER);
+        Ok(Decoder {
+            encoding,
+            raw: zeroed(size).ok_or(Error::NoMemory { bytes: size as u64 })?,
+            at: 0,
+            end: 0,
+            eof: false,
+            offset: 0,
+            failed_at: None,
+        })
+    }
+
+    /// Decodes what it has into `out`.
+    fn step(&mut self, out: &mut [u8]) -> Decoded {
+        let mut done = RawTranscoded::default();
+        let code = transcode(
+            self.encoding,
+            &self.raw[self.at..self.end],
+            self.eof,
+            out,
+            &mut done,
+        );
+        debug_assert_eq!(code, OK, "a code this type made");
+        if done.failed != 0 {
+            self.failed_at = Some(self.offset + done.failure_at);
+        }
+        self.at += done.consumed as usize;
+        self.offset += done.consumed;
+        if done.written > 0 {
+            Decoded::Wrote(done.written as usize)
+        } else if self.failed_at.is_some() {
+            Decoded::Failed
+        } else if self.at < self.end && out.len() < MAX_CHARACTER {
+            Decoded::Room
+        } else if self.eof {
+            Decoded::Finished
+        } else {
+            Decoded::Input
+        }
+    }
+
+    /// Where the next read of the source goes, after what's still to decode.
+    fn room(&mut self) -> &mut [u8] {
+        self.raw.copy_within(self.at..self.end, 0);
+        self.end -= self.at;
+        self.at = 0;
+        &mut self.raw[self.end..]
+    }
+
+    /// Counts a read of the source into [`Decoder::room`].
+    fn landed(&mut self, bytes: usize) {
+        self.end += bytes;
+        self.eof = bytes == 0;
     }
 }
 
@@ -256,6 +601,8 @@ enum Source<'a> {
         reader: Box<dyn Read + Send + 'a>,
         eof: bool,
         ceiling: usize,
+        /// With a declared encoding, what the buffer's text is decoded by.
+        decoder: Option<Decoder>,
     },
     /// An asynchronous stream, read through a buffer that is all initialized, `end` bytes
     /// of it read: each read is counted the moment it lands, so a read that is abandoned
@@ -269,6 +616,8 @@ enum Source<'a> {
         reader: std::pin::Pin<Box<dyn futures_io::AsyncRead + Send + 'a>>,
         eof: bool,
         ceiling: usize,
+        /// With a declared encoding, what the buffer's text is decoded by.
+        decoder: Option<Decoder>,
     },
 }
 
@@ -342,6 +691,7 @@ impl<'a> Source<'a> {
             reader,
             eof,
             ceiling,
+            decoder,
         } = self
         else {
             return match self {
@@ -351,6 +701,17 @@ impl<'a> Source<'a> {
         };
         buf.drain(..*at);
         *at = 0;
+        if let Some(byte) = decoder.as_ref().and_then(|decoder| decoder.failed_at) {
+            // All the text ahead of the failure has been read, but for what the fill can't
+            // finish. A `\r` it's holding ends a row whatever comes next, and only waits to see
+            // if a `\n` is part of it; nothing is coming, and this says so. In a quote it ends
+            // nothing, and the record is as cut as it was.
+            if buf.last() == Some(&b'\r') {
+                buf.push(b'\n');
+                return Ok(());
+            }
+            return Err(encoding_failure(state, byte));
+        }
         if buf.len() >= *limit {
             if *limit >= *ceiling {
                 return Err(row_too_long(state));
@@ -359,6 +720,41 @@ impl<'a> Source<'a> {
         }
         let filled = buf.len();
         buf.resize(*limit, 0);
+        if let Some(decoder) = decoder {
+            loop {
+                let written = match decoder.step(&mut buf[filled..]) {
+                    Decoded::Wrote(written) => written,
+                    // The next refill raises it, once the fill has had one more look.
+                    Decoded::Failed => 0,
+                    Decoded::Finished => {
+                        *eof = true;
+                        0
+                    }
+                    Decoded::Room => {
+                        if *limit >= *ceiling {
+                            buf.truncate(filled);
+                            return Err(row_too_long(state));
+                        }
+                        *limit = limit.saturating_mul(2).min(*ceiling);
+                        buf.resize(*limit, 0);
+                        continue;
+                    }
+                    Decoded::Input => {
+                        match reader.read(decoder.room()) {
+                            Ok(bytes) => decoder.landed(bytes),
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(error) => {
+                                buf.truncate(filled);
+                                return Err(error.into());
+                            }
+                        }
+                        continue;
+                    }
+                };
+                buf.truncate(filled + written);
+                return Ok(());
+            }
+        }
         loop {
             match reader.read(&mut buf[filled..]) {
                 Ok(0) => {
@@ -390,6 +786,7 @@ impl<'a> Source<'a> {
             reader,
             eof,
             ceiling,
+            decoder,
         } = self
         else {
             return self.refill(state);
@@ -397,11 +794,55 @@ impl<'a> Source<'a> {
         buf.copy_within(*at..*end, 0);
         *end -= *at;
         *at = 0;
+        if let Some(byte) = decoder.as_ref().and_then(|decoder| decoder.failed_at) {
+            // As in `Source::refill`: nothing is coming to end a `\r` the fill is holding.
+            if *end > 0 && buf[*end - 1] == b'\r' {
+                if *end == buf.len() {
+                    buf.push(0);
+                }
+                buf[*end] = b'\n';
+                *end += 1;
+                return Ok(());
+            }
+            return Err(encoding_failure(state, byte));
+        }
         if *end >= buf.len() {
             if buf.len() >= *ceiling {
                 return Err(row_too_long(state));
             }
             buf.resize(buf.len().saturating_mul(2).clamp(1, *ceiling), 0);
+        }
+        if let Some(decoder) = decoder {
+            loop {
+                match decoder.step(&mut buf[*end..]) {
+                    Decoded::Wrote(written) => {
+                        *end += written;
+                        return Ok(());
+                    }
+                    // The next refill raises it, once the fill has had one more look.
+                    Decoded::Failed => return Ok(()),
+                    Decoded::Finished => {
+                        *eof = true;
+                        return Ok(());
+                    }
+                    Decoded::Room => {
+                        if buf.len() >= *ceiling {
+                            return Err(row_too_long(state));
+                        }
+                        buf.resize(buf.len().saturating_mul(2).clamp(1, *ceiling), 0);
+                    }
+                    Decoded::Input => {
+                        let room = decoder.room();
+                        let read =
+                            std::future::poll_fn(|cx| reader.as_mut().poll_read(cx, &mut *room));
+                        match read.await {
+                            Ok(bytes) => decoder.landed(bytes),
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+            }
         }
         loop {
             let read = std::future::poll_fn(|cx| reader.as_mut().poll_read(cx, &mut buf[*end..]));
@@ -422,7 +863,7 @@ impl<'a> Source<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "python"))]
 impl DelimitedReader<'_> {
     /// Hands a slice to the core at most `bytes` a call from here on, as the reader does a
     /// slice of 2 GiB or more.
@@ -457,6 +898,7 @@ impl DelimitedReader<'_> {
     }
 
     /// The cell-table entries the reader holds.
+    #[cfg(test)]
     pub(crate) fn cell_entries(&self) -> usize {
         self.cells.len()
     }
@@ -471,6 +913,19 @@ fn row_too_long(state: &State) -> Error {
         record: state.records,
         line: state.line,
         byte: state.offset,
+        expected: 0,
+        found: 0,
+    })
+}
+
+/// The failure of a unit a declared encoding has no character for: the record it cut, and where
+/// the unit is in the original input.
+fn encoding_failure(state: &State, byte: u64) -> Error {
+    Error::Structure(Failure {
+        kind: FailureKind::Encoding,
+        record: state.records,
+        line: state.line,
+        byte,
         expected: 0,
         found: 0,
     })
@@ -496,12 +951,18 @@ pub struct DelimitedReader<'a> {
     error: Option<Error>,
 }
 
+impl SampleSource for DelimitedReader<'_> {
+    fn next_batch(&mut self) -> Result<Option<Batch<'_>>, Error> {
+        self.read()
+    }
+}
+
 impl<'a> DelimitedReader<'a> {
     /// The most a stream is buffered for one record, whatever buffer the reader began
     /// with: a record that fills this much and has not ended is
     /// [`FailureKind::RowTooLong`], the input taken to be something other than delimited
     /// text.
-    pub const MAX_ROW_BYTES: usize = 1 << 30;
+    pub const MAX_ROW_BYTES: usize = size::MAX_ROW_BYTES as usize;
 
     /// The options a reader is built with, to change before building one.
     pub const fn options() -> DelimitedOptions {
@@ -518,7 +979,8 @@ impl<'a> DelimitedReader<'a> {
     }
 
     /// Reads `bytes` in place through `plan`: nothing is copied, and a batch's text is
-    /// `bytes` itself.
+    /// `bytes` itself. A dialect that declares an [`Encoding`] has to be decoded, and reads
+    /// them as a stream instead.
     pub fn from_slice(bytes: &'a [u8], dialect: Dialect, plan: &[Column]) -> Result<Self, Error> {
         DelimitedOptions::new().from_slice(bytes, dialect, plan)
     }
@@ -569,6 +1031,113 @@ impl<'a> DelimitedReader<'a> {
         DelimitedOptions::new().from_reader_unbound(reader, dialect)
     }
 
+    /// Reads a sample of the file at `path` through the text door and says what its columns look
+    /// like: a plan to look at, change and pass to a read, and a report. Nothing is sniffed in a
+    /// read, and nothing here reaches one: this is its own read of the file, opened and closed
+    /// here. There's no form of this for a stream, which would lose the rows it sampled.
+    ///
+    /// The width is the header's, or the first record's, and a plan has to name the columns before
+    /// that record can be read. So with no header the file is opened twice, once to read the first
+    /// record: a path that can only be read once, as a FIFO's can, is not for this. The dialect is
+    /// what the sample is read with, its tokens included, and a cell it says is empty is blank to
+    /// the suggestion.
+    ///
+    /// Declaring the locale is the recommended route: a number format and a date order are the
+    /// plan's to say, and with them nothing needs inferring. This is a starting point for a plan to
+    /// inspect.
+    ///
+    /// With no format declared, `,` and `.` follow from which of two notations reads the column:
+    /// two of one delimiter group digits (`1,234,567`, `1.234.567`); one of each is a group then a
+    /// decimal (`1,234.5`, `1.234,5`); one with 1, 2 or more than 3 digits after it is a decimal
+    /// (`2,5`, `2.5`, `2,5000`). One with exactly 3 digits after it is ambiguous (`1,234`, `1.234`),
+    /// unless a zero is what's left of it (`0,125` and `0.125` are 0.125), or another cell settles
+    /// it (`1,234` beside `2,5` is a comma decimal). A comma-decimal column is resolved in that
+    /// notation, and [`SuggestedColumn::format`] names it. `2,5` beside `2.5` is unresolved.
+    ///
+    /// What it says can surprise, so read the report before the plan:
+    ///
+    /// - A column of `0` and `1` is bool, the first door asked, and `F` or `No` read `false`.
+    /// - A column of prices at three decimals, `1.234`, is ambiguous and reads as text until a
+    ///   format is declared or a value settles it, because no comma doesn't establish a locale.
+    /// - `1,23,456`, Indian grouping, reads under neither notation with none declared, because
+    ///   nothing says its culture: alone it's text, resolved, and beside `5` unresolved. Declaring
+    ///   `NumFormat::INVARIANT.with_grouping(Grouping::Indian)` for the column makes it a number.
+    /// - `007` and an integer past `i64` are text, with no note saying why, so as not to lose the
+    ///   zeros or the digits.
+    /// - A sheet's date column is text: [`Sheet::suggest`](crate::Sheet::suggest) says why.
+    ///
+    /// # Errors
+    /// [`Error::Plan`] first, before the file is opened, for any format declared in `options` the
+    /// core would refuse. Then what opening the file can return, and [`Error::Structure`] for a
+    /// failure among the sampled rows: there's
+    /// no knowing what's past it, and a read would stop there too. A failure past them isn't met,
+    /// or only says the source was [`Suggestion::truncated`].
+    pub fn suggest(
+        path: impl AsRef<Path>,
+        dialect: Dialect,
+        options: &SuggestOptions,
+    ) -> Result<Suggestion, Error> {
+        let path = path.as_ref();
+        Self::suggest_from(dialect, options, |rows, dialect| {
+            DelimitedOptions::new()
+                .notes(false)
+                .batch_rows(rows)
+                .open_unbound(path, dialect)
+        })
+    }
+
+    /// [`DelimitedReader::suggest`], over bytes.
+    pub fn suggest_slice(
+        bytes: &[u8],
+        dialect: Dialect,
+        options: &SuggestOptions,
+    ) -> Result<Suggestion, Error> {
+        Self::suggest_from(dialect, options, |rows, dialect| {
+            DelimitedOptions::new()
+                .notes(false)
+                .batch_rows(rows)
+                .from_slice_unbound(bytes, dialect)
+        })
+    }
+
+    pub(crate) fn suggest_from<'s>(
+        dialect: Dialect,
+        options: &SuggestOptions,
+        open: impl Fn(usize, Dialect) -> Result<DelimitedReader<'s>, Error>,
+    ) -> Result<Suggestion, Error> {
+        options.check_formats()?;
+        let limit = options.rows_within(DelimitedOptions::new().batch_rows);
+        // A headerless source's width is its first record's, which a read says through a plan of
+        // one column, whose cells are verdicts as the sample's will be.
+        let width = if dialect.has_header {
+            None
+        } else {
+            let mut first = open(1, dialect)?;
+            first.bind(&[Column::text(0)])?;
+            first.read()?;
+            Some(first.column_count().unwrap_or(0))
+        };
+        let mut reader = open(1, dialect)?;
+        let width = width.unwrap_or_else(|| reader.header().map_or(0, Header::len));
+        check_width(width)?;
+        let plan: Vec<Column> = (0..width).map(Column::text).collect();
+        if width != 0 {
+            // One row more than the sample, so that a row past it costs no second batch to find, in
+            // as many batches as the core says that takes.
+            reader.options.batch_rows = column::sample_rows(
+                &column::specs_with(&plan)?,
+                limit + 1,
+                reader.options.size_flags(dialect),
+            )?;
+            reader.bind(&plan)?;
+        }
+        let mut sample = Sample::new(width, limit);
+        if width != 0 {
+            sample.read_from(&mut reader)?;
+        }
+        sample.judge(reader.header(), options)
+    }
+
     /// Reads from an asynchronous byte source, with the plan bound later: see
     /// [`DelimitedOptions::from_async_reader`].
     #[cfg(feature = "async")]
@@ -589,13 +1158,7 @@ impl<'a> DelimitedReader<'a> {
         plan: Option<&[Column]>,
         options: DelimitedOptions,
     ) -> Result<Self, Error> {
-        let raw = RawDialect {
-            separator: dialect.separator,
-            quoting: u8::from(dialect.quoting),
-            skip_blank_lines: u8::from(dialect.skip_blank_lines),
-            engine: 0,
-        };
-        let state = State::init(raw).ok_or(Error::Separator(dialect.separator))?;
+        let state = State::init_with(&dialect.raw()).ok_or(Error::Separator(dialect.separator))?;
         let mut reader = DelimitedReader {
             dialect,
             options,
@@ -651,14 +1214,22 @@ impl<'a> DelimitedReader<'a> {
         if self.columns.is_some() {
             return Err(Error::AlreadyBound);
         }
-        let (specs, width, widest) = column::specs(plan)?;
+        let (_, width, widest) = column::specs(plan)?;
+        let specs = column::specs_with(plan)?;
         column::within(plan, self.column_count())?;
+        self.options.checked_specs(self.dialect, &specs)?;
         let batch_rows = self.options.batch_rows;
         let per_row = width + 1;
         let rows = column::cell_rows(per_row, batch_rows);
         self.cells = column::table(per_row.checked_mul(rows), widest)?;
         self.per_row = per_row;
-        self.columns = Some(Columns::new(plan, specs, batch_rows));
+        self.columns = Some(Columns::with_options(
+            plan,
+            specs,
+            batch_rows,
+            self.options.notes,
+            self.dialect.long_rows == LongRows::Report,
+        )?);
         Ok(())
     }
 
@@ -689,7 +1260,8 @@ impl<'a> DelimitedReader<'a> {
         (self.state.expected != 0).then_some(self.state.expected as usize)
     }
 
-    /// How many records have been read, the header among them.
+    /// How many records have been read, the header and any discarded among them; the lines
+    /// [`Dialect::skip`] passes over aren't records.
     pub fn records(&self) -> u64 {
         self.state.records
     }
@@ -789,11 +1361,12 @@ impl<'a> DelimitedReader<'a> {
         let mut out = Filled::default();
         loop {
             let (window, last) = self.source.window();
-            let (specs, buffers) = columns.for_core();
+            let (specs, buffers, widths) = columns.for_core_with();
             // SAFETY: every buffer has room for `max_rows` values of its column's door
-            // and as many verdicts, which is what `Columns` allocated.
+            // and as many verdicts and notes, which is what `Columns` allocated; the specs'
+            // lists are interned.
             let code = unsafe {
-                fill::fill(
+                fill::fill_with(
                     &mut self.state,
                     window,
                     last,
@@ -802,6 +1375,8 @@ impl<'a> DelimitedReader<'a> {
                     max_rows,
                     &mut self.cells,
                     &mut self.arena,
+                    self.dialect.tokens,
+                    widths,
                     &mut out,
                 )
             };
@@ -811,7 +1386,7 @@ impl<'a> DelimitedReader<'a> {
                     // The batch's text is the input it was read from, which stays where it
                     // is until the next read.
                     self.pending = out.consumed as usize;
-                    // A batch the cell table ends early (see `column::CELL_BUDGET`) is no
+                    // A batch the cell table ends early (see `size::CELL_BUDGET`) is no
                     // reason to grow the arena.
                     let held = max_rows.min(self.cells.len() / self.per_row);
                     self.cramped = rows < held && out.arena_used as usize * 2 >= self.arena.len();
@@ -855,7 +1430,10 @@ impl<'a> DelimitedReader<'a> {
             self.per_row,
             window,
             &self.arena,
-            Origin::Delimited,
+            Home::Delimited {
+                reported_width: (self.dialect.long_rows == LongRows::Report)
+                    .then_some(self.state.expected),
+            },
         )
     }
 
@@ -864,7 +1442,7 @@ impl<'a> DelimitedReader<'a> {
     /// asked for.
     ///
     /// A structural failure is returned once every intact row before it has been
-    /// delivered, and again on every call after. A reader opened without a plan returns
+    /// delivered, and again on every call after, a declared [`Encoding`]'s among them. A reader opened without a plan returns
     /// [`Error::Unbound`] until one is bound, and one opened on an asynchronous source is
     /// read with `read_async` (available with the `async` feature).
     pub fn read(&mut self) -> Result<Option<Batch<'_>>, Error> {

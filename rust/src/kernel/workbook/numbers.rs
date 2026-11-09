@@ -26,7 +26,7 @@ use super::cell::{Cell, parse_f64};
 use super::iwa::{self, BROKEN_MESSAGE, Package, STORAGE_VERSION, resolve};
 use super::part::{Part, Stop};
 use super::proto::{self, Fields};
-use super::rows::Run;
+use super::rows::{Opening, Run};
 use super::sort::{heap_sort, partition_point};
 use super::styles;
 use super::{Memory, State, failure, room};
@@ -1067,7 +1067,15 @@ pub(super) fn read_row(
             sheet.next_number = number.wrapping_add(1);
             sheet.col = 0;
             run.clear_row();
-            run.sheet.n_mid = 1;
+            match run.opening() {
+                Opening::Read => run.sheet.n_mid = 1,
+                Opening::PastEnd => return Ok(true),
+                Opening::Finished => return Ok(false),
+                Opening::PassOver => {
+                    run.sheet.n_pos = after;
+                    continue;
+                }
+            }
         }
         let columns = (offsets.len() / 2).min(MAX_COLUMNS);
         while (run.sheet.col as usize) < columns {
@@ -1076,7 +1084,7 @@ pub(super) fn read_row(
                 .get(col * 2..col * 2 + 2)
                 .and_then(|b| b.first_chunk::<2>())
                 .map_or(-1, |b| i16::from_le_bytes(*b));
-            if raw >= 0 {
+            if raw >= 0 && run.wants(col as u64, 1) {
                 let start = usize::from(raw as u16) * if wide { 4 } else { 1 };
                 let bytes = storage.get(start..).unwrap_or_default();
                 let slot = cell(bytes, run.table, run.sheet.table, part)?;

@@ -15,12 +15,17 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.github.skunkwerkx.hypercast.CastFailure;
+import io.github.skunkwerkx.hypercast.DateOptions;
 import io.github.skunkwerkx.hypercast.DateOrder;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
 import io.github.skunkwerkx.hypercast.Fault;
+import io.github.skunkwerkx.hypercast.FaultDetail;
+import io.github.skunkwerkx.hypercast.Grouping;
+import io.github.skunkwerkx.hypercast.MonthNames;
 import io.github.skunkwerkx.hypercast.NumFormat;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
+import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -39,7 +44,11 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -49,8 +58,8 @@ import org.junit.jupiter.api.io.TempDir;
  * root) — the same file the Rust and C# bindings replay — through this binding: from a byte
  * array, from native memory read in place and a window at a time, from a stream read
  * through buffers too small for a record, and from a file, in batches of one row, of two
- * and of many. How the input is cut up is the binding's business and must not change the
- * answer.
+ * and of many, with notes on and off. How the input is cut up is the binding's business and
+ * must not change the answer.
  */
 final class CorpusTest {
     private static final int[] BATCH_ROWS = {1, 2, 1024};
@@ -86,16 +95,60 @@ final class CorpusTest {
         DelimitedReader open(Dialect dialect, List<Column> plan);
     }
 
-    private static NumFormat formatOf(JsonObject entry) {
+    /** A corpus entry's format, or {@code null} where it has none. */
+    private static NumFormat declaredFormat(JsonObject entry) {
         if (!entry.has("format")) {
-            return NumFormat.INVARIANT;
+            return null;
         }
         JsonObject format = entry.getAsJsonObject("format");
-        return new NumFormat(
+        // A corpus flags value mixes leniences and grouping, which HyperCast's type keeps apart.
+        int flags = format.get("flags").getAsInt();
+        NumFormat declared = new NumFormat(
                 format.get("decimal_sep").getAsString(),
                 format.get("group_sep").getAsString(),
-                format.get("flags").getAsInt(),
-                format.has("currency") ? format.get("currency").getAsString() : "");
+                flags & 0xFF,
+                Grouping.of(flags & ~0xFF));
+        return format.has("currency")
+                ? declared.withCurrencySymbol(format.get("currency").getAsString())
+                : declared;
+    }
+
+    private static NumFormat formatOf(JsonObject entry) {
+        NumFormat declared = declaredFormat(entry);
+        return declared != null ? declared : NumFormat.INVARIANT;
+    }
+
+    private static String[] stringsOf(JsonArray list) {
+        String[] strings = new String[list.size()];
+        for (int index = 0; index < strings.length; index++) {
+            strings[index] = list.get(index).getAsString();
+        }
+        return strings;
+    }
+
+    private static Column withDateOptions(Column column, JsonObject options) {
+        int flags = 0;
+        if (options.has("flags")) {
+            for (JsonElement flag : options.getAsJsonArray("flags")) {
+                flags |= switch (flag.getAsString()) {
+                    case "compact_date" -> DateOptions.COMPACT_DATE;
+                    case "space_separator" -> DateOptions.SPACE_SEPARATOR;
+                    case "hour_offset" -> DateOptions.HOUR_OFFSET;
+                    default -> throw new IllegalStateException("unknown date flag " + flag);
+                };
+            }
+        }
+        DateOptions declared = new DateOptions(
+                flags, options.has("pivot") ? options.get("pivot").getAsInt() : 0);
+        if (!options.has("months")) {
+            return column.withDateOptions(declared);
+        }
+        MonthNames.Builder months = MonthNames.builder();
+        for (JsonElement entry : options.getAsJsonArray("months")) {
+            JsonArray pair = entry.getAsJsonArray();
+            months.add(pair.get(0).getAsInt(), pair.get(1).getAsString());
+        }
+        return column.withDateOptions(declared, months.build());
     }
 
     // The corpus numbers what a door declares as HyperCast numbers it: from one, in order.
@@ -104,6 +157,17 @@ final class CorpusTest {
     }
 
     static Column columnOf(JsonObject entry) {
+        Column column = doorOf(entry);
+        if (entry.has("tokens")) {
+            column = column.withTokens(stringsOf(entry.getAsJsonArray("tokens")));
+        }
+        if (entry.has("options")) {
+            column = withDateOptions(column, entry.getAsJsonObject("options"));
+        }
+        return column;
+    }
+
+    private static Column doorOf(JsonObject entry) {
         int ordinal = entry.get("ordinal").getAsInt();
         NumFormat format = formatOf(entry);
         String door = entry.get("door").getAsString();
@@ -207,11 +271,26 @@ final class CorpusTest {
         return new String(bytes.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8);
     }
 
-    /** Holds one cell of the batch in hand to what the corpus says of it. */
+    /** Holds one cell of the batch in hand to what the corpus says of it, with notes kept. */
     static void assertCell(String label, Batch batch, int column, int row, JsonObject expected) {
+        assertCell(label, batch, column, row, expected, true);
+    }
+
+    /** Holds one cell of the batch in hand to what the corpus says of it. */
+    static void assertCell(String label, Batch batch, int column, int row, JsonObject expected, boolean notes) {
         CellVerdict verdict = batch.verdict(column, row);
         Door door = batch.columns().get(column).door();
         String expect = expected.get("expect").getAsString();
+        // The note beside the verdict: with notes off there is none, and it says so.
+        FaultDetail detail = batch.detail(column, row);
+        assertEquals(
+                notes && expected.has("detail") ? expected.get("detail").getAsString() : null,
+                detail == null ? null : detail.name(),
+                label);
+        assertEquals(
+                notes && expected.has("origin") ? expected.get("origin").getAsString() : "cell",
+                batch.origin(column, row).name().toLowerCase(Locale.ROOT),
+                label);
         // The verdict array, read in place, says what the per-cell verdict says.
         MemorySegment entry = batch.verdicts(column).asSlice(row * CellVerdict.LAYOUT.byteSize());
         assertEquals(verdict.isOk() ? 0 : verdict.reason().code(), entry.get(ValueLayout.JAVA_INT, 8), label);
@@ -235,9 +314,16 @@ final class CorpusTest {
                 assertEquals(span.get(0).getAsInt(), verdict.offset(), label);
                 assertEquals(span.get(1).getAsInt(), verdict.length(), label);
                 // The cell's own text is still to hand, for the diagnostic a fault deserves.
-                String raw = expected.get("raw").getAsString();
-                assertEquals(raw, batch.rawString(column, row), label);
-                assertEquals(raw, utf8(batch.raw(column, row)), label);
+                if (expected.has("raw_hex")) {
+                    assertEquals(
+                            expected.get("raw_hex").getAsString(),
+                            HexFormat.of().formatHex(batch.raw(column, row).toArray(ValueLayout.JAVA_BYTE)),
+                            label);
+                } else {
+                    String raw = expected.get("raw").getAsString();
+                    assertEquals(raw, batch.rawString(column, row), label);
+                    assertEquals(raw, utf8(batch.raw(column, row)), label);
+                }
             } else {
                 // An empty cell: the corpus states no span and no text, and the text there
                 // was — none, or only what the door trims — is still there to be asked for.
@@ -309,6 +395,8 @@ final class CorpusTest {
                 Door door = batch.columns().get(column).door();
                 assertEquals(batch.verdict(column, index), row.verdict(column), label);
                 assertEquals(batch.isOk(column, index), row.isOk(column), label);
+                assertEquals(batch.detail(column, index), row.detail(column), label);
+                assertEquals(batch.origin(column, index), row.origin(column), label);
                 assertEquals(batch.rawString(column, index), utf8(row.raw(column)), label);
                 assertEquals(batch.rawString(column, index), row.rawString(column), label);
                 assertEquals(batch.get(column, index, typeOf(door)), row.get(column, typeOf(door)), label);
@@ -327,8 +415,8 @@ final class CorpusTest {
 
     /**
      * Holds a reader opened header-first to what a reader with no plan promises — the header's
-     * names resolved first-match, by string and by bytes; no plan; no read, and not for good
-     * — and binds {@code plan}, which binds once.
+     * names found first-match and refused strict where two columns share one, by string and by
+     * bytes; no plan; no read, and not for good — and binds {@code plan}, which binds once.
      */
     static void bindHeaderFirst(
             String label,
@@ -344,59 +432,193 @@ final class CorpusTest {
         assertThrows(IllegalStateException.class, read::run, label);
         if (header != null) {
             for (int ordinal = 0; ordinal < header.size(); ordinal++) {
-                int found = header.ordinal(header.get(ordinal));
+                String name = header.get(ordinal);
+                int found = header.findOrdinal(name).getAsInt();
                 assertTrue(found <= ordinal, label);
-                assertEquals(header.get(found), header.get(ordinal), label);
-                assertEquals(found, header.findOrdinal(header.get(ordinal)).getAsInt(), label);
-                int byBytes = header.ordinal(header.utf8(ordinal));
+                assertEquals(header.get(found), name, label);
+                assertEquals(found, header.indexOf(name), label);
+                MemorySegment bytes = header.utf8(ordinal);
+                int byBytes = header.findOrdinal(bytes).getAsInt();
                 assertTrue(byBytes <= ordinal, label);
-                assertEquals(utf8(header.utf8(byBytes)), utf8(header.utf8(ordinal)), label);
+                assertEquals(utf8(header.utf8(byBytes)), utf8(bytes), label);
                 assertEquals(
                         byBytes,
-                        header.findOrdinal(header.utf8(ordinal).toArray(ValueLayout.JAVA_BYTE))
-                                .getAsInt(),
+                        header.findOrdinal(bytes.toArray(ValueLayout.JAVA_BYTE)).getAsInt(),
                         label);
+                // The strict door answers only for a name one column has.
+                int second = -1;
+                for (int later = found + 1; later < header.size() && second < 0; later++) {
+                    second = header.get(later).equals(name) ? later : -1;
+                }
+                if (second < 0) {
+                    assertEquals(found, header.ordinal(name), label);
+                } else {
+                    AmbiguousColumnException two =
+                            assertThrows(AmbiguousColumnException.class, () -> header.ordinal(name), label);
+                    assertEquals(List.of(name, found, second), List.of(two.name(), two.first(), two.second()), label);
+                }
             }
         }
         bind.accept(plan);
         assertThrows(IllegalStateException.class, () -> bind.accept(plan), label);
     }
 
-    private static void assertFailure(String label, TabularException actual, JsonObject vector) {
-        if (!vector.has("failure")) {
+    /** Holds a failure, whole, to what the corpus says of it: every field for every kind. */
+    static void assertFailure(String label, TabularException actual, JsonObject vector) {
+        if (!vector.has("failure") || vector.get("failure").isJsonNull()) {
             assertNull(actual, label);
             return;
         }
         assertNotNull(actual, label);
         JsonObject expected = vector.getAsJsonObject("failure");
-        String kind = expected.get("kind").getAsString();
-        assertEquals(
-                kind.equals("column_count") ? TabularFailure.COLUMN_COUNT : TabularFailure.UNCLOSED_QUOTE,
-                actual.failure(),
-                label);
+        // The corpus names a failure as the core does: the constant's name, in snake case.
+        assertEquals(expected.get("kind").getAsString(), actual.failure().name().toLowerCase(Locale.ROOT), label);
         assertEquals(expected.get("record").getAsLong(), actual.record(), label);
         assertEquals(expected.get("line").getAsInt(), actual.line(), label);
         assertEquals(expected.get("byte").getAsLong(), actual.byteOffset(), label);
-        if (kind.equals("column_count")) {
-            assertEquals(expected.get("expected").getAsInt(), actual.expected(), label);
-            assertEquals(expected.get("found").getAsInt(), actual.found(), label);
+        assertEquals(expected.has("expected") ? expected.get("expected").getAsInt() : 0, actual.expected(), label);
+        assertEquals(expected.has("found") ? expected.get("found").getAsInt() : 0, actual.found(), label);
+    }
+
+    /** A JSON object with its keys in order, for comparing what a read listed to what the corpus says. */
+    private static String canonical(JsonObject entry) {
+        Map<String, JsonElement> sorted = new TreeMap<>();
+        entry.entrySet().forEach(pair -> sorted.put(pair.getKey(), pair.getValue()));
+        return sorted.toString();
+    }
+
+    /** The problems a batch lists, in the corpus's shape, its rows counted across the read. */
+    static void appendProblems(String label, List<String> problems, Batch batch, int base) {
+        for (Problem problem : batch.faults()) {
+            assertEquals(batch.line(problem.row()), problem.line(), label);
+            JsonObject entry = new JsonObject();
+            entry.addProperty("row", base + problem.row());
+            entry.addProperty("line", problem.line());
+            if (problem.planColumn().isPresent()) {
+                entry.addProperty("plan_column", problem.planColumn().getAsInt());
+                entry.addProperty("source_column", problem.sourceColumn().getAsInt());
+                entry.addProperty("reason", problem.reason().name().toLowerCase(Locale.ROOT));
+                if (problem.reason() != CastFailure.EMPTY) {
+                    JsonArray span = new JsonArray();
+                    span.add(problem.offset());
+                    span.add(problem.length());
+                    entry.add("fault", span);
+                } else {
+                    assertEquals(0, problem.offset(), label);
+                    assertEquals(0, problem.length(), label);
+                }
+                assertEquals(0, problem.expected(), label);
+                assertEquals(0, problem.found(), label);
+            } else {
+                assertTrue(problem.sourceColumn().isEmpty(), label);
+                assertNull(problem.reason(), label);
+                assertNull(problem.detail(), label);
+                assertEquals(0, problem.offset(), label);
+                assertEquals(0, problem.length(), label);
+                entry.addProperty("expected", problem.expected());
+                entry.addProperty("found", problem.found());
+            }
+            if (problem.detail() != null) {
+                entry.addProperty("detail", problem.detail().name());
+            }
+            if (problem.origin() != Origin.CELL) {
+                entry.addProperty("origin", problem.origin().name().toLowerCase(Locale.ROOT));
+            }
+            problems.add(canonical(entry));
         }
     }
 
-    private static void replay(String label, JsonObject vector, Opening opening, int batchRows) {
+    /**
+     * Holds what the faults listed to what the corpus says. With notes off the list has no detail
+     * or origin to give, and no formula with no cached value.
+     */
+    static void assertProblems(String label, List<String> found, JsonObject vector, boolean notes) {
+        List<String> expected = new ArrayList<>();
+        for (JsonElement element : vector.getAsJsonArray("problems")) {
+            JsonObject problem = element.getAsJsonObject().deepCopy();
+            if (!notes) {
+                if (problem.has("origin") && problem.get("origin").getAsString().equals("uncached")) {
+                    continue;
+                }
+                problem.remove("detail");
+                problem.remove("origin");
+            }
+            expected.add(canonical(problem));
+        }
+        assertEquals(expected, found, label);
+    }
+
+    /** The bytes of a case's input. */
+    static byte[] inputOf(JsonObject vector) {
+        return vector.has("input_hex")
+                ? HexFormat.of().parseHex(vector.get("input_hex").getAsString())
+                : vector.get("input").getAsString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    static Tokens tokensOf(JsonArray tokens) {
+        return Tokens.of(stringsOf(tokens));
+    }
+
+    private static Dialect dialectOf(JsonObject vector) {
         JsonObject settings = vector.getAsJsonObject("dialect");
         Dialect dialect = new Dialect(
                 settings.get("separator").getAsString().charAt(0),
                 settings.get("quoting").getAsBoolean(),
                 settings.get("has_header").getAsBoolean(),
                 settings.get("skip_blank_lines").getAsBoolean());
+        if (settings.has("skip")) {
+            dialect = dialect.withSkip(settings.get("skip").getAsInt());
+        }
+        if (settings.has("header_row")) {
+            dialect = dialect.withHeaderRow(settings.get("header_row").getAsInt());
+        }
+        if (settings.has("short_rows")) {
+            dialect = dialect.withShortRows(
+                    ShortRows.valueOf(settings.get("short_rows").getAsString().toUpperCase(Locale.ROOT)));
+        }
+        if (settings.has("long_rows")) {
+            dialect = dialect.withLongRows(
+                    LongRows.valueOf(settings.get("long_rows").getAsString().toUpperCase(Locale.ROOT)));
+        }
+        if (settings.has("tokens")) {
+            dialect = dialect.withTokens(tokensOf(settings.getAsJsonArray("tokens")));
+        }
+        if (settings.has("encoding")) {
+            dialect = dialect.withEncoding(
+                    switch (settings.get("encoding").getAsString()) {
+                        case "utf-8" -> Encoding.UTF_8;
+                        case "windows-1252" -> Encoding.WINDOWS_1252;
+                        case "latin-1" -> Encoding.LATIN_1;
+                        case "utf-16le" -> Encoding.UTF_16LE;
+                        default -> throw new IllegalStateException("unknown encoding " + settings.get("encoding"));
+                    });
+        }
+        return dialect;
+    }
+
+    private static void replay(String label, JsonObject vector, Opening opening, int batchRows) {
+        replay(label, vector, opening, batchRows, true);
+    }
+
+    private static void replay(String label, JsonObject vector, Opening opening, int batchRows, boolean notes) {
+        Dialect dialect = dialectOf(vector).withNotes(notes);
         List<Column> plan = new ArrayList<>();
         for (JsonElement entry : vector.getAsJsonArray("plan")) {
             plan.add(columnOf(entry.getAsJsonObject()));
         }
         JsonArray rows = vector.getAsJsonArray("rows");
 
-        try (DelimitedReader reader = opening.open(dialect, plan)) {
+        // A failure in the header is the opening's: no reader, and no rows before it.
+        DelimitedReader opened;
+        try {
+            opened = opening.open(dialect, plan);
+        } catch (TabularException e) {
+            assertEquals(0, rows.size(), label);
+            assertFailure(label, e, vector);
+            assertProblems(label, List.of(), vector, notes);
+            return;
+        }
+        try (DelimitedReader reader = opened) {
             JsonElement header = vector.get("header");
             if (header.isJsonNull()) {
                 assertNull(reader.header(), label);
@@ -421,21 +643,26 @@ final class CorpusTest {
             assertEquals(plan, reader.plan(), label);
 
             int seen = 0;
+            List<String> problems = new ArrayList<>();
             TabularException failure = null;
             try {
                 for (Batch batch = reader.read(); batch != null; batch = reader.read()) {
                     assertTrue(batch.rows() >= 1 && batch.rows() <= batchRows, label);
                     assertRows(label, batch);
+                    appendProblems(label, problems, batch, seen);
                     for (int row = 0; row < batch.rows(); row++, seen++) {
                         assertTrue(seen < rows.size(), label + ": more rows than the corpus lists");
                         JsonArray cells = rows.get(seen).getAsJsonArray();
+                        // Every row as wide as the plan, whatever its record held.
+                        assertEquals(plan.size(), cells.size(), label);
                         for (int column = 0; column < plan.size(); column++) {
                             assertCell(
                                     label + ", row " + seen + ", column " + column,
                                     batch,
                                     column,
                                     row,
-                                    cells.get(column).getAsJsonObject());
+                                    cells.get(column).getAsJsonObject(),
+                                    notes);
                         }
                     }
                 }
@@ -446,6 +673,7 @@ final class CorpusTest {
             }
             assertEquals(rows.size(), seen, label);
             assertFailure(label, failure, vector);
+            assertProblems(label, problems, vector, notes);
         }
     }
 
@@ -454,11 +682,12 @@ final class CorpusTest {
     }
 
     private static void everyCase(Mode mode) {
-        assertTrue(CORPUS.size() >= 30, "the corpus has " + CORPUS.size() + " cases");
+        assertTrue(CORPUS.size() >= 123, "the corpus has " + CORPUS.size() + " cases");
+        assertEquals(List.of(), CorpusKeys.unknownDelimited(CORPUS));
         for (JsonElement element : CORPUS) {
             JsonObject vector = element.getAsJsonObject();
             String name = vector.get("name").getAsString();
-            byte[] input = vector.get("input").getAsString().getBytes(StandardCharsets.UTF_8);
+            byte[] input = inputOf(vector);
             for (int batchRows : BATCH_ROWS) {
                 mode.replay(name, vector, input, batchRows);
             }
@@ -478,6 +707,12 @@ final class CorpusTest {
                     vector,
                     (dialect, plan) -> DelimitedReader.of(input, dialect),
                     batchRows);
+            replay(
+                    name + " (byte[], notes off, " + batchRows + " rows a batch)",
+                    vector,
+                    (dialect, plan) -> DelimitedReader.of(input, dialect, plan, batchRows),
+                    batchRows,
+                    false);
         });
     }
 
@@ -534,6 +769,10 @@ final class CorpusTest {
         // window, so each case's windows are no smaller than its longest record (and the
         // byte after it, which says a line break is over).
         everyCase((name, vector, input, batchRows) -> {
+            // Windows are the original memory's, and a declared encoding reads a buffer instead.
+            if (vector.has("input_hex") || vector.getAsJsonObject("dialect").has("encoding")) {
+                return;
+            }
             boolean quoting = vector.getAsJsonObject("dialect").get("quoting").getAsBoolean();
             int smallest = longestRecord(input, quoting) + 1;
             try (Arena arena = Arena.ofConfined()) {
@@ -581,7 +820,7 @@ final class CorpusTest {
         for (JsonElement element : CORPUS) {
             JsonObject vector = element.getAsJsonObject();
             String name = vector.get("name").getAsString();
-            byte[] input = vector.get("input").getAsString().getBytes(StandardCharsets.UTF_8);
+            byte[] input = inputOf(vector);
             Files.write(file, input);
             assertArrayEquals(input, Files.readAllBytes(file));
             for (int batchRows : BATCH_ROWS) {
@@ -600,6 +839,226 @@ final class CorpusTest {
                 }
             }
         }
+    }
+
+    @Test
+    void everyDelimitedCorpusKeyIsRead() throws IOException {
+        CorpusKeys.aJunkKeyIsSeenEverywhere("delimited.json", CorpusKeys::unknownDelimited);
+    }
+
+    /** Holds a suggestion to what a corpus case says of it, its param put back together from the report. */
+    static void assertSuggestion(String label, Suggestion found, JsonObject expected) {
+        assertEquals(expected.get("truncated").getAsBoolean(), found.truncated(), label);
+        JsonArray columns = expected.getAsJsonArray("columns");
+        assertEquals(columns.size(), found.report().size(), label);
+        assertEquals(columns.size(), found.plan().size(), label);
+        NumFormat declared = declaredFormat(expected);
+        for (int index = 0; index < columns.size(); index++) {
+            SuggestedColumn report = found.report().get(index);
+            JsonObject want = columns.get(index).getAsJsonObject();
+            String where = label + ", column " + index;
+            int param = want.get("param").getAsInt();
+            int got = report.param();
+            if (!report.candidates().isEmpty()) {
+                got = 0;
+                for (Candidate candidate : report.candidates()) {
+                    got |= switch (candidate) {
+                        case Candidate.Notation notation ->
+                            notation.format().decimalSeparator().equals(".") ? 1 << 1 : 1 << 2;
+                        case Candidate.Order order -> 1 << order.order().code();
+                    };
+                }
+            }
+            if (report.status() == SuggestStatus.RESOLVED && report.door().isNumeric()) {
+                // The plan is in the one notation the param left, and comma groups is also what's
+                // used with no separator to prove it. The export's param is held in its own replay.
+                NumFormat planned = declared != null
+                        ? declared
+                        : param == 1 << 2 ? new NumFormat(',', '.', NumFormat.STYLE_ALL) : NumFormat.INVARIANT;
+                param = 0;
+                assertEquals(planned, report.format(), where);
+                assertEquals(planned, found.plan().get(index).format(), where);
+            } else {
+                assertNull(report.format(), where);
+            }
+            assertEquals(want.get("door").getAsString(), doorName(report.door()), where);
+            assertEquals(param, got, where);
+            assertEquals(
+                    want.get("status").getAsString(), report.status().name().toLowerCase(Locale.ROOT), where);
+            assertEquals(want.get("matched").getAsInt(), report.matched(), where);
+            assertEquals(want.get("sampled").getAsInt(), report.sampled(), where);
+            assertEquals(index, report.ordinal(), where);
+            assertEquals(index, found.plan().get(index).ordinal(), where);
+            assertEquals(
+                    report.status() == SuggestStatus.RESOLVED ? report.door() : Door.TEXT,
+                    found.plan().get(index).door(),
+                    where);
+        }
+    }
+
+    /** A door's name in the corpus. */
+    static String doorName(Door door) {
+        return door.name().toLowerCase(Locale.ROOT);
+    }
+
+    /** What the corpus declares for a case's suggestion. */
+    static SuggestOptions suggestOptionsOf(JsonObject suggest) {
+        SuggestOptions options = SuggestOptions.DEFAULT;
+        if (suggest.has("sample_rows")) {
+            options = options.withSampleRows(suggest.get("sample_rows").getAsInt());
+        }
+        NumFormat format = declaredFormat(suggest);
+        return format == null ? options : options.withFormat(format);
+    }
+
+    /**
+     * Every case that says what to suggest: from memory and from a file; through the export, over
+     * the cells the case's own rows say; and a plan that reads back without refusing what it
+     * resolved.
+     */
+    @Test
+    void everySuggestionIsWhatTheCorpusSays(@TempDir Path directory) throws IOException {
+        int seen = 0;
+        for (JsonElement element : CORPUS) {
+            JsonObject vector = element.getAsJsonObject();
+            if (!vector.has("suggest")) {
+                continue;
+            }
+            seen++;
+            JsonObject suggest = vector.getAsJsonObject("suggest");
+            String name = vector.get("name").getAsString();
+            byte[] input = inputOf(vector);
+            Dialect dialect = dialectOf(vector);
+            SuggestOptions options = suggestOptionsOf(suggest);
+            Suggestion found = DelimitedReader.suggest(input, dialect, options);
+            assertSuggestion(name + " (memory)", found, suggest);
+            Path file = directory.resolve("suggest-" + seen + ".txt");
+            Files.write(file, input);
+            assertSuggestion(name + " (file)", DelimitedReader.suggest(file, dialect, options), suggest);
+            assertTheExportSays(name, vector, suggest, options);
+
+            // What's resolved takes every cell it saw, and refuses none.
+            int sample = suggest.has("sample_rows") ? suggest.get("sample_rows").getAsInt() : Integer.MAX_VALUE;
+            try (DelimitedReader reader = DelimitedReader.of(input, dialect, found.plan())) {
+                int read = 0;
+                for (Batch batch = read < sample ? reader.read() : null;
+                        batch != null;
+                        batch = read < sample ? reader.read() : null) {
+                    for (Problem problem : batch.faults()) {
+                        if (problem.row() + read < sample
+                                && problem.planColumn().isPresent()) {
+                            SuggestedColumn report =
+                                    found.report().get(problem.planColumn().getAsInt());
+                            assertFalse(
+                                    report.status() == SuggestStatus.RESOLVED && report.door() != Door.TEXT,
+                                    name + ": read back refused " + problem);
+                        }
+                    }
+                    read += batch.rows();
+                }
+            }
+        }
+        assertTrue(seen >= 19, seen + " cases say what to suggest");
+    }
+
+    /**
+     * The export, over a case's own rows, on whichever path this JDK takes: a cell with no text in
+     * the case is blank here, as a read's empty verdict is.
+     */
+    private static void assertTheExportSays(String name, JsonObject vector, JsonObject suggest, SuggestOptions options)
+            throws IOException {
+        JsonArray rows = vector.getAsJsonArray("rows");
+        int sample = suggest.has("sample_rows") ? suggest.get("sample_rows").getAsInt() : rows.size();
+        int width = vector.getAsJsonArray("plan").size();
+        java.io.ByteArrayOutputStream text = new java.io.ByteArrayOutputStream();
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment cells = arena.allocate(Math.max((long) width * sample, 1) * Abi.SPAN_BYTES, 4);
+            long entry = 0;
+            for (int column = 0; column < width; column++) {
+                for (int row = 0; row < sample; row++) {
+                    JsonObject cell = rows.get(row).getAsJsonArray().get(column).getAsJsonObject();
+                    byte[] bytes = cell.has("raw_hex")
+                            ? HexFormat.of().parseHex(cell.get("raw_hex").getAsString())
+                            : cell.has("text")
+                                    ? cell.get("text").getAsString().getBytes(StandardCharsets.UTF_8)
+                                    : new byte[0];
+                    cells.set(ValueLayout.JAVA_INT, entry * Abi.SPAN_BYTES, text.size());
+                    cells.set(ValueLayout.JAVA_INT, entry * Abi.SPAN_BYTES + 4, bytes.length);
+                    text.write(bytes);
+                    entry++;
+                }
+            }
+            MemorySegment input = nativeCopy(arena, text.toByteArray());
+            MemorySegment formats = arena.allocate(Math.max(width, 1) * NativeValues.FORMAT_BYTES, 4);
+            for (int column = 0; column < width; column++) {
+                NumFormat format = options.declaredFormat(column);
+                if (format != null) {
+                    NativeValues.writeFormat(format, formats, column * NativeValues.FORMAT_BYTES);
+                }
+            }
+            MemorySegment found = arena.allocate(Math.max(width, 1) * Abi.SUGGESTION_BYTES, 4);
+            assertEquals(
+                    Abi.OK,
+                    Native.suggest(
+                            input,
+                            input.byteSize(),
+                            MemorySegment.NULL,
+                            0,
+                            cells,
+                            MemorySegment.NULL,
+                            sample,
+                            width,
+                            formats,
+                            found),
+                    name);
+            JsonArray columns = suggest.getAsJsonArray("columns");
+            for (int column = 0; column < width; column++) {
+                JsonObject want = columns.get(column).getAsJsonObject();
+                long at = column * Abi.SUGGESTION_BYTES;
+                String where = name + ": the export, column " + column;
+                assertEquals(
+                        want.get("door").getAsString(),
+                        doorName(Door.ofCode(found.get(ValueLayout.JAVA_INT, at + Abi.SUGGESTION_DOOR))),
+                        where);
+                assertEquals(
+                        want.get("param").getAsInt(),
+                        found.get(ValueLayout.JAVA_INT, at + Abi.SUGGESTION_PARAM),
+                        where);
+                assertEquals(
+                        want.get("status").getAsString(),
+                        SuggestStatus.of(found.get(ValueLayout.JAVA_INT, at + Abi.SUGGESTION_STATUS))
+                                .name()
+                                .toLowerCase(Locale.ROOT),
+                        where);
+                assertEquals(
+                        want.get("matched").getAsInt(),
+                        found.get(ValueLayout.JAVA_INT, at + Abi.SUGGESTION_MATCHED),
+                        where);
+                assertEquals(
+                        want.get("sampled").getAsInt(),
+                        found.get(ValueLayout.JAVA_INT, at + Abi.SUGGESTION_SAMPLED),
+                        where);
+            }
+        }
+    }
+
+    /** Every case the corpus has: a suggestion fails where a read of the case fails, and nowhere else. */
+    @Test
+    void aSuggestionFailsOnlyWhereAReadOfTheCaseFails() {
+        int planned = 0;
+        int failed = 0;
+        for (JsonElement element : CORPUS) {
+            JsonObject vector = element.getAsJsonObject();
+            try {
+                DelimitedReader.suggest(inputOf(vector), dialectOf(vector));
+                planned++;
+            } catch (TabularException e) {
+                failed++;
+                assertTrue(vector.has("failure"), vector.get("name") + ": " + e.getMessage());
+            }
+        }
+        assertTrue(planned > 80, planned + " planned");
+        assertTrue(failed > 0, failed + " failed");
     }
 
     // By hand rather than Arena.allocateFrom, which JDK 21 lacks: testFloor runs this too.

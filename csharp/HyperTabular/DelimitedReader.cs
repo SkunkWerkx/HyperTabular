@@ -8,7 +8,8 @@ namespace HyperTabular;
 
 /// <summary>
 /// Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
-/// typed columns, every cell a HyperCast <see cref="Verdict{T}"/>.
+/// typed columns, every cell a HyperCast <see cref="Verdict{T}"/>. UTF-8 unless the dialect declares
+/// another <see cref="TextEncoding"/>, which is decoded ahead of the read.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -35,12 +36,22 @@ namespace HyperTabular;
 /// quote never closed — is a <see cref="TabularException"/>, raised after every intact row
 /// before it has been delivered. Not thread-safe.
 /// </para>
+/// <para>
+/// The caller's stream runs in the middle of a read. A call from it back into the reader — a
+/// read, a bind, a loop over <see cref="Rows"/> — is refused with an
+/// <see cref="InvalidOperationException"/>, as is a second read while a <see cref="ReadAsync"/>
+/// is pending; a <see cref="Dispose"/> from it ends that read with no batch.
+/// </para>
 /// </remarks>
 [SkipLocalsInit]
 public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBatchSource
 {
 	/// <summary>The row ceiling: a single record larger than this is a <see cref="TabularFailure.RowTooLong"/>.</summary>
 	public const int MaxRowBytes = 1 << 30;
+
+	/// <summary>A test's ceiling in place of <see cref="MaxRowBytes"/>, on its thread, for the paths the suite proves many times over: each decoded encoding and the async read, where the real one would take a gigabyte a run.</summary>
+	[ThreadStatic]
+	internal static int RowCeiling;
 
 	/// <summary>The initial read buffer for a stream.</summary>
 	public const int DefaultBufferBytes = 256 * 1024;
@@ -58,6 +69,9 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 
 	const string ContractViolation =
 		"libhypertabular reported a contract violation — a binding bug, please report it.";
+
+	const string Busy =
+		"The reader is in the middle of a read; its stream can't call back into it, and a second read can't start until the first has completed.";
 
 	/// <summary>
 	/// The core's state block, field for field (<c>kernel::delimited::fill::State</c>): where
@@ -106,15 +120,21 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	int _start;
 	int _end;
 	bool _eof;
+	/// <summary>What stands between the source and the buffer when the dialect declares an encoding.</summary>
+	readonly Decoder? _decoder;
+	/// <summary>The dialect's tokens as the core reads them: <see langword="null"/> for none.</summary>
+	readonly byte[]? _tokens;
 
 	/// <summary>The table the header's names are located in, while the header is being read.</summary>
 	Native.RawSpan[]? _names;
 	Header? _header;
 	TabularException? _failure;
 	bool _disposed;
+	/// <summary>A call is in progress: a read (until an asynchronous one completes), a bind or the header. The caller's stream runs in the middle of one.</summary>
+	bool _busy;
 
 	/// <summary>
-	/// Reads UTF-8 delimited text from a stream, the header first: the reader is open, its
+	/// Reads delimited text from a stream, the header first: the reader is open, its
 	/// <see cref="Header"/> read, and the plan left to <see cref="Bind"/> once the header has
 	/// said where each column is.
 	/// </summary>
@@ -135,7 +155,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 			ReadHeader();
 	}
 
-	/// <summary>Reads UTF-8 delimited text from a stream through <paramref name="plan"/>.</summary>
+	/// <summary>Reads delimited text from a stream through <paramref name="plan"/>.</summary>
 	/// <param name="utf8">The stream. Read forward only; never sought.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="plan">The output columns, in output order.</param>
@@ -151,7 +171,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		int batchRows = DefaultBatchRows,
 		int bufferBytes = DefaultBufferBytes,
 		bool leaveOpen = false)
-		: this(dialect, new Columns(plan, batchRows), utf8, bufferBytes, leaveOpen)
+		: this(dialect, Bound(dialect, plan, batchRows, bufferBytes), utf8, bufferBytes, leaveOpen)
 	{
 		if (dialect.HasHeader)
 			ReadHeader();
@@ -159,7 +179,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	}
 
 	/// <summary>
-	/// Reads UTF-8 delimited text already in memory, in place — nothing is copied — the header
+	/// Reads delimited text already in memory, in place — nothing is copied unless the dialect declares an encoding, which has to be decoded — the header
 	/// first, leaving the plan to <see cref="Bind"/>.
 	/// </summary>
 	/// <param name="utf8">The text. Pinned for the reader's lifetime.</param>
@@ -167,17 +187,13 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <exception cref="ArgumentException">The dialect's separator cannot be honoured.</exception>
 	/// <exception cref="TabularException">The header record is structurally broken.</exception>
 	public DelimitedReader(ReadOnlyMemory<byte> utf8, Dialect dialect)
-		: this(dialect, null)
+		: this(dialect, null, utf8)
 	{
-		_pin = utf8.Pin();
-		_memory = (byte*)_pin.Pointer;
-		_end = utf8.Length;
-		_eof = true;
 		if (dialect.HasHeader)
 			ReadHeader();
 	}
 
-	/// <summary>Reads UTF-8 delimited text already in memory, in place — nothing is copied — through <paramref name="plan"/>.</summary>
+	/// <summary>Reads delimited text already in memory, in place — nothing is copied unless the dialect declares an encoding, which has to be decoded — through <paramref name="plan"/>.</summary>
 	/// <param name="utf8">The text. Pinned for the reader's lifetime.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="plan">The output columns, in output order.</param>
@@ -189,23 +205,20 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		Dialect dialect,
 		ReadOnlySpan<Column> plan,
 		int batchRows = DefaultBatchRows)
-		: this(dialect, new Columns(plan, batchRows))
+		: this(dialect, Bound(dialect, plan, batchRows), utf8)
 	{
-		_pin = utf8.Pin();
-		_memory = (byte*)_pin.Pointer;
-		_end = utf8.Length;
-		_eof = true;
 		if (dialect.HasHeader)
 			ReadHeader();
 		WithinHeader();
 	}
 
-	/// <summary>Opens a file of UTF-8 delimited text and reads its header, leaving the plan to <see cref="Bind"/>.</summary>
+	/// <summary>Opens a file of delimited text and reads its header, leaving the plan to <see cref="Bind"/>.</summary>
 	/// <param name="path">The file.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="bufferBytes">The initial read buffer.</param>
 	public static DelimitedReader Open(string path, Dialect dialect, int bufferBytes = DefaultBufferBytes)
 	{
+		CheckSizes(dialect, [], DefaultBatchRows, bufferBytes);
 		var stream = OpenFile(path);
 		try
 		{
@@ -218,7 +231,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		}
 	}
 
-	/// <summary>Opens a file of UTF-8 delimited text, read through <paramref name="plan"/>.</summary>
+	/// <summary>Opens a file of delimited text, read through <paramref name="plan"/>.</summary>
 	/// <param name="path">The file.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="plan">The output columns, in output order.</param>
@@ -231,6 +244,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		int batchRows = DefaultBatchRows,
 		int bufferBytes = DefaultBufferBytes)
 	{
+		CheckSizes(dialect, plan, batchRows, bufferBytes);
 		var stream = OpenFile(path);
 		try
 		{
@@ -248,7 +262,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		new(path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 0, FileOptions.SequentialScan);
 
 	/// <summary>
-	/// Opens a stream of UTF-8 delimited text and awaits its header, leaving the plan to
+	/// Opens a stream of delimited text and awaits its header, leaving the plan to
 	/// <see cref="Bind"/>: the constructor, for a stream that is read asynchronously — the only
 	/// way a browser's (an <c>HttpClient</c> response, a picked file) can be read.
 	/// </summary>
@@ -273,7 +287,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	}
 
 	/// <summary>
-	/// Opens a stream of UTF-8 delimited text through <paramref name="plan"/> and awaits its
+	/// Opens a stream of delimited text through <paramref name="plan"/> and awaits its
 	/// header: <see cref="OpenAsync(Stream, Dialect, int, bool, CancellationToken)"/> with the
 	/// plan declared up front.
 	/// </summary>
@@ -299,15 +313,23 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		if (cancellationToken.IsCancellationRequested)
 			return ValueTask.FromCanceled<DelimitedReader>(cancellationToken);
 		return HeaderAsync(
-			new DelimitedReader(dialect, new Columns(plan, batchRows), utf8, bufferBytes, leaveOpen), cancellationToken);
+			new DelimitedReader(dialect, Bound(dialect, plan, batchRows, bufferBytes), utf8, bufferBytes, leaveOpen), cancellationToken);
 	}
 
 	static async ValueTask<DelimitedReader> HeaderAsync(DelimitedReader reader, CancellationToken cancellationToken)
 	{
 		if (reader._dialect.HasHeader)
 		{
-			while (!reader.HeaderStep())
-				await reader.RefillAsync(cancellationToken).ConfigureAwait(false);
+			reader.Enter();
+			try
+			{
+				while (!reader.HeaderStep())
+					await reader.RefillAsync(cancellationToken).ConfigureAwait(false);
+			}
+			finally
+			{
+				reader._busy = false;
+			}
 		}
 		reader.WithinHeader();
 		return reader;
@@ -318,11 +340,41 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		: this(dialect, columns)
 	{
 		ArgumentNullException.ThrowIfNull(utf8);
-		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferBytes);
+		// The batch's size is the columns' to answer for: this asks about the buffer alone.
+		var start = (int)Columns.CheckSizes(default, 1, bufferBytes, 0).BufferBytes;
 		_stream = utf8;
 		_leaveOpen = leaveOpen;
-		_buffer = GC.AllocateUninitializedArray<byte>(Math.Min(bufferBytes, MaxRowBytes), pinned: true);
+		_buffer = GC.AllocateUninitializedArray<byte>(start, pinned: true);
+		if (dialect.Encoding != TextEncoding.Utf8)
+			_decoder = new Decoder((uint)dialect.Encoding, start);
 	}
+
+	/// <summary>A reader of memory, its header not yet read. Under a declared encoding the memory is the decoder's, and what it decodes to lands in a buffer.</summary>
+	DelimitedReader(Dialect dialect, Columns? columns, ReadOnlyMemory<byte> text)
+		: this(dialect, columns)
+	{
+		_pin = text.Pin();
+		_memory = (byte*)_pin.Pointer;
+		if (dialect.Encoding == TextEncoding.Utf8)
+		{
+			_end = text.Length;
+			_eof = true;
+			return;
+		}
+		_buffer = GC.AllocateUninitializedArray<byte>(DefaultBufferBytes, pinned: true);
+		_decoder = new Decoder((uint)dialect.Encoding, _memory, text.Length);
+	}
+
+	/// <summary>A plan's columns, as a dialect has them read.</summary>
+	/// <summary>The core's answer on these sizes, ahead of touching a file.</summary>
+	static void CheckSizes(Dialect dialect, ReadOnlySpan<Column> plan, int batchRows, int bufferBytes) =>
+		Columns.CheckSizes(Columns.SizeSpecs(plan), batchRows, bufferBytes, SizeFlags(dialect));
+
+	static uint SizeFlags(Dialect dialect) =>
+		(dialect.Notes ? Columns.NotesFlag : 0) | (dialect.LongRows == LongRows.Report ? Columns.WidthsFlag : 0);
+
+	static Columns Bound(Dialect dialect, ReadOnlySpan<Column> plan, int batchRows, int bufferBytes = 1) =>
+		new(plan, batchRows, dialect.Notes, rowWidths: dialect.LongRows == LongRows.Report, bufferBytes: bufferBytes);
 
 	/// <summary>
 	/// The dialect made the core's, and the plan's columns when the plan came with the reader:
@@ -337,16 +389,26 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 
 		if (dialect.Separator > 0x7E)
 			throw new ArgumentException($"Separator U+{(int)dialect.Separator:X4} is not a single ASCII byte.", nameof(dialect));
-		_state = GC.AllocateUninitializedArray<State>(1, pinned: true);
-		var raw = new Native.RawDialect
+		// As many 64-byte elements as the library's block takes; only the first's fields are read.
+		dialect.CheckDeclared();
+		_state = GC.AllocateUninitializedArray<State>(
+			(int)((Native.hypertabular_delimited_state_size() + 63) / 64), pinned: true);
+		var raw = new Native.RawDelimitedOptions
 		{
+			Size = (uint)sizeof(Native.RawDelimitedOptions),
 			Separator = (byte)dialect.Separator,
 			Quoting = dialect.Quoting ? (byte)1 : (byte)0,
 			SkipBlankLines = dialect.SkipBlankLines ? (byte)1 : (byte)0,
+			Skip = dialect.Skip,
+			HeaderRow = dialect.HeaderRow,
+			ShortRows = (uint)dialect.ShortRows,
+			LongRows = (uint)dialect.LongRows,
 		};
-		if (Native.hypertabular_delimited_init((Native.State*)Columns.Address(_state), &raw) != Native.Ok)
+		if (Native.hypertabular_delimited_init_with((Native.State*)Columns.Address(_state), &raw) != Native.Ok)
 			throw new ArgumentException(
 				$"Separator '{dialect.Separator}' is not tab or printable ASCII other than '\"'.", nameof(dialect));
+		if (dialect.Tokens.Packed.Length > 0)
+			_tokens = Columns.Pinned(dialect.Tokens.Packed);
 	}
 
 	/// <summary>The rows a cell table of <paramref name="perRow"/> entries a row is sized for: as many as <see cref="CellBudget"/> holds, from one to a batch.</summary>
@@ -360,7 +422,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		var cells = perRow * CellRows(perRow, columns.BatchRows);
 		_perRow = (int)perRow;
 		_cells = GC.AllocateUninitializedArray<Native.RawSpan>((int)cells, pinned: true);
-		_batch = new Batch(columns, workbook: false);
+		_batch = new Batch(this, columns, workbook: false);
 		_columns = columns;
 	}
 
@@ -372,16 +434,24 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// </summary>
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <param name="batchRows">Rows per batch.</param>
-	/// <exception cref="InvalidOperationException">The reader already has a plan.</exception>
+	/// <exception cref="InvalidOperationException">The reader already has a plan, or is in the middle of a read (from its stream).</exception>
 	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, a column's ordinal is 2²⁰ or more, or a column reads past the columns the header gives every record; the reader is left without a plan.</exception>
 	public void Bind(ReadOnlySpan<Column> plan, int batchRows = DefaultBatchRows)
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
-		if (_columns is not null)
-			throw new InvalidOperationException("The reader already has a plan; a plan is bound once.");
-		var columns = new Columns(plan, batchRows);
-		Within(columns.Plan);
-		Attach(columns);
+		Enter();
+		try
+		{
+			if (_columns is not null)
+				throw new InvalidOperationException("The reader already has a plan; a plan is bound once.");
+			var columns = Bound(_dialect, plan, batchRows);
+			Within(columns.Plan);
+			Attach(columns);
+		}
+		finally
+		{
+			_busy = false;
+		}
 	}
 
 	/// <summary>
@@ -451,10 +521,10 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	{
 		length = _end - _start;
 		last = _eof;
-		return (_stream is null ? _memory : Address(_buffer)) + _start;
+		return (_stream is null && _decoder is null ? _memory : Address(_buffer)) + _start;
 	}
 
-	/// <summary>Puts the unfinished record at the front of the buffer, and makes room behind it.</summary>
+	/// <summary>Puts the unfinished record at the front of the buffer.</summary>
 	void Compact()
 	{
 		var pending = _end - _start;
@@ -464,20 +534,51 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 			_start = 0;
 			_end = pending;
 		}
-		if (_end == _buffer.Length)
+	}
+
+	/// <summary>Doubles the buffer, up to the row ceiling.</summary>
+	void Grow()
+	{
+		if (_buffer.Length >= (RowCeiling > 0 ? RowCeiling : MaxRowBytes))
 		{
-			// One record fills the buffer: it needs a bigger one.
-			if (_buffer.Length >= MaxRowBytes)
+			ref readonly var state = ref _state[0];
+			throw _failure = new TabularException(TabularFailure.RowTooLong,
+				(long)state.Records, (int)state.Line, (long)state.Offset, 0, 0);
+		}
+		var larger = GC.AllocateUninitializedArray<byte>(
+			(int)Math.Min((long)_buffer.Length * 2, MaxRowBytes), pinned: true);
+		Buffer.BlockCopy(_buffer, 0, larger, 0, _end);
+		_buffer = larger;
+	}
+
+	/// <summary>
+	/// What every refill does ahead of the source: the unfinished record to the front, room behind it,
+	/// and a failure the decoder is holding, now that the fill has had all the text ahead of it.
+	/// </summary>
+	/// <returns><see langword="false"/> if nothing is to be read: the fill has one more look.</returns>
+	bool MakeRoom()
+	{
+		Compact();
+		if (_decoder is { Failed: true })
+		{
+			// A \r the fill is holding ends a row whatever comes next, and only waits to see if a \n
+			// is part of it; nothing is coming, and this says so. In a quote it ends nothing, and the
+			// record is as cut as it was.
+			if (_end == 0 || _buffer[_end - 1] != (byte)'\r')
 			{
 				ref readonly var state = ref _state[0];
-				throw _failure = new TabularException(TabularFailure.RowTooLong,
-					(long)state.Records, (int)state.Line, (long)state.Offset, 0, 0);
+				throw _failure = new TabularException(TabularFailure.Encoding,
+					(long)state.Records, (int)state.Line, (long)_decoder.FailedAt, 0, 0);
 			}
-			var larger = GC.AllocateUninitializedArray<byte>(
-				(int)Math.Min((long)_buffer.Length * 2, MaxRowBytes), pinned: true);
-			Buffer.BlockCopy(_buffer, 0, larger, 0, _end);
-			_buffer = larger;
+			if (_end == _buffer.Length)
+				Grow();
+			_buffer[_end++] = (byte)'\n';
+			return false;
 		}
+		// One record fills the buffer: it needs a bigger one.
+		if (_end == _buffer.Length)
+			Grow();
+		return true;
 	}
 
 	/// <summary>Counts what a read of the stream brought in.</summary>
@@ -491,8 +592,26 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// <summary>Puts the unfinished record at the front of the buffer and reads more behind it.</summary>
 	void Refill()
 	{
-		Compact();
-		Landed(_stream!.Read(_buffer, _end, _buffer.Length - _end));
+		if (!MakeRoom())
+			return;
+		if (_decoder is null)
+		{
+			Landed(Returned(_stream!.Read(_buffer, _end, _buffer.Length - _end)));
+			return;
+		}
+		while (!Decode())
+			_decoder.Landed(Returned(_stream!.Read(_decoder.Raw!, _decoder.End, _decoder.Raw!.Length - _decoder.End)));
+	}
+
+	/// <summary>
+	/// What a read of the stream brought in, once the stream has given control back: a reader the
+	/// stream (or anything it ran) disposed ends the read here, with no batch, rather than going on.
+	/// </summary>
+	int Returned(int read)
+	{
+		if (_disposed)
+			throw new ObjectDisposedException(GetType().FullName, "The reader was disposed in the middle of a read.");
+		return read;
 	}
 
 	/// <summary>
@@ -502,16 +621,145 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	async ValueTask RefillAsync(CancellationToken cancellationToken)
 	{
 		cancellationToken.ThrowIfCancellationRequested();
-		Compact();
-		Landed(await _stream!.ReadAsync(_buffer.AsMemory(_end), cancellationToken).ConfigureAwait(false));
+		if (!MakeRoom())
+			return;
+		if (_decoder is null)
+		{
+			Landed(Returned(await _stream!.ReadAsync(_buffer.AsMemory(_end), cancellationToken).ConfigureAwait(false)));
+			return;
+		}
+		while (!Decode())
+			_decoder.Landed(Returned(await _stream!.ReadAsync(_decoder.Raw.AsMemory(_decoder.End), cancellationToken).ConfigureAwait(false)));
+	}
+
+	/// <summary>
+	/// Decodes what the decoder holds behind what the buffer holds, with whatever that wants first.
+	/// </summary>
+	/// <returns><see langword="true"/> once the fill has something new to look at: text, the end, or a failure to raise when it next asks. <see langword="false"/> if the stream has to bring more first.</returns>
+	bool Decode()
+	{
+		var decoder = _decoder!;
+		while (true)
+		{
+			var room = _buffer.Length - _end;
+			Native.RawTranscoded done;
+			if (Native.hypertabular_transcode(decoder.Encoding, decoder.Input + decoder.At, (nuint)(decoder.End - decoder.At),
+				decoder.Eof ? 1u : 0u, Address(_buffer) + _end, (nuint)room, &done) != Native.Ok)
+				throw new InvalidOperationException(ContractViolation);
+			if (done.Failed != 0)
+			{
+				decoder.Failed = true;
+				decoder.FailedAt = decoder.Offset + done.FailureAt;
+			}
+			decoder.At += (int)done.Consumed;
+			decoder.Offset += done.Consumed;
+			if (done.Written > 0)
+			{
+				_end += (int)done.Written;
+				return true;
+			}
+			// The next refill raises it, once the fill has had one more look.
+			if (decoder.Failed)
+				return true;
+			if (decoder.At < decoder.End && room < Decoder.MaxCharacter)
+			{
+				Grow();
+				continue;
+			}
+			if (decoder.Eof)
+			{
+				_eof = true;
+				return true;
+			}
+			decoder.Compact();
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// The step ahead of the fill, for a dialect that declares an encoding: the original bytes, which
+	/// go through the core's transcoder into the reader's buffer, where the fill reads them as it would
+	/// have read UTF-8.
+	/// </summary>
+	sealed class Decoder
+	{
+		/// <summary>The most bytes of UTF-8 one character takes: with this much room, a transcode that writes nothing and does not fail wants more input.</summary>
+		internal const int MaxCharacter = 4;
+
+		internal readonly uint Encoding;
+		/// <summary>What a stream's reads land in: fixed in size, since what is left when more is wanted is less than a character. <see langword="null"/> over memory.</summary>
+		internal readonly byte[]? Raw;
+		/// <summary>The original bytes, <see cref="At"/> to <see cref="End"/> of them not yet decoded.</summary>
+		internal readonly byte* Input;
+		internal int At;
+		internal int End;
+		/// <summary>Whether the source has ended.</summary>
+		internal bool Eof;
+		/// <summary>The original bytes decoded so far: added to a call's <c>FailureAt</c>, this is the input's offset.</summary>
+		internal ulong Offset;
+		/// <summary>A unit has no character, at <see cref="FailedAt"/> in the original input: raised only when the fill has had all that was decoded ahead of it, and wants more.</summary>
+		internal bool Failed;
+		internal ulong FailedAt;
+
+		/// <summary>A decoder of a stream.</summary>
+		internal Decoder(uint encoding, int size)
+		{
+			Encoding = encoding;
+			Raw = GC.AllocateUninitializedArray<byte>(Math.Max(size, MaxCharacter), pinned: true);
+			Input = Address(Raw);
+		}
+
+		/// <summary>A decoder of pinned memory, all there already.</summary>
+		internal Decoder(uint encoding, byte* input, int length)
+		{
+			Encoding = encoding;
+			Input = input;
+			End = length;
+			Eof = true;
+		}
+
+		/// <summary>Puts what is left undecoded at the front.</summary>
+		internal void Compact()
+		{
+			new ReadOnlySpan<byte>(Input + At, End - At).CopyTo(new Span<byte>(Input, End));
+			End -= At;
+			At = 0;
+		}
+
+		/// <summary>Counts what a read of the stream brought in.</summary>
+		internal void Landed(int read)
+		{
+			if (read == 0)
+				Eof = true;
+			End += read;
+		}
 	}
 
 	TabularException Structural(in Native.RawFailure failure) => _failure = TabularException.From(failure);
 
+	/// <summary>
+	/// Starts a call that reads or changes the reader, refusing one made from inside another: the
+	/// caller's stream runs in the middle of a read, and the read has its buffers' offsets in hand.
+	/// </summary>
+	void Enter()
+	{
+		if (_busy)
+			throw new InvalidOperationException(Busy);
+		_busy = true;
+	}
+
 	void ReadHeader()
 	{
-		while (!HeaderStep())
-			Refill();
+		Enter();
+		try
+		{
+			while (!HeaderStep())
+				Refill();
+		}
+		finally
+		{
+			_busy = false;
+		}
 	}
 
 	/// <summary>Reads the header from what is buffered: <see langword="true"/> once it has been read, <see langword="false"/> if the core needs more input first.</summary>
@@ -605,15 +853,19 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		while (true)
 		{
 			var window = Window(out var length, out var last);
-			// Only the cells and the arena are the fill's; the rest stays empty.
-			var buffers = new Native.RawBuffers
+			// Only the cells, the arena, the tokens and the row widths are the fill's; the rest stays empty.
+			var buffers = new Native.RawBuffersWith
 			{
+				Size = (uint)sizeof(Native.RawBuffersWith),
 				Arena = Address(_arena),
 				ArenaCap = (nuint)_arena.Length,
 				Cells = Address(_cells),
 				CellsCap = (nuint)_cells.Length,
+				Tokens = _tokens is null ? null : Address(_tokens),
+				TokensLen = _tokens is null ? 0 : (nuint)_tokens.Length,
+				RowWidths = columns.RowWidths is null ? null : Address(columns.RowWidths),
 			};
-			var code = Native.hypertabular_delimited_fill(
+			var code = Native.hypertabular_delimited_fill_with(
 				(Native.State*)Address(_state), window, (nuint)length, last ? 1u : 0u,
 				Address(columns.Specs), Address(columns.Buffers), (nuint)columns.Plan.Length, (nuint)batchRows,
 				&buffers, &filled);
@@ -629,7 +881,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 						// the budget fills fewer rows than a batch every time, and that is no
 						// reason to grow the arena.
 						_cramped = rows < Math.Min(batchRows, _cells.Length / _perRow) && (long)filled.ArenaUsed * 2 >= _arena.Length;
-						_batch!.Fill(rows, _cells, _perRow, window, _arena);
+						_batch!.Fill(rows, _cells, _perRow, window, _arena, _state[0].Expected);
 						return Step.Rows;
 					}
 					if (last && (consumed == length || consumed == 0))
@@ -664,22 +916,32 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// The input is structurally broken. Raised after every intact row before the break has
 	/// been delivered, and again on every later call.
 	/// </exception>
-	/// <exception cref="InvalidOperationException">No plan has been bound. Not final: bind one and read.</exception>
+	/// <exception cref="InvalidOperationException">No plan has been bound (not final: bind one and read), or the reader is in the middle of a read: the call came from its stream, or while a <see cref="ReadAsync"/> is pending.</exception>
+	/// <exception cref="ObjectDisposedException">The reader is disposed, or was disposed while this read waited on the stream.</exception>
 	public Batch? Read()
 	{
-		Begin();
-		while (true)
+		ObjectDisposedException.ThrowIf(_disposed, this);
+		Enter();
+		try
 		{
-			switch (FillStep())
+			Begin();
+			while (true)
 			{
-				case Step.Rows:
-					return _batch;
-				case Step.End:
-					return null;
-				default:
-					Refill();
-					break;
+				switch (FillStep())
+				{
+					case Step.Rows:
+						return _batch;
+					case Step.End:
+						return null;
+					default:
+						Refill();
+						break;
+				}
 			}
+		}
+		finally
+		{
+			_busy = false;
 		}
 	}
 
@@ -697,43 +959,64 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// The input is structurally broken. Raised after every intact row before the break has
 	/// been delivered, and again on every later call.
 	/// </exception>
-	/// <exception cref="InvalidOperationException">No plan has been bound. Not final: bind one and read.</exception>
+	/// <exception cref="InvalidOperationException">No plan has been bound (not final: bind one and read), or the reader is in the middle of a read: the call came from its stream, or while another <see cref="ReadAsync"/> is pending.</exception>
+	/// <exception cref="ObjectDisposedException">The reader is disposed, or was disposed while this read waited on the stream.</exception>
 	/// <exception cref="OperationCanceledException">The token was cancelled.</exception>
-	/// <remarks>One read at a time: the next is not started until this one has completed.</remarks>
+	/// <remarks>One read at a time: until this one has completed, another read or a bind is refused.</remarks>
 	public ValueTask<Batch?> ReadAsync(CancellationToken cancellationToken = default)
 	{
 		if (cancellationToken.IsCancellationRequested)
 			return ValueTask.FromCanceled<Batch?>(cancellationToken);
 		try
 		{
-			Begin();
-			switch (FillStep())
-			{
-				case Step.Rows:
-					return new(_batch);
-				case Step.End:
-					return new((Batch?)null);
-			}
+			ObjectDisposedException.ThrowIf(_disposed, this);
+			Enter();
 		}
 		catch (Exception e)
 		{
 			return ValueTask.FromException<Batch?>(e);
 		}
-		return ReadRestAsync(cancellationToken);
-	}
-
-	async ValueTask<Batch?> ReadRestAsync(CancellationToken cancellationToken)
-	{
-		while (true)
+		try
 		{
-			await RefillAsync(cancellationToken).ConfigureAwait(false);
+			Begin();
 			switch (FillStep())
 			{
 				case Step.Rows:
-					return _batch;
+					_busy = false;
+					return new(_batch);
 				case Step.End:
-					return null;
+					_busy = false;
+					return new((Batch?)null);
 			}
+		}
+		catch (Exception e)
+		{
+			_busy = false;
+			return ValueTask.FromException<Batch?>(e);
+		}
+		return ReadRestAsync(cancellationToken);
+	}
+
+	/// <summary>The rest of a <see cref="ReadAsync"/> that has to wait on the stream: the reader stays busy until it completes.</summary>
+	async ValueTask<Batch?> ReadRestAsync(CancellationToken cancellationToken)
+	{
+		try
+		{
+			while (true)
+			{
+				await RefillAsync(cancellationToken).ConfigureAwait(false);
+				switch (FillStep())
+				{
+					case Step.Rows:
+						return _batch;
+					case Step.End:
+						return null;
+				}
+			}
+		}
+		finally
+		{
+			_busy = false;
 		}
 	}
 
@@ -745,6 +1028,14 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	public RowSequence Rows() => new(this);
 
 	/// <summary>Releases the pinned memory, and the stream unless it was to be left open.</summary>
+	/// <remarks>
+	/// Never refused: called from the reader's stream in the middle of a read, or while a
+	/// <see cref="ReadAsync"/> is still waiting on the stream, it disposes the reader there and then,
+	/// and that read ends with an <see cref="ObjectDisposedException"/> once the stream gives control
+	/// back, handing out no batch. A <c>Dispose</c> from another thread that lands after the stream
+	/// has given control back is concurrent use, which the reader doesn't support: that read may
+	/// still hand out its batch, whole and correct, and the next read is refused.
+	/// </remarks>
 	public void Dispose()
 	{
 		if (!Release())
@@ -769,5 +1060,77 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		_batch?.Clear();
 		_pin.Dispose();
 		return true;
+	}
+
+	/// <summary>
+	/// Reads a sample of the file at <paramref name="path"/> through the text door and says what its
+	/// columns look like: a plan to look at, change and hand to a read, and a report. Nothing is sniffed
+	/// in a read, and nothing here reaches one: this is its own read of the file, opened and closed here.
+	/// There is no form of this for a stream, which would lose the rows it sampled.
+	/// </summary>
+	/// <remarks>
+	/// <para>
+	/// Declaring the locale is the recommended route: a number format and a date order are the plan's to
+	/// say, and with them nothing needs inferring. A suggestion is a starting point for a plan to inspect.
+	/// </para>
+	/// <para>
+	/// The width is the header's, or the first record's, and a plan has to name the columns before that
+	/// record can be read. So with no header the file is opened twice, once to read the first record: a
+	/// path that can only be read once is not for this. The dialect is what the sample is read with, its
+	/// tokens included, and a cell it says is empty is blank to the suggestion.
+	/// </para>
+	/// <para>What it says can surprise, so read the report before the plan:</para>
+	/// <list type="bullet">
+	/// <item><description>A column of <c>0</c> and <c>1</c> is <see cref="Door.Boolean"/>, the first door asked, and <c>F</c> or <c>No</c> read false.</description></item>
+	/// <item><description><c>1.234</c> alone is ambiguous, 1.234 or 1234, and reads as text until a format is declared or a value settles it, which takes in a column of prices at three decimals. Beside <c>2.5</c> it is a decimal, and beside <c>2,5</c> it is 1234.</description></item>
+	/// <item><description><c>2,5</c>, <c>0,125</c>, <c>1.234,5</c> and <c>1.234.567</c> read only with <c>,</c> as the decimal, so they are resolved in that notation, and <see cref="SuggestedColumn.Format"/> names it. <c>2,5</c> beside <c>2.5</c> is unresolved.</description></item>
+	/// <item><description><c>1,23,456</c>, Indian grouping, reads under neither notation with none declared, because nothing says its culture: alone it is text, resolved, and beside <c>5</c> unresolved. Declaring <c>NumFormat.Invariant with { Grouping = NumGrouping.Indian }</c> for the column makes it a number.</description></item>
+	/// <item><description><c>007</c> and an integer past <see cref="long"/> are text, with no note saying why, so as not to lose the zeros or the digits.</description></item>
+	/// <item><description>A sheet's date column is text: <see cref="Sheet.Suggest"/> says why.</description></item>
+	/// </list>
+	/// </remarks>
+	/// <param name="path">The file.</param>
+	/// <param name="dialect">The declared dialect.</param>
+	/// <param name="options">How the sample is taken and read; <see langword="null"/> takes 1,000 rows with nothing declared.</param>
+	/// <exception cref="ArgumentException">A format the options declare is one HyperCast refuses: first, before the file is opened, though another replaces it or the sample never reaches its ordinal.</exception>
+	/// <exception cref="TabularException">A failure among the sampled rows: there is no knowing what is past it, and a read would stop there too. A failure past them is not met, or only says the source was truncated.</exception>
+	public static Suggestion Suggest(string path, Dialect dialect, SuggestOptions? options = null)
+	{
+		ArgumentNullException.ThrowIfNull(path);
+		return Suggest(dialect, options, unnoted => Open(path, unnoted));
+	}
+
+	/// <summary><see cref="Suggest(string, Dialect, SuggestOptions?)"/> over text in memory.</summary>
+	/// <param name="text">The text.</param>
+	/// <param name="dialect">The declared dialect.</param>
+	/// <param name="options">How the sample is taken and read; <see langword="null"/> takes 1,000 rows with nothing declared.</param>
+	/// <exception cref="ArgumentException">A format the options declare is one HyperCast refuses: first, before anything is read.</exception>
+	/// <exception cref="TabularException">A failure among the sampled rows.</exception>
+	public static Suggestion Suggest(ReadOnlyMemory<byte> text, Dialect dialect, SuggestOptions? options = null) =>
+		Suggest(dialect, options, unnoted => new DelimitedReader(text, unnoted));
+
+	static Suggestion Suggest(Dialect dialect, SuggestOptions? options, Func<Dialect, DelimitedReader> open)
+	{
+		options ??= SuggestOptions.Default;
+		options.CheckFormats();
+		var limit = options.RowsWithin(DefaultBatchRows);
+		var unnoted = dialect with { Notes = false };
+		var width = -1;
+		if (!dialect.HasHeader)
+		{
+			// A headerless source's width is its first record's, which a read says through a plan of
+			// one column.
+			using var first = open(unnoted);
+			first.Bind([Column.Text(0)], 1);
+			first.Read();
+			width = first.ColumnCount ?? 0;
+		}
+		using var reader = open(unnoted);
+		if (width < 0)
+			width = reader.Header!.Count;
+		// One row more than the sample, so that a row past it costs no second batch to find, in as many
+		// batches as the core says that takes.
+		var sample = Sample.Of(reader, plan => reader.Bind(plan, Columns.SampleRows(plan, limit + 1, SizeFlags(unnoted))), width, limit, sheet: false);
+		return sample.Judge(reader.Header, options);
 	}
 }

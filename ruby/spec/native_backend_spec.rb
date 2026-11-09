@@ -57,6 +57,11 @@ RSpec.describe "native backend" do
     expect(fiddle_eval("Agreement.header_first_digest")).to eq(Agreement.header_first_digest)
   end
 
+  # Every suggestion, and what a suggest of every other case says.
+  it "agrees with the Fiddle backend on what to suggest for every case in both corpora" do
+    expect(fiddle_eval("Agreement.suggest_digest")).to eq(Agreement.suggest_digest)
+  end
+
   it "agrees with the Fiddle backend on a sheet whose repeated header row a late plan reads" do
     path = File.expand_path("../../corpus/workbook/generated-a.ods", __dir__).dump
     script = "s = HyperTabular::Workbook.open(#{path}).sheet(1, HyperTabular::SheetOptions::DEFAULT); " \
@@ -65,7 +70,7 @@ RSpec.describe "native backend" do
   end
 
   it "agrees with the Fiddle backend on a fault span in multi-byte text" do
-    script = 'r = HyperTabular::DelimitedReader.new("n\nééx\n", HyperTabular::Dialect::CSV, ' \
+    script = 'r = HyperTabular::DelimitedReader.new("n\n\u00e9\u00e9x\n", HyperTabular::Dialect::CSV, ' \
              "[HyperTabular::Column.i32(0)]); b = r.read; [b.get(0, 0), b.raw(0, 0)].inspect"
     expect(fiddle_eval(script)).to eq(eval(script))
   end

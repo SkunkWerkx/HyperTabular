@@ -152,3 +152,72 @@ sealed class LiveStream : Stream
 	public override void SetLength(long value) => throw new NotSupportedException();
 	public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }
+
+/// <summary>
+/// A forward-only stream over bytes, 1 to <c>maxChunk</c> of them a read in a seeded order, that
+/// runs <see cref="Hook"/> with the read's number at the start of each read: caller code in the
+/// middle of a reader's read. Its asynchronous read waits for <see cref="Hold"/>, when one is set.
+/// </summary>
+sealed class HookStream(byte[] bytes, int seed, int maxChunk = 64) : Stream
+{
+	readonly Random _chunks = new(seed);
+	int _position;
+
+	/// <summary>Run at the start of every read, with that read's number, from 1.</summary>
+	public Action<int>? Hook { get; set; }
+
+	/// <summary>What the next asynchronous read waits for before it hands anything over; cleared as it starts.</summary>
+	public TaskCompletionSource? Hold { get; set; }
+
+	public int Reads { get; private set; }
+
+	/// <summary>Once set, from the hook or before, every read gives 0: the end, as a stream that was closed may say.</summary>
+	public bool Ended { get; set; }
+
+	public override bool CanRead => true;
+	public override bool CanSeek => false;
+	public override bool CanWrite => false;
+	public override long Length => throw new NotSupportedException();
+	public override long Position
+	{
+		get => throw new NotSupportedException();
+		set => throw new NotSupportedException();
+	}
+
+	int Next(Span<byte> destination)
+	{
+		Hook?.Invoke(++Reads);
+		if (Ended)
+			return 0;
+		var chunk = Math.Min(Math.Min(destination.Length, _chunks.Next(1, maxChunk + 1)), bytes.Length - _position);
+		bytes.AsSpan(_position, chunk).CopyTo(destination);
+		_position += chunk;
+		return chunk;
+	}
+
+	public override int Read(byte[] buffer, int offset, int count) => Next(buffer.AsSpan(offset, count));
+
+	public override int Read(Span<byte> buffer) => Next(buffer);
+
+	public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+	{
+		if (Hold is { } hold)
+		{
+			Hold = null;
+			await hold.Task.ConfigureAwait(false);
+		}
+		cancellationToken.ThrowIfCancellationRequested();
+		return Next(buffer.Span);
+	}
+
+	public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+		ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+	public override void Flush()
+	{
+	}
+
+	public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+	public override void SetLength(long value) => throw new NotSupportedException();
+	public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}

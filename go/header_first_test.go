@@ -32,15 +32,28 @@ func TestAPlanIsBuiltFromTheHeaderAndBoundOnce(t *testing.T) {
 	if len(header) != 5 || r.ColumnCount() != 5 || r.IsBound() || r.Plan() != nil {
 		t.Fatalf("header %q, %d columns, bound %v, plan %v", header, r.ColumnCount(), r.IsBound(), r.Plan())
 	}
-	// Exact, case and spaces included, and the first of two columns of the same name.
+	// Exact, case and spaces included, and Find takes the first of two columns of the same name.
 	for name, want := range map[string]int{"Region Code": 0, "M49 Code": 2, "m49 code": -1, " M49 Code": -1, "M49 Code ": -1} {
 		got, ok := header.Find(name)
 		if got != want || ok != (want >= 0) {
 			t.Errorf("Find(%q) = %d, %v; want %d", name, got, ok, want)
 		}
 	}
-	if got, err := header.OrdinalBytes([]byte("M49 Code")); got != 2 || err != nil {
+	// Ordinal won't choose, and says which two it won't choose between.
+	if got, err := header.OrdinalBytes([]byte("Region Name")); got != 1 || err != nil {
 		t.Errorf("OrdinalBytes: %d, %v", got, err)
+	}
+	for name, ordinal := range map[string]func() (int, error){
+		"Ordinal":      func() (int, error) { return header.Ordinal("M49 Code") },
+		"OrdinalBytes": func() (int, error) { return header.OrdinalBytes([]byte("M49 Code")) },
+	} {
+		got, err := ordinal()
+		var ambiguous *AmbiguousColumnError
+		if got != -1 || !errors.Is(err, ErrAmbiguousColumn) || !errors.As(err, &ambiguous) ||
+			ambiguous.Name != "M49 Code" || ambiguous.First != 2 || ambiguous.Second != 4 ||
+			err.Error() != `hypertabular: the header names two columns "M49 Code", at positions 2 and 4: say which by position` {
+			t.Errorf("%s of a shared name: %d, %v", name, got, err)
+		}
 	}
 	_, err = header.Ordinal("Population")
 	var noColumn *NoColumnError
@@ -58,7 +71,7 @@ func TestAPlanIsBuiltFromTheHeaderAndBoundOnce(t *testing.T) {
 			t.Fatalf("Read before Bind: %v, %v", b, err)
 		}
 	}
-	m49, _ := header.Ordinal("M49 Code")
+	m49, _ := header.Find("M49 Code")
 	name, _ := header.Ordinal("Region Name")
 	plan := []Column{I32(m49, hypercast.Invariant), Text(name)}
 	if err := r.Bind(plan); err != nil {
@@ -81,7 +94,7 @@ func TestAPlanIsBuiltFromTheHeaderAndBoundOnce(t *testing.T) {
 // and past are refused at Bind, naming the plan column, and the reader is left unbound.
 func TestAnOrdinalAtTheCapIsRefusedAtBind(t *testing.T) {
 	const widest = 1<<20 - 1
-	if spec, err := Text(widest).spec(); err != nil || spec.ordinal != widest {
+	if spec, _, err := Text(widest).spec(); err != nil || spec.ordinal != widest {
 		t.Errorf("ordinal 2^20 − 1: %v (spec ordinal %d)", err, spec.ordinal)
 	}
 	ordinals := []int{1 << 20, math.MaxInt32}
@@ -419,7 +432,7 @@ func TestASheetIsOpenedHeaderFirst(t *testing.T) {
 	if _, err := book.SheetNamedUnbound("No such sheet", DefaultSheetOptions); !errors.Is(err, ErrNoSheet) {
 		t.Errorf("a name the workbook lacks: %v", err)
 	}
-	if _, err := book.SheetUnbound(0, SheetOptions{}); err == nil {
+	if _, err := book.SheetUnbound(0, DefaultSheetOptions, BatchRows(0)); err == nil {
 		t.Error("no rows a batch: no error")
 	}
 	sheet, err := book.SheetUnbound(0, DefaultSheetOptions)

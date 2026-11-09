@@ -17,8 +17,8 @@
 //! the core wherever it is linked. Collections, files, and anything else a host language
 //! does better itself belong to the layer above.
 //!
-//! The supported Rust interface is [`abi`], [`door`], [`exports`], [`delimited::fill`]
-//! and [`workbook`]'s state, buffers and book/row operations. Parser implementation
+//! The supported Rust interface is [`abi`], [`door`], [`exports`], [`delimited::fill`],
+//! [`faults`], [`size`], [`suggest`], [`transcode`] and [`workbook`]'s state, buffers and book/row operations. Parser implementation
 //! modules are private:
 //!
 //! ```compile_fail,E0603
@@ -38,5 +38,9 @@ pub mod abi;
 pub mod delimited;
 pub mod door;
 pub mod exports;
+pub mod faults;
 pub(crate) mod inflate;
+pub mod size;
+pub mod suggest;
+pub mod transcode;
 pub mod workbook;

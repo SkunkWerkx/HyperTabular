@@ -1,7 +1,6 @@
 //! `Header`: the names a source's header row declared, and the ordinal each is at.
 
 use std::cell::OnceCell;
-use std::collections::HashMap;
 
 use ext_php_rs::exception::PhpResult;
 use ext_php_rs::prelude::*;
@@ -11,7 +10,8 @@ use ext_php_rs::zend::{ClassEntry, ce};
 use super::args::{ArrayArg, Mixed, Str};
 use super::batch::{Array, MixedValue, typed_return};
 use super::classes::{bool_zval, call, new_object};
-use super::errors::{logic, out_of_bounds, out_of_range, pending};
+use super::convert::rust_error;
+use super::errors::{contract_violation, logic, out_of_bounds, out_of_range, pending};
 use super::guard;
 
 // JSON's interface, part of every PHP build since 8.0, read from the binary's exported data
@@ -52,9 +52,12 @@ typed_return!(
 /// $reader->bind($plan);
 /// ```
 ///
-/// A name is matched exactly, byte for byte; where a name repeats, the first column of that
-/// name is the one found. A header is read-only: it counts, iterates and indexes as the list of
-/// its names, and serializes to JSON as that list.
+/// A name is matched exactly, byte for byte. `ordinal()` is strict: a name no column has is an
+/// `\OutOfBoundsException`, and one that two columns have is an `AmbiguousColumn` naming both, because
+/// a plan built from names mustn't silently read the wrong column. `find()` is the optional lookup:
+/// it can't carry an error and its caller asked for the first, so it keeps the first match, and a
+/// plan by position reads either. A header is read-only: it counts, iterates and indexes as the list
+/// of its names, and serializes to JSON as that list.
 #[php_class]
 #[php(name = "HyperTabular\\Header")]
 #[php(flags = ext_php_rs::flags::ClassFlags::Final)]
@@ -65,7 +68,8 @@ typed_return!(
 pub struct Header {
     names: Zval,
     count: usize,
-    first: OnceCell<HashMap<Vec<u8>, i64>>,
+    /// The names as the crate looks them up, and the key each is at in `names`.
+    lookup: OnceCell<(crate::Header, Vec<i64>)>,
 }
 
 impl Header {
@@ -74,7 +78,7 @@ impl Header {
         Header {
             names,
             count,
-            first: OnceCell::new(),
+            lookup: OnceCell::new(),
         }
     }
 
@@ -86,9 +90,10 @@ impl Header {
             .map_err(|_| pending("header"))
     }
 
-    fn lookup(&self, name: &[u8]) -> Option<i64> {
-        let first = self.first.get_or_init(|| {
-            let mut first = HashMap::new();
+    fn index(&self) -> &(crate::Header, Vec<i64>) {
+        self.lookup.get_or_init(|| {
+            let mut header = crate::Header::new();
+            let mut keys = Vec::new();
             if let Some(names) = self.names.array() {
                 for (ordinal, (key, each)) in names.iter().enumerate() {
                     let ordinal = match key {
@@ -96,13 +101,13 @@ impl Header {
                         _ => ordinal as i64,
                     };
                     if let Some(each) = each.zend_str() {
-                        first.entry(each.as_bytes().to_vec()).or_insert(ordinal);
+                        header.push(each.as_bytes());
+                        keys.push(ordinal);
                     }
                 }
             }
-            first
-        });
-        first.get(name).copied()
+            (header, keys)
+        })
     }
 
     fn name_at(&self, offset: &Zval) -> Option<Zval> {
@@ -127,24 +132,32 @@ impl Header {
         guard(|| Ok(Array(self.names.shallow_clone())))
     }
 
-    /// The ordinal of the first column named `$name` exactly — what `Column`'s factories take.
+    /// The ordinal of the column named `$name` exactly — what `Column`'s factories take.
     ///
     /// @throws \OutOfBoundsException when no column has that name.
+    /// @throws AmbiguousColumn when two columns have it: `find()` keeps the first, and a plan can
+    ///                         name either by position.
     pub fn ordinal(&self, name: Str) -> PhpResult<i64> {
         guard(|| {
-            self.lookup(&name.0).ok_or_else(|| {
-                out_of_bounds(format!(
+            let (header, keys) = self.index();
+            match header.require(&name.0) {
+                Ok(at) => keys.get(at).copied().ok_or_else(contract_violation),
+                Err(crate::Error::NoColumn(_)) => Err(out_of_bounds(format!(
                     "The header has no column named \"{}\"; it names {} columns",
                     String::from_utf8_lossy(&name.0),
                     self.count
-                ))
-            })
+                ))),
+                Err(other) => Err(rust_error(other)),
+            }
         })
     }
 
     /// The ordinal of the first column named `$name` exactly, or null when none is.
     pub fn find(&self, name: Str) -> PhpResult<Option<i64>> {
-        guard(|| Ok(self.lookup(&name.0)))
+        guard(|| {
+            let (header, keys) = self.index();
+            Ok(header.ordinal(&name.0).and_then(|at| keys.get(at).copied()))
+        })
     }
 
     /// How many columns the header names.

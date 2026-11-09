@@ -23,12 +23,13 @@ module HyperTabular
     KINDS = {
       1 => :unclosed_quote, 2 => :column_count, 3 => :row_too_long, 16 => :not_a_zip, 17 => :container,
       18 => :encrypted, 19 => :method, 20 => :missing_part, 21 => :xml, 22 => :deflate,
-      23 => :not_a_workbook, 24 => :shared_string, 25 => :too_large, 26 => :iwa
+      23 => :not_a_workbook, 24 => :shared_string, 25 => :too_large, 26 => :iwa, 27 => :encoding
     }.freeze
 
     # What is wrong: :unclosed_quote (the input ended inside a quoted cell), :column_count
     # (a record's cell count disagrees with the first record's), :row_too_long (a single
-    # record is larger than DelimitedReader::MAX_ROW_BYTES); for a workbook :not_a_zip,
+    # record is larger than DelimitedReader::MAX_ROW_BYTES), :encoding (the input holds a unit
+    # its declared Dialect encoding has no character for); for a workbook :not_a_zip,
     # :container (the zip's own structure is broken), :encrypted, :method (a part is
     # compressed by neither stored nor deflate), :missing_part, :xml (a part ends inside an
     # XML construct), :deflate (a part is not a whole deflate stream), :not_a_workbook,
@@ -46,7 +47,9 @@ module HyperTabular
     # One-based line the offending record starts on.
     attr_reader :line
 
-    # Absolute byte offset of the offending record's start, a byte-order mark included.
+    # Absolute byte offset of the offending record's start, a byte-order mark included, in the
+    # decoded text under a declared encoding. For :encoding alone it is the unit's offset in the
+    # original input.
     attr_reader :byte
 
     # Cells in the first record, for :column_count; 0 otherwise.
@@ -86,6 +89,9 @@ module HyperTabular
       case kind
       when :column_count then "Record #{at} has #{found} cells; the first record had #{expected}."
       when :unclosed_quote then "The input ended inside a quoted cell in record #{at}."
+      when :encoding
+        "Record #{record} (line #{line}) holds a unit its declared encoding has no character for, " \
+        "at byte #{byte} of the input."
       when :row_too_long then "Record #{at} exceeds the #{DelimitedReader::MAX_ROW_BYTES}-byte row ceiling."
       when :not_a_zip then "The workbook is not a zip file."
       when :encrypted then "The workbook is encrypted."

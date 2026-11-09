@@ -11,41 +11,6 @@ namespace HyperTabular.Tests;
 /// </summary>
 public sealed class WorkbookCorpusTests
 {
-	static string FailureName(TabularFailure failure) =>
-		failure switch
-		{
-			TabularFailure.UnclosedQuote => "unclosed_quote",
-			TabularFailure.ColumnCount => "column_count",
-			TabularFailure.RowTooLong => "row_too_long",
-			TabularFailure.NotAZip => "not_a_zip",
-			TabularFailure.Container => "container",
-			TabularFailure.Encrypted => "encrypted",
-			TabularFailure.Method => "method",
-			TabularFailure.MissingPart => "missing_part",
-			TabularFailure.Xml => "xml",
-			TabularFailure.Deflate => "deflate",
-			TabularFailure.NotAWorkbook => "not_a_workbook",
-			TabularFailure.SharedString => "shared_string",
-			TabularFailure.TooLarge => "too_large",
-			_ => throw new InvalidOperationException($"no corpus name for {failure}"),
-		};
-
-	static void AssertFailure(string label, TabularException? actual, JsonElement @case)
-	{
-		if (!@case.TryGetProperty("failure", out var expected) || expected.ValueKind == JsonValueKind.Null)
-		{
-			actual.ShouldBeNull(label);
-			return;
-		}
-		actual.ShouldNotBeNull(label);
-		FailureName(actual.Failure).ShouldBe(expected.GetProperty("kind").GetString(), label);
-		actual.Record.ShouldBe(expected.GetProperty("record").GetInt64(), label);
-		actual.Line.ShouldBe(expected.GetProperty("line").GetInt32(), label);
-		actual.Byte.ShouldBe(expected.GetProperty("byte").GetInt64(), label);
-		if (expected.TryGetProperty("expected", out var count))
-			(actual.Expected, actual.Found).ShouldBe((count.GetInt32(), expected.GetProperty("found").GetInt32()), label);
-	}
-
 	[Fact]
 	void Workbook_corpus() => Replay();
 
@@ -109,7 +74,8 @@ public sealed class WorkbookCorpusTests
 	static void Replay()
 	{
 		var corpus = CorpusTests.Corpus("workbook.json");
-		corpus.Length.ShouldBeGreaterThanOrEqualTo(80);
+		corpus.Length.ShouldBeGreaterThanOrEqualTo(398);
+		CorpusKeys.UnknownWorkbook(corpus).ShouldBeEmpty();
 		var cells = 0;
 		foreach (var @case in corpus)
 		{
@@ -122,7 +88,7 @@ public sealed class WorkbookCorpusTests
 			{
 				foreach (var (source, open, check) in Sources(path, bytes))
 				{
-					AssertFailure($"{name} ({source})", Should.Throw<TabularException>(() => Now(open())), @case);
+					CorpusTests.AssertFailure($"{name} ({source})", Should.Throw<TabularException>(() => Now(open())), @case);
 					check($"{name} ({source})");
 				}
 				continue;
@@ -154,10 +120,7 @@ public sealed class WorkbookCorpusTests
 
 				foreach (var batchRows in (int[])[1, 2, 1024])
 				{
-					var options = new SheetOptions(
-						settings.GetProperty("has_header").GetBoolean(),
-						settings.GetProperty("skip_empty_rows").GetBoolean(),
-						batchRows);
+					var options = OptionsOf(settings) with { BatchRows = batchRows };
 					foreach (var (named, headerFirst) in ((bool, bool)[])[(false, false), (true, false), (false, true), (true, true)])
 					{
 						if (named && !byName)
@@ -182,6 +145,7 @@ public sealed class WorkbookCorpusTests
 						sheet.IsBound.ShouldBeTrue(label);
 
 						var seen = 0;
+						var problems = new List<string>();
 						TabularException? failure = null;
 						try
 						{
@@ -189,10 +153,12 @@ public sealed class WorkbookCorpusTests
 							{
 								batch.Rows.ShouldBeInRange(1, batchRows, label);
 								CorpusTests.AssertRows(label, batch);
+								CorpusTests.AppendProblems(label, problems, batch, seen);
 								for (var row = 0; row < batch.Rows; row++, seen++)
 								{
 									seen.ShouldBeLessThan(rows.GetArrayLength(), label);
 									batch.Line(row).ShouldBe(numbers[seen].GetInt32(), $"{label}, row {seen}");
+									rows[seen].GetArrayLength().ShouldBe(plan.Length, label);
 									for (var column = 0; column < plan.Length; column++)
 										CorpusTests.AssertCell($"{label}, row {seen}, column {column}", batch, column, row, rows[seen][column]);
 								}
@@ -205,12 +171,106 @@ public sealed class WorkbookCorpusTests
 							Should.Throw<TabularException>(() => sheet.Read()).ShouldBeSameAs(e, label);
 						}
 						seen.ShouldBe(rows.GetArrayLength(), label);
-						AssertFailure(label, failure, @case);
+						CorpusTests.AssertFailure(label, failure, @case);
+						CorpusTests.AssertProblems(label, problems, @case, notes: true);
 					}
 				}
 			}
 		}
 		cells.ShouldBeGreaterThanOrEqualTo(12_000);
+	}
+
+	/// <summary>A case's options, as the corpus says them.</summary>
+	static SheetOptions OptionsOf(JsonElement settings)
+	{
+		var options = new SheetOptions(
+			settings.GetProperty("has_header").GetBoolean(),
+			settings.GetProperty("skip_empty_rows").GetBoolean());
+		if (settings.TryGetProperty("skip", out var skip))
+			options = options with { Skip = skip.GetUInt32() };
+		if (settings.TryGetProperty("header_row", out var headerRow))
+			options = options with { HeaderRow = headerRow.GetUInt32() };
+		if (settings.TryGetProperty("range", out var range))
+			options = options with { Range = SheetRange.Parse(range.GetString()!) };
+		if (settings.TryGetProperty("tokens", out var tokens))
+			options = options with { Tokens = CorpusTests.TokensOf(tokens) };
+		return options;
+	}
+
+	[Fact]
+	void Every_workbook_corpus_key_is_read() =>
+		CorpusKeys.AJunkKeyIsSeenEverywhere("workbook.json", CorpusKeys.UnknownWorkbook);
+
+	/// <summary>
+	/// Every case read with notes off, once, from memory: refused cells keep their verdicts and lose
+	/// their details, and the faults list loses uncached formulas.
+	/// </summary>
+	[Fact]
+	void Workbook_corpus_with_notes_off()
+	{
+		foreach (var @case in CorpusTests.Corpus("workbook.json"))
+		{
+			if (!@case.TryGetProperty("sheet", out var sheetIndex))
+				continue;
+			var name = @case.GetProperty("name").GetString()!;
+			using var book = Workbook.Open(Path.Combine(CorpusTests._corpusDirectory, @case.GetProperty("file").GetString()!));
+			Column[] plan = [.. @case.GetProperty("plan").EnumerateArray().Select(CorpusTests.ColumnOf)];
+			var sheet = book.Sheet(sheetIndex.GetInt32(), OptionsOf(@case.GetProperty("options")) with { Notes = false }, plan);
+			var rows = @case.GetProperty("rows");
+			var seen = 0;
+			var problems = new List<string>();
+			TabularException? failure = null;
+			try
+			{
+				while (sheet.Read() is { } batch)
+				{
+					CorpusTests.AppendProblems(name, problems, batch, seen);
+					for (var row = 0; row < batch.Rows; row++, seen++)
+						for (var column = 0; column < plan.Length; column++)
+							CorpusTests.AssertCell($"{name}, row {seen}, column {column}", batch, column, row, rows[seen][column], notes: false);
+				}
+			}
+			catch (TabularException e)
+			{
+				failure = e;
+			}
+			seen.ShouldBe(rows.GetArrayLength(), name);
+			CorpusTests.AssertFailure(name, failure, @case);
+			CorpusTests.AssertProblems(name, problems, @case, notes: false);
+		}
+	}
+
+	/// <summary>
+	/// Every case that says what its sheet suggests: through the sheet itself, whose plan then has to
+	/// read back refusing no cell.
+	/// </summary>
+	[Fact]
+	void Every_workbook_suggestion_is_what_the_corpus_says()
+	{
+		var seen = 0;
+		foreach (var @case in CorpusTests.Corpus("workbook.json"))
+		{
+			if (!@case.TryGetProperty("suggest", out var suggest))
+				continue;
+			seen++;
+			var name = @case.GetProperty("name").GetString()!;
+			using var book = Workbook.Open(Path.Combine(CorpusTests._corpusDirectory, @case.GetProperty("file").GetString()!));
+			var index = @case.GetProperty("sheet").GetInt32();
+			var options = OptionsOf(@case.GetProperty("options"));
+			var found = book.Sheet(index, options).Suggest(CorpusTests.SuggestOptionsOf(suggest));
+			CorpusTests.AssertSuggestion(name, found, suggest);
+			AssertReadsBack(name, book.Sheet(index, options, [.. found.Plan]));
+		}
+		seen.ShouldBeGreaterThanOrEqualTo(15);
+	}
+
+	/// <summary>No cell of a sheet its plan was suggested from is refused.</summary>
+	internal static void AssertReadsBack(string label, Sheet sheet)
+	{
+		while (sheet.Read() is { } batch)
+			foreach (var problem in batch.Faults())
+				if (problem.Reason is CastFailure.Malformed or CastFailure.OutOfRange)
+					throw new ShouldAssertException($"{label}: read back refused {problem}");
 	}
 
 	[Fact]

@@ -11,7 +11,7 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 
 /**
  * The rows of one read, column-major, copied out of the reader: a batch stays valid after
- * the reader has moved on.
+ * the reader has moved on, and after it is closed.
  */
 export declare class Batch {
   /** How many rows the batch holds. */
@@ -30,6 +30,22 @@ export declare class Batch {
    * not have is HyperCast's contract violation: `malformed`, offset 0, length 0.
    */
   get<T extends Value = Value>(column: number, row: number): Verdict<T>
+  /**
+   * What failed in the cell, by HyperCast's `Detail` name: `null` for a cell that cast,
+   * one no door was asked about (a token, padding, a formula with no cached value), a read
+   * with notes off, and a cell the batch does not have.
+   */
+  detail(column: number, row: number): Detail | null
+  /**
+   * Where the cell's verdict came from (`cell` for every cell of a read with notes off), or
+   * `null` for a cell the batch does not have.
+   */
+  origin(column: number, row: number): Origin | null
+  /**
+   * What went wrong in the batch, by row and then column, a row's own entry first: worked
+   * out when asked for, a new array each call, the caller's own.
+   */
+  faults(): Array<Problem>
   /**
    * The text of the cell, whatever its door and verdict: what a fault's span is a span of.
    * Empty for an empty cell, a typed workbook cell that cast, and a cell the batch does
@@ -50,11 +66,18 @@ export declare class Batch {
 }
 
 /**
- * One output column: the source column it reads, the door its cells go through, and, for a
- * numeric door, the notation. Made by a factory (`Column.i32(0)`), never by `new`. A factory
- * never refuses: a column it cannot honour (an ordinal that is not a whole number below
- * 2^20, a format or a declared precision, order or epoch that is not one) is refused, with
- * its place in the plan, when the plan is bound.
+ * A batch's store under WebAssembly, as `index.js`'s batch holds it: opaque, and of no use to
+ * anything but this package's own `batch*` functions. (Under Node, Bun and Deno the store is an
+ * `ArrayBuffer` instead.)
+ */
+export declare class BatchStore {}
+
+/**
+ * One output column: the source column it reads, the door its cells go through, and what it
+ * declares beside them. Made by a factory (`Column.i32(0)`), never by `new`. A factory never
+ * refuses: a column whose arguments are not of the declared types is refused, with its
+ * place in the plan, when the plan is bound, as is one the core cannot honour (an ordinal
+ * past the core's limit, a format or date options HyperCast refuses).
  */
 export declare class Column {
   /** A boolean, read under HyperCast's natural-language lexicon. */
@@ -104,13 +127,34 @@ export declare class Column {
   static dateOrdered(ordinal: number, order: number): Column
   /** A zone-less civil date-time whose date fields come in the declared `DateOrder`. */
   static datetime(ordinal: number, order: number): Column
+  /**
+   * The same column answering to these tokens rather than its dialect's or sheet's: a
+   * cell whose exact unquoted text is one of them is `empty`, its origin `token`. An empty
+   * list means none, so a column can opt out of its dialect's. Each distinct list is kept
+   * for the life of the process: a program building lists from request data grows without
+   * bound.
+   */
+  withTokens(tokens: ReadonlyArray<string>): Column
+  /**
+   * The same column reading dates under a HyperCast `DateOptions`, its month names
+   * included: the `timestamp`, `date`, `dateOrdered` and `datetime` doors read them. On a
+   * sheet they reach only a text cell. Each distinct month list is kept for the life of the
+   * process.
+   */
+  withDateOptions(options: DeclaredDateOptions): Column
   /** The door its cells go through. */
   get door(): Door
   /** The source column it reads, as it was given (`NaN` for an ordinal that is no number). */
   get ordinal(): number
   /**
-   * Whether the core can honour it: a plan holding a column that is not valid is refused
-   * when it is bound, with the column's place in the plan.
+   * The notation a number door reads in, as its 92 bytes (other doors carry one too, and
+   * read nothing of it); `null` for a column that is not valid.
+   */
+  get format(): SuggestedFormat | null
+  /**
+   * Whether its arguments were of the declared types. A plan holding a column that is not
+   * valid is refused when it is bound, with the column's place in the plan; so is one the
+   * core cannot honour, valid or not.
    */
   get valid(): boolean
 }
@@ -127,8 +171,20 @@ export declare class DelimitedReader {
    * `Dialect.CSV`. Never throws: anything that stops it is the outcome's `error`.
    */
   static fromBytes(bytes: Uint8Array | string, dialect?: Dialect | null, plan?: ReadonlyArray<Column> | null, options?: DelimitedOptions | null): Outcome<DelimitedReader>
-  /** Opens the file at `path` and reads it a buffer at a time, as `fromBytes` reads memory. */
+  /**
+   * Opens the file at `path` and reads it a buffer at a time, as `fromBytes` reads memory.
+   * The core judges the options' sizes before the file is opened.
+   */
   static open(path: string, dialect?: Dialect | null, plan?: ReadonlyArray<Column> | null, options?: DelimitedOptions | null): Outcome<DelimitedReader>
+  /**
+   * Samples the file at `path` and suggests a plan for it, never applying it: each column
+   * tried against the doors, with a report saying how far the sample settles it. A
+   * starting point to inspect; declaring the number format and date order settles what a
+   * sample cannot.
+   */
+  static suggest(path: string, dialect?: Dialect | null, options?: SuggestOptions | null): Outcome<Suggestion>
+  /** `suggest`, over delimited text held in memory: a `Uint8Array` or a string. */
+  static suggestBytes(bytes: Uint8Array | string, dialect?: Dialect | null, options?: SuggestOptions | null): Outcome<Suggestion>
   /**
    * Declares the plan a reader opened without one reads through: once, before the first
    * read.
@@ -142,22 +198,30 @@ export declare class DelimitedReader {
   read(): Outcome<Batch | null>
   /**
    * Releases the reader's buffers and its file now, rather than when it is collected.
-   * Batches already read stay valid; a read or bind after it is a `closed` error.
+   * Batches already read stay valid; a read or bind after it is a `closed` error. Closing
+   * twice is no error.
    */
-  close(): void
-  /** Whether a plan has been bound. */
+  close(): Outcome<null>
+  /**
+   * Whether a plan has been bound; `false` once closed. Throws the `busy` error from
+   * inside one of the reader's own calls.
+   */
   get isBound(): boolean
   /**
-   * The header record's names, or `null` if the dialect declares no header or the reader
-   * was closed.
+   * The header record's names, or `null` if the dialect declares no header, and once
+   * closed. Throws the `busy` error from inside one of the reader's own calls.
    */
   get header(): Header | null
   /**
    * How many cells a record has: the header's count, or the first record's once it has
-   * been read; `null` before either, or once closed.
+   * been read; `null` before either, and once closed. Throws the `busy` error from inside
+   * one of the reader's own calls.
    */
   get columnCount(): number | null
-  /** How many records have been read, the header among them; `null` once closed. */
+  /**
+   * How many records have been read, the header among them; `null` once closed. Throws
+   * the `busy` error from inside one of the reader's own calls.
+   */
   get records(): number | null
 }
 
@@ -170,16 +234,40 @@ export declare class Header {
   /**
    * The first column with exactly this name (byte for byte, case and spaces included; a
    * `Uint8Array` is matched against the bytes the file holds), or `null` if none has it.
+   * Two columns with the name answer the first: `require` refuses that instead.
    */
   ordinal(name: string | Uint8Array): number | null
   /**
-   * The first column with exactly this name, or the `noColumn` error naming it: what a
-   * plan built from names reads best with.
+   * The column with exactly this name: the `noColumn` error naming it if none has it, and
+   * the `ambiguousColumn` error naming both if two have, since a plan built from names must
+   * not choose for its caller.
    */
   require(name: string | Uint8Array): Outcome<number>
 }
 
-/** One row of a batch, read across: the batch and an index, nothing copied. */
+/**
+ * A part of a sheet: rows and columns, each 1-based, `0` meaning no limit on that side.
+ * Made by `Range.parse` or `Range.of`, never by `new`.
+ */
+export declare class Range {
+  /**
+   * A range from its text, `A5:F200`: capital column letters, both corners, the last not
+   * before the first. Anything else is the `range` error.
+   */
+  static parse(text: string): Outcome<Range>
+  /**
+   * A range from its four numbers, each 1-based, `0` for no limit on that side: what text
+   * cannot say, such as every row from the fifth. A last before its first is the `range`
+   * error.
+   */
+  static of(firstRow: number, firstColumn: number, lastRow: number, lastColumn: number): Outcome<Range>
+  get firstRow(): number
+  get firstColumn(): number
+  get lastRow(): number
+  get lastColumn(): number
+}
+
+/** One row of a batch, read across: the batch's store and an index, nothing copied. */
 export declare class Row {
   /** The row's place in its batch. */
   get index(): number
@@ -190,6 +278,10 @@ export declare class Row {
    * contract violation.
    */
   get<T extends Value = Value>(column: number): Verdict<T>
+  /** What failed in the cell in `column`, as `Batch.detail`. */
+  detail(column: number): Detail | null
+  /** Where the verdict of the cell in `column` came from, as `Batch.origin`. */
+  origin(column: number): Origin | null
   /** The raw text of the cell in `column`, as `Batch.raw`. */
   raw(column: number): Uint8Array
   /** `raw` as a string, as `Batch.rawString`. */
@@ -209,16 +301,26 @@ export declare class Sheet {
   /** Reads the next batch, as `DelimitedReader.read` does. */
   read(): Outcome<Batch | null>
   /**
+   * Samples the sheet from its first row, under the options it was opened with, and
+   * suggests a plan for it, never applying it: as `DelimitedReader.suggest`. A sheet's
+   * date column is text, and its typed cells count for every notation. Reads nothing of
+   * this sheet's own read.
+   */
+  suggest(options?: SuggestOptions | null): Outcome<Suggestion>
+  /**
    * Releases the sheet's buffers now, rather than when it is collected (the workbook's
    * bytes stay until the workbook and its sheets are). Batches already read stay valid; a
-   * read or bind after it is a `closed` error.
+   * read or bind after it is a `closed` error. Closing twice is no error.
    */
-  close(): void
-  /** Whether a plan has been bound. */
+  close(): Outcome<null>
+  /**
+   * Whether a plan has been bound; `false` once closed. Throws the `busy` error from
+   * inside one of the sheet's own calls.
+   */
   get isBound(): boolean
   /**
-   * The header row's names, or `null` if the sheet was opened without a header or was
-   * closed.
+   * The header row's names, or `null` if the sheet was opened without a header, and once
+   * closed. Throws the `busy` error from inside one of the sheet's own calls.
    */
   get header(): Header | null
   /** The workbook's date system, as `Workbook.dateSystem`. */
@@ -250,6 +352,40 @@ export declare class Workbook {
   sheet(which: number | string, options?: SheetOptions | null, plan?: ReadonlyArray<Column> | null): Outcome<Sheet>
 }
 
+/**
+ * Makes every batch this environment reads with `make(store, rows, doors)`, `index.js`'s own,
+ * rather than as the native `Batch`, which a native finalizer frees only once the event loop
+ * turns. Internal to the package: what `make` is given is of no use to anything else.
+ */
+export declare function __makeBatchesWith(make: (store: unknown, rows: number, doors: Array<Door>) => Batch): void
+
+/** `Batch.column`, over a store. */
+export declare function batchColumn(store: unknown, column: number): Array<Verdict<Value>>
+
+/** `Batch.detail`, over a store. */
+export declare function batchDetail(store: unknown, column: number, row: number): Detail | null
+
+/** `Batch.faultCount`, over a store. */
+export declare function batchFaultCount(store: unknown, column: number): number
+
+/** `Batch.faults`, over a store. */
+export declare function batchFaults(store: unknown): Array<Problem>
+
+/** `Batch.get`, over a store. */
+export declare function batchGet(store: unknown, column: number, row: number): Verdict<Value>
+
+/** `Batch.line`, over a store. */
+export declare function batchLine(store: unknown, row: number): number
+
+/** `Batch.origin`, over a store. */
+export declare function batchOrigin(store: unknown, column: number, row: number): Origin | null
+
+/** `Batch.raw`, over a store. */
+export declare function batchRaw(store: unknown, column: number, row: number): Uint8Array
+
+/** `Batch.rawString`, over a store. */
+export declare function batchRawString(store: unknown, column: number, row: number): string
+
 /** The failure case of an outcome: `ok` is `false` and `error` says why. */
 export interface Broken {
   ok: false
@@ -262,6 +398,19 @@ export interface CalendarDate {
   month: number
   day: number
 }
+
+/**
+ * A declaration that would settle an ambiguous column: a date order (a HyperCast
+ * `DateOrder`, in `order`) or a notation (in `format`).
+ */
+export interface Candidate {
+  kind: CandidateKind
+  order: number | null
+  format: SuggestedFormat | null
+}
+
+/** What a candidate declares. */
+export type CandidateKind = 'dateOrder' | 'numFormat'
 
 /** The closed set of reasons a cell can fail its door: HyperCast's own. */
 export type CastFailure = 'empty' | 'malformed' | 'outOfRange'
@@ -277,28 +426,65 @@ export interface CivilDateTime {
   nanos: number
 }
 
-/** How a delimited reader sizes what it owns. */
+/**
+ * What a column's date doors read beyond their own shapes: a `DateOptions` of
+ * `@skunkwerkx/hypercast`, its month names included.
+ */
+export interface DeclaredDateOptions {
+  flags: number
+  pivot: number
+  months?: { readonly packed: Uint8Array } | null
+}
+
+/** How a delimited reader sizes what it owns. Each left out is the core's default. */
 export interface DelimitedOptions {
-  /** The most rows a batch holds; 4096 when left out. */
+  /**
+   * The most rows a batch holds; 4096 when left out. The core refuses `0`, and a batch of
+   * the plan that would ask for more memory than a batch may.
+   */
   batchRows?: number
   /**
    * The input buffer a file is read through to begin with (it grows to hold the longest
-   * record); 256 KiB when left out.
+   * record); 256 KiB when left out. The core refuses `0`.
    */
   bufferBytes?: number
+  /** Whether a batch keeps each cell's `detail` and `origin`; `true` when left out. */
+  notes?: boolean
 }
 
 /**
- * How delimited text is written: the separator, and whether `"` quotes, the first record
- * is the header and blank lines are skipped. Each flag left out is `true`, as in
- * `Dialect.CSV`.
+ * What failed in a cell, as HyperCast names it: the names `@skunkwerkx/hypercast`'s
+ * `Detail` uses, and `unknown` for one a later core adds that this binding does not know.
+ */
+export type Detail = 'blank' | 'unexpectedCharacter' | 'digitExpected' | 'delimiterExpected' | 'trailingText' | 'noDigits' | 'signMisplaced' | 'parenthesesUnbalanced' | 'markRepeated' | 'groupMisplaced' | 'groupSize' | 'groupInFraction' | 'ambiguousSeparator' | 'fractionNotAllowed' | 'fieldWidth' | 'wrongLength' | 'componentMissing' | 'notRecognized' | 'unknownUnit' | 'invalidUtf8' | 'tooLong' | 'notFinite' | 'notWhole' | 'negativeNotAllowed' | 'tooLarge' | 'tooSmall' | 'tooPrecise' | 'dateFieldOutOfRange' | 'timeFieldOutOfRange' | 'outsideWindow' | 'nonexistentDate' | 'notAScalar' | 'unknown'
+
+/**
+ * How delimited text is written. Every field left out is the core's default: comma-
+ * separated (`Dialect.CSV`), `"` quoting, a header, blank lines skipped, nothing skipped,
+ * short and long rows refused, UTF-8, no tokens.
  */
 export interface Dialect {
   /** One character: a tab, or printable ASCII other than `"`. */
-  separator: string
+  separator?: string
   quoting?: boolean
   hasHeader?: boolean
   skipBlankLines?: boolean
+  /**
+   * Physical lines to pass over first, after a byte-order mark; a quote in one means
+   * nothing.
+   */
+  skip?: number
+  /** Records to discard after those, ahead of the header if there is one. */
+  headerRow?: number
+  shortRows?: ShortRows
+  longRows?: LongRows
+  encoding?: Encoding
+  /**
+   * The exact unquoted cells that stand for no value, in every column without tokens of
+   * its own: such a cell is `empty`, its origin `token`. Each distinct list is kept for the
+   * life of the process.
+   */
+  tokens?: ReadonlyArray<string>
 }
 
 /** A HyperCast door, as a column names the one its cells go through. */
@@ -310,8 +496,14 @@ export interface Duration {
   nanos: number
 }
 
+/**
+ * What the input's bytes are: UTF-8 (the default), or one decoded to it ahead of the read.
+ * Never sniffed.
+ */
+export type Encoding = 'utf8' | 'windows1252' | 'latin1' | 'utf16le'
+
 /** What went wrong that is not a cell's verdict. */
-export type ErrorKind = 'io' | 'separator' | 'plan' | 'noSheet' | 'noColumn' | 'unbound' | 'alreadyBound' | 'structure' | 'argument' | 'closed'
+export type ErrorKind = 'io' | 'separator' | 'plan' | 'noSheet' | 'noColumn' | 'ambiguousColumn' | 'range' | 'unbound' | 'alreadyBound' | 'structure' | 'argument' | 'closed' | 'busy'
 
 /** The failure case of a verdict: `ok` is `false` and `fault` says why. */
 export interface Failure {
@@ -320,7 +512,7 @@ export interface Failure {
 }
 
 /** What a structural failure is, as the core numbers it. */
-export type FailureKind = 'unclosedQuote' | 'columnCount' | 'rowTooLong' | 'notAZip' | 'container' | 'encrypted' | 'method' | 'missingPart' | 'xml' | 'deflate' | 'notAWorkbook' | 'sharedString' | 'tooLarge' | 'iwa'
+export type FailureKind = 'unclosedQuote' | 'columnCount' | 'rowTooLong' | 'notAZip' | 'container' | 'encrypted' | 'method' | 'missingPart' | 'xml' | 'deflate' | 'notAWorkbook' | 'sharedString' | 'tooLarge' | 'iwa' | 'encoding'
 
 /**
  * The failure case of a cell: the reason, and the offending span in bytes of the cell's raw
@@ -336,10 +528,23 @@ export interface Fault {
 }
 
 /**
+ * What a record with more cells than the width is: refused (the default); its extra cells
+ * dropped and the row listed by `Batch.faults`; or its extra cells dropped silently.
+ */
+export type LongRows = 'reject' | 'report' | 'truncate'
+
+/**
  * The core's version, `major.minor.patch`, decoded from the same packed
  * `hypertabular_version` every other binding probes.
  */
 export declare function nativeVersion(): string
+
+/**
+ * Where a cell's verdict came from: a door judged its text (`cell`), its exact unquoted
+ * bytes are a declared token (`token`), the row has no such cell (`padded`), or a
+ * workbook's formula has no cached value (`uncached`). All but `cell` are `empty`.
+ */
+export type Origin = 'cell' | 'token' | 'padded' | 'uncached'
 
 /** The outcome of opening, binding or reading: the value, or the error that stopped it. */
 export type Outcome<T> = Success<T> | Broken
@@ -352,6 +557,34 @@ export interface PackedNumFormat {
   packed: Uint8Array
 }
 
+/**
+ * One thing that went wrong in a batch (`Batch.faults`): a cell at `malformed` or
+ * `outOfRange`, a formula with no cached value, or a row longer than the width under
+ * `longRows: 'report'`. Blanks, tokens and padding are not problems.
+ */
+export interface Problem {
+  /** The row in the batch, from zero. */
+  row: number
+  /** The line (delimited text) or sheet row (a workbook) it came from. */
+  line: number
+  /** The plan column, or `null` for an entry about the row as a whole. */
+  planColumn: number | null
+  /** The source column, from zero (a sheet's own, `A` being 0), or `null` for a row. */
+  sourceColumn: number | null
+  /** The verdict's reason, or `null` for a row. */
+  reason: CastFailure | null
+  /** What failed, by HyperCast's `Detail` name, or `null`. */
+  detail: Detail | null
+  /** Where the verdict came from; `cell` for a row. */
+  origin: Origin
+  /** The span in the cell's raw text; 0 where there is none. */
+  offset: number
+  length: number
+  /** For a long row, the width the first record fixed and the cells it had; otherwise 0. */
+  expected: number
+  found: number
+}
+
 /** One sheet of a workbook, as its listing names it. */
 export interface SheetInfo {
   /** The sheet's name. */
@@ -360,12 +593,35 @@ export interface SheetInfo {
   hidden: boolean
 }
 
-/** How a sheet is read. Left out: a header, empty rows skipped, 4096 rows a batch. */
+/**
+ * How a sheet is read. Each left out is the core's default: a header, empty rows skipped,
+ * 4096 rows a batch, nothing skipped, the whole sheet, no tokens, notes kept.
+ */
 export interface SheetOptions {
   hasHeader?: boolean
   skipEmptyRows?: boolean
+  /** The most rows a batch holds. The core refuses `0`. */
   batchRows?: number
+  /** Rows at the range's start to pass over, empty ones included. */
+  skip?: number
+  /** Rows read and discarded after those, ahead of the header. */
+  headerRow?: number
+  /** The part of the sheet to read: a `Range`, or its text (`'A5:F200'`). */
+  range?: Range | string
+  /**
+   * The exact text cells that stand for no value, in every column without tokens of its
+   * own. Each distinct list is kept for the life of the process.
+   */
+  tokens?: ReadonlyArray<string>
+  /** Whether a batch keeps each cell's `detail` and `origin`. */
+  notes?: boolean
 }
+
+/**
+ * What a record with fewer cells than the width is: refused (the default), or padded with
+ * `empty` verdicts whose origin is `padded`.
+ */
+export type ShortRows = 'reject' | 'pad'
 
 /** A structural failure: what is broken, and where (the core's `Failure`). */
 export interface StructuralFailure {
@@ -379,8 +635,9 @@ export interface StructuralFailure {
   /** Delimited text: the 1-based line the record starts on. A workbook: the sheet row. */
   line: number
   /**
-   * Delimited text: the record's byte offset. A workbook: how far into the part's
-   * inflated bytes the read had got.
+   * Delimited text: the record's byte offset in the decoded text (an `encoding` failure's
+   * counts the original input). A workbook: how far into the part's inflated bytes the
+   * read had got.
    */
   byte: number
   /** What was expected, for the kinds that say. */
@@ -395,6 +652,75 @@ export interface Success<T> {
   value: T
 }
 
+/** What a sample says of one source column. */
+export interface SuggestedColumn {
+  /** The zero-based source column, as a `Column` names it. */
+  ordinal: number
+  /** The header's name for it, or `null` with no header. */
+  name: string | null
+  /** The door found: text when unresolved, and under the first candidate when ambiguous. */
+  door: Door
+  /**
+   * What the door declares beside itself (a `UnixPrecision`, `DateOrder` or
+   * `ExcelEpoch`), or `null`.
+   */
+  declared: number | null
+  /** The notation the plan reads a resolved numeric column in, or `null`. */
+  format: SuggestedFormat | null
+  /** What to choose between: empty unless ambiguous. */
+  candidates: Array<Candidate>
+  status: SuggestStatus
+  /** The cells `door` took. */
+  matched: number
+  /** The cells that are not blank. */
+  sampled: number
+}
+
+/**
+ * A notation a suggestion names: the 92 bytes the core reads, which a `Column` factory
+ * takes as its `format` and which compare with a HyperCast `NumFormat`'s own `packed`. A
+ * copy, the caller's own.
+ */
+export interface SuggestedFormat {
+  packed: Uint8Array
+}
+
+/**
+ * What a suggestion found: a plan to inspect, change and pass to a read, a report for each
+ * source column, and whether the source has rows past the sample. Never applied.
+ */
+export interface Suggestion {
+  plan: Array<Column>
+  report: Array<SuggestedColumn>
+  truncated: boolean
+}
+
+/**
+ * What a suggestion is asked with. Each left out is the core's default: a sample of 1,000
+ * rows (an explicit `0` is one row), no notation and no date order declared.
+ */
+export interface SuggestOptions {
+  /**
+   * The most rows the sample holds. It stops at 4096 rows of delimited text and at a
+   * sheet's own batch size.
+   */
+  sampleRows?: number
+  /** Every column's notation: a HyperCast `NumFormat`. */
+  format?: PackedNumFormat
+  /**
+   * A column's own notation, ahead of `format`: `[ordinal, NumFormat]` pairs, the last for
+   * an ordinal winning.
+   */
+  columnFormats?: ReadonlyArray<readonly [number, PackedNumFormat]>
+  /** Every column's date order where the sample leaves it open: a HyperCast `DateOrder`. */
+  dateOrder?: number
+  /** A column's own date order, ahead of `dateOrder`: `[ordinal, DateOrder]` pairs. */
+  columnDateOrders?: ReadonlyArray<readonly [number, number]>
+}
+
+/** How far a sample settles a column. */
+export type SuggestStatus = 'resolved' | 'ambiguous' | 'unresolved'
+
 /** Why a reader could not be made, or stopped. */
 export interface TabularError {
   /** What kind of error it is. */
@@ -405,6 +731,10 @@ export interface TabularError {
   failure?: StructuralFailure
   /** The plan column, for `plan`. */
   column?: number
+  /** The first column with the name, for `ambiguousColumn`. */
+  first?: number
+  /** The next column with the name, for `ambiguousColumn`. */
+  second?: number
 }
 
 /** A wall-clock time of day with no date and no zone; `nanos` is `0..=999_999_999`. */

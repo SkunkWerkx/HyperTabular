@@ -33,7 +33,13 @@ public enum TabularFailure {
      * malformed message, 3 for an object a reference names that is not there ({@code expected} is its identifier), 4
      * for cell storage of a version the core does not read ({@code expected} is the version).
      */
-    IWA(26);
+    IWA(26),
+    /**
+     * Text that is not valid in its encoding: a unit a dialect's declared {@link Encoding} has no
+     * character for, or, under UTF-8, a header name that is not valid. A cell that is not valid
+     * UTF-8 is that cell's malformed verdict, not this.
+     */
+    ENCODING(27);
 
     private final int code;
 

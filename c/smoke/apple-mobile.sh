@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the smoke consumers (CMakeLists.txt has the list: main.c as each C standard,
-# main.cpp as C++17, C++20 and C++23 with exceptions on and off, and the corpus replay)
+# main.cpp as C++17, C++20 and C++23 with exceptions on and off, the corpus replay and the stale
+# faults walks)
 # against the four Apple mobile C archives through find_package, linked to
 # hypertabular::hypertabular_static (they carry no shared library), and the C++ programs to
 # hypercast::hypercast_static from HyperCast's archive for the same platform beside it

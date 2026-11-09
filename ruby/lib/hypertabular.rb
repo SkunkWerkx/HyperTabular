@@ -28,13 +28,16 @@ require_relative "hypertabular/runtime/workbook"
 #   reader.bind([HyperTabular::Column.text(reader.header.ordinal("name"))])
 #   reader.map { |row| row.value(0) }  # => ["alice"]
 #
-# Nothing is sniffed: the Dialect states the separator, the quoting and the header,
-# SheetOptions a sheet's header and whether empty rows are skipped, and the plan states each
-# Column's door and, for numbers, its notation. HyperCast is the judge:
+# Nothing is sniffed: the Dialect states the separator, the quoting, the header, what to pass
+# over, what a record of the wrong width is, the encoding and what stands for no value;
+# SheetOptions a sheet's header, what to pass over, its range and whether empty rows are skipped;
+# and the plan states each Column's door and, for numbers, its notation. A Suggestion offers a
+# plan to inspect, from a sample, and applies nothing. HyperCast is the judge:
 # the verdicts (HyperCast::Success, HyperCast::Fault), the notation (HyperCast::NumFormat),
 # the exact decimal (HyperCast::Decimal) and the declared options are that gem's own types,
 # and a cell means exactly what HyperCast's door would say of the same text. A bad value is
-# a verdict; a broken file is a TabularError.
+# a verdict, with its detail and Batch#origin beside it, and Batch#faults lists a batch's; a broken
+# file is a TabularError.
 module HyperTabular
   # This gem's own version — kept in lockstep with hypertabular.gemspec and the core's
   # rust/Cargo.toml.
@@ -71,6 +74,8 @@ require_relative "hypertabular/tabular_error"
 require_relative "hypertabular/header"
 require_relative "hypertabular/row"
 require_relative "hypertabular/batch"
+require_relative "hypertabular/suggest"
+require_relative "hypertabular/guarded"
 require_relative "hypertabular/delimited_reader"
 require_relative "hypertabular/workbook"
 

@@ -15,6 +15,8 @@ module HyperTabular
       OK = 0
       # A caller bug, never a data verdict.
       ERR_CONTRACT = -1
+      # The sizes hypertabular_batch_check was asked about are refused.
+      ERR_BATCH = -6
       # The data is structurally broken; the failure says where.
       ERR_STRUCTURE = -2
       # The arena cannot hold what one row needs.
@@ -36,8 +38,7 @@ module HyperTabular
       FILLED_BYTES = 64
       FILLED = "Q<4L<2Q<2L<2".freeze
       # Buffers: seven pointer and size pairs (window, arena, cells, row, strings, table,
-      # kinds), as every workbook call takes them. A delimited fill reads the arena and the
-      # cell table from it and nothing else.
+      # kinds), as the workbook calls but a fill take them.
       BUFFERS = "Q<14".freeze
       BUFFERS_BYTES = 112
 
@@ -80,10 +81,11 @@ module HyperTabular
           Runtime.function(:hypertabular_version).call
         end
 
-        # +dialect+ is the four bytes of a RawDialect. Nil when the core refuses it.
-        def start(dialect)
+        # +options+ is the bytes of a RawDelimitedOptions and +tokens+ the dialect's tokens as the
+        # core takes them, or nil. Nil when the core refuses them.
+        def start(options, tokens = nil)
           reader = new
-          reader.send(:init, dialect) ? reader : nil
+          reader.send(:init, options, tokens) ? reader : nil
         end
       end
 
@@ -91,33 +93,34 @@ module HyperTabular
 
       def initialize
         @header = Runtime.function(:hypertabular_delimited_header)
-        @fill = Runtime.function(:hypertabular_delimited_fill)
+        @fill = Runtime.function(:hypertabular_delimited_fill_with)
         @state = Runtime.buffer(Runtime.function(:hypertabular_delimited_state_size).call)
         @cramped = false
         @arena_cap = ARENA_BYTES
         @arena = Runtime.buffer(@arena_cap)
         @out = Runtime.buffer(FILLED_BYTES)
-        @buffers = Runtime.buffer(BUFFERS_BYTES)
+        @buffers = Runtime.buffer(Columns::BUFFERS_WITH_BYTES)
         @rows = @consumed = @arena_used = 0
       end
 
-      # Takes the plan: +specs+ is one packed ColumnSpec per plan column and +sizes+ the
-      # bytes one value of each takes, +batch_rows+ the most rows a fill writes and +per_row+
-      # the cell-table entries one row takes. Once, before the first #fill.
-      def bind(specs, sizes, batch_rows, per_row)
+      # Takes the plan: +specs+ is one Column.specs entry per plan column and +sizes+ the
+      # bytes one value of each takes, +batch_rows+ the most rows a fill writes, +per_row+ the
+      # cell-table entries one row takes, +notes+ whether each column keeps its notes, +widths+
+      # whether each row's width is kept. Once, before the first #fill.
+      def bind(specs, sizes, batch_rows, per_row, notes = true, widths = false)
         @batch_rows = batch_rows
-        @columns = Columns.new(specs, sizes, batch_rows)
-        @per_row = per_row
-        @cells_cap = per_row * Delimited.cell_rows(per_row, batch_rows)
-        @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
+        @columns = Columns.new(specs, sizes, batch_rows, notes, widths)
+        grow_cells(per_row, batch_rows)
       end
 
       # Names the String the calls that follow read: +start+ and +offset+ below index its
       # bytes. It is held where it is, not copied, and must not be modified until another
-      # one is attached.
+      # one is attached. The one before is let go of only once this one is held, so that an
+      # exception along the way leaves the calls reading the one before, still held.
       def attach(input)
-        @pin = Runtime.pin(input)
-        @base = @pin.to_i
+        pin = Runtime.pin(input)
+        @base = pin.to_i
+        @pin = pin
       end
 
       # Reads the next record of the attached input, +length+ bytes from +start+, as a
@@ -132,8 +135,8 @@ module HyperTabular
           case code
           when OK, ERR_STRUCTURE then return code
           when ERR_CELLS
+            @names = Runtime.buffer(SPAN_BYTES * needed)
             @names_cap = needed
-            @names = Runtime.buffer(SPAN_BYTES * @names_cap)
           when ERR_ARENA then grow_arena(needed)
           else raise CONTRACT
           end
@@ -169,9 +172,7 @@ module HyperTabular
             return code
           when ERR_STRUCTURE then return code
           when ERR_CELLS
-            @per_row = [@per_row, needed].max
-            @cells_cap = @per_row * Delimited.cell_rows(@per_row, @batch_rows)
-            @cells = Runtime.buffer(SPAN_BYTES * @cells_cap)
+            grow_cells([@per_row, needed].max, @batch_rows)
           when ERR_ARENA then grow_arena(needed)
           else raise CONTRACT
           end
@@ -210,17 +211,25 @@ module HyperTabular
 
       private
 
-      def init(dialect)
-        raw = Runtime.buffer(4)
-        raw[0, 4] = dialect
-        Runtime.function(:hypertabular_delimited_init).call(@state, raw) == OK
+      def init(options, tokens)
+        raw = Runtime.buffer(options.bytesize)
+        raw[0, options.bytesize] = options
+        unless tokens.nil?
+          @tokens_len = tokens.bytesize
+          @tokens = Runtime.buffer(@tokens_len)
+          @tokens[0, @tokens_len] = tokens
+        end
+        Runtime.function(:hypertabular_delimited_init_with).call(@state, raw) == OK
       end
 
-      # The arena and the cell table as the Buffers block a fill takes them — packed again
-      # for every call, since either may have been grown since the last.
+      # The arena, the cell table, the tokens and the row widths as the BuffersWith block a fill
+      # takes them — packed again for every call, since either of the first two may have been grown
+      # since the last.
       def buffers
-        @buffers[0, BUFFERS_BYTES] = [0, 0, @arena.to_i, @arena_cap, @cells.to_i, @cells_cap, 0, 0, 0, 0, 0, 0, 0, 0]
-                                     .pack(BUFFERS)
+        @buffers[0, Columns::BUFFERS_WITH_BYTES] = Columns.word(Columns::BUFFERS_WITH_BYTES) +
+                                                   [0, 0, @arena.to_i, @arena_cap, @cells.to_i, @cells_cap, 0, 0,
+                                                    0, 0, 0, 0, 0, 0, @tokens.to_i, @tokens_len.to_i,
+                                                    @columns.widths_address].pack("J*")
         @buffers
       end
 
@@ -230,9 +239,19 @@ module HyperTabular
         needed
       end
 
+      # Each capacity moves only with the block behind it: the allocation can raise and the
+      # caller can read on, and the next call hands the core this capacity with this block.
+      def grow_cells(per_row, batch_rows)
+        capacity = per_row * Delimited.cell_rows(per_row, batch_rows)
+        @cells = Runtime.buffer(SPAN_BYTES * capacity)
+        @cells_cap = capacity
+        @per_row = per_row
+      end
+
       def grow_arena(needed)
-        @arena_cap = [needed, @arena_cap * 2].max
-        @arena = Runtime.buffer(@arena_cap)
+        capacity = [needed, @arena_cap * 2].max
+        @arena = Runtime.buffer(capacity)
+        @arena_cap = capacity
       end
     end
   end

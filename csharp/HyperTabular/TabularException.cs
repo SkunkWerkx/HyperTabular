@@ -36,7 +36,39 @@ public enum TabularFailure
 	/// malformed message, 3 for an object a reference names that is not there (<c>Expected</c> is its identifier), 4 for
 	/// cell storage of a version the core does not read (<c>Expected</c> is the version).
 	/// </summary>
-	Iwa = 26
+	Iwa = 26,
+	/// <summary>
+	/// Text that is not valid in its encoding: a unit a dialect's declared <see cref="TextEncoding"/> has no
+	/// character for, or, under UTF-8, a header name that is not valid. A cell that is not valid UTF-8 is that
+	/// cell's malformed verdict, not this.
+	/// </summary>
+	Encoding = 27
+}
+
+/// <summary>
+/// What <see cref="Header.Ordinal(string)"/> says of a name two columns of the header share: it will
+/// not choose between them. <see cref="Header.TryOrdinal(string, out int)"/> takes the first, and a plan
+/// can name either by position. A <see cref="KeyNotFoundException"/>, as a name no column has is, so
+/// that code catching one catches the other: neither name resolved to a column.
+/// </summary>
+public sealed class DuplicateColumnException : KeyNotFoundException
+{
+	internal DuplicateColumnException(string name, int first, int second)
+		: base($"The header names two columns \"{name}\", at positions {first} and {second}: say which by position.")
+	{
+		Name = name;
+		First = first;
+		Second = second;
+	}
+
+	/// <summary>The name that was looked for.</summary>
+	public string Name { get; }
+
+	/// <summary>The zero-based column that has it first, counted as a plan's ordinals are.</summary>
+	public int First { get; }
+
+	/// <summary>The zero-based column that has it next. A later one is not named.</summary>
+	public int Second { get; }
 }
 
 /// <summary>
@@ -70,7 +102,7 @@ public sealed class TabularException : Exception
 			1 => TabularFailure.UnclosedQuote,
 			2 => TabularFailure.ColumnCount,
 			3 => TabularFailure.RowTooLong,
-			>= 16 and <= 26 => (TabularFailure)failure.Code,
+			>= 16 and <= 27 => (TabularFailure)failure.Code,
 			// The one code left, and the reading of any the core has yet to be given.
 			_ => TabularFailure.Container,
 		}, (long)failure.Record, (int)failure.Line, (long)failure.Byte, (int)failure.Expected, (int)failure.Found);
@@ -90,7 +122,7 @@ public sealed class TabularException : Exception
 	/// <summary>Delimited text: the one-based line the record starts on. A workbook: the sheet row being read, where there is one.</summary>
 	public int Line { get; }
 
-	/// <summary>Delimited text: the byte offset of the record. A workbook: how far into the part's inflated bytes the read had got.</summary>
+	/// <summary>Delimited text: the byte offset of the record, in the decoded text if an encoding was declared, except that an <see cref="TabularFailure.Encoding"/> failure under a declared encoding gives the unit's offset in the original input. A workbook: how far into the part's inflated bytes the read had got.</summary>
 	public long Byte { get; }
 
 	/// <summary>What was expected, for the kinds that say: the first record's cell count; the length of the shared-string table.</summary>
@@ -121,6 +153,8 @@ public sealed class TabularException : Exception
 			TabularFailure.TooLarge => "The workbook holds more text than a batch can address.",
 			TabularFailure.Iwa =>
 				$"Part {record} of the Numbers document is not what the IWA packaging says (byte {@byte}, detail {found}).",
+			TabularFailure.Encoding =>
+				$"Record {record} (line {line}) holds text with no character in its encoding, at byte {@byte}.",
 			_ => $"The input is structurally broken ({failure}).",
 		};
 }

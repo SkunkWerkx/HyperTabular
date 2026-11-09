@@ -62,7 +62,7 @@ public enum Door : byte
 /// </summary>
 public readonly record struct Column
 {
-	Column(int ordinal, Door door, uint declared, NumFormat format)
+	internal Column(int ordinal, Door door, uint declared, NumFormat format)
 	{
 		ArgumentOutOfRangeException.ThrowIfNegative(ordinal);
 		Ordinal = ordinal;
@@ -82,6 +82,34 @@ public readonly record struct Column
 
 	/// <summary>What the door declares beside itself, as the core numbers it.</summary>
 	internal uint Declared { get; }
+
+	/// <summary>The column's own tokens, in place of its dialect's or its sheet's; <see langword="null"/> to take theirs.</summary>
+	public Tokens? Tokens { get; private init; }
+
+	/// <summary>The date options and month vocabulary the date doors read: <c>default</c> for none.</summary>
+	public DateOptions DateOptions { get; private init; }
+
+	/// <summary>
+	/// The same column answering to these tokens rather than its dialect's or sheet's: a cell whose
+	/// exact, unquoted bytes are one of them is empty, whatever its door, and
+	/// <see cref="Batch.Origin"/> says <see cref="Origin.Token"/>. No tokens at all means none, so a
+	/// column can opt out of its dialect's. On a sheet only a text cell can be one.
+	/// </summary>
+	/// <param name="tokens">The tokens.</param>
+	public Column WithTokens(params ReadOnlySpan<string> tokens) => this with { Tokens = new Tokens(tokens) };
+
+	/// <summary>
+	/// The same column reading dates under these options and their month vocabulary: the
+	/// <see cref="Door.Timestamp"/>, <see cref="Door.Date"/>, <see cref="Door.DateOrdered"/> and
+	/// <see cref="Door.DateTime"/> doors read them, as HyperCast's own detailed doors do, and the
+	/// others ignore them. On a sheet they reach only a text cell, since a typed date cell has no
+	/// text for them to read. Options HyperCast refuses are the error of whatever binds the plan.
+	/// </summary>
+	/// <param name="options">The options, with <see cref="DateOptions.Months"/> if the column names its months.</param>
+	public Column WithDateOptions(DateOptions options) => this with { DateOptions = options };
+
+	/// <summary>Whether a door reads a <see cref="NumFormat"/>: the integers, the reals and the exact decimal.</summary>
+	internal static bool IsNumeric(Door door) => door is (>= Door.SByte and <= Door.Double) or Door.Decimal;
 
 	/// <summary>A <see cref="bool"/> column.</summary>
 	public static Column Boolean(int ordinal) => new(ordinal, Door.Boolean, 0, NumFormat.Invariant);

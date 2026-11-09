@@ -12,17 +12,20 @@
 //   - One batch type. Read returns a *Batch — Rows, Columns, Line, Verdicts, a whole column
 //     at a time (I32, F64, Text and the rest), and Get for any one cell — for delimited text
 //     and for a sheet alike.
-//   - Nothing is sniffed. The Dialect states the separator, the quoting and the header;
-//     SheetOptions states a sheet's header and whether empty rows are skipped; the plan
-//     states each column's door and, for numbers, its hypercast.NumFormat.
-//   - HyperCast is the judge. Fault, CastFailure, NumFormat, Decimal, Date, CivilDateTime,
-//     Duration, UnixPrecision, DateOrder and ExcelEpoch are HyperCast's own types, from its
-//     own module. A text cell means exactly what the HyperCast door of the same name would
+//   - Nothing is sniffed. The Dialect states the separator, the quoting, the header, what a read
+//     passes over, how it takes a record of the wrong width, the encoding and the tokens that stand
+//     for no value; SheetOptions states a sheet's header, its range and whether empty rows are
+//     skipped; the plan states each column's door and, for numbers, its hypercast.NumFormat.
+//     SuggestDelimited, SuggestDelimitedBytes and Sheet.Suggest say what a sample looks like, as a
+//     plan to read and change, and no read takes one it wasn't handed.
+//   - HyperCast is the judge. Fault, CastFailure, Detail, NumFormat, DateOptions, Decimal, Date,
+//     CivilDateTime, Duration, UnixPrecision, DateOrder and ExcelEpoch are HyperCast's own types,
+//     from its own module. A text cell means exactly what the HyperCast door of the same name would
 //     say of the same text; a typed workbook cell is converted by the door directly.
 //   - A bad value is a verdict; a broken file is an error. A cell that does not cast is a
-//     fault in its column and the read goes on. A record of the wrong width, input that ends
-//     inside a quoted cell, a workbook whose container or parts cannot be read, is a
-//     *Failure, returned after every intact row before it.
+//     fault in its column and the read goes on, and Batch.Faults lists a batch's. A record of the
+//     wrong width, input that ends inside a quoted cell, a workbook whose container or parts cannot
+//     be read, is a *Failure, returned after every intact row before it.
 //   - Text is not copied out. A Text column's cells are slices of the input itself, or of a
 //     workbook's shared strings; only a cell with "" inside, or a typed workbook cell said as
 //     text, is written to an arena.
@@ -57,7 +60,9 @@ const (
 	errStructure = -2
 	errArena     = -3
 	errCells     = -4
-	errStateSize = -100 // the core's state block is not the one this package mirrors
+	errWindow    = -5
+	errBatch     = -6
+	errStateSize = -100 // the core's state block doesn't hold what this package mirrors, or won't fit
 )
 
 const contractViolation = "hypertabular: the core reported a contract violation — a binding bug, please report it"
@@ -86,6 +91,15 @@ type rawSpec struct {
 	format  hypercast.RawNumFormat
 }
 
+// What a ColumnSpecWith adds to a ColumnSpec: date options (a Size of 0 declares none) and a month
+// vocabulary, and the column's own tokens, each packed list in the core's shape.
+type specExtra struct {
+	date      hypercast.RawDateOptions
+	months    string
+	tokens    string
+	hasTokens bool
+}
+
 type rawFailure struct {
 	code     uint32
 	line     uint32
@@ -101,6 +115,46 @@ type rawFilled struct {
 	arenaUsed uint64
 	needed    uint64
 	failure   rawFailure
+}
+
+// CellNote: what failed in a cell, and where its verdict came from. A notes array holds one a row.
+type rawNote struct {
+	detail uint16
+	origin uint16
+}
+
+// RawProblem: one entry of hypertabular_faults' list, read back by decodeProblem.
+type rawProblem struct {
+	row        uint32
+	planColumn uint32
+	reason     uint32
+	detail     uint16
+	origin     uint16
+	offset     uint32
+	len        uint32
+	expected   uint32
+	found      uint32
+}
+
+// rowLevel is a rawProblem's planColumn when the entry is about the row as a whole.
+const rowLevel = 1<<32 - 1
+
+// RawSuggestion: what hypertabular_suggest says of one column, read back by decodeSuggestion.
+type rawSuggestion struct {
+	door    uint32
+	param   uint32
+	status  uint32
+	matched uint32
+	sampled uint32
+}
+
+// RawTranscoded: how far hypertabular_transcode got, read back by decodeTranscoded.
+type rawTranscoded struct {
+	consumed  uint64
+	written   uint64
+	failureAt uint64
+	failed    uint32
+	_         uint32
 }
 
 // The core's state block (kernel::delimited::fill::State): where the input stands. The core
@@ -137,6 +191,14 @@ type (
 	_ [64 - unsafe.Sizeof(rawState{})]struct{}
 	_ [unsafe.Sizeof(CellVerdict{}) - 12]struct{}
 	_ [12 - unsafe.Sizeof(CellVerdict{})]struct{}
+	_ [unsafe.Sizeof(rawNote{}) - 4]struct{}
+	_ [4 - unsafe.Sizeof(rawNote{})]struct{}
+	_ [unsafe.Sizeof(rawProblem{}) - 32]struct{}
+	_ [32 - unsafe.Sizeof(rawProblem{})]struct{}
+	_ [unsafe.Sizeof(rawSuggestion{}) - 20]struct{}
+	_ [20 - unsafe.Sizeof(rawSuggestion{})]struct{}
+	_ [unsafe.Sizeof(rawTranscoded{}) - 32]struct{}
+	_ [32 - unsafe.Sizeof(rawTranscoded{})]struct{}
 	// uuid.UUID is the sixteen bytes the core writes, in RFC 9562 order.
 	_ [unsafe.Sizeof(uuid.UUID{}) - 16]struct{}
 	_ [16 - unsafe.Sizeof(uuid.UUID{})]struct{}

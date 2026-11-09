@@ -23,6 +23,7 @@ test('the namespace exposes exactly the public names', () => {
     'Dialect',
     'Column',
     'Header',
+    'Range',
     'DelimitedReader',
     'Workbook',
     'Sheet',

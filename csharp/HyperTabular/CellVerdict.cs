@@ -32,7 +32,11 @@ public readonly struct CellVerdict
 	/// <summary>Byte length of the offending span.</summary>
 	public int Length => (int)_length;
 
-	/// <summary>The verdict as HyperCast's <see cref="Fault"/>. Only for a cell that did not cast.</summary>
+	/// <summary>
+	/// The verdict as HyperCast's <see cref="Fault"/>, its reason and span. Only for a cell that did not cast.
+	/// What failed isn't here: a verdict has no room for it, so <see cref="Batch.Fault"/> is the one with
+	/// <see cref="Fault.Detail"/>.
+	/// </summary>
 	/// <exception cref="InvalidOperationException">The cell cast; there is no fault.</exception>
 	public Fault ToFault() =>
 		IsOk

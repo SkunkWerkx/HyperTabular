@@ -23,23 +23,117 @@ public struct SheetInfo: Equatable, Sendable {
     let index: UInt32
 }
 
+/// The part of a sheet a read keeps to: `A5:F200`, or four numbers, each 1-based, with 0 for no
+/// limit on that side.
+public struct SheetRange: Equatable, Sendable, CustomStringConvertible {
+    /// The first row, or 0 for no limit.
+    public let firstRow: UInt32
+    /// The first column, `A` being 1, or 0 for no limit.
+    public let firstColumn: UInt32
+    /// The last row, included, or 0 for no limit.
+    public let lastRow: UInt32
+    /// The last column, included, or 0 for no limit.
+    public let lastColumn: UInt32
+
+    /// A range from its four numbers: how to say what `A5:F200` cannot, every row from the fifth,
+    /// or columns B to D of all of them.
+    ///
+    /// - Throws: ``RangeError`` when a last comes before its first.
+    public init(firstRow: UInt32 = 0, firstColumn: UInt32 = 0, lastRow: UInt32 = 0, lastColumn: UInt32 = 0) throws {
+        guard !Self.inverted(firstRow, lastRow), !Self.inverted(firstColumn, lastColumn) else {
+            throw RangeError(
+                text: "Rows \(firstRow) to \(lastRow), columns \(firstColumn) to \(lastColumn)")
+        }
+        self.firstRow = firstRow
+        self.firstColumn = firstColumn
+        self.lastRow = lastRow
+        self.lastColumn = lastColumn
+    }
+
+    /// Reads `A5:F200`: both corners, in capitals, the second no less than the first in either
+    /// direction. The core reads it, so every binding agrees on what one is.
+    ///
+    /// - Throws: ``RangeError`` when it is not one: `A5` alone, `a5:f200` or `F200:A5`.
+    public init(parsing text: String) throws {
+        var raw = HyperTabularRawRange()
+        let bytes = Array(text.utf8)
+        let code = bytes.withUnsafeBufferPointer { hypertabular_range_parse($0.baseAddress, UInt($0.count), &raw) }
+        guard code == HYPERTABULAR_OK else {
+            throw RangeError(text: text)
+        }
+        try self.init(
+            firstRow: raw.first_row, firstColumn: raw.first_column, lastRow: raw.last_row, lastColumn: raw.last_column)
+    }
+
+    private static func inverted(_ first: UInt32, _ last: UInt32) -> Bool {
+        first != 0 && last != 0 && first > last
+    }
+
+    /// The four numbers, in a sentence, a 0 said as what it means.
+    public var description: String {
+        func span(_ name: String, _ first: UInt32, _ last: UInt32) -> String {
+            first == 0 && last == 0
+                ? "every \(name)" : "\(name)s \(max(first, 1)) to \(last == 0 ? "the last" : String(last))"
+        }
+        return "\(span("row", firstRow, lastRow)), \(span("column", firstColumn, lastColumn))"
+    }
+}
+
+/// The error ``SheetRange`` throws for what is not a range.
+public struct RangeError: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
+    /// What was given.
+    public let text: String
+
+    /// What was given, in a sentence.
+    public var description: String { "\"\(text)\" is not a range." }
+
+    /// ``description``, for `localizedDescription`.
+    public var errorDescription: String? { description }
+}
+
 /// How a sheet is read.
 public struct SheetOptions: Equatable, Sendable {
     /// Whether the sheet's first row is a header, exposed through ``Sheet/header`` and
     /// never delivered as a row.
     public var hasHeader: Bool
-    /// Whether a row with no cells is skipped rather than delivered as a row of empty cells.
+    /// Whether a row with no cells, and the rows a gap in the numbering stands for, are left out
+    /// rather than delivered as rows of empty cells. A row whose only cells are formulas with
+    /// nothing spelled where a value goes counts as one, and nothing says it was left out: that
+    /// depends on the writer, so a table of nothing but formulas can read as no rows. Off, those
+    /// rows are delivered, their cells at ``Origin/uncached``.
     public var skipEmptyRows: Bool
-    /// Rows per batch — the capacity of every column buffer. Must be positive.
+    /// Rows per batch — the capacity of every column buffer. The core refuses 0, and a batch past its limit.
     public var batchRows: Int
+    /// Rows of the sheet to pass over at the start of the range, empty ones included. Their cells
+    /// are not judged, so a bad cell there does not matter.
+    public var skip: UInt32
+    /// Rows to read and discard after those, as a filtered read delivers them, ahead of the header
+    /// if there is one.
+    public var headerRow: UInt32
+    /// The part of the sheet to read; `nil` for all of it. Ordinal 0 of a plan is its first column.
+    /// A read ends at its last row, so a failure past it is not met, and what opening a workbook
+    /// reads is met whatever the range.
+    public var range: SheetRange?
+    /// What stands for no value in every column without tokens of its own
+    /// (``Column/withTokens(_:)``). Only a text cell can be one: a typed cell never is.
+    public var tokens: [String]
+    /// Whether a batch keeps what ``Batch/origin(_:row:)``, a fault's `detail` and
+    /// ``Batch/faults()`` read: see ``Dialect/notes``.
+    public var notes: Bool
 
     /// The options, stated; each defaults to ``default``'s.
     public init(
-        hasHeader: Bool = true, skipEmptyRows: Bool = true, batchRows: Int = DelimitedReader.defaultBatchRows
+        hasHeader: Bool = true, skipEmptyRows: Bool = true, batchRows: Int = DelimitedReader.defaultBatchRows,
+        skip: UInt32 = 0, headerRow: UInt32 = 0, range: SheetRange? = nil, tokens: [String] = [], notes: Bool = true
     ) {
         self.hasHeader = hasHeader
         self.skipEmptyRows = skipEmptyRows
         self.batchRows = batchRows
+        self.skip = skip
+        self.headerRow = headerRow
+        self.range = range
+        self.tokens = tokens
+        self.notes = notes
     }
 
     /// A header, empty rows skipped, ``DelimitedReader/defaultBatchRows`` rows a batch.
@@ -102,8 +196,8 @@ public final class Workbook {
 
     // The workbook's tables, which every read of a sheet is handed.
     let strings: UnsafeMutableBufferPointer<UInt8>
-    private let table: UnsafeMutableBufferPointer<HyperTabularSpan>
-    private let kinds: UnsafeMutableBufferPointer<UInt8>
+    let table: UnsafeMutableBufferPointer<HyperTabularSpan>
+    let kinds: UnsafeMutableBufferPointer<UInt8>
 
     /// Opens a workbook held in memory: an array, a `Data`. The bytes are copied once, so
     /// the workbook does not depend on the collection outliving it.
@@ -430,6 +524,9 @@ public final class Workbook {
         var arena: UnsafeMutableBufferPointer<UInt8>
         var cells: UnsafeMutableBufferPointer<HyperTabularSpan>
         var row: UnsafeMutableBufferPointer<HyperTabularSlot>
+        /// The sheet's tokens as the core reads them.
+        var tokens = UnsafeMutableBufferPointer<UInt8>(start: nil, count: 0)
+        var tokensLength = 0
 
         init(window: Int, arena: Int, cells: Int, row: Int) {
             self.window = .allocate(capacity: window)
@@ -443,6 +540,7 @@ public final class Workbook {
             arena.deallocate()
             cells.deallocate()
             row.deallocate()
+            tokens.deallocate()
         }
 
         func buffers() -> HyperTabularBuffers {
@@ -455,6 +553,30 @@ public final class Workbook {
             buffers.cells_cap = UInt(cells.count)
             buffers.row = row.baseAddress
             buffers.row_cap = UInt(row.count)
+            return buffers
+        }
+
+        /// The fill's own block: its buffers, the workbook's tables, the tokens and the widths.
+        private func buffersWith(_ book: Workbook, _ columns: Columns) -> HyperTabularBuffersWith {
+            var buffers = HyperTabularBuffersWith()
+            buffers.size = buffersSize
+            buffers.window = window.baseAddress
+            buffers.window_cap = UInt(window.count)
+            buffers.arena = arena.baseAddress
+            buffers.arena_cap = UInt(arena.count)
+            buffers.cells = cells.baseAddress
+            buffers.cells_cap = UInt(cells.count)
+            buffers.row = row.baseAddress
+            buffers.row_cap = UInt(row.count)
+            buffers.strings = UnsafePointer(book.strings.baseAddress)
+            buffers.strings_len = UInt(book.strings.count)
+            buffers.table = UnsafePointer(book.table.baseAddress)
+            buffers.table_len = UInt(book.table.count)
+            buffers.kinds = UnsafePointer(book.kinds.baseAddress)
+            buffers.kinds_len = UInt(book.kinds.count)
+            buffers.tokens = UnsafePointer(tokens.baseAddress)
+            buffers.tokens_len = UInt(tokensLength)
+            buffers.row_widths = columns.rowWidths
             return buffers
         }
 
@@ -484,9 +606,7 @@ public final class Workbook {
                     case .styles: hypertabular_workbook_styles(block, input, length, &buffers, &filled)
                     case .header: hypertabular_workbook_header(block, input, length, &buffers, &filled)
                     case .fill:
-                        hypertabular_workbook_fill(
-                            block, input, length, columns!.specs, columns!.buffers,
-                            UInt(columns!.plan.count), UInt(columns!.batchRows), &buffers, &filled)
+                        fill(block, input, length, tables, columns, &filled)
                     }
                 switch code {
                 case HYPERTABULAR_ERR_WINDOW:
@@ -505,6 +625,19 @@ public final class Workbook {
                     return (code, filled)
                 }
             }
+        }
+
+        private func fill(
+            _ block: OpaquePointer?, _ input: UnsafePointer<UInt8>?, _ length: UInt, _ book: Workbook?,
+            _ columns: Columns?, _ filled: inout HyperTabularFilled
+        ) -> Int32 {
+            guard let book, let columns else {
+                preconditionFailure(Workbook.contractViolation)
+            }
+            var buffers = buffersWith(book, columns)
+            return hypertabular_workbook_fill_with(
+                block, input, length, columns.specs, columns.buffers, UInt(columns.plan.count),
+                UInt(columns.batchRows), &buffers, &filled)
         }
     }
 }
@@ -528,8 +661,9 @@ public final class Workbook {
 /// and a text cell goes through the door as delimited text would. Not thread-safe.
 public final class Sheet {
     private let book: Workbook
+    private let info: SheetInfo
     /// The options the sheet is read with.
-    public let options: SheetOptions
+    public private(set) var options: SheetOptions
     // The plan and the batch it is read into, once one is bound.
     private var columnSet: Columns?
     private var batch: Batch?
@@ -546,9 +680,13 @@ public final class Sheet {
     /// Read when the sheet is opened, before any plan, so that a plan can be built from it.
     public private(set) var header: Header?
 
-    init(_ book: Workbook, _ info: SheetInfo, options: SheetOptions, plan: [Column]?) throws {
-        precondition(options.batchRows > 0, "batchRows must be positive; got \(options.batchRows)")
+    init(
+        _ book: Workbook, _ info: SheetInfo, options: SheetOptions, plan: [Column]?, rowWidths: Bool = false
+    ) throws {
+        _ = try Columns.checkSizes(
+            batchRows: options.batchRows, bufferBytes: 1, notes: options.notes, widths: false, sheet: true)
         self.book = book
+        self.info = info
         self.options = options
         // A copy of the opened state, which the core allows, so that this sheet's read is
         // its own.
@@ -560,16 +698,29 @@ public final class Sheet {
             Workbook.stingy
             ? Workbook.Scratch(window: 1, arena: 1, cells: 1, row: 0)
             : Workbook.Scratch(window: 0, arena: 4096, cells: 64, row: 0)
+        let packed = packedTokens(options.tokens)
+        scratch.tokens = Columns.hold(packed)
+        scratch.tokensLength = packed.count
         if let plan {
-            try bind(plan)
+            try bind(plan, rowWidths: rowWidths)
         }
 
+        var raw = HyperTabularRawSheetOptions()
+        raw.size = UInt32(HyperTabularRawSheetOptions_SIZE)
+        raw.has_header = options.hasHeader ? 1 : 0
+        raw.skip_empty_rows = options.skipEmptyRows ? 1 : 0
+        raw.skip = options.skip
+        raw.header_row = options.headerRow
+        raw.first_row = options.range?.firstRow ?? 0
+        raw.first_column = options.range?.firstColumn ?? 0
+        raw.last_row = options.range?.lastRow ?? 0
+        raw.last_column = options.range?.lastColumn ?? 0
         var filled = HyperTabularFilled()
         let container = book.containerBytes
         let code = info.part.withUnsafeBufferPointer { part in
-            hypertabular_workbook_sheet(
+            hypertabular_workbook_sheet_with(
                 OpaquePointer(state.baseAddress), Workbook.address(container), UInt(container.count), part.baseAddress,
-                UInt(part.count), info.index, options.hasHeader ? 1 : 0, options.skipEmptyRows ? 1 : 0, &filled)
+                UInt(part.count), info.index, &raw, &filled)
         }
         _ = try Workbook.settled((code, filled))
         if options.hasHeader {
@@ -607,13 +758,21 @@ public final class Sheet {
     ///
     /// - Throws: ``PlanError/alreadyBound`` when the sheet has a plan, whether it was opened
     ///   with one or bound one already; the sheet goes on with the plan it has.
-    ///   ``PlanError/outOfReach(column:)`` when a column's ordinal is 2²⁰ or more; the sheet
+    ///   ``PlanError/outOfReach(column:)`` when a column's ordinal is 2²⁰ or more, and
+    ///   ``PlanError/refused(column:)`` when the core will not read a column as declared; the sheet
     ///   stays unbound.
     public func bind(_ plan: [Column]) throws {
+        try bind(plan, rowWidths: false)
+    }
+
+    /// ``bind(_:)``, with how many cells each row had kept: what a headerless sheet's suggest
+    /// learns its width from.
+    private func bind(_ plan: [Column], rowWidths: Bool) throws {
         guard columnSet == nil else {
             throw PlanError.alreadyBound
         }
-        let columns = try Columns(plan: plan, batchRows: options.batchRows)
+        let columns = try Columns(
+            plan: plan, batchRows: options.batchRows, notes: options.notes, rowWidths: rowWidths, sheet: true)
         perRow = plan.count + 1
         // Grown, never replaced: the slots may hold a header row still to be repeated. The
         // stingy test pass leaves the cell table at its one entry, for the core to ask.
@@ -625,7 +784,9 @@ public final class Sheet {
             scratch.row = scratch.row.grown(toHold: UInt64(columns.width))
         }
         columnSet = columns
-        batch = Batch(columns, workbook: true)
+        batch = Batch(
+            columns, workbook: true, firstColumn: Int(max(options.range?.firstColumn ?? 0, 1)) - 1,
+            reaches: [scratch, book])
     }
 
     /// Whether a plan has been bound: always, for a sheet opened with one.
@@ -672,6 +833,55 @@ public final class Sheet {
         return batch.fill(
             rows: rows, cells: scratch.cells, perRow: perRow, base: UnsafeRawPointer(book.strings.baseAddress),
             arena: scratch.arena)
+    }
+
+    /// Reads a sample of this sheet through the text door and says what its columns look like, as
+    /// ``DelimitedReader/suggest(contentsOfFile:dialect:options:)`` does. It is a read of its own,
+    /// from the sheet's start with the sheet's options, and this one's own read is left as it was.
+    /// Its plan's ordinals count from the range's first column, as any plan's do.
+    ///
+    /// A typed number is judged by its value and has no notation, whichever is declared: a column
+    /// of them is a number under any format, and its plan reads every one, since a typed cell reads
+    /// the same under them all. A text cell holding `1.234` keeps its question, in a column of its
+    /// own or beside typed numbers. A typed date, date-time, time or duration cell reads as its
+    /// canonical text, which the suggester does not take as a date: such a column of a sheet is
+    /// text, resolved, for a plan to change by hand.
+    ///
+    /// - Parameter options: How the sample is taken and read.
+    /// - Throws: ``PlanError/refused(column:)`` for a format the options declare that no door
+    ///   accepts, first, before anything is read (see ``SuggestOptions``), and ``TabularError`` for
+    ///   a failure among the sampled rows.
+    public func suggest(_ options: SuggestOptions = SuggestOptions()) throws -> Suggestion {
+        try options.checkFormats()
+        let limit = options.rows(within: self.options.batchRows)
+        var width = -1
+        if !self.options.hasHeader {
+            var first = self.options
+            first.batchRows = 1
+            first.notes = false
+            // A headerless sheet's width is its first row's, which a read says through a plan of one
+            // column.
+            let probe = try Sheet(book, info, options: first, plan: [.text(0)], rowWidths: true)
+            width = try probe.read() == nil ? 0 : Int(probe.columnSet?.rowWidths?[0] ?? 0)
+        }
+        var sampling = self.options
+        sampling.batchRows = 1
+        // Notes on, for what the sample's second door says of a cell.
+        sampling.notes = true
+        let sheet = try Sheet(book, info, options: sampling, plan: nil)
+        if width < 0 {
+            width = sheet.header?.count ?? 0
+        }
+        // One row more than the sample, so that a row past it costs no second batch to find, in as many
+        // batches as the core says that takes.
+        let sample = try Sample.of(
+            width: width, limit: limit, sheet: true,
+            bind: { plan in
+                sheet.options.batchRows = try Columns.sampleRows(
+                    plan, wanted: limit + 1, notes: true, widths: false, sheet: true)
+                try sheet.bind(plan)
+            }, read: { try sheet.read() })
+        return try sample.judge(header: sheet.header, options: options)
     }
 
     /// Reads every row left, batch by batch, handing each to `body`:

@@ -39,6 +39,10 @@ const (
 	// that is not there (Expected is its identifier), 4 for cell storage of a version the
 	// core does not read (Expected is the version).
 	IWA FailureKind = 26
+	// Encoding means text that isn't valid in its encoding: a unit a Dialect's declared
+	// TextEncoding has no character for, or, under UTF-8, a header name that isn't valid. A cell
+	// that isn't valid UTF-8 is that cell's Malformed verdict, not this.
+	Encoding FailureKind = 27
 )
 
 var failureNames = map[FailureKind]string{
@@ -56,6 +60,7 @@ var failureNames = map[FailureKind]string{
 	SharedString:  "shared string",
 	TooLarge:      "too large",
 	IWA:           "iwa",
+	Encoding:      "encoding",
 }
 
 // String names the kind in lower case — "unclosed quote", "column count", "not a zip".
@@ -84,7 +89,9 @@ type Failure struct {
 	Record int64
 	// Line is the one-based line the offending record starts on.
 	Line int
-	// Byte is the absolute byte offset of the offending record's start.
+	// Byte is the absolute byte offset of the offending record's start, in the decoded text if an
+	// encoding was declared; an Encoding failure under a declared encoding gives the offending
+	// unit's offset in the original input, and a header's the record's offset there.
 	Byte int64
 	// Expected is the number of cells in the first record, for ColumnCount.
 	Expected int
@@ -123,6 +130,9 @@ func (f *Failure) Error() string {
 		return fmt.Sprintf("hypertabular: row %d names shared string %d; the table has %d", f.Line, f.Found, f.Expected)
 	case TooLarge:
 		return "hypertabular: the workbook holds more text than a batch can address"
+	case Encoding:
+		return fmt.Sprintf("hypertabular: text that isn't valid in its encoding at byte %d (record %d, line %d)",
+			f.Byte, f.Record, f.Line)
 	case IWA:
 		return fmt.Sprintf("hypertabular: part %d of the Numbers document is not what the IWA packaging says (byte %d, detail %d)",
 			f.Record, f.Byte, f.Found)

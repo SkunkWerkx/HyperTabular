@@ -1,5 +1,5 @@
 //! What ext-php-rs's builders can't declare, written into the registered class entries once every
-//! module's startup has run: `Door`, `TabularFailure` and `WorkbookFormat` are `final`, as every
+//! module's startup has run: this binding's enums are `final`, as every
 //! PHP enum is (ext-php-rs registers an enum through `zend_register_internal_enum` without the
 //! flag the compiler gives a declared one). HyperCast's extension does the same, for the same
 //! reason (its `registration.rs` has the whole account).
@@ -17,7 +17,9 @@ use std::sync::Mutex;
 use ext_php_rs::class::RegisteredClass;
 use ext_php_rs::ffi::{ZEND_ACC_FINAL, zend_class_entry};
 
-use super::enums::{Door, TabularFailure, WorkbookFormat};
+use super::enums::{
+    Door, Encoding, LongRows, Origin, ShortRows, SuggestStatus, TabularFailure, WorkbookFormat,
+};
 
 // The engine's hook for work after every MINIT and before any request (`zend.h`), which
 // bindgen doesn't carry. Read and written only during startup, on the one startup thread.
@@ -78,6 +80,11 @@ fn finish() {
         own_entry::<Door>(),
         own_entry::<TabularFailure>(),
         own_entry::<WorkbookFormat>(),
+        own_entry::<ShortRows>(),
+        own_entry::<LongRows>(),
+        own_entry::<Encoding>(),
+        own_entry::<Origin>(),
+        own_entry::<SuggestStatus>(),
     ]
     .into_iter()
     .flatten()

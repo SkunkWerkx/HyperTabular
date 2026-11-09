@@ -103,6 +103,119 @@ takes it. A
 cancelled `readAsync()` throws `CancellationError` and loses nothing: every byte that had
 arrived stays buffered, and the next read goes on from there.
 
+## A messier file
+
+Everything about a file is still declared, on the `Dialect` and on the `SheetOptions`, whose defaults
+read as before: lines to pass over, records to discard, what a record of the wrong width is, the
+encoding, and what stands for no value.
+
+```swift
+import Foundation
+import HyperCast
+import HyperTabular
+
+// Windows-1252, with a title line above the table, NA for nothing and rows that stop short.
+var dialect = Dialect.csv
+dialect.skip = 1
+dialect.shortRows = .pad
+dialect.encoding = .windows1252
+dialect.tokens = ["NA"]
+
+let input = Array("Exported by hand\nname,amount\ncaf".utf8) + [0xE9] + Array(",NA\ntea\nmilk,12x4\n".utf8)
+let reader = try DelimitedReader(
+    bytes: input, dialect: dialect,
+    plan: [
+        .text(0),
+        .f64(1).withTokens(["NA", "-"]),  // in place of the dialect's
+    ])
+let batch = try reader.read()!
+for row in batch {
+    let reason = row.verdict(1).reason.map { "\($0)" } ?? "ok"
+    let detail = row.fault(1)?.detail.map { "\($0)" } ?? "-"
+    print("\(row.string(0) ?? "") \(reason) \(row.origin(1)) \(detail)")
+}
+// What went wrong, and only that: a blank, a token and a padded cell aren't problems.
+for problem in batch.faults() {
+    print("line \(problem.line) column \(problem.sourceColumn ?? -1) \(problem.reason!) \(problem.detail!)")
+}
+
+// A plan to look at, from a sample of the text. It reads nothing until it's handed to a read.
+let found = try DelimitedReader.suggest(
+    bytes: Array("id,total,day\n1,\"1,234.50\",2026-01-07\n2,12.00,2026-01-08\n".utf8), dialect: .csv)
+for column in found.report {
+    print("\(column.name ?? "") \(column.status) \(column.door) \(column.matched) of \(column.sampled)")
+}
+
+// A sheet takes the part of it that's the table; its plan's ordinals count from B here.
+var options = SheetOptions()
+options.range = try SheetRange(parsing: "B2:D40")
+print("\(options.range!.firstColumn) \(options.range!.lastRow)")
+```
+
+A `TabularError` of kind `.encoding` comes after every intact row before it, and its `byte` alone
+counts the original bytes: a read's spans are all the decoded text's. A sheet's `range` is parsed by
+the core, so `SheetRange(parsing: "A5:F200")` means what it means in every binding, with
+`SheetRange(firstRow:firstColumn:lastRow:lastColumn:)` for what that can't say, such as every row from
+the fifth (`SheetRange(firstRow: 5)`); both throw `RangeError`. A plan's ordinals count from the
+range's first column, while `line(_:)` and a problem's `sourceColumn` stay the sheet's own. `skip` and
+`headerRow`, on a `Dialect` and on `SheetOptions`, count from zero; `skipEmptyRows` and `skipBlankLines`
+work on what they leave.
+
+`notes = false`, on a `Dialect` or `SheetOptions`, drops the detail on a `Fault` and `Origin`, which then
+say `.none` and `.cell`: the read costs a little less, and `faults()` can't list a formula with no
+cached value. `Column.withDateOptions(_:)` hands a date door HyperCast's `DateOptions`, and on a sheet it
+and `withTokens(_:)` reach only a text cell. A cell's detail is on `batch.fault(_:row:)`, `row.fault(_:)`,
+`get(_:row:as:)`'s `.fault` and `faults()`; `CellVerdict.fault` has only what the verdict holds.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied. Read
+the report first: only a resolved column reads through its door in the plan, the rest as text. With no
+format declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read
+only with `,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the
+plan is in whichever is left. `1,234` and `1.234` read both ways, so they come back ambiguous and read
+as text until a format is declared or another cell settles them, which takes in a column of prices at
+three decimals; `SuggestOptions.dateOrder` does the same for `01/02/2026`. `2,5` beside `2.5` is
+unresolved, and `1,23,456`, Indian grouping, is text until the column declares Indian grouping, because
+nothing says its culture. A sheet's number cell has no notation, so a column of them is a number under
+any format, where text holding the same digits asks. A column of `0` and `1` is `.bool`, `007` and an
+integer past `Int64` are text, and a typed date in a sheet is text, for a plan to change by hand. With
+nothing to choose between, a resolved number is planned in `,` groups of three, and
+`SuggestedColumn.format` names what the plan uses: a later `1,23,456` is refused.
+`DelimitedReader.suggest` takes a path or bytes. A headerless file is opened twice, so no suggestion is
+offered of a stream. `Sheet.suggest(_:)` answers from the sheet's first row whatever has been read of
+it, and leaves it unbound and where it was.
+
+**To keep every row of a sheet, set `skipEmptyRows` to `false`.** By default a row whose only cells are
+formulas with no cached value is filtered out as empty, with nothing to say so; off, those rows are
+delivered, their cells at `Origin.uncached`.
+
+A column given no format reads `NumFormat.invariant`, which is Western: `1,234,567` is 1234567 and
+`1,23,456` is `malformed`, and a format that names no policy is the same. If a column of Indian numbers
+comes back refused, declare it, one column at a time, so an Indian column reads beside a Western one in
+the same read:
+
+```swift
+import HyperCast
+import HyperTabular
+
+let plan: [Column] = [
+    .i32(0, format: NumFormat.invariant.withGrouping(.indian)),  // 1,23,456 is 123456, and 1,234,567 is malformed
+    .i32(1, format: .invariant),  // 1,234,567 is 1234567, and 1,23,456 is malformed
+]
+```
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `NumFormat.detect` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `.f64` reads `1,2345` as 1.2345,
+`12,34` as 12.34 and `0,125` as 0.125. `NumFormat.from(locale:)` takes what the platform's Foundation says
+of a locale, which is not the same everywhere: `en_IN` is Indian on macOS 27.2 and Western on Linux
+(swift-foundation, Swift 6.4.2), so an Indian column says `.withGrouping(.indian)` there. A format holding the
+retired grouping bit `256` (the words `351` and `863`), which HyperCast's own constructor stops with a
+precondition failure and only memory written by hand can hold, is `PlanError.refused(column:)` when the
+plan is bound, before any cell, naming the plan column, and in a suggest's options before it opens
+anything. HyperCast's
+[grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and
+the locales neither policy matches.
+
 ## The shape
 
 The native core owns no memory and reads no files. `DelimitedReader` and `Sheet` allocate
@@ -123,21 +236,45 @@ once per few thousand rows, not once per cell.
   core writes the value (`UUID`'s layout is not part of Foundation's ABI), and HyperCast's
   Swift package has no type of its own that is.
 - **Rows, too.** A `Batch` is a `RandomAccessCollection` of `Row` — `index`, `line`,
-  `get(_:as:)`, `verdict(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`, the batch's accessors
-  with the row fixed, allocating nothing — and `forEachRow` on a reader or a sheet reads
-  every row left across batches. A row is valid as long as its batch.
+  `get(_:as:)`, `verdict(_:)`, `fault(_:)`, `origin(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`,
+  the batch's accessors with the row fixed, allocating nothing — and `forEachRow` on a reader
+  or a sheet reads every row left across batches, the one cursor here that follows the read. A row
+  is valid as long as its batch: a `Row`, a slice or `reversed()` of a batch's rows, a walk of them
+  or a `faults()` kept past the next `read()` stops the program with a precondition failure, rather
+  than read the next batch's cells as its own. The `Batch` itself is the reader's one batch, so one
+  kept past a read holds the rows just read, and `batch.lazy` with it: `[first, second]` holds one
+  object twice, so copy what you keep. A batch or a row that outlives
+  its reader or sheet stays readable, holding what it needs until it goes, since no read can follow.
+- **The source can't call back in.** A `Source` closure runs in the middle of its reader's
+  `read()`, and a `read()`, `bind(_:)` or `forEachRow` it calls on that same reader
+  throws `PlanError.busy` (`The reader is in the middle of a read; its source can't call back into
+  it.`). The outer read goes on unharmed, and a source that throws leaves no read in progress. A
+  `read()` in the body of `forEachRow` moves the reader under the walk, which stops the program
+  with a precondition failure, as any walk past the next read does. Other readers and sheets are
+  there to use. A sheet, a workbook and `suggest` read memory or a path, so nothing of the
+  caller's runs inside them.
 - **Header first, or plan first.** Opened without a plan, a reader or sheet reads its
   header — a `Header`, a collection of `String` with `ordinal(of:)` (throwing
-  `NoSuchColumn`) and `firstIndex(of:)`, both exact byte for byte — and is bound once with
+  `NoSuchColumn` for a name it doesn't hold, `AmbiguousColumn`, naming both positions, for one
+  two columns share) and `firstIndex(of:)`, which takes the first, both exact byte for
+  byte — and is bound once with
   `bind(_:)`; reading before that, or binding twice, throws `PlanError`. Once a delimited
   header has been read, a plan column at or past its width — where every record can only
   be empty — is refused with `PlanError.outOfReach(column:)`, whether the plan was given
   to the initializer or bound after. So, for a reader or a sheet, is an ordinal of 2²⁰ or
   more: no workbook format has that many columns, and one row of cell table stays under
   8 MiB.
-- **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
-  the plan states each column's door and, for numbers, its `NumFormat`.
+- **The core decides how much a batch may ask for.** A `batchRows` or `bufferBytes` of 0, and a batch
+  past 4 GiB (214 million rows of one `i32` column, 1.8 million of 100 text columns), throw
+  ``BatchSizeError`` from the core, when a reader or a sheet opens or a plan is bound, before anything is
+  allocated. A `bufferBytes` past 1 GiB starts there. A negative count is a programmer's error, and
+  traps. `suggest` is never refused for the size of its own batches: the core says what fits and the
+  sampler reads as many as it takes. A row that alone is past the limit throws
+  ``BatchSizeError/rowTooWide(width:needed:limit:)``.
+- **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and what
+  [a messier file](#a-messier-file) needs; `SheetOptions` states a sheet's header, its range,
+  whether empty rows are skipped and the batch size; the plan states each column's door and,
+  for numbers, its `NumFormat`.
 - **HyperCast is the judge.** `Verdict`, `Fault`, `NumFormat`, `UnixPrecision`, `DateOrder`
   and `ExcelEpoch` are HyperCast's own types. A text cell means exactly what `Cast` would
   say of the same text; a typed workbook cell is converted by the door directly.
@@ -145,6 +282,22 @@ once per few thousand rows, not once per cell.
   fault in its column and the read goes on. A record of the wrong width, input that ends
   inside a quoted cell, a workbook whose container or parts cannot be read, throws
   `TabularError`, after every intact row before it.
+
+One very long record costs what it costs in Rust, but for memory. A release build on an Apple M6 Mac
+mini (`Mac18,5`) on 2026-11-07, one run of each, reading one record from a source:
+
+| One record | Swift | Rust |
+| --- | ---: | ---: |
+| 1 GiB, each read filling the room: time | 0.23 s | 0.19 s |
+| 1 GiB, each read filling the room: peak resident | 2.15 GB | 1.08 GB |
+| 64 MiB, 64 KiB a read | 1.36 s | 1.43 s |
+| 128 MiB, 64 KiB a read | 5.42 s | 5.77 s |
+| 64 MiB of Latin-1 | 0.37 s | 0.38 s |
+| 128 MiB of Latin-1 | 1.42 s | 1.49 s |
+
+Short reads and a declared encoding are quadratic in the record's length in both, since a fill looks
+again from the record's start. Swift's peak is twice Rust's because the input doubles by copying, with
+both copies alive for the copy.
 
 `Tabular.isAvailable` and `Tabular.nativeVersion()` report the linked core.
 

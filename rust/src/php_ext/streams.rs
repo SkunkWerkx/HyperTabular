@@ -75,15 +75,37 @@ pub(crate) fn contents(path: &[u8]) -> PhpResult<Vec<u8>> {
     }
 }
 
-/// `fread($stream, $length)`; `None` for `false`.
-pub(crate) fn read(stream: &Zval, length: usize) -> PhpResult<Option<Vec<u8>>> {
-    let length = i64::try_from(length).unwrap_or(i64::MAX);
+/// The most one `fread()` asks for: PHP allocates what it is asked for against `memory_limit` before
+/// it reads, whatever the stream then has, and a buffer can double up to 1 GiB.
+const TRANSFER_BYTES: usize = 1 << 20;
+
+/// One `fread()` into `into`, the bytes it handed over; `0` is the stream's end. `fread` returning
+/// `false` is an error, and so is an empty read before `feof`: a non-blocking stream, or a read
+/// that timed out.
+pub(crate) fn read_into(stream: &Zval, into: &mut [u8]) -> PhpResult<usize> {
+    let length = into.len().min(TRANSFER_BYTES);
+    if length == 0 {
+        return Ok(0);
+    }
     let chunk = call(
         None,
         "fread",
-        &mut [stream.shallow_clone(), int_zval(length)],
+        &mut [stream.shallow_clone(), int_zval(length as i64)],
     )?;
-    Ok(chunk.zend_str().map(|s| s.as_bytes().to_vec()))
+    let Some(chunk) = chunk.zend_str().map(|s| s.as_bytes()) else {
+        return Err(runtime("hypertabular: reading the stream failed"));
+    };
+    if chunk.is_empty() && !at_end(stream)? {
+        return Err(runtime(
+            "hypertabular: the stream returned no data before its end (a non-blocking stream, or a \
+             read that timed out); the reader needs one that blocks",
+        ));
+    }
+    let read = chunk.len().min(length);
+    if let (Some(to), Some(from)) = (into.get_mut(..read), chunk.get(..read)) {
+        to.copy_from_slice(from);
+    }
+    Ok(read)
 }
 
 /// `feof($stream)`.

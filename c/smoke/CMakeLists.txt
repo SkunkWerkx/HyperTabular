@@ -8,13 +8,19 @@
 #   smoke_cxx<std>_noexceptions  the same with exceptions off (-fno-exceptions; /EHs-c- and
 #                                _HAS_EXCEPTIONS=0 on MSVC)
 #   smoke_corpus                 corpus.cpp: the conformance corpus replayed through the header
+#   smoke_aborts_<way>           aborts.cpp, each passing only by the header's std::abort() of a
+#                                caller bug: a faults or row walk past the next read(), a reader
+#                                destroyed or moved by its own source, a sheet destroyed by its own
+#                                for_each_row callback (aborts.cpp lists the ways)
 #
 # The C++ programs link HyperCast's library of the same kind beside this one (hypercast.hpp is
 # the header the C++ one stands on, and NumFormat::declare asks HyperCast's core), so they are
 # built only where find_package(hypercast) finds HyperCast's archive; HYPERTABULAR_SMOKE_CXX
 # makes that, and a C++ compiler, required.
 #
-# Every one with warnings as errors (-Wall -Wextra -Wpedantic -Werror; /W4 /WX on MSVC).
+# Every one with warnings as errors (-Wall -Wextra -Wpedantic -Wshadow -Werror; /W4 /WX on MSVC),
+# which reach the headers too: an imported target's includes are system headers, whose warnings a
+# compiler keeps to itself, so NO_SYSTEM_FROM_IMPORTED takes that away.
 # programs.txt lists what was built, and <program>-path-<config>.txt where each landed (inside
 # an .app on iOS; under the configuration's folder in Visual Studio).
 cmake_minimum_required(VERSION 3.21)
@@ -29,7 +35,7 @@ find_package(hypertabular REQUIRED CONFIG)
 if(MSVC)
   set(_warnings /W4 /WX)
 else()
-  set(_warnings -Wall -Wextra -Wpedantic -Werror)
+  set(_warnings -Wall -Wextra -Wpedantic -Wshadow -Werror)
 endif()
 
 set(_programs)
@@ -91,6 +97,16 @@ if(CMAKE_CXX_COMPILER AND hypercast_FOUND)
   target_compile_options(smoke_corpus PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
   list(APPEND _programs smoke_corpus)
   list(APPEND _cxx_programs smoke_corpus)
+  foreach(way faults_begin faults_advance rows_deref rows_advance rows_postfix destroyed moved_from
+          moved_onto sheet_destroyed)
+    set(program smoke_aborts_${way})
+    add_executable(${program} aborts.cpp)
+    set_target_properties(${program} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    target_compile_options(${program} PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/EHsc>)
+    target_compile_definitions(${program} PRIVATE SMOKE_WAY=${way})
+    list(APPEND _programs ${program})
+    list(APPEND _cxx_programs ${program})
+  endforeach()
 elseif(HYPERTABULAR_SMOKE_CXX)
   if(NOT CMAKE_CXX_COMPILER)
     message(FATAL_ERROR "HYPERTABULAR_SMOKE_CXX is on, but there is no C++ compiler here")
@@ -102,6 +118,7 @@ endif()
 
 foreach(program IN LISTS _programs)
   target_compile_options(${program} PRIVATE ${_warnings})
+  set_target_properties(${program} PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
   if(HYPERTABULAR_SMOKE_STATIC)
     target_link_libraries(${program} PRIVATE hypertabular::hypertabular_static)
     if(program IN_LIST _cxx_programs)

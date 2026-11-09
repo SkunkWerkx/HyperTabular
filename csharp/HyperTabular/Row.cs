@@ -35,6 +35,12 @@ public readonly ref struct Row
 	/// <summary>The verdict of the cell in <paramref name="column"/>: <see cref="Batch.Verdicts"/> of the column, at this row.</summary>
 	public CellVerdict Verdict(int column) => _batch.Verdicts(column)[Index];
 
+	/// <summary>The fault of the cell in <paramref name="column"/>, with its detail: <see cref="Batch.Fault"/> of this row.</summary>
+	public Fault? Fault(int column) => _batch.Fault(column, Index);
+
+	/// <summary>Where the verdict of the cell in <paramref name="column"/> came from: <see cref="Batch.Origin"/> of this row.</summary>
+	public Origin Origin(int column) => _batch.Origin(column, Index);
+
 	/// <summary>The bytes of the text cell in <paramref name="column"/>: <see cref="Batch.TryGetText"/> of this row.</summary>
 	/// <exception cref="InvalidOperationException">The column is not read through <see cref="Door.Text"/>.</exception>
 	public bool TryGetText(int column, out ReadOnlySpan<byte> utf8) => _batch.TryGetText(column, Index, out utf8);
@@ -69,7 +75,9 @@ internal interface IBatchSource
 /// <remarks>
 /// The loop reads the next batch whenever the current one runs out, and the reader hands out
 /// the same <see cref="Batch"/> every time, so a <see cref="Row"/> is valid for its own
-/// iteration only. A failure the reader raises is raised from the loop.
+/// iteration only. A failure the reader raises is raised from the loop. The loop is the
+/// reader's only reader while it runs: a read of the reader in its body makes the loop's next
+/// step throw <see cref="InvalidOperationException"/>, as a batch's own loop does.
 /// </remarks>
 public readonly struct RowSequence
 {
@@ -85,6 +93,8 @@ public readonly struct RowSequence
 	{
 		readonly IBatchSource _source;
 		Batch? _batch;
+		/// <summary>The batch's generation when the loop read it: a read in the loop's body moves it on.</summary>
+		ulong _generation;
 		int _index;
 
 		internal Enumerator(IBatchSource source)
@@ -94,16 +104,32 @@ public readonly struct RowSequence
 		}
 
 		/// <summary>The row the loop is on.</summary>
-		public readonly Row Current => new(_batch!, _index);
+		/// <exception cref="InvalidOperationException">The reader has been read on inside the loop.</exception>
+		public readonly Row Current
+		{
+			get
+			{
+				_batch!.StillCurrent(_generation);
+				return new(_batch, _index);
+			}
+		}
 
 		/// <summary>Moves to the next row, reading the next batch when this one has no more.</summary>
+		/// <exception cref="InvalidOperationException">The reader has been read on inside the loop: the loop would go on in a batch it never read.</exception>
 		public bool MoveNext()
 		{
-			if (_batch is not null && ++_index < _batch.Rows)
-				return true;
+			if (_batch is not null)
+			{
+				_batch.StillCurrent(_generation);
+				if (++_index < _batch.Rows)
+					return true;
+			}
 			_batch = _source.Read();
 			_index = 0;
-			return _batch is not null;
+			if (_batch is null)
+				return false;
+			_generation = _batch.Generation;
+			return true;
 		}
 	}
 }

@@ -220,7 +220,14 @@ RSpec.describe HyperTabular do
       end
       expect(seen).to eq(["got 12", 'malformed "x"', "nothing", 'out_of_range "256"'])
       expect(batch.values(0)).to eq([12, nil, nil, nil])
-      expect(batch.get(0, 2)).to equal(HyperTabular::Batch::EMPTY)
+      # Every blank cell is the one frozen Fault, with notes on and off.
+      expect(batch.get(0, 2)).to equal(HyperTabular::Batch::BLANK)
+      expect(batch.get(0, 2)).to eq(HyperTabular::Batch::EMPTY)
+      expect(batch.get(0, 2).detail).to eq(HyperCast::Detail::BLANK)
+      keeping = HyperTabular::Dialect.new(separator: ",", skip_blank_lines: false)
+      quiet = HyperTabular::DelimitedReader.new("a\n\n", keeping, [HyperTabular::Column.i32(0)], notes: false).read
+      expect(quiet.get(0, 0)).to equal(HyperTabular::Batch::EMPTY)
+      expect(quiet.get(0, 0).detail).to be_nil
       expect(HyperCast.optional(batch.get(0, 2))).to be_nil
     end
 

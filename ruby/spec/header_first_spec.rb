@@ -28,9 +28,13 @@ RSpec.describe "header first" do
       expect(header.inspect).to eq('["id", "name", "Name", "name", " name"]')
     end
 
-    it "finds a name exactly, case and spaces included, and a repeated one where it is first" do
+    it "finds a name exactly, case and spaces included, and refuses one the header names twice" do
       expect(header.ordinal("id")).to eq(0)
-      expect(header.ordinal("name")).to eq(1)
+      expect { header.ordinal("name") }.to raise_error(HyperTabular::AmbiguousColumn) { |e|
+        expect([e.name, e.first, e.second]).to eq(["name", 1, 3])
+        expect(e.message).to eq('the header names two columns "name", at positions 1 and 3: say which by position')
+        expect(e).to be_a(ArgumentError)
+      }
       expect(header.ordinal("Name")).to eq(2)
       expect(header.ordinal(" name")).to eq(4)
       expect(header.find_ordinal("NAME")).to be_nil

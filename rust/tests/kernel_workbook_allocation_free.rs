@@ -17,27 +17,27 @@ mod packages;
 mod support;
 
 use hypertabular::kernel::abi::{
-    CellVerdict, ColumnBuffer, ColumnSpec, ERR_STRUCTURE, Failure, Filled, OK, Opened, Slot, Span,
+    CellNote, CellVerdict, ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith,
+    ERR_STRUCTURE, Failure, Filled, OK, Opened, RawSheetOptions, Slot, Span,
 };
 use hypertabular::kernel::door::Door;
 use hypertabular::kernel::workbook::{Memory, State, book, rows};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
 
-static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 thread_local! {
-    // Const-initialised and without a destructor, so reading it never allocates.
+    // Const-initialised and without a destructor, so reading them never allocates.
     static COUNTED: Cell<bool> = const { Cell::new(false) };
+    // Per thread: two tests here run at once, and neither's fixtures are the other's count.
+    static ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if COUNTED.try_with(Cell::get).unwrap_or(false) {
-            ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
+            ALLOC_COUNT.set(ALLOC_COUNT.get() + 1);
         }
         unsafe { System.alloc(layout) }
     }
@@ -104,14 +104,8 @@ impl Room {
         (code, out)
     }
 
-    /// Opens `container` and reads every sheet of it to its end. Returns the rows read
-    /// and the failure that stopped a sheet, if one did.
-    fn read(
-        &mut self,
-        container: &[u8],
-        specs: &[ColumnSpec],
-        columns: &[ColumnBuffer],
-    ) -> (u64, u32) {
+    /// Opens `container`, loads its tables, and says where its sheets are.
+    fn load(&mut self, container: &[u8]) -> ([([u8; 96], usize, u32); 4], usize) {
         (self.strings_len, self.table_len, self.kinds_len) = (0, 0, 0);
         let mut opened = Opened::default();
         let code = {
@@ -152,7 +146,72 @@ impl Room {
         self.kinds_len = out.rows as usize;
         self.kinds[..self.kinds_len].copy_from_slice(&self.arena[..self.kinds_len]);
         (self.strings_len, self.table_len) = (bytes, count_strings);
+        (sheets, count)
+    }
 
+    /// Opens `container` and reads its first sheet through a range, a skip and a header row, and
+    /// everything `fill_with` takes. Returns the rows read.
+    fn read_with(
+        &mut self,
+        container: &[u8],
+        specs: &[ColumnSpecWith],
+        columns: &[ColumnBufferWith],
+        tokens: &[u8],
+        widths: &mut [u32],
+    ) -> u64 {
+        let (sheets, _) = self.load(container);
+        let sheet = &sheets[0];
+        let options = RawSheetOptions {
+            size: RawSheetOptions::SIZE,
+            has_header: 1,
+            skip_empty_rows: 1,
+            skip: 2,
+            header_row: 1,
+            first_row: 1,
+            first_column: 2,
+            last_row: 12,
+            last_column: 5,
+        };
+        let mut out = Filled::default();
+        let code = rows::sheet_with(
+            &mut self.state,
+            container,
+            &sheet.0[..sheet.1],
+            sheet.2,
+            &options,
+            &mut out,
+        );
+        assert_eq!(code, OK);
+        let (code, _) = self.call(container, rows::header);
+        assert_eq!(code, OK);
+        let mut rows_read = 0u64;
+        loop {
+            let (code, out) = self.call(container, |state, container, memory, out| {
+                // SAFETY: every column's arrays, and the widths, hold `ROWS` elements, and the
+                // lists are the caller's for the whole call.
+                unsafe {
+                    rows::fill_with(
+                        state, container, specs, columns, ROWS, memory, tokens, widths, out,
+                    )
+                }
+            });
+            assert_eq!(code, OK);
+            rows_read += out.rows;
+            if (out.rows as usize) < ROWS {
+                return rows_read;
+            }
+        }
+    }
+
+    /// Reads every sheet of `container` to its end. Returns the rows read and the failure that
+    /// stopped a sheet, if one did.
+    fn read(
+        &mut self,
+        container: &[u8],
+        specs: &[ColumnSpec],
+        columns: &[ColumnBuffer],
+    ) -> (u64, u32) {
+        let (sheets, count) = self.load(container);
         let mut rows_read = 0u64;
         let mut failure = 0u32;
         for (sheet_index, sheet) in sheets.iter().enumerate().take(count) {
@@ -189,6 +248,86 @@ impl Room {
     }
 }
 
+/// A range, a skip and a header row over each sheet, read through `fill_with` with tokens, notes,
+/// date options and row widths: the options that came after the first core ask for no more.
+#[test]
+fn allocation_free_through_every_option() {
+    COUNTED.set(true);
+    let xlsx = packages::ranges_xlsx();
+    let ods = packages::ranges_ods();
+    let numbers = packages::ranges_numbers();
+    let uncached_xlsx = packages::uncached_xlsx();
+    let uncached_ods = packages::uncached_ods();
+    let specs = support::every_door(WIDTH);
+    let mut months = Vec::new();
+    for (month, name) in [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .iter()
+    .enumerate()
+    {
+        months.push(month as u8 + 1);
+        months.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        months.extend_from_slice(name.as_bytes());
+    }
+    let tokens = [2u8, 0, 0, 0, b'N', b'A', 1, 0, 0, 0, b'-'];
+    let with: Vec<ColumnSpecWith> = specs
+        .iter()
+        .map(|spec| {
+            let mut with = ColumnSpecWith::new(spec.ordinal, spec.door, spec.param);
+            with.date.size = hypercast::RawDateOptions::SIZE;
+            with.date.flags = hypertabular::DateOptions::COMPACT_DATE;
+            with.months = months.as_ptr();
+            with.months_len = months.len();
+            with
+        })
+        .collect();
+    let mut values: Vec<Vec<u8>> = specs
+        .iter()
+        .map(|spec| {
+            let door = Door::from_code(spec.door, spec.param).unwrap();
+            vec![0u8; support::size_of_door(door) * ROWS]
+        })
+        .collect();
+    let mut verdicts: Vec<Vec<CellVerdict>> = specs
+        .iter()
+        .map(|_| vec![CellVerdict::default(); ROWS])
+        .collect();
+    let mut notes: Vec<Vec<CellNote>> = specs
+        .iter()
+        .map(|_| vec![CellNote::default(); ROWS])
+        .collect();
+    let columns: Vec<ColumnBufferWith> = values
+        .iter_mut()
+        .zip(verdicts.iter_mut())
+        .zip(notes.iter_mut())
+        .map(|((values, verdicts), notes)| ColumnBufferWith {
+            size: ColumnBufferWith::SIZE,
+            values: values.as_mut_ptr().cast(),
+            verdicts: verdicts.as_mut_ptr(),
+            notes: notes.as_mut_ptr(),
+        })
+        .collect();
+    let mut widths = vec![0u32; ROWS];
+    let mut room = Room::new();
+
+    let before = ALLOC_COUNT.get();
+    let mut total = 0u64;
+    for container in [&xlsx[..], &ods[..], &numbers[..]] {
+        total += room.read_with(container, &with, &columns, &tokens, &mut widths);
+    }
+    let uncached = room.read_with(&uncached_xlsx, &with, &columns, &tokens, &mut widths)
+        + room.read_with(&uncached_ods, &with, &columns, &tokens, &mut widths);
+    let allocations = ALLOC_COUNT.get() - before;
+
+    assert_eq!(allocations, 0, "the workbook core allocated");
+    // Three formats, rows 5 to 12 less the empty one, the header (row 4) read off by `skip` first.
+    assert_eq!(total, 3 * 7, "the same rows from each");
+    // What's left of rows 1 to 12 from column B, the filter having had the formulas with nothing
+    // spelled, and `skip`, `header_row` and the header what comes first of the rest.
+    assert_eq!(uncached, 9);
+}
+
 #[test]
 fn allocation_free() {
     COUNTED.set(true);
@@ -223,13 +362,13 @@ fn allocation_free() {
         .collect();
     let mut room = Room::new();
 
-    let before = ALLOC_COUNT.load(Ordering::SeqCst);
+    let before = ALLOC_COUNT.get();
     let (xlsx_rows, xlsx_failure) = room.read(&xlsx, &specs, &columns);
     let (stored_rows, stored_failure) = room.read(&stored, &specs, &columns);
     let (ods_rows, ods_failure) = room.read(&ods, &specs, &columns);
     let (numbers_rows, numbers_failure) = room.read(&numbers, &specs, &columns);
     let (broken_rows, broken_failure) = room.read(&broken, &specs, &columns);
-    let allocations = ALLOC_COUNT.load(Ordering::SeqCst) - before;
+    let allocations = ALLOC_COUNT.get() - before;
 
     assert_eq!(allocations, 0, "the workbook core allocated");
     assert!(xlsx_rows > 400 && stored_rows > 400 && ods_rows > 300 && numbers_rows > 300);

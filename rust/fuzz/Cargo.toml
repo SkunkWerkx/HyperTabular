@@ -56,3 +56,10 @@ path = "fuzz_targets/inflate.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "suggest"
+path = "fuzz_targets/suggest.rs"
+test = false
+doc = false
+bench = false

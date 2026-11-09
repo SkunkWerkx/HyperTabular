@@ -10,7 +10,7 @@ import java.lang.invoke.MethodHandle;
 
 /**
  * The FFM path to the core: the JDK 25 tree of the multi-release jar, read on 25 and later.
- * {@code libhypertabular}'s fourteen exports, each reached by a downcall, under the same
+ * {@code libhypertabular}'s twenty-three exports, each reached by a downcall, under the same
  * members as the JNI base's class of this name; {@link Abi} has the shapes that cross them.
  * Every pointer handed over is this binding's own memory for the length of the call; the
  * core keeps nothing.
@@ -43,6 +43,7 @@ final class Native {
 
         // usize is a long on every platform this jar carries a library for: all are 64-bit.
         private static final ValueLayout.OfLong USIZE = ValueLayout.JAVA_LONG;
+        private static final ValueLayout.OfLong I64 = ValueLayout.JAVA_LONG;
         private static final ValueLayout PTR = ValueLayout.ADDRESS;
         private static final ValueLayout.OfInt I32 = ValueLayout.JAVA_INT;
 
@@ -75,6 +76,27 @@ final class Native {
         //                            column_count, max_rows, buffers, out) -> i32
         private static final MethodHandle BOOK_FILL =
                 LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, PTR, USIZE, USIZE, PTR, PTR));
+        // hypertabular_transcode(encoding, input, input_len, last, out, cap, progress) -> i32
+        private static final MethodHandle TRANSCODE =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, I32, PTR, USIZE, I32, PTR, USIZE, PTR));
+        // hypertabular_faults(columns, column_count, rows, row_widths, expected_width, long_rows,
+        //                     cursor, out, cap, written) -> i32
+        private static final MethodHandle FAULTS = LINKER.downcallHandle(
+                FunctionDescriptor.of(I32, PTR, USIZE, USIZE, PTR, I32, I32, PTR, PTR, USIZE, PTR));
+        // hypertabular_suggest(input, input_len, arena, arena_len, cells, typed, rows, columns,
+        //                      formats, out) -> i32
+        private static final MethodHandle SUGGEST = LINKER.downcallHandle(
+                FunctionDescriptor.of(I32, PTR, USIZE, PTR, USIZE, PTR, PTR, USIZE, USIZE, PTR, PTR));
+        // hypertabular_workbook_sheet_with(state, container, container_len, part, part_len, index,
+        //                                  options, out) -> i32
+        private static final MethodHandle SHEET_WITH =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, PTR, USIZE, PTR, USIZE, I32, PTR, PTR));
+        // hypertabular_range_parse(text, len, out) -> i32
+        private static final MethodHandle RANGE_PARSE =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, USIZE, PTR));
+        // hypertabular_batch_check(specs, column_count, batch_rows, buffer_bytes, flags, out) -> i32
+        private static final MethodHandle BATCH_CHECK =
+                LINKER.downcallHandle(FunctionDescriptor.of(I32, PTR, USIZE, I64, I64, I32, PTR));
     }
 
     /**
@@ -109,6 +131,15 @@ final class Native {
         private static final MemorySegment BOOK_SHEET = export("hypertabular_workbook_sheet");
         private static final MemorySegment BOOK_HEADER = export("hypertabular_workbook_header");
         private static final MemorySegment BOOK_FILL = export("hypertabular_workbook_fill");
+        private static final MemorySegment INIT_WITH = export("hypertabular_delimited_init_with");
+        private static final MemorySegment FILL_WITH = export("hypertabular_delimited_fill_with");
+        private static final MemorySegment TRANSCODE = export("hypertabular_transcode");
+        private static final MemorySegment FAULTS = export("hypertabular_faults");
+        private static final MemorySegment SUGGEST = export("hypertabular_suggest");
+        private static final MemorySegment BOOK_SHEET_WITH = export("hypertabular_workbook_sheet_with");
+        private static final MemorySegment BOOK_FILL_WITH = export("hypertabular_workbook_fill_with");
+        private static final MemorySegment RANGE_PARSE = export("hypertabular_range_parse");
+        private static final MemorySegment BATCH_CHECK = export("hypertabular_batch_check");
 
         private static MemorySegment export(String symbol) {
             return LOOKUP.find(symbol)
@@ -126,6 +157,15 @@ final class Native {
     /** Which path reached the core, for the diagnostics; loads nothing. */
     static String backend() {
         return "ffm";
+    }
+
+    /**
+     * Whether a caller's native segment can be read in place: always, here, since a downcall holds
+     * the segment's arena open for the length of the call, and a close from another thread is
+     * refused until it returns. The JNI base's answer differs.
+     */
+    static boolean holdsInPlace(MemorySegment segment) {
+        return true;
     }
 
     /** The loaded library's version, packed {@code major << 16 | minor << 8 | patch}. */
@@ -306,6 +346,192 @@ final class Native {
             throw failure;
         } catch (Throwable t) {
             throw unexpected("hypertabular_workbook_fill", t);
+        }
+    }
+
+    static int initWith(MemorySegment state, MemorySegment options) {
+        try {
+            return (int) Downcalls.INIT.invokeExact(Core.INIT_WITH, state, options);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_delimited_init_with", t);
+        }
+    }
+
+    static int fillWith(
+            MemorySegment state,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment buffers,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.FILL.invokeExact(
+                    Core.FILL_WITH,
+                    state,
+                    input,
+                    inputLen,
+                    last ? 1 : 0,
+                    specs,
+                    columns,
+                    columnCount,
+                    maxRows,
+                    buffers,
+                    out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_delimited_fill_with", t);
+        }
+    }
+
+    static int transcode(
+            int encoding,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment out,
+            long cap,
+            MemorySegment progress) {
+        try {
+            return (int) Downcalls.TRANSCODE.invokeExact(
+                    Core.TRANSCODE, encoding, input, inputLen, last ? 1 : 0, out, cap, progress);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_transcode", t);
+        }
+    }
+
+    static int faults(
+            MemorySegment columns,
+            long columnCount,
+            long rows,
+            MemorySegment rowWidths,
+            int expectedWidth,
+            int longRows,
+            MemorySegment cursor,
+            MemorySegment out,
+            long cap,
+            MemorySegment written) {
+        try {
+            return (int) Downcalls.FAULTS.invokeExact(
+                    Core.FAULTS,
+                    columns,
+                    columnCount,
+                    rows,
+                    rowWidths,
+                    expectedWidth,
+                    longRows,
+                    cursor,
+                    out,
+                    cap,
+                    written);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_faults", t);
+        }
+    }
+
+    static int suggest(
+            MemorySegment input,
+            long inputLen,
+            MemorySegment arena,
+            long arenaLen,
+            MemorySegment cells,
+            MemorySegment typed,
+            long rows,
+            long columns,
+            MemorySegment formats,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.SUGGEST.invokeExact(
+                    Core.SUGGEST, input, inputLen, arena, arenaLen, cells, typed, rows, columns, formats, out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_suggest", t);
+        }
+    }
+
+    static int sheetWith(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment part,
+            int index,
+            MemorySegment options,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.SHEET_WITH.invokeExact(
+                    Core.BOOK_SHEET_WITH,
+                    state,
+                    container,
+                    container.byteSize(),
+                    part,
+                    part.byteSize(),
+                    index,
+                    options,
+                    out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_workbook_sheet_with", t);
+        }
+    }
+
+    static int bookFillWith(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment buffers,
+            MemorySegment out) {
+        try {
+            return (int) Downcalls.BOOK_FILL.invokeExact(
+                    Core.BOOK_FILL_WITH,
+                    state,
+                    container,
+                    container.byteSize(),
+                    specs,
+                    columns,
+                    columnCount,
+                    maxRows,
+                    buffers,
+                    out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_workbook_fill_with", t);
+        }
+    }
+
+    static int rangeParse(MemorySegment text, long len, MemorySegment out) {
+        try {
+            return (int) Downcalls.RANGE_PARSE.invokeExact(Core.RANGE_PARSE, text, len, out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_range_parse", t);
+        }
+    }
+
+    static int batchCheck(
+            MemorySegment specs, long columnCount, long batchRows, long bufferBytes, int flags, MemorySegment out) {
+        try {
+            return (int) Downcalls.BATCH_CHECK.invokeExact(
+                    Core.BATCH_CHECK, specs, columnCount, batchRows, bufferBytes, flags, out);
+        } catch (RuntimeException | Error failure) {
+            throw failure;
+        } catch (Throwable t) {
+            throw unexpected("hypertabular_batch_check", t);
         }
     }
 }

@@ -2,8 +2,10 @@
 //! and one row's worth, not a batch of them, for a plan reaching far past anything a
 //! record holds.
 
-use crate::column::CELL_BUDGET;
+use crate::kernel::size;
 use hypertabular::{Column, DelimitedReader, Dialect, Reason};
+
+const CELL_BUDGET: usize = size::CELL_BUDGET as usize;
 
 #[test]
 fn a_column_far_past_a_headerless_source_costs_a_row_not_a_batch() {

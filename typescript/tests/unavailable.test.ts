@@ -37,6 +37,10 @@ for (const call of [
   () => api.DelimitedReader.fromBytes('a'),
   () => api.DelimitedReader.open('a.csv'),
   () => api.Workbook.open('a.xlsx'),
+  () => api.DelimitedReader.suggest('a.csv'),
+  () => api.DelimitedReader.suggestBytes('a'),
+  () => api.Range.parse('A1:B2'),
+  () => api.Range.of(1, 1, 2, 2),
   () => api.Column.i32(0),
   () => api.nativeVersion(),
 ]) {

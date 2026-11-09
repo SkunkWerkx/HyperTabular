@@ -166,6 +166,103 @@ func ExampleWorkbook() {
 	// row 2 alice
 }
 
+func ExampleBatch_Faults() {
+	const orders = "id,total\n1,2.50\n2,12x4\n"
+	plan := []hypertabular.Column{hypertabular.I32(0, hypercast.Invariant), hypertabular.F64(1, hypercast.Invariant)}
+	reader, err := hypertabular.NewDelimitedReader(strings.NewReader(orders), hypertabular.CSV, plan)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	batch, err := reader.Read()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for problem := range batch.Faults() {
+		fmt.Println("line", problem.Line, "column", problem.SourceColumn, problem.Reason, problem.Detail)
+	}
+	// Output:
+	// line 3 column 1 malformed unexpected_character
+}
+
+func ExampleDialect() {
+	// What a file declares: lines above its table, a marker for nothing, short rows, and its encoding.
+	dialect := hypertabular.CSV
+	dialect.Skip = 1
+	dialect.ShortRows = hypertabular.ShortRowsPad
+	dialect.Encoding = hypertabular.Windows1252
+	dialect.Tokens = hypertabular.NewTokens("NA")
+
+	input := []byte("exported by hand\nname,amount\ncaf\xe9,NA\ntea\n")
+	plan := []hypertabular.Column{hypertabular.Text(0), hypertabular.F64(1, hypercast.Invariant)}
+	reader, err := hypertabular.NewDelimitedReaderBytes(input, dialect, plan)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	for row, err := range reader.All() {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(row.TextString(0), row.Verdict(1).Reason(), row.Origin(1))
+	}
+	// Output:
+	// café empty token
+	// tea empty padded
+}
+
+func ExampleSuggestDelimitedBytes() {
+	input := []byte("id,total,placed\n1,\"1,234.50\",07/01/2026\n2,\"12.00\",13/01/2026\n")
+	found, err := hypertabular.SuggestDelimitedBytes(input, hypertabular.CSV, hypertabular.SuggestOptions{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, column := range found.Report {
+		fmt.Println(*column.Name, column.Status, column.Door, column.Format != nil)
+	}
+	// The plan is the caller's, to change or to hand to a read: nothing takes it unasked.
+	reader, err := hypertabular.NewDelimitedReaderBytes(input, hypertabular.CSV, found.Plan)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer reader.Close()
+	batch, err := reader.Read()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(batch.Rows(), batch.F64(1))
+	// Output:
+	// id resolved I32 true
+	// total resolved F64 true
+	// placed resolved DateOnlyOrdered false
+	// 2 [1234.5 12]
+}
+
+func ExampleParseRange() {
+	cut, err := hypertabular.ParseRange("B4:E12")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(cut.FirstRow(), cut.FirstColumn(), cut.LastRow(), cut.LastColumn())
+	if _, err := hypertabular.ParseRange("a5:f200"); errors.Is(err, hypertabular.ErrRange) {
+		fmt.Println(err)
+	}
+	// Output:
+	// 4 2 12 5
+	// hypertabular: not a range: "a5:f200"
+}
+
+func ExampleHeader_Ordinal() {
+	header := hypertabular.Header{"id", "name", "id"}
+	_, err := header.Ordinal("id")
+	fmt.Println(err, errors.Is(err, hypertabular.ErrAmbiguousColumn))
+	first, ok := header.Find("id")
+	fmt.Println(first, ok)
+	// Output:
+	// hypertabular: the header names two columns "id", at positions 0 and 2: say which by position true
+	// 0 true
+}
+
 func ExampleNativeVersion() {
 	// The compiled-in core's own version, read from the core.
 	fmt.Println(hypertabular.NativeVersion() != "")

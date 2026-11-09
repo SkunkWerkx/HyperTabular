@@ -110,7 +110,7 @@ class BackendTest {
                 .filter(m -> Modifier.isNative(m.getModifiers()))
                 .count();
         // One native per C export, and jniNatives, the count the library checks against.
-        assertEquals("jni".equals(expectBackend()) ? 15 : 0, natives);
+        assertEquals("jni".equals(expectBackend()) ? 24 : 0, natives);
         int major;
         try (InputStream in = Native.class.getResourceAsStream("Native.class")) {
             var data = new DataInputStream(in);

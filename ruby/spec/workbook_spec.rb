@@ -2,7 +2,8 @@
 # binding replays — through this binding: each package opened from a String, from its path
 # and from an IO, each sheet read by index and (where the name finds it) by name, in batches
 # of one row, of two, and of more than any sheet has, with its plan up front and header
-# first. And the workbook's own surface around that.
+# first. Each batch's faults list is held to the case's problems, a case's suggest to what its sheet
+# says, and a key this replay doesn't know fails it. And the workbook's own surface around that.
 
 require "spec_helper"
 require_relative "corpus_helpers"
@@ -59,21 +60,25 @@ RSpec.describe HyperTabular::Workbook do
     sheet.bind(plan)
   end
 
-  def replay_sheet(label, vector, plan, sheet, batch_rows)
+  def replay_sheet(label, vector, plan, sheet, batch_rows, notes: true)
     rows = vector["rows"]
     numbers = vector["numbers"]
     expect(sheet.header).to eq(vector["header"]), label
     expect(sheet.plan).to eq(plan), label
     seen = 0
     failure = nil
+    problems = []
     begin
       while (batch = sheet.read)
         expect(batch.rows).to be_between(1, batch_rows), label
+        problems.concat(batch.faults.map { |problem| problem_json(batch, problem, seen) })
+        assert_rows(label, plan, batch)
         batch.rows.times do |row|
           expect(seen).to be < rows.size, "#{label}: more rows than the corpus lists"
+          expect(rows[seen].size).to eq(plan.size), "#{label}: a corpus row of another width"
           expect(batch.line(row)).to eq(numbers[seen]), "#{label}, row #{seen}"
           plan.each_index do |column|
-            assert_cell("#{label}, row #{seen}, column #{column}", batch, column, row, rows[seen][column])
+            assert_cell("#{label}, row #{seen}, column #{column}", batch, column, row, rows[seen][column], notes: notes)
           end
           seen += 1
         end
@@ -84,11 +89,19 @@ RSpec.describe HyperTabular::Workbook do
       expect { sheet.read }.to raise_error(HyperTabular::TabularError) { |again| expect(again).to equal(e) }
     end
     expect(seen).to eq(rows.size), label
+    expect(numbers.size).to eq(seen), label
+    expect(problems).to eq(problems_of(vector, notes: notes)), "#{label}: problems"
     assert_failure(label, failure, vector)
   end
 
+  it "reads every key the corpus has, and notices one added anywhere" do
+    expect(CorpusHelpers.keys_problem(CASES, workbook: true)).to be_nil
+  end
+
   it "has the cases, and the cells it says it does" do
-    expect(CASES.size).to be >= 80
+    expect(CASES.size).to eq(398)
+    expect(CASES.map { |vector| vector["file"] }.uniq.size).to eq(41)
+    expect(CASES.count { |vector| vector.key?("suggest") }).to eq(15)
     expect(CASES.select { |vector| vector.key?("sheet") }.sum { |vector| vector["rows"].size * vector["plan"].size })
       .to be >= 12_000
   end
@@ -120,15 +133,67 @@ RSpec.describe HyperTabular::Workbook do
           .to eq(vector["sheets"].map { |sheet| [sheet["name"], sheet["hidden"]] }), name
         by_name = book.sheets.index { |sheet| sheet.name == sheet_name } == index
         WORKBOOK_BATCH_ROWS.each do |batch_rows|
-          options = HyperTabular::SheetOptions.new(has_header: settings["has_header"],
-                                                   skip_empty_rows: settings["skip_empty_rows"],
-                                                   batch_rows: batch_rows)
+          options = options_of(settings, batch_rows)
           (by_name ? [index, sheet_name] : [index]).each do |which|
             label = "#{name}: #{source}, #{batch_rows} rows a batch, sheet #{which.inspect}"
             replay_sheet(label, vector, plan, book.sheet(which, options, plan), batch_rows)
             sheet = header_first(vector, plan) { book.sheet(which, options) }
             replay_sheet("#{label}, header first", vector, plan, sheet, batch_rows)
           end
+        end
+      end
+    end
+  end
+
+  CASES.select { |vector| vector.key?("sheet") }.each do |vector|
+    it "reads \"#{vector['name']}\" the same with notes off, less the details" do
+      plan = vector["plan"].map { |entry| column_of(entry) }
+      book = described_class.open(File.join(CorpusHelpers.directory, vector["file"]))
+      WORKBOOK_BATCH_ROWS.each do |batch_rows|
+        sheet = book.sheet(vector["sheet"], options_of(vector["options"], batch_rows, notes: false), plan)
+        replay_sheet("#{vector['name']}: notes off", vector, plan, sheet, batch_rows, notes: false)
+      end
+    end
+
+    it "answers \"#{vector['name']}\"'s faults for each batch, held past the next read" do
+      plan = vector["plan"].map { |entry| column_of(entry) }
+      book = described_class.open(File.join(CorpusHelpers.directory, vector["file"]))
+      # Each batch's list asked as it's read, or as a batch held when the read is over.
+      read = lambda do |asked|
+        said = []
+        begin
+          source = book.sheet(vector["sheet"], options_of(vector["options"], 2), plan)
+          while (batch = source.read)
+            said << (asked ? batch.faults : batch)
+          end
+        rescue HyperTabular::TabularError
+          nil
+        end
+        said
+      end
+      at_once = read.call(true)
+      expect(read.call(false).map(&:faults)).to eq(at_once)
+      expect(at_once.flatten.size).to eq(vector["problems"].size)
+    end
+  end
+
+  CASES.select { |vector| vector.key?("suggest") }.each do |vector|
+    it "suggests what the corpus says of \"#{vector['name']}\", and its plan reads back refusing nothing" do
+      name = vector["name"]
+      expected = vector["suggest"]
+      declared = expected.key?("format") ? format_of(expected) : nil
+      asked = HyperTabular::SuggestOptions.new(format: declared)
+      options = options_of(vector["options"], 4096)
+      path = File.join(CorpusHelpers.directory, vector["file"])
+      [described_class.open(path), described_class.new(Trickle.new(File.binread(path)))].each do |book|
+        found = book.sheet(vector["sheet"], options).suggest(asked)
+        columns = expected["columns"]
+        expect(suggestion_json(found)).to eq(reported(columns)), name
+        expect(found.truncated).to eq(expected["truncated"]), name
+        assert_notation(name, found, columns, declared)
+        book.sheet(vector["sheet"], options, found.plan).each_batch do |batch|
+          refused = batch.faults.select { |problem| %i[malformed out_of_range].include?(problem.reason) }
+          expect(refused).to eq([]), name
         end
       end
     end
@@ -144,9 +209,7 @@ RSpec.describe HyperTabular::Workbook do
     CASES.select { |vector| vector.key?("sheet") }.each do |vector|
       path = File.join(CorpusHelpers.directory, vector["file"])
       plan = vector["plan"].map { |entry| column_of(entry) }
-      settings = vector["options"]
-      options = HyperTabular::SheetOptions.new(has_header: settings["has_header"],
-                                               skip_empty_rows: settings["skip_empty_rows"], batch_rows: 2)
+      options = options_of(vector["options"], 2)
       book = described_class.open(path)
       replay_sheet("#{vector['name']} (stingy)", vector, plan, book.sheet(vector["sheet"], options, plan), 2)
       sheet = header_first(vector, plan) { book.sheet(vector["sheet"], options) }
@@ -166,7 +229,9 @@ RSpec.describe HyperTabular::Workbook do
     expect { book.sheet(99, defaults, plan) }.to raise_error(IndexError)
     expect { book.sheet(:first, defaults, plan) }.to raise_error(ArgumentError)
     expect { book.sheet(0, {}, plan) }.to raise_error(ArgumentError, /SheetOptions/)
-    expect { HyperTabular::SheetOptions.new(batch_rows: 0) }.to raise_error(ArgumentError, /batch_rows/)
+    expect {
+      book.sheet(0, HyperTabular::SheetOptions.new(batch_rows: 0), plan)
+    }.to raise_error(ArgumentError, /batch_rows/)
     expect { described_class.open("/no/such/file.xlsx") }.to raise_error(Errno::ENOENT)
     expect { described_class.new("not a zip at all") }.to raise_error(HyperTabular::TabularError) { |e|
       expect([e.kind, e.message]).to eq([:not_a_zip, "The workbook is not a zip file."])

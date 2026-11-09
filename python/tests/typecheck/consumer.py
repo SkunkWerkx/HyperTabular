@@ -17,24 +17,38 @@ import hypercast
 
 import hypertabular
 from hypertabular import (
+    AmbiguousColumn,
     Batch,
     CastFailure,
     Column,
     ColumnData,
+    DateOptions,
     DateOrder,
     DelimitedReader,
+    Detail,
     Dialect,
     Door,
+    Encoding,
     ExcelEpoch,
     Fault,
     Header,
+    LongRows,
+    MonthNames,
     NumFormat,
+    Origin,
+    Problem,
+    Range,
     Row,
     Rows,
     Sheet,
     SheetInfo,
     SheetOptions,
+    ShortRows,
     Success,
+    SuggestedColumn,
+    SuggestOptions,
+    SuggestStatus,
+    Suggestion,
     TabularError,
     TabularFailure,
     UnixPrecision,
@@ -192,3 +206,60 @@ for sheet_row in headed.rows():
     assert_type(sheet_row, Row)
 
 assert_type(hypertabular.native_version(), str)
+
+# A messier file: what can be declared, and what comes back beside the values.
+messy = Dialect(
+    ",",
+    skip=1,
+    header_row=1,
+    short_rows=ShortRows.PAD,
+    long_rows=LongRows.REPORT,
+    encoding=Encoding.WINDOWS_1252,
+    tokens=("NA", "-"),
+)
+months = MonthNames([(month, f"m{month}") for month in range(1, 13)])
+dated = Column.date_ordered(0, DateOrder.DAY_MONTH_YEAR).with_date_options(DateOptions(), months)
+assert_type(dated, Column)
+assert_type(Column.i32(0).with_tokens(["NA"]), Column)
+assert_type(dated.tokens, tuple[str, ...] | None)
+quiet = DelimitedReader(b"a\n", messy, [dated], notes=False)
+batch_read = quiet.read()
+assert batch_read is not None
+assert_type(batch_read.origin(0, 0), Origin)
+problems = batch_read.faults()
+assert_type(problems, list[Problem])
+for problem in problems:
+    assert_type(problem.plan_column, int | None)
+    assert_type(problem.source_column, int | None)
+    assert_type(problem.reason, CastFailure | None)
+    assert_type(problem.detail, Detail | None)
+    assert_type(problem.origin, Origin)
+assert_type(batch_read.column(0).origin(0), Origin)
+
+asked = SuggestOptions(
+    sample_rows=10, format=NumFormat.INVARIANT, column_formats={1: NumFormat.INVARIANT}
+)
+found = DelimitedReader.suggest("rows.csv", messy, asked)
+assert_type(found, Suggestion)
+assert_type(DelimitedReader.suggest_bytes(b"a\n", Dialect.CSV), Suggestion)
+assert_type(found.plan, tuple[Column, ...])
+assert_type(found.truncated, bool)
+for column_found in found.report:
+    assert_type(column_found, SuggestedColumn)
+    assert_type(column_found.status, SuggestStatus)
+    assert_type(column_found.format, NumFormat | None)
+    assert_type(column_found.name, str | None)
+assert_type(headed.suggest(asked), Suggestion)
+
+part = Range.parse("B4:C12")
+assert_type(part, Range)
+assert_type(part.first_row, int)
+assert_type(
+    SheetOptions(range=part, skip=1, header_row=1, tokens=("NA",), notes=False), SheetOptions
+)
+try:
+    header.ordinal("id")
+except AmbiguousColumn as both:
+    assert_type(both.first, int)
+    assert_type(both.second, int)
+    assert_type(both.name, str)

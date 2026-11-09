@@ -9,11 +9,15 @@
 
 use super::number::{self, Text};
 use super::styles;
-use crate::kernel::abi::{CellVerdict, ColumnBuffer, ColumnSpec, Slot, Span};
+use crate::kernel::abi::{
+    CellNote, CellVerdict, ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, Slot, Span,
+};
+use crate::kernel::delimited::fill::{is_token, resolved_date, resolved_format, resolved_tokens};
 use crate::kernel::door::Door;
 use hypercast::{
-    CivilDateTime, Date, Decimal, Duration, ExcelEpoch, Fault, NumFormat, Reason, Timestamp,
-    UnixPrecision, excel_duration, excel_serial, excel_time,
+    CivilDateTime, Date, Decimal, Detail, Duration, ExcelEpoch, Fault, NumFormat, Reason,
+    Timestamp, UnixPrecision, ValidDateOptions, ValidNumFormat, detailed, excel_duration,
+    excel_serial, excel_time,
 };
 
 /// Nanoseconds in one day.
@@ -24,7 +28,8 @@ pub const NANOS_PER_DAY: u64 = 86_400_000_000_000;
 pub enum Cell<'a> {
     /// No value: a missing cell, a gap in a sparse row.
     Empty,
-    /// UTF-8 bytes, untrimmed — the doors do their own trimming.
+    /// The part's bytes, untrimmed — the doors do their own trimming, and judge whether
+    /// they are UTF-8.
     Text(&'a [u8]),
     /// The double a numeric cell with a non-temporal format stores.
     Number(f64),
@@ -38,6 +43,9 @@ pub enum Cell<'a> {
     Span(Duration),
     /// A formula error, by its BIFF code.
     Error(u8),
+    /// A formula with no cached result: read as [`Cell::Empty`], with
+    /// [`CellNote::ORIGIN_UNCACHED`] where a note can say so.
+    Uncached,
 }
 
 /// The spreadsheet error values, as XLSX and ODS spell them, with the BIFF code of each.
@@ -81,6 +89,9 @@ impl Slot {
     const CLOCK: u32 = 5;
     const SPAN: u32 = 6;
     const ERROR: u32 = 7;
+    const UNCACHED: u32 = 8;
+    /// `aux` of a text cell of no bytes that's really a formula with no result.
+    const NO_RESULT: u32 = 1;
 
     /// A text cell, by where its bytes are.
     pub const fn text(span: Span) -> Slot {
@@ -91,10 +102,43 @@ impl Slot {
         }
     }
 
+    /// This text cell with its bytes moved to `span`, whatever else it is.
+    pub(crate) const fn moved(self, span: Span) -> Slot {
+        Slot {
+            aux: self.aux,
+            ..Slot::text(span)
+        }
+    }
+
+    /// This slot, for a formula it turns out has no result. 1.0 read such a cell one of two ways:
+    /// as no cell at all, or, where the file spells a value and it's empty, as a text cell of no
+    /// bytes, which unlike the other makes its row one that holds something. So the second stays
+    /// that to everything but `cast_with`, and the rows a sheet delivers don't move.
+    pub(crate) const fn with_no_result(self) -> Slot {
+        if self.tag == Slot::TEXT {
+            Slot {
+                aux: Slot::NO_RESULT,
+                ..self
+            }
+        } else {
+            Slot {
+                tag: Slot::UNCACHED,
+                aux: 0,
+                bits: 0,
+            }
+        }
+    }
+
+    /// True for a formula with no result.
+    pub(crate) const fn is_uncached(&self) -> bool {
+        self.tag == Slot::UNCACHED || (self.tag == Slot::TEXT && self.aux == Slot::NO_RESULT)
+    }
+
     /// A typed cell. (A text cell is stored by its span, not its bytes: [`Slot::text`].)
     pub fn of(cell: &Cell<'_>) -> Slot {
         let (tag, aux, bits) = match *cell {
             Cell::Empty | Cell::Text(_) => (0, 0, 0),
+            Cell::Uncached => (Slot::UNCACHED, 0, 0),
             Cell::Number(value) => (Slot::NUMBER, 0, value.to_bits()),
             Cell::Bool(value) => (Slot::BOOL, 0, u64::from(value)),
             Cell::Wall { date, nanos } => (
@@ -109,7 +153,8 @@ impl Slot {
         Slot { tag, aux, bits }
     }
 
-    /// True for no cell at all. (A text cell with no bytes is still a cell.)
+    /// True for no cell at all. (A text cell with no bytes is still a cell, and a formula with no
+    /// result, which holds nothing, is none.)
     pub const fn is_empty(&self) -> bool {
         self.tag == 0 || self.tag > Slot::ERROR
     }
@@ -145,6 +190,7 @@ impl Slot {
                 nanos: self.aux as i32,
             }),
             Slot::ERROR => Cell::Error(self.bits as u8),
+            Slot::UNCACHED => Cell::Uncached,
             _ => Cell::Empty,
         }
     }
@@ -368,7 +414,7 @@ fn duration(cell: &Cell<'_>) -> Result<Duration, Fault> {
 pub fn render(cell: &Cell<'_>) -> Text {
     let mut out = Text::new();
     match *cell {
-        Cell::Empty | Cell::Text(_) => {}
+        Cell::Empty | Cell::Text(_) | Cell::Uncached => {}
         Cell::Number(value) => out.number(value),
         Cell::Bool(value) => out.boolean(value),
         Cell::Wall { date, nanos } => out.wall(date, nanos),
@@ -437,10 +483,12 @@ pub struct Stores<'a> {
 /// # Safety
 /// `buffer.values` has room for `row + 1` values of the door's type, and
 /// `buffer.verdicts` for `row + 1` verdicts.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn cast(
     slot: &Slot,
     door: Door,
     spec: &ColumnSpec,
+    read_format: fn(&ColumnSpec) -> Option<NumFormat>,
     system: ExcelEpoch,
     buffer: &ColumnBuffer,
     row: usize,
@@ -457,10 +505,13 @@ pub unsafe fn cast(
     };
     let own = slot.span();
     let mut raw = own.unwrap_or_default();
-    let cell = slot.cell(stores.arena, stores.strings);
+    let cell = match slot.cell(stores.arena, stores.strings) {
+        Cell::Uncached => Cell::Empty,
+        cell => cell,
+    };
     let cell = &cell;
     // Only a text cell meets a declared notation, so only then is it worked out.
-    let format = || spec.num_format().unwrap_or(NumFormat::INVARIANT);
+    let format = || read_format(spec).unwrap_or(NumFormat::INVARIANT);
     // SAFETY: the caller's contract, one value at a time.
     let fault = unsafe {
         match door {
@@ -627,11 +678,11 @@ pub unsafe fn cast(
                 put(buffer, row, duration(cell), zero)
             }
             Door::Text => {
-                // The bytes themselves, untrimmed, or a typed cell said as text; no bytes
-                // at all is the one way to fail.
+                // The bytes themselves, untrimmed, once HyperCast's door has judged them, or
+                // a typed cell said as text.
                 let result = match *cell {
-                    Cell::Empty | Cell::Text(&[]) => Err(EMPTY),
-                    Cell::Text(_) => Ok(raw),
+                    Cell::Empty => Err(EMPTY),
+                    Cell::Text(text) => hypercast::cast_text(text).map(|_| raw),
                     _ => {
                         raw = append(
                             stores.arena,
@@ -664,6 +715,463 @@ pub unsafe fn cast(
     };
     // SAFETY: per the function contract; the array need not be aligned.
     unsafe { buffer.verdicts.add(row).write_unaligned(verdict) };
+    Ok(raw)
+}
+
+/// Why a cell has no value, with what a note says of it: [`cast`]'s [`Fault`], and HyperCast's
+/// detail where one of its doors was asked.
+#[derive(Clone, Copy)]
+struct Refused {
+    fault: Fault,
+    detail: u16,
+}
+
+impl From<hypercast::Failure> for Refused {
+    #[inline]
+    fn from(failure: hypercast::Failure) -> Refused {
+        Refused {
+            fault: failure.fault(),
+            detail: failure.detail.code() as u16,
+        }
+    }
+}
+
+/// What a blank cell is told, as the doors tell blank text.
+const BLANK: Refused = Refused {
+    fault: EMPTY,
+    detail: Detail::Blank.code() as u16,
+};
+/// What a typed cell is told by a door with no twin for its kind. No door was asked, so there is
+/// no detail to report.
+const WRONG_KIND: Refused = Refused {
+    fault: MALFORMED,
+    detail: 0,
+};
+
+fn refused(fault: Fault, detail: Detail) -> Refused {
+    Refused {
+        fault,
+        detail: detail.code() as u16,
+    }
+}
+
+/// [`numeric`], through the detailed doors.
+#[inline(always)]
+fn numeric_with<T>(
+    cell: &Cell<'_>,
+    door: impl FnOnce(&[u8]) -> Result<T, hypercast::Failure>,
+    typed: impl FnOnce(f64) -> Result<T, hypercast::Failure>,
+) -> Result<T, Refused> {
+    match *cell {
+        Cell::Empty => Err(BLANK),
+        Cell::Text(text) => door(text).map_err(Refused::from),
+        Cell::Number(value) => typed(value).map_err(Refused::from),
+        _ => Err(WRONG_KIND),
+    }
+}
+
+/// [`timestamp`], through the detailed doors.
+fn timestamp_with<'o>(
+    cell: &Cell<'_>,
+    system: ExcelEpoch,
+    options: impl FnOnce() -> Option<ValidDateOptions<'o>>,
+) -> Result<Timestamp, Refused> {
+    match *cell {
+        Cell::Empty => Err(BLANK),
+        Cell::Text(text) => {
+            detailed::cast_timestamp(text, options().as_ref()).map_err(Refused::from)
+        }
+        Cell::Number(value) => detailed::excel_serial(value, system)
+            .map(CivilDateTime::assume_utc)
+            .map_err(Refused::from),
+        Cell::Wall { date, nanos } => Ok(wall_to_timestamp(date, nanos)),
+        _ => Err(WRONG_KIND),
+    }
+}
+
+/// [`date`], through the detailed doors.
+fn date_with<'o>(
+    cell: &Cell<'_>,
+    system: ExcelEpoch,
+    options: impl FnOnce() -> Option<ValidDateOptions<'o>>,
+) -> Result<Date, Refused> {
+    match *cell {
+        Cell::Empty => Err(BLANK),
+        Cell::Text(text) => detailed::cast_date(text, options().as_ref()).map_err(Refused::from),
+        Cell::Number(value) => detailed::excel_serial(value, system)
+            .map(|wall| wall.date)
+            .map_err(Refused::from),
+        Cell::Wall { date, .. } => Ok(date),
+        _ => Err(WRONG_KIND),
+    }
+}
+
+/// [`time`], through the detailed doors.
+fn time_with(cell: &Cell<'_>) -> Result<u64, Refused> {
+    match *cell {
+        Cell::Empty => Err(BLANK),
+        Cell::Text(text) => detailed::cast_time(text).map_err(Refused::from),
+        Cell::Number(value) => detailed::excel_time(value).map_err(Refused::from),
+        Cell::Wall { nanos, .. } | Cell::Clock(nanos) => Ok(nanos),
+        Cell::Span(span) => {
+            if span.seconds < 0 || span.nanos < 0 {
+                return Err(refused(OUT_OF_RANGE, Detail::NegativeNotAllowed));
+            }
+            let total = (span.seconds as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(span.nanos as u64);
+            if total >= NANOS_PER_DAY {
+                Err(refused(OUT_OF_RANGE, Detail::TooLarge))
+            } else {
+                Ok(total)
+            }
+        }
+        _ => Err(WRONG_KIND),
+    }
+}
+
+/// [`duration`], through the detailed doors.
+fn duration_with(cell: &Cell<'_>) -> Result<Duration, Refused> {
+    match *cell {
+        Cell::Empty => Err(BLANK),
+        Cell::Text(text) => detailed::cast_duration(text).map_err(Refused::from),
+        Cell::Number(value) => detailed::excel_duration(value).map_err(Refused::from),
+        Cell::Clock(nanos) => Ok(Duration {
+            seconds: (nanos / 1_000_000_000) as i64,
+            nanos: (nanos % 1_000_000_000) as i32,
+        }),
+        Cell::Span(span) => Ok(span),
+        _ => Err(WRONG_KIND),
+    }
+}
+
+/// Writes one value where the caller pointed, or the door's zero if it did not cast.
+///
+/// # Safety
+/// `buffer.values` has room for `row + 1` values of `T`.
+#[inline(always)]
+unsafe fn put_with<T: Copy>(
+    buffer: &ColumnBufferWith,
+    row: usize,
+    result: Result<T, Refused>,
+    zero: T,
+) -> Option<Refused> {
+    let (value, fault) = match result {
+        Ok(value) => (value, None),
+        Err(fault) => (zero, Some(fault)),
+    };
+    // SAFETY: per the function contract; the array need not be aligned.
+    unsafe { buffer.values.cast::<T>().add(row).write_unaligned(value) };
+    fault
+}
+
+/// [`cast`], with what [`ColumnSpecWith`] declares and a note beside the verdict: the same
+/// verdicts and values, from HyperCast's detailed doors and their typed twins, except that
+/// a text cell whose exact bytes are one of the column's `tokens` is `Empty` at
+/// [`CellNote::ORIGIN_TOKEN`], a cell the row doesn't have (`absent`) at
+/// [`CellNote::ORIGIN_PADDED`], its slot being empty, and a formula with no result at
+/// [`CellNote::ORIGIN_UNCACHED`], which no token can match.
+///
+/// The spec was judged when the fill began. It's read again here, a text cell at a time, since a
+/// row-wise fill has nowhere of its own to keep what a judging found.
+///
+/// # Safety
+/// As [`cast`], `buffer.notes` too unless it's null, and `spec`'s pointers as
+/// [`ColumnSpecWith`] says.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cast_with(
+    slot: &Slot,
+    absent: bool,
+    door: Door,
+    spec: &ColumnSpecWith,
+    inherited: &[u8],
+    system: ExcelEpoch,
+    buffer: &ColumnBufferWith,
+    row: usize,
+    stores: &mut Stores<'_>,
+) -> Result<Span, u64> {
+    const INSTANT: Timestamp = Timestamp {
+        seconds: 0,
+        nanos: 0,
+    };
+    const DAY: Date = Date {
+        year: 0,
+        month: 0,
+        day: 0,
+    };
+    let uncached = slot.is_uncached();
+    let own = slot.span();
+    let mut raw = own.unwrap_or_default();
+    let mut cell = if uncached {
+        Cell::Empty
+    } else {
+        slot.cell(stores.arena, stores.strings)
+    };
+    let mut origin = if uncached {
+        CellNote::ORIGIN_UNCACHED
+    } else if absent {
+        CellNote::ORIGIN_PADDED
+    } else {
+        CellNote::ORIGIN_CELL
+    };
+    if let Cell::Text(text) = cell {
+        // SAFETY: the caller's contract; the list was judged when the fill began.
+        let tokens = unsafe { resolved_tokens(spec, inherited) }.unwrap_or_default();
+        if !tokens.is_empty() && is_token(tokens, text) {
+            cell = Cell::Empty;
+            origin = CellNote::ORIGIN_TOKEN;
+        }
+    }
+    let cell = &cell;
+    // Only a text cell meets a declared notation or date options, so only then are they worked
+    // out.
+    let format = || resolved_format(spec).unwrap_or(ValidNumFormat::INVARIANT);
+    // SAFETY: the caller's contract.
+    let options = || unsafe { resolved_date(spec) }.flatten();
+    // SAFETY: the caller's contract, one value at a time.
+    let fault = unsafe {
+        match door {
+            Door::Bool => {
+                let result = match *cell {
+                    Cell::Bool(value) => Ok(value),
+                    _ => numeric_with(
+                        cell,
+                        |text| detailed::cast_bool(text),
+                        detailed::bool_from_f64,
+                    ),
+                };
+                put_with(buffer, row, result.map(u8::from), 0u8)
+            }
+            Door::I8 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_i8(text, &format()),
+                    detailed::i8_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::I16 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_i16(text, &format()),
+                    detailed::i16_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::I32 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_i32(text, &format()),
+                    detailed::i32_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::I64 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_i64(text, &format()),
+                    detailed::i64_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::U8 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_u8(text, &format()),
+                    detailed::u8_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::U16 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_u16(text, &format()),
+                    detailed::u16_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::U32 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_u32(text, &format()),
+                    detailed::u32_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::U64 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_u64(text, &format()),
+                    detailed::u64_from_f64,
+                );
+                put_with(buffer, row, result, 0)
+            }
+            Door::F32 => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_f32(text, &format()),
+                    detailed::f32_from_f64,
+                );
+                put_with(buffer, row, result, 0.0)
+            }
+            Door::F64 => {
+                let result = match *cell {
+                    Cell::Empty => Err(BLANK),
+                    Cell::Text(text) => detailed::cast_f64(text, &format()).map_err(Refused::from),
+                    Cell::Number(value) if value.is_nan() => {
+                        Err(refused(MALFORMED, Detail::NotFinite))
+                    }
+                    Cell::Number(value) if value.is_infinite() => {
+                        Err(refused(OUT_OF_RANGE, Detail::NotFinite))
+                    }
+                    Cell::Number(value) => Ok(value),
+                    _ => Err(WRONG_KIND),
+                };
+                put_with(buffer, row, result, 0.0)
+            }
+            Door::Decimal => {
+                let result = numeric_with(
+                    cell,
+                    |text| detailed::cast_decimal(text, &format()),
+                    detailed::decimal_from_f64,
+                );
+                let zero = Decimal {
+                    lo: 0,
+                    hi: 0,
+                    scale: 0,
+                    negative: false,
+                };
+                put_with(buffer, row, result, zero)
+            }
+            Door::Uuid => {
+                let result = match *cell {
+                    Cell::Empty => Err(BLANK),
+                    Cell::Text(text) => detailed::cast_uuid(text).map_err(Refused::from),
+                    _ => Err(WRONG_KIND),
+                };
+                put_with(buffer, row, result, [0u8; 16])
+            }
+            Door::Timestamp => {
+                let result = timestamp_with(cell, system, options);
+                put_with(buffer, row, result, INSTANT)
+            }
+            Door::Unix(precision) => {
+                let result = match *cell {
+                    Cell::Empty => Err(BLANK),
+                    Cell::Text(text) => detailed::cast_unix(text, precision).map_err(Refused::from),
+                    Cell::Number(value) => {
+                        detailed::unix_from_f64(value, precision).map_err(Refused::from)
+                    }
+                    Cell::Wall { date, nanos } => Ok(wall_to_timestamp(date, nanos)),
+                    _ => Err(WRONG_KIND),
+                };
+                put_with(buffer, row, result, INSTANT)
+            }
+            Door::ExcelSerial(epoch) => {
+                // The *declared* date system, for serials the file did not format as dates.
+                let result = match *cell {
+                    Cell::Text(text) => {
+                        detailed::cast_excel_serial(text, epoch).map_err(Refused::from)
+                    }
+                    _ => timestamp_with(cell, epoch, || None),
+                };
+                put_with(buffer, row, result, INSTANT)
+            }
+            Door::Date => {
+                let result = date_with(cell, system, options);
+                put_with(buffer, row, result, DAY)
+            }
+            Door::DateOrdered(order) => {
+                // A stored date has no field order to declare.
+                let result = match *cell {
+                    Cell::Text(text) => {
+                        detailed::cast_date_ordered(text, order, options().as_ref())
+                            .map_err(Refused::from)
+                    }
+                    _ => date_with(cell, system, || None),
+                };
+                put_with(buffer, row, result, DAY)
+            }
+            Door::DateTime(order) => {
+                let result = match *cell {
+                    Cell::Empty => Err(BLANK),
+                    Cell::Text(text) => detailed::cast_datetime(text, order, options().as_ref())
+                        .map_err(Refused::from),
+                    Cell::Number(value) => {
+                        detailed::excel_serial(value, system).map_err(Refused::from)
+                    }
+                    Cell::Wall { date, nanos } => Ok(CivilDateTime {
+                        date,
+                        nanos_of_day: nanos,
+                    }),
+                    _ => Err(WRONG_KIND),
+                };
+                let zero = CivilDateTime {
+                    date: DAY,
+                    nanos_of_day: 0,
+                };
+                put_with(buffer, row, result, zero)
+            }
+            Door::Time => put_with(buffer, row, time_with(cell), 0u64),
+            Door::Duration => {
+                let zero = Duration {
+                    seconds: 0,
+                    nanos: 0,
+                };
+                put_with(buffer, row, duration_with(cell), zero)
+            }
+            Door::Text => {
+                let result = match *cell {
+                    Cell::Empty => Err(BLANK),
+                    Cell::Text(text) => detailed::cast_text(text)
+                        .map(|_| raw)
+                        .map_err(Refused::from),
+                    _ => {
+                        raw = append(
+                            stores.arena,
+                            stores.used,
+                            render(&slot.cell(&[], &[])).as_bytes(),
+                        )?;
+                        Ok(raw)
+                    }
+                };
+                put_with(buffer, row, result, Span::default())
+            }
+        }
+    };
+    let (verdict, detail) = match fault {
+        None => (CellVerdict::OK, 0),
+        Some(refusal) if refusal.fault.reason == Reason::Empty || own.is_some() => {
+            (CellVerdict::from_fault(refusal.fault), refusal.detail)
+        }
+        Some(refusal) => {
+            // A typed cell's fault spans its whole rendering.
+            raw = append(
+                stores.arena,
+                stores.used,
+                render(&slot.cell(&[], &[])).as_bytes(),
+            )?;
+            let mut verdict = CellVerdict::from_fault(refusal.fault);
+            verdict.len = raw.len() as u32;
+            (verdict, refusal.detail)
+        }
+    };
+    let note = CellNote {
+        // No door was asked about a token, a cell the row doesn't have or a formula with no result.
+        detail: if origin == CellNote::ORIGIN_CELL {
+            detail
+        } else {
+            0
+        },
+        origin,
+    };
+    // SAFETY: per the function contract; neither array need be aligned.
+    unsafe {
+        buffer.verdicts.add(row).write_unaligned(verdict);
+        if !buffer.notes.is_null() {
+            buffer.notes.add(row).write_unaligned(note);
+        }
+    }
     Ok(raw)
 }
 

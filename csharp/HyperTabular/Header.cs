@@ -9,9 +9,10 @@ namespace HyperTabular;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A name is matched exactly: ordinal, case-sensitive and untrimmed, as the Rust core's
-/// <c>Header::ordinal</c> matches it. When two columns share a name, the first is the one
-/// found.
+/// A name is matched exactly: ordinal, case-sensitive and untrimmed. When two columns share a
+/// name, <see cref="Ordinal(string)"/> refuses to choose, so a plan built from names cannot read
+/// the wrong one, and <see cref="TryOrdinal(string, out int)"/> says the first; a plan can name
+/// either by position.
 /// </para>
 /// <para>
 /// The names are decoded from UTF-8 once, when the header is read (bytes that are not UTF-8
@@ -77,14 +78,22 @@ public sealed class Header : IReadOnlyList<string>
 		return _utf8.AsSpan(start, _ends[ordinal] - start);
 	}
 
-	/// <summary>The ordinal of the first column named exactly <paramref name="name"/>.</summary>
+	/// <summary>The ordinal of the one column named exactly <paramref name="name"/>.</summary>
 	/// <exception cref="KeyNotFoundException">No column has that name; the message names it.</exception>
-	public int Ordinal(string name) =>
-		TryOrdinal(name, out var ordinal)
-			? ordinal
-			: throw new KeyNotFoundException($"The header has no column named \"{name}\".");
+	/// <exception cref="DuplicateColumnException">Two columns share that name; it names both.</exception>
+	public int Ordinal(string name)
+	{
+		if (!TryOrdinal(name, out var first))
+			throw new KeyNotFoundException($"The header has no column named \"{name}\".");
+		var second = Array.IndexOf(_names, name, first + 1);
+		return second < 0 ? first : throw new DuplicateColumnException(name, first, second);
+	}
 
-	/// <summary>The ordinal of the first column named exactly <paramref name="name"/>, if there is one.</summary>
+	/// <summary>
+	/// The ordinal of the first column named exactly <paramref name="name"/>, if there is one. Of two
+	/// columns with the same name the first is the one found, with nothing said of the other:
+	/// <see cref="Ordinal(string)"/> refuses to choose.
+	/// </summary>
 	/// <returns><see langword="false"/> if no column has that name.</returns>
 	public bool TryOrdinal(string name, out int ordinal)
 	{
@@ -93,17 +102,23 @@ public sealed class Header : IReadOnlyList<string>
 		return ordinal >= 0;
 	}
 
-	/// <summary>
-	/// The ordinal of the first column whose name is exactly the bytes
-	/// <paramref name="utf8Name"/> — the Rust core's <c>Header::ordinal</c>, byte for byte.
-	/// </summary>
+	/// <summary>The ordinal of the one column whose name is exactly the bytes <paramref name="utf8Name"/>.</summary>
 	/// <exception cref="KeyNotFoundException">No column has that name; the message names it.</exception>
-	public int Ordinal(ReadOnlySpan<byte> utf8Name) =>
-		TryOrdinal(utf8Name, out var ordinal)
-			? ordinal
-			: throw new KeyNotFoundException($"The header has no column named \"{Encoding.UTF8.GetString(utf8Name)}\".");
+	/// <exception cref="DuplicateColumnException">Two columns share that name; it names both.</exception>
+	public int Ordinal(ReadOnlySpan<byte> utf8Name)
+	{
+		if (!TryOrdinal(utf8Name, out var first))
+			throw new KeyNotFoundException($"The header has no column named \"{Encoding.UTF8.GetString(utf8Name)}\".");
+		for (var second = first + 1; second < _names.Length; second++)
+			if (Utf8(second).SequenceEqual(utf8Name))
+				throw new DuplicateColumnException(Encoding.UTF8.GetString(utf8Name), first, second);
+		return first;
+	}
 
-	/// <summary>The ordinal of the first column whose name is exactly the bytes <paramref name="utf8Name"/>, if there is one.</summary>
+	/// <summary>
+	/// The ordinal of the first column whose name is exactly the bytes <paramref name="utf8Name"/>,
+	/// if there is one: the first of two with the same name, as <see cref="TryOrdinal(string, out int)"/> says.
+	/// </summary>
 	/// <returns><see langword="false"/> if no column has that name.</returns>
 	public bool TryOrdinal(ReadOnlySpan<byte> utf8Name, out int ordinal)
 	{

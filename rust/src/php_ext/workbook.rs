@@ -1,39 +1,34 @@
 //! `Workbook` and `Sheet`: XLSX, ODS and Numbers workbooks, opened in memory, and one sheet of
 //! one read a batch at a time into typed columns — the same `Batch` delimited text gives.
 
-use std::rc::Rc;
+use std::cell::{Ref, RefCell, RefMut};
+use std::sync::Arc;
 
-use ext_php_rs::class::RegisteredClass;
 use ext_php_rs::exception::{PhpException, PhpResult};
 use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ZendClassObject, Zval};
 use ext_php_rs::zend::ce;
 
-use super::args::{ArrayArg, Mixed, OptArray, SheetOptionsArg, Str};
+use super::args::{ArrayArg, Mixed, OptArray, OptSuggestOptions, SheetOptionsArg, Str};
 use super::batch::{
-    Array, Batch, BatchCore, IteratorObject, MaybeArray, MaybeBatch, RowIterator, this_zval,
+    Array, Batch, BatchCore, Holds, IteratorObject, MaybeArray, MaybeBatch, RowIterator, this_zval,
     typed_return,
 };
 use super::classes::{bytes_zval, list_zval};
+use super::convert::{
+    failure_zval, rust_error, sheet_options_of, suggest_options_of, suggestion_of,
+};
+use super::delimited::SuggestionObject;
 use super::enums::WorkbookFormat;
-use super::errors::{contract_violation, object, out_of_bounds, out_of_range, runtime, type_error};
+use super::errors::{logic, object, out_of_bounds, out_of_range, runtime, type_error};
 use super::guard;
 use super::header::{Header, MaybeHeader};
 use super::hypercast::excel_epoch;
 use super::plan::Plan;
 use super::streams;
-use super::tabular::Scratch as Hook;
 use super::value_name;
-use super::values::{sheet_info, sheet_options, tabular_exception};
-use crate::kernel::abi::{
-    ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened, Slot, Span,
-};
-use crate::kernel::workbook::{Memory, State as Book, book, rows};
-
-/// The smallest window the core works in.
-const WINDOW_MIN: usize = 64 * 1024;
-/// The most a workbook's shared strings are given up front.
-const STRINGS_BOUND: u64 = 1 << 28;
+use super::values::sheet_info;
+use crate::{Error, SheetRef};
 
 typed_return!(
     /// `\HyperCast\ExcelEpoch`.
@@ -47,250 +42,6 @@ typed_return!(
     "HyperTabular\\SheetOptions",
     false
 );
-
-/// Whether the tests asked every buffer to start with room for one element
-/// (`Scratch::$stingy`).
-fn stingy() -> bool {
-    Hook::get_metadata()
-        .ce()
-        .get_static_property::<bool>("stingy")
-        .unwrap_or(false)
-}
-
-/// Counts one growth of buffer `which` (window, arena, cells) in `Scratch::$grown`.
-fn grown(which: usize) {
-    let class = Hook::get_metadata().ce();
-    let mut counts = class
-        .get_static_property::<Vec<i64>>("grown")
-        .unwrap_or_default();
-    if counts.len() < 3 {
-        counts.resize(3, 0);
-    }
-    counts[which] += 1;
-    let _ = class.set_static_property("grown", counts);
-}
-
-/// The workbook's tables as a sheet's calls are handed them.
-#[derive(Clone, Copy)]
-struct Tables<'a> {
-    strings: &'a [u8],
-    table: &'a [Span],
-    kinds: &'a [u8],
-}
-
-const NO_TABLES: Tables<'static> = Tables {
-    strings: &[],
-    table: &[],
-    kinds: &[],
-};
-
-/// The buffers a workbook call may ask to have grown.
-struct Scratch {
-    window: Vec<u8>,
-    arena: Vec<u8>,
-    cells: Vec<Span>,
-    row: Vec<Slot>,
-}
-
-impl Scratch {
-    fn new(window: usize, arena: usize, cells: usize, row: usize) -> Scratch {
-        Scratch {
-            window: vec![0; window],
-            arena: vec![0; arena],
-            cells: vec![Span::default(); cells],
-            row: vec![Slot::default(); row],
-        }
-    }
-
-    /// The buffer at least `needed` long and longer than it was, what it held kept.
-    fn grow<T: Copy + Default>(buffer: &mut Vec<T>, needed: u64) {
-        let length = usize::try_from(needed)
-            .unwrap_or(usize::MAX)
-            .max(buffer.len() + 1);
-        buffer.resize(length, T::default());
-    }
-
-    /// The buffer at least `needed` long if it is shorter, what it held kept.
-    fn reserve<T: Copy + Default>(buffer: &mut Vec<T>, needed: usize) {
-        if buffer.len() < needed {
-            buffer.resize(needed, T::default());
-        }
-    }
-
-    fn memory<'a>(&'a mut self, tables: Tables<'a>) -> Memory<'a> {
-        Memory {
-            window: &mut self.window,
-            arena: &mut self.arena,
-            cells: &mut self.cells,
-            row: &mut self.row,
-            strings: tables.strings,
-            table: tables.table,
-            kinds: tables.kinds,
-        }
-    }
-
-    /// Makes `call` until it stops asking for room, growing the buffer it names each time.
-    /// With `row_follows_cells`, the row's slots are grown with the cell table.
-    fn drive(
-        &mut self,
-        tables: Tables<'_>,
-        row_follows_cells: bool,
-        out: &mut Filled,
-        mut call: impl FnMut(&mut Memory<'_>, &mut Filled) -> i32,
-    ) -> i32 {
-        loop {
-            let code = call(&mut self.memory(tables), out);
-            match code {
-                ERR_WINDOW => {
-                    Scratch::grow(&mut self.window, out.needed);
-                    grown(0);
-                }
-                ERR_ARENA => {
-                    Scratch::grow(&mut self.arena, out.needed);
-                    grown(1);
-                }
-                ERR_CELLS => {
-                    Scratch::grow(&mut self.cells, out.needed);
-                    if row_follows_cells {
-                        Scratch::reserve(&mut self.row, self.cells.len());
-                    }
-                    grown(2);
-                }
-                _ => return code,
-            }
-        }
-    }
-}
-
-/// What a call's code means: nothing more to do, or a structural failure. Anything else is
-/// this binding's bug.
-fn settle(code: i32, out: &Filled) -> PhpResult<()> {
-    match code {
-        OK => Ok(()),
-        ERR_STRUCTURE => Err(object(&tabular_exception(&out.failure)?)),
-        _ => Err(contract_violation()),
-    }
-}
-
-/// One sheet as the workbook listed it.
-struct Listed {
-    name: Vec<u8>,
-    part: Vec<u8>,
-    index: u32,
-    info: Zval,
-}
-
-/// A workbook opened: nothing in it changes once it is, and every sheet read from it shares it.
-struct BookData {
-    container: Vec<u8>,
-    state: Box<Book>,
-    format: u32,
-    epoch: u32,
-    sheets: Vec<Listed>,
-    /// `sheets()`, built once.
-    list: Zval,
-    strings: Rc<Vec<u8>>,
-    table: Vec<Span>,
-    kinds: Vec<u8>,
-}
-
-impl BookData {
-    fn tables(&self) -> Tables<'_> {
-        Tables {
-            strings: &self.strings,
-            table: &self.table,
-            kinds: &self.kinds,
-        }
-    }
-
-    fn open(container: Vec<u8>) -> PhpResult<BookData> {
-        let stingy = stingy();
-        let mut scratch = if stingy {
-            Scratch::new(1, 1, 1, 0)
-        } else {
-            Scratch::new(WINDOW_MIN, 1024, 64, 0)
-        };
-        let mut state = Box::new(Book::new());
-        // Opening starts over when it is refused, and reports through its own shape.
-        let mut found = Opened::default();
-        loop {
-            match book::open(
-                &mut state,
-                &container,
-                &mut scratch.memory(NO_TABLES),
-                &mut found,
-            ) {
-                OK => break,
-                ERR_WINDOW => Scratch::grow(&mut scratch.window, found.needed),
-                ERR_ARENA => Scratch::grow(&mut scratch.arena, found.needed),
-                ERR_STRUCTURE => return Err(object(&tabular_exception(&found.failure)?)),
-                _ => return Err(contract_violation()),
-            }
-        }
-
-        // The sheets: three spans each — the name and the part, in the arena, then one whose
-        // offset's low bit says hidden and whose length is the sheet's index.
-        let mut out = Filled::default();
-        let code = scratch.drive(NO_TABLES, false, &mut out, |memory, out| {
-            book::sheets(&mut state, &container, memory, out)
-        });
-        settle(code, &out)?;
-        let listed = (out.rows as usize * 3).min(scratch.cells.len());
-        let slice = |span: Span| {
-            let offset = (span.offset as usize).min(scratch.arena.len());
-            let end = offset.saturating_add(span.len()).min(scratch.arena.len());
-            scratch.arena[offset..end].to_vec()
-        };
-        let mut sheets = Vec::with_capacity(listed / 3);
-        for entry in scratch.cells[..listed].as_chunks::<3>().0 {
-            let (name, part, index) = (slice(entry[0]), slice(entry[1]), entry[2].len);
-            let info = sheet_info(&name, entry[2].offset & 1 == 1, &part, index)?;
-            sheets.push(Listed {
-                name,
-                part,
-                index,
-                info,
-            });
-        }
-        let list = list_zval(
-            sheets
-                .iter()
-                .map(|sheet| sheet.info.shallow_clone())
-                .collect(),
-        )?;
-
-        // The shared strings take no more room than their part inflates to; asking for it
-        // once saves growing into it.
-        let bound = found.strings_bytes.min(STRINGS_BOUND);
-        if !stingy && (scratch.arena.len() as u64) < bound {
-            Scratch::grow(&mut scratch.arena, bound);
-        }
-        let code = scratch.drive(NO_TABLES, false, &mut out, |memory, out| {
-            book::strings(&mut state, &container, memory, out)
-        });
-        settle(code, &out)?;
-        let used = (out.arena_used as usize).min(scratch.arena.len());
-        let strings = Rc::new(scratch.arena[..used].to_vec());
-        let table = scratch.cells[..(out.rows as usize).min(scratch.cells.len())].to_vec();
-        let code = scratch.drive(NO_TABLES, false, &mut out, |memory, out| {
-            book::styles(&mut state, &container, memory, out)
-        });
-        settle(code, &out)?;
-        let kinds = scratch.arena[..(out.rows as usize).min(scratch.arena.len())].to_vec();
-
-        Ok(BookData {
-            container,
-            state,
-            format: found.format,
-            epoch: found.epoch,
-            sheets,
-            list,
-            strings,
-            table,
-            kinds,
-        })
-    }
-}
 
 /// An XLSX, ODS or Numbers workbook, opened in memory: its format, its date system, its sheets.
 /// A sheet is read through a plan, as delimited text is, into the same `Batch`.
@@ -312,18 +63,63 @@ impl BookData {
 #[php(name = "HyperTabular\\Workbook")]
 #[php(flags = ext_php_rs::flags::ClassFlags::Final)]
 pub struct Workbook {
-    data: Rc<BookData>,
+    book: Arc<crate::Workbook<'static>>,
+    /// `sheets()`, built once.
+    list: Zval,
 }
 
 impl Workbook {
     fn of(bytes: Vec<u8>) -> PhpResult<Workbook> {
+        let book = crate::Workbook::from_vec(bytes).map_err(rust_error)?;
+        let mut sheets = Vec::with_capacity(book.sheets().len());
+        for sheet in book.sheets() {
+            sheets.push(sheet_info(
+                sheet.name.as_bytes(),
+                sheet.hidden,
+                sheet.part(),
+                sheet.index(),
+            )?);
+        }
         Ok(Workbook {
-            data: Rc::new(BookData::open(bytes)?),
+            book: Arc::new(book),
+            list: list_zval(sheets)?,
         })
     }
 
-    fn sheet_at(&self, at: usize, options: &Zval, plan: Option<Zval>) -> PhpResult<Sheet> {
-        Sheet::new(&self.data, at, options, plan)
+    fn open_sheet(
+        &self,
+        which: SheetRef<'_>,
+        options: &Zval,
+        plan: Option<Zval>,
+        no_sheet: impl FnOnce() -> PhpException,
+    ) -> PhpResult<Sheet> {
+        let plan = plan.map(|plan| Plan::new(&plan)).transpose()?;
+        let settings = sheet_options_of(options)?;
+        let sheet = crate::Workbook::shared_sheet(
+            &self.book,
+            which,
+            settings,
+            plan.as_ref().map(|plan| plan.columns.as_slice()),
+        )
+        .map_err(|error| match error {
+            Error::NoSheet(_) => no_sheet(),
+            other => rust_error(other),
+        })?;
+        let header = sheet
+            .header()
+            .map(|header| list_zval(header.names().map(bytes_zval).collect()))
+            .transpose()?;
+        Ok(Sheet {
+            state: RefCell::new(SheetState {
+                sheet,
+                book: Arc::clone(&self.book),
+                plan,
+                header,
+                header_index: None,
+                failure: None,
+            }),
+            options: options.shallow_clone(),
+        })
     }
 }
 
@@ -378,18 +174,24 @@ impl Workbook {
 
     /// The workbook's format.
     pub fn format(&self) -> PhpResult<WorkbookFormat> {
-        guard(|| WorkbookFormat::from_code(self.data.format).ok_or_else(contract_violation))
+        guard(|| {
+            Ok(match self.book.format() {
+                crate::Format::Xlsx => WorkbookFormat::Xlsx,
+                crate::Format::Ods => WorkbookFormat::Ods,
+                crate::Format::Numbers => WorkbookFormat::Numbers,
+            })
+        })
     }
 
     /// The workbook's date system, as HyperCast's `ExcelEpoch`: what `Column::excelSerial()`
     /// takes to read its date serials.
     pub fn date_system(&self) -> PhpResult<EpochObject> {
-        guard(|| excel_epoch(self.data.epoch).map(|epoch| EpochObject(Some(epoch))))
+        guard(|| excel_epoch(self.book.date_system() as u32).map(|epoch| EpochObject(Some(epoch))))
     }
 
     /// The workbook's sheets, in its own order, hidden ones included.
     pub fn sheets(&self) -> PhpResult<Array> {
-        guard(|| Ok(Array(self.data.list.shallow_clone())))
+        guard(|| Ok(Array(self.list.shallow_clone())))
     }
 
     /// One sheet, by its place in `sheets()` (an int) or by its name (a string, matched
@@ -406,21 +208,17 @@ impl Workbook {
     ) -> PhpResult<Sheet> {
         guard(|| {
             let which = &which.0;
-            let count = self.data.sheets.len();
             if let Some(name) = which.zend_str() {
                 let name = name.as_bytes();
-                let at = self
-                    .data
-                    .sheets
-                    .iter()
-                    .position(|sheet| sheet.name == name)
-                    .ok_or_else(|| {
-                        out_of_bounds(format!(
-                            "The workbook has no sheet named \"{}\"",
-                            String::from_utf8_lossy(name)
-                        ))
-                    })?;
-                return self.sheet_at(at, &options.0, plan.0);
+                let shown = || {
+                    out_of_bounds(format!(
+                        "The workbook has no sheet named \"{}\"",
+                        String::from_utf8_lossy(name)
+                    ))
+                };
+                // A name that isn't UTF-8 can't be a sheet's, whose names are text.
+                let text = std::str::from_utf8(name).map_err(|_| shown())?;
+                return self.open_sheet(SheetRef::Name(text), &options.0, plan.0, shown);
             }
             // An int, or what PHP's weak mode turns into one for an `int|string` parameter.
             let index = if let Some(index) = which.long() {
@@ -438,15 +236,14 @@ impl Workbook {
                     value_name(which)
                 )));
             };
-            let at = usize::try_from(index)
-                .ok()
-                .filter(|at| *at < count)
-                .ok_or_else(|| {
-                    out_of_range(format!(
-                        "The workbook has {count} sheets; there is no sheet {index}"
-                    ))
-                })?;
-            self.sheet_at(at, &options.0, plan.0)
+            let count = self.book.sheets().len();
+            let shown = || {
+                out_of_range(format!(
+                    "The workbook has {count} sheets; there is no sheet {index}"
+                ))
+            };
+            let at = usize::try_from(index).map_err(|_| shown())?;
+            self.open_sheet(SheetRef::Index(at), &options.0, plan.0, shown)
         })
     }
 }
@@ -462,183 +259,63 @@ impl Workbook {
 #[php(name = "HyperTabular\\Sheet")]
 #[php(flags = ext_php_rs::flags::ClassFlags::Final)]
 pub struct Sheet {
-    book: Rc<BookData>,
+    /// Everything a call changes, borrowed for the call: a call back into the sheet from PHP that
+    /// runs inside one of its own calls is refused, never a second hold on the Rust sheet.
+    state: RefCell<SheetState>,
     options: Zval,
-    batch_rows: usize,
-    state: Box<Book>,
+}
+
+/// A sheet's state, behind its `RefCell`.
+struct SheetState {
+    /// The Rust sheet, holding a clone of `book`.
+    sheet: crate::Sheet<'static>,
+    book: Arc<crate::Workbook<'static>>,
     plan: Option<Plan>,
-    scratch: Scratch,
-    per_row: usize,
-    out: Filled,
     header: Option<Zval>,
     header_index: Option<Zval>,
-    pending: Option<Zval>,
     failure: Option<Zval>,
 }
 
+/// What calling back into a sheet mid-call says.
+fn mid_call() -> PhpException {
+    logic("The sheet is in the middle of a call; nothing it runs can call back into it")
+}
+
 impl Sheet {
-    fn new(data: &Rc<BookData>, at: usize, options: &Zval, plan: Option<Zval>) -> PhpResult<Sheet> {
-        let (has_header, skip_empty_rows, batch_rows) = sheet_options(options)?;
-        let listed = data.sheets.get(at).ok_or_else(contract_violation)?;
-        let mut state = Box::new(Book::new());
-        // SAFETY: a state block is plain integers with no destructor, the two do not overlap,
-        // and the core documents an opened block as copyable.
-        unsafe { std::ptr::copy_nonoverlapping(&*data.state, &mut *state, 1) };
-        // With a plan, binding it sizes the cell table and the row; without one, the header row
-        // is read into a cell table of its own size and a row of at least as many slots, which a
-        // plan bound later grows and never shrinks.
-        let stingy = stingy();
-        let scratch = match (plan.is_some(), stingy) {
-            (false, true) => Scratch::new(1, 1, 1, 1),
-            (false, false) => Scratch::new(0, 4096, 64, 64),
-            (true, true) => Scratch::new(1, 1, 1, 0),
-            (true, false) => Scratch::new(0, 4096, 0, 0),
-        };
-        let mut sheet = Sheet {
-            book: Rc::clone(data),
-            options: options.shallow_clone(),
-            batch_rows,
-            state,
-            plan: None,
-            scratch,
-            per_row: 0,
-            out: Filled::default(),
-            header: None,
-            header_index: None,
-            pending: None,
-            failure: None,
-        };
-        if let Some(plan) = plan {
-            sheet.take(Plan::new(&plan, batch_rows)?);
-        }
-        let code = rows::sheet(
-            &mut sheet.state,
-            &data.container,
-            &listed.part,
-            listed.index,
-            has_header,
-            skip_empty_rows,
-            &mut sheet.out,
-        );
-        settle(code, &sheet.out)?;
-        if has_header {
-            sheet.read_header()?;
-        }
-        Ok(sheet)
+    /// The sheet's state for a call that changes it; refused while another call holds it.
+    fn state(&self) -> PhpResult<RefMut<'_, SheetState>> {
+        self.state.try_borrow_mut().map_err(|_| mid_call())
     }
 
-    fn take(&mut self, plan: Plan) {
-        self.per_row = plan.count() + 1;
-        // The cell table takes a batch's rows up front — unless the tests asked every buffer to
-        // start with no room, when the fill asks for it instead.
-        if !stingy() {
-            Scratch::reserve(&mut self.scratch.cells, self.batch_rows * self.per_row);
-        }
-        // A slot for every source column the plan reaches. What the slots already hold — a
-        // header row the sheet may yet repeat — is kept.
-        Scratch::reserve(&mut self.scratch.row, plan.width);
-        self.plan = Some(plan);
+    /// The sheet's state for a call that only looks; refused while a read holds it.
+    fn view(&self) -> PhpResult<Ref<'_, SheetState>> {
+        self.state.try_borrow().map_err(|_| mid_call())
     }
+}
 
-    /// The header row's names: in the shared strings as written, or — flagged — in the arena.
-    fn read_header(&mut self) -> PhpResult<()> {
-        // The header row's cells are kept in the row's slots as well as named — the slots are
-        // what a row the sheet repeats (an ODS `number-rows-repeated`) is delivered again from.
-        let unbound = self.plan.is_none();
-        if unbound {
-            Scratch::reserve(&mut self.scratch.row, self.scratch.cells.len());
-        }
-        let book = Rc::clone(&self.book);
-        let state = &mut self.state;
-        let code = self
-            .scratch
-            .drive(book.tables(), unbound, &mut self.out, |memory, out| {
-                rows::header(state, &book.container, memory, out)
-            });
-        settle(code, &self.out)?;
-        let count = (self.out.rows as usize).min(self.scratch.cells.len());
-        let mut names = Vec::with_capacity(count);
-        for span in &self.scratch.cells[..count] {
-            let from: &[u8] = if span.flagged() {
-                &self.scratch.arena
-            } else {
-                &book.strings
-            };
-            let offset = (span.offset as usize).min(from.len());
-            let end = offset.saturating_add(span.len()).min(from.len());
-            names.push(bytes_zval(&from[offset..end]));
-        }
-        self.header = Some(list_zval(names)?);
-        Ok(())
-    }
-
+impl SheetState {
     fn next_batch(&mut self) -> PhpResult<Option<Zval>> {
-        if self.plan.is_none() {
-            return Err(super::errors::logic(
+        let Some(plan) = self.plan.as_ref() else {
+            return Err(logic(
                 "The sheet has no plan to read through; bind() one first",
             ));
-        }
-        if let Some(pending) = self.pending.take() {
-            self.failure = Some(pending);
-        }
+        };
         if let Some(failure) = &self.failure {
             return Err(object(failure));
         }
-        let book = Rc::clone(&self.book);
-        let plan = self.plan.as_mut().ok_or_else(contract_violation)?;
-        let buffers = plan.buffers();
-        let (state, specs, batch_rows) = (&mut self.state, &plan.specs, plan.batch_rows);
-        let code = self
-            .scratch
-            .drive(book.tables(), false, &mut self.out, |memory, out| {
-                // SAFETY: each column's two arrays have room for `batch_rows` values of its door's
-                // type and `batch_rows` verdicts (`Plan::new`).
-                unsafe {
-                    rows::fill(
-                        state,
-                        &book.container,
-                        specs,
-                        &buffers,
-                        batch_rows,
-                        memory,
-                        out,
-                    )
-                }
-            });
-        let rows = self.out.rows as usize;
-        match code {
-            OK => {}
-            ERR_STRUCTURE => {
-                let broken = tabular_exception(&self.out.failure)?;
-                if rows == 0 {
-                    let thrown = object(&broken);
-                    self.failure = Some(broken);
-                    return Err(thrown);
-                }
-                self.pending = Some(broken);
+        match self.sheet.read() {
+            Ok(None) => Ok(None),
+            Ok(Some(batch)) => {
+                Batch::object(BatchCore::of(plan, &batch, Holds::Book(&self.book))).map(Some)
             }
-            _ => return Err(contract_violation()),
+            Err(Error::Structure(found)) => {
+                let exception = failure_zval(found)?;
+                let thrown = object(&exception);
+                self.failure = Some(exception);
+                Err(thrown)
+            }
+            Err(other) => Err(rust_error(other)),
         }
-        if rows == 0 {
-            return Ok(None);
-        }
-        // The arena as far as the core wrote into it, which is as far as any of the batch's
-        // spans reach — the text typed cells were said as, and the raw text of those that
-        // failed.
-        let used = (self.out.arena_used as usize).min(self.scratch.arena.len());
-        let cells =
-            self.scratch.cells[..(rows * self.per_row).min(self.scratch.cells.len())].to_vec();
-        let plan = self.plan.as_ref().ok_or_else(contract_violation)?;
-        let core = BatchCore::new(
-            plan,
-            rows,
-            cells,
-            self.per_row,
-            Rc::clone(&book.strings),
-            self.scratch.arena[..used].to_vec(),
-            true,
-        );
-        Batch::object(core).map(Some)
     }
 }
 
@@ -665,27 +342,43 @@ impl Sheet {
     ///
     /// @throws \LogicException when the sheet already has a plan.
     /// @throws \InvalidArgumentException for a plan entry that is not a `Column`.
-    pub fn bind(&mut self, plan: ArrayArg) -> PhpResult<()> {
+    pub fn bind(&self, plan: ArrayArg) -> PhpResult<()> {
         guard(|| {
-            if self.plan.is_some() {
-                return Err(super::errors::logic(
-                    "The sheet already has a plan; a plan is bound once",
-                ));
+            let mut state = self.state()?;
+            if state.plan.is_some() {
+                return Err(logic("The sheet already has a plan; a plan is bound once"));
             }
-            let plan = Plan::new(&plan.0, self.batch_rows)?;
-            self.take(plan);
+            let plan = Plan::new(&plan.0)?;
+            state.sheet.bind(&plan.columns).map_err(rust_error)?;
+            state.plan = Some(plan);
             Ok(())
+        })
+    }
+
+    /// What a sample of the sheet says its columns are: a plan to change or to pass to a read, and
+    /// why. It starts you off, and it's yours to inspect: nothing is applied, and a read never
+    /// sniffs. The sample reads the sheet from its start, whatever this sheet has read, with notes
+    /// on, and takes one batch of this sheet's size at most. A date column is text: nothing in a
+    /// sheet's cells says which order a date string is in unless it's declared.
+    ///
+    /// @throws \InvalidArgumentException for a format the core refuses, or too many columns.
+    /// @throws TabularException at a broken part among the sampled rows.
+    pub fn suggest(&self, options: OptSuggestOptions) -> PhpResult<SuggestionObject> {
+        guard(|| {
+            let made = suggest_options_of(options.0.as_ref())?;
+            let found = self.view()?.sheet.suggest(&made).map_err(rust_error)?;
+            suggestion_of(&found, options.0.as_ref()).map(|made| SuggestionObject(Some(made)))
         })
     }
 
     /// Whether the sheet has a plan.
     pub fn is_bound(&self) -> PhpResult<bool> {
-        guard(|| Ok(self.plan.is_some()))
+        guard(|| Ok(self.view()?.plan.is_some()))
     }
 
     /// The plan, as bound; an empty list before one is.
     pub fn plan(&self) -> PhpResult<Array> {
-        guard(|| match &self.plan {
+        guard(|| match &self.view()?.plan {
             Some(plan) => Ok(Array(plan.list.shallow_clone())),
             None => list_zval(Vec::new()).map(Array),
         })
@@ -693,20 +386,26 @@ impl Sheet {
 
     /// The header row's names; null when the options say there is no header.
     pub fn header(&self) -> PhpResult<MaybeArray> {
-        guard(|| Ok(MaybeArray(self.header.as_ref().map(Zval::shallow_clone))))
+        guard(|| {
+            Ok(MaybeArray(
+                self.view()?.header.as_ref().map(Zval::shallow_clone),
+            ))
+        })
     }
 
     /// The header as a `Header`, to look columns up by name; null when there is none.
-    pub fn header_index(&mut self) -> PhpResult<MaybeHeader> {
+    pub fn header_index(&self) -> PhpResult<MaybeHeader> {
         guard(|| {
-            let Some(names) = &self.header else {
+            let mut state = self.state()?;
+            let state = &mut *state;
+            let Some(names) = &state.header else {
                 return Ok(MaybeHeader(None));
             };
-            if self.header_index.is_none() {
-                self.header_index = Some(Header::object(names)?);
+            if state.header_index.is_none() {
+                state.header_index = Some(Header::object(names)?);
             }
             Ok(MaybeHeader(
-                self.header_index.as_ref().map(Zval::shallow_clone),
+                state.header_index.as_ref().map(Zval::shallow_clone),
             ))
         })
     }
@@ -722,7 +421,7 @@ impl Sheet {
     /// @throws \LogicException when the sheet has no plan.
     /// @throws TabularException at a broken part, once every intact row before it has been
     ///                          delivered — and again at every read after.
-    pub fn read(&mut self) -> PhpResult<MaybeBatch> {
-        guard(|| self.next_batch().map(MaybeBatch))
+    pub fn read(&self) -> PhpResult<MaybeBatch> {
+        guard(|| self.state()?.next_batch().map(MaybeBatch))
     }
 }

@@ -54,12 +54,71 @@ type SheetOptions struct {
 	// Sheet.Header and never delivered as a row.
 	HasHeader bool
 	// SkipEmptyRows says whether a row with no cells is skipped rather than delivered as a
-	// row of empty cells.
+	// row of empty cells. Set it to false to keep every row: on, a row whose only cells are formulas
+	// with no cached value is left out too, and nothing says so.
 	SkipEmptyRows bool
-	// BatchRows is the rows per batch — the capacity of every column buffer. It must be
-	// positive.
+	// BatchRows is the rows per batch — the capacity of every column buffer. A struct can't tell
+	// 0 from a field left out, so 0 here is DefaultBatchRows; the BatchRows option can, and refuses 0.
+	// The core refuses a batch asking for more memory than it allows.
 	BatchRows int
+	// Skip is the rows of the sheet to pass over at the start of the range, empty ones included.
+	// Their cells aren't judged, so a bad cell there doesn't matter.
+	Skip uint32
+	// HeaderRow is the rows to read and discard after those, as SkipEmptyRows delivers them, so
+	// with it on an empty row doesn't count.
+	HeaderRow uint32
+	// Range is the part of the sheet to read; the zero Range is all of it.
+	Range Range
+	// Tokens is what stands for no value in every column without tokens of its own: text cells
+	// alone can be one.
+	Tokens Tokens
 }
+
+// ErrRange is the error ParseRange and NewRange wrap for what isn't a range; reach it with
+// errors.Is.
+var ErrRange = errors.New("hypertabular: not a range")
+
+// Range is the part of a sheet a read keeps: its corners, 1-based like the A5:F200 they're written
+// as, and included, a 0 meaning no limit on that side. The first column is ordinal 0 of a plan,
+// while a cell's line and source column stay the sheet's own. A range that runs past the sheet's
+// end reads what's there, and adds no rows of its own. Comparable.
+type Range struct {
+	firstRow, firstColumn, lastRow, lastColumn uint32
+}
+
+// ParseRange reads A5:F200: both corners, in capitals, the second no less than the first in either
+// direction. The core reads it, so every binding agrees on what one is. Anything else, A5 alone,
+// a5:f200 or F200:A5, is an error that wraps ErrRange.
+func ParseRange(text string) (Range, error) {
+	first, firstColumn, last, lastColumn, ok := nativeRangeParse(text)
+	if !ok {
+		return Range{}, fmt.Errorf("%w: %q", ErrRange, text)
+	}
+	return Range{first, firstColumn, last, lastColumn}, nil
+}
+
+// NewRange is a range from its four numbers, each 1-based, with 0 for no limit on that side. That's
+// how to say what A5:F200 can't: every row from the fifth, or columns B to D of all of them. A last
+// before its first is an error that wraps ErrRange.
+func NewRange(firstRow, firstColumn, lastRow, lastColumn uint32) (Range, error) {
+	inverted := func(first, last uint32) bool { return first != 0 && last != 0 && first > last }
+	if inverted(firstRow, lastRow) || inverted(firstColumn, lastColumn) {
+		return Range{}, fmt.Errorf("%w: rows %d to %d, columns %d to %d", ErrRange, firstRow, lastRow, firstColumn, lastColumn)
+	}
+	return Range{firstRow, firstColumn, lastRow, lastColumn}, nil
+}
+
+// FirstRow is the first row, or 0 for no limit.
+func (r Range) FirstRow() uint32 { return r.firstRow }
+
+// FirstColumn is the first column, A being 1, or 0 for no limit.
+func (r Range) FirstColumn() uint32 { return r.firstColumn }
+
+// LastRow is the last row, or 0 for no limit.
+func (r Range) LastRow() uint32 { return r.lastRow }
+
+// LastColumn is the last column, or 0 for no limit.
+func (r Range) LastColumn() uint32 { return r.lastColumn }
 
 // DefaultSheetOptions reads a header, skips empty rows, and reads DefaultBatchRows rows a
 // batch.
@@ -77,9 +136,6 @@ var (
 	stingy bool
 	grown  [3]int
 )
-
-// errWindow is the code a workbook call returns for a window too small to work in.
-const errWindow = -5
 
 // windowMin is the smallest window the core takes.
 const windowMin = 64 * 1024
@@ -338,44 +394,46 @@ func (w *Workbook) Sheets() []SheetInfo { return w.sheets[:len(w.sheets):len(w.s
 
 // Sheet starts a read of the sheet at index of Sheets through plan. When the options declare
 // a header it is read here, so a header that is structurally broken is this method's error.
-// An index the workbook has no sheet at is an error that wraps ErrNoSheet.
-func (w *Workbook) Sheet(index int, options SheetOptions, plan []Column) (*Sheet, error) {
+// An index the workbook has no sheet at is an error that wraps ErrNoSheet. Notes and BatchRows
+// reach the sheet from opts, BatchRows in place of the options' own. A sheet has no buffer for
+// BufferBytes to set, and its 0 is refused here as on a reader.
+func (w *Workbook) Sheet(index int, options SheetOptions, plan []Column, opts ...Option) (*Sheet, error) {
 	info, err := w.sheetAt(index)
 	if err != nil {
 		return nil, err
 	}
-	return newSheet(w, info, options, plan, true)
+	return newSheet(w, info, options, plan, true, opts)
 }
 
 // SheetUnbound starts a read of the sheet at index of Sheets without a plan: the header is
 // read — when the options declare one — and the plan is bound later, with Sheet.Bind, once
 // the header has said where each column is. Sheet.Read returns ErrUnbound until then.
-func (w *Workbook) SheetUnbound(index int, options SheetOptions) (*Sheet, error) {
+func (w *Workbook) SheetUnbound(index int, options SheetOptions, opts ...Option) (*Sheet, error) {
 	info, err := w.sheetAt(index)
 	if err != nil {
 		return nil, err
 	}
-	return newSheet(w, info, options, nil, false)
+	return newSheet(w, info, options, nil, false, opts)
 }
 
 // SheetNamed starts a read of the first sheet named name, as Sheet does. A name the
 // workbook has no sheet by is an error that wraps ErrNoSheet.
-func (w *Workbook) SheetNamed(name string, options SheetOptions, plan []Column) (*Sheet, error) {
+func (w *Workbook) SheetNamed(name string, options SheetOptions, plan []Column, opts ...Option) (*Sheet, error) {
 	info, err := w.sheetNamed(name)
 	if err != nil {
 		return nil, err
 	}
-	return newSheet(w, info, options, plan, true)
+	return newSheet(w, info, options, plan, true, opts)
 }
 
 // SheetNamedUnbound starts a read of the first sheet named name without a plan, as
 // SheetUnbound does.
-func (w *Workbook) SheetNamedUnbound(name string, options SheetOptions) (*Sheet, error) {
+func (w *Workbook) SheetNamedUnbound(name string, options SheetOptions, opts ...Option) (*Sheet, error) {
 	info, err := w.sheetNamed(name)
 	if err != nil {
 		return nil, err
 	}
-	return newSheet(w, info, options, nil, false)
+	return newSheet(w, info, options, nil, false, opts)
 }
 
 func (w *Workbook) sheetAt(index int) (*SheetInfo, error) {
@@ -403,7 +461,9 @@ func (w *Workbook) sheetNamed(name string) (*SheetInfo, error) {
 // delimited text would. A Sheet is not safe for concurrent use.
 type Sheet struct {
 	book    *Workbook
+	info    *SheetInfo
 	options SheetOptions
+	notes   bool
 	// set is the plan and its buffers: nil until one is bound.
 	set     *columns
 	batch   Batch
@@ -416,30 +476,49 @@ type Sheet struct {
 	err     error
 }
 
-func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Column, bound bool) (*Sheet, error) {
-	s := &Sheet{book: book, options: options}
+func newSheet(book *Workbook, info *SheetInfo, declared SheetOptions, plan []Column, bound bool, opts []Option) (*Sheet, error) {
+	o := options{batchRows: declared.BatchRows, bufferBytes: DefaultBufferBytes, notes: true}
+	if o.batchRows == 0 {
+		o.batchRows = DefaultBatchRows
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	declared.BatchRows = o.batchRows
+	// The core's answer on the size, ahead of the instance and its copy of the container. With no
+	// plan yet it can only judge what a sheet holds whatever the plan; bind asks again with one.
+	flags := batchSheet
+	if o.notes {
+		flags |= batchNotes
+	}
+	if _, err := checkSizes(nil, o.batchRows, 1, flags); err != nil {
+		return nil, err
+	}
+	// A sheet has no input buffer and the core doesn't judge one, but this option is shared with a
+	// reader, so it's asked as a reader's.
+	if _, err := checkSizes(nil, 1, o.bufferBytes, 0); err != nil {
+		return nil, err
+	}
+	s := &Sheet{book: book, info: info, options: declared, notes: o.notes}
 	// An instance of the sheet's own, with a copy of the opened state, which the core
 	// allows, so that this sheet's read is its own.
 	core, ok := newBookNative(book, true)
-	if !ok {
+	if !ok || !core.putTokens(declared.Tokens) {
 		return nil, errWorkbookMemory
 	}
 	if bound {
 		// The plan is bound before the sheet is opened, so that its error comes first, and
 		// the buffers are sized to it.
-		set, perRow, err := sheetPlan(plan, options.BatchRows)
+		set, perRow, err := s.plan(plan)
 		if err != nil {
 			return nil, err
 		}
-		s.scratch = newScratch(core, 0, 4096, perRow*options.BatchRows, set.width)
+		s.scratch = newScratch(core, 0, 4096, perRow*declared.BatchRows, set.width)
 		if stingy {
 			s.scratch = newScratch(core, 1, 1, 1, set.width)
 		}
 		s.attach(set, perRow)
 	} else {
-		if options.BatchRows <= 0 {
-			return nil, fmt.Errorf("hypertabular: BatchRows must be positive, not %d", options.BatchRows)
-		}
 		// No plan to size the row's slots by: there is one for every cell the header call is
 		// given, and they grow with the cell table (see readHeader).
 		s.scratch = newScratch(core, 0, 4096, 64, 64)
@@ -447,10 +526,10 @@ func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Colu
 			s.scratch = newScratch(core, 1, 1, 1, 1)
 		}
 	}
-	if err := settled(s.scratch.sheet(info, options), &s.scratch.filled); err != nil {
+	if err := settled(s.scratch.sheet(info, declared), &s.scratch.filled); err != nil {
 		return nil, err
 	}
-	if options.HasHeader {
+	if declared.HasHeader {
 		if err := s.readHeader(); err != nil {
 			return nil, err
 		}
@@ -458,27 +537,23 @@ func newSheet(book *Workbook, info *SheetInfo, options SheetOptions, plan []Colu
 	return s, nil
 }
 
-// sheetPlan checks a plan for a sheet and allocates its buffers; perRow is the cell-table
+// plan checks a plan for the sheet and allocates its buffers; perRow is the cell-table
 // entries one row takes: one per plan column, and one more.
-func sheetPlan(plan []Column, batchRows int) (*columns, int, error) {
-	set, err := newColumns(plan, batchRows)
+func (s *Sheet) plan(plan []Column) (*columns, int, error) {
+	batchRows := s.options.BatchRows
+	set, err := newColumns(plan, batchRows, s.notes, batchSheet)
 	if err != nil {
 		return nil, 0, err
 	}
-	perRow := len(plan) + 1
-	// In int64: the bound is 1<<31, which overflows int where int is 32 bits (TinyGo on
-	// WebAssembly).
-	if int64(perRow) > (1<<31)/int64(batchRows) {
-		return nil, 0, fmt.Errorf("hypertabular: a plan of %d columns at %d rows a batch needs too large a cell table",
-			len(plan), batchRows)
-	}
-	return set, perRow, nil
+	// The core has allowed the cell table, so this fits an int even where an int is 32 bits.
+	return set, len(plan) + 1, nil
 }
 
 // attach makes set the sheet's plan.
 func (s *Sheet) attach(set *columns, perRow int) {
 	s.set = set
-	s.batch = Batch{columns: set, workbook: true}
+	first := int(s.options.Range.firstColumn)
+	s.batch = Batch{columns: set, workbook: true, core: s.scratch.core, firstColumn: max(first-1, 0)}
 	s.perRow = perRow
 }
 
@@ -520,7 +595,7 @@ func (s *Sheet) Bind(plan []Column) error {
 	if s.set != nil {
 		return ErrAlreadyBound
 	}
-	set, perRow, err := sheetPlan(plan, s.options.BatchRows)
+	set, perRow, err := s.plan(plan)
 	if err != nil {
 		return err
 	}
@@ -533,6 +608,18 @@ func (s *Sheet) Bind(plan []Column) error {
 	s.scratch.row = max(s.scratch.row, set.width)
 	s.attach(set, perRow)
 	return nil
+}
+
+// setBatchRows is the batches a sampler reads this sheet in, ahead of Bind.
+func (s *Sheet) setBatchRows(rows int) { s.options.BatchRows = rows }
+
+// sizeFlags is what the core counts of a batch of this sheet's beside its plan.
+func (s *Sheet) sizeFlags() uint32 {
+	flags := batchSheet
+	if s.notes {
+		flags |= batchNotes
+	}
+	return flags
 }
 
 // IsBound says whether the sheet has a plan: always, for a sheet opened with one.

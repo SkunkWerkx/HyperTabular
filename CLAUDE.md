@@ -173,6 +173,22 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
   reproducibility constraint, not a floor) and wasm2go's version in its `go.mod`, each moved
   by regenerating and committing the core, and kept equal to HyperCast's. Go's floor is `go`
   in `go/go.mod` (`1.26`) and the floor sentence in `go/README.md`.
+- The corpus's keys: every replay refuses a key it doesn't know (`corpus/README.md`), so a new
+  key in `corpus/delimited.json` or `corpus/workbook.json` is read in `rust/tests/support/corpus.rs`
+  and `corpus_delimited.rs`, `CorpusKeys.cs`, `CorpusKeys.java`, `go/corpus_test.go` and
+  `go/workbook_test.go`,
+  `CorpusKeys.swift`, `python/tests/test_corpus.py`, `ruby/spec/corpus_helpers.rb`,
+  `php/tests/CorpusTest.php`, `typescript/tests/corpus.test.ts`, `r/tests/testthat/test-corpus.R`
+  and `c/smoke/corpus.cpp`, and a new package is added to `r_corpus`.
+- The core's codes that bindings name: `Failure` (`kernel/abi.rs`, `ENCODING` is 27), a
+  `CellNote`'s origins, and `hypertabular_suggest`'s doors, params and statuses (every door,
+  `DateTime` included, `NOTATION_COMMA_GROUPS` and `NOTATION_COMMA_DECIMAL`, `NOTATION_FLAGS` 95):
+  each binding's enums and its suggest's door table, and the C++ header's.
+- The core's size constants in `kernel/size.rs`: `MAX_ROW_BYTES` (1 GiB) is restated by C#,
+  Java, Swift, Go, Ruby (`delimited_reader.rb`), R's C shim and the C++ header (`max_row_bytes`), and reaches PHP and Python through
+  the Rust API; `CELL_BUDGET` (4096 × 257) by C#, Java, Swift, Go, Ruby (`runtime/delimited.rb`),
+  R's C shim and the C++ header. `BATCH_BYTES_LIMIT` (4 GiB) and `SAMPLE_BATCH_BYTES` (64 MiB)
+  are the core's alone, asked through `hypertabular_batch_check`; no binding holds a size rule.
 
 ## Never hand-edit
 
@@ -201,7 +217,7 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
 ## Claims are measured
 
 Benchmark tables are dated, machine-specific receipts; losses are printed next to wins, and
-a row that predates a change says so. Go's translated core is 1.7–2.1x slower than the cgo
+a row that predates a change says so. Go's translated core is 1.7–2.3x slower than the cgo
 binding it replaced (`go/README.md`): that loss stays printed. Don't adjust a number without
 re-running its harness, and don't drop a loss.
 
@@ -365,6 +381,49 @@ in `rust/`, after deleting `rust/target/.rustc_info.json` and
 `rust/target/wasm32-unknown-emscripten/` (cargo caches rustc's cfg without regard to the
 variable); the Forge's `wasm_archive_guard.py` checks the result.
 
+## Keeping the owner's Mac alive
+
+Runs here have taken the Mac down: build artifacts filled its disk (before `local-core.sh` began
+with `local-clean.sh`), a size probe filled its RAM (2026-11-07, 959 processes killed,
+force-quit), HyperCast's `swift test` filled the process table with about 2,600
+`swiftpm-testing-helper` copies (2026-11-08, nothing could fork, reboot), and agents' wait loops
+never ended. Every session and every subagent follows these rules; a brief repeats them.
+
+- Disk: every `--target-dir`, staged library and Docker image costs gigabytes (one gate run's
+  scratch reached 26 GiB). Reuse a target dir rather than make a new one, check `df -h ~`
+  before a run that makes several, and delete your own scratch target dirs as soon as their
+  results are recorded. In the main checkout, `local-clean.sh` clears the staged artifacts, alone
+  and only when no other agent is building against them.
+- Memory: never run a size probe, or anything that may allocate without bound, on the host.
+  `timeout` doesn't help and macOS ignores `ulimit -v`: run it in Docker with `--memory=4g
+  --memory-swap=4g` and a `timeout`, or reason from the source. A refusal test refuses before
+  touching memory and joins a suite only after Docker proved it; a test needing gigabytes skips
+  itself out loud and states its measured footprint.
+- Processes: run every `swift test`, and anything else that spawns test children (Swift Testing
+  exit tests, fork-per-test runners), in a subshell capped from this user's own process count,
+  `( ulimit -u $(( $(ps -U $(id -u) | wc -l) + 80 )); timeout 300 swift test ... )`, and check
+  that no helper is left after. Size it from `ps -U`, never `ps -ax` (that left ~530 spare slots).
+  The 2026-11-08 swarm's cause is unknown (intermittent, seen only from subagent shells);
+  HyperCast's `StylesRefusalExitTests` is the only suite that spawns the helper.
+- One heavy job at a time: any build, suite, benchmark, Docker run, mutant or differential storm.
+  When agents run in parallel, each heavy job takes a lock in one command, `until mkdir
+  ~/.cache/hyper-gate/heavy.lock 2>/dev/null; do sleep 20; done; trap 'rmdir
+  ~/.cache/hyper-gate/heavy.lock' EXIT; <job>`, never held across thinking. A lock older than 30
+  minutes with nothing heavy running is stale.
+- A long unattended run keeps a guard alive: `~/.cache/hyper-gate/memguard.py` kills any process
+  above 16 GiB, the largest when swap passes 8 GiB or memory pressure goes critical, and any
+  command with more than 300 copies, and acts on its last process table when it can't fork. A
+  `KILL` line in its log is a finding: report it, never retry at the same size or without the cap.
+- Waiting: never `while pgrep -f <name>` (the loop matches its own command line and never ends)
+  and no foreground wait that can outlive its timeout; background the job and take its
+  notification, or wait on its PID.
+- Never print a process environment (`ps -E`, `env`, `/proc/*/environ`): the owner's shell holds
+  tokens.
+- Never run `local-core.sh` as it is inside an unattended run: it removes every binding's staged
+  artifacts. Build the core step by step as it does.
+- Scratch lives under `~/.cache/<run>/`, never `/private/tmp` (a reboot wipes it), and goes when
+  done. Never delete shared caches or prune Docker to make room.
+
 ## Bun and npm
 
 Bun is the package manager and script runner for every JavaScript tree here, locked by `bun.lock`.
@@ -409,18 +468,34 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Remove agent worktrees and their branches once the work is in the main checkout;
   `.claude/` is untracked and `git add` picks it up.
 
-## Open follow-ups (as of 2026-11-01)
+## Open follow-ups (as of 2026-11-08)
 
-- The next release waits on HyperCast 1.1.0 on every registry. Every manifest requires 1.1.0,
-  but its lockfiles (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `java/jni/`) and
+- The next release waits on HyperCast 1.1.0 on every registry. HyperCast 1.1 is a freeze
+  candidate, uncommitted in `../HyperCast`'s working tree on `cran_1_1`, and the companion pin in
+  `.github/hyper.json` hasn't moved (still `9fbe8b2`): moving it needs that work merged to
+  HyperCast's default branch. Every manifest requires 1.1.0, but the committed lockfiles
+  (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `java/jni/`) and
   `swift/Benchmarks/Package.resolved` still name 1.0.0, which only the bump above can move
   once 1.1.0 is published; the board meanwhile runs on the pin, whose wiring relocks each job's
-  tree.
+  tree. HyperCast and HyperTabular 1.1 go to CRAN together, HyperCast's first.
 - The next release is the first with npm, CRAN, C archives, PIE zips, the Swift zips and the
   JNI jar; what only it can prove is the same list as HyperCast's.
-- Benchmark tables were measured on the WSL2 i9-11900H box, Go's and PHP's new receipts on an
-  Apple M6. Re-measure every harness on one machine before relabelling a table; never mix
-  machines.
+- Benchmark tables: the workbook table through every binding and Go's and PHP's receipts were
+  measured on an Apple M6 on 2026-11-08, one session; the delimited and workbook core against 1.0
+  (tag `v1.0.0` over HyperCast 1.0.0, with a third build splitting each loss between the two
+  libraries) in a second session that evening, after simdutf8. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
+  and `docs/design.md`) say so. Re-measure every harness on one machine before relabelling a
+  table; never mix machines.
+- Ruby's Fiddle path reads an xlsx sheet 54% and an ods one 30% slower than the Magnus
+  extension (`ruby/README.md`, 2026-11-08). A three-column sheet read level on 2026-11-07, before
+  the 2026-11-08 changes to Ruby's read path; the cause isn't known.
+- One long record from a stream whose reads come back short costs the square of its length
+  (256 MiB at 64 KiB a read, about 24 s in Rust, the same shape in Java and Swift): the core
+  scans an unfinished record again from its start each fill. Parked, with numbers, in
+  `docs/delimited.md`.
+- Owner decisions held for later: a sheet row of only uncached formulas is filtered by
+  `skip_empty_rows` (kept for this release, `skip_empty_rows=false` documented as the lossless
+  route); a workbook's date columns suggest text (native date inference parked).
 - Java does not reach Android: the JNI base still works in `java.lang.foreign`'s memory API
   (`Arena`, `MemorySegment`), which ART lacks, so Android would need a heap or `ByteBuffer`
   data plane. Python, Ruby, PHP and R don't reach Android either.

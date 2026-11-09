@@ -5,8 +5,9 @@ module HyperTabular
     # which never see a pointer.
     #
     # A workbook call works in buffers the caller hands it (a Buffers block of seven pointer
-    # and size pairs), and when one is too small it says which and how large, having undone
-    # nothing: the buffer is grown with what it held kept, and the same call made again.
+    # and size pairs, or a BuffersWith with tokens and row widths for a fill), and when one is
+    # too small it says which and how large, having undone nothing: the buffer is grown with
+    # what it held kept, and the same call made again.
     module Book
       class << self
         # For the specs: every buffer a workbook call works in starts with room for one
@@ -78,6 +79,18 @@ module HyperTabular
           @buffers
         end
 
+        # As #buffers, for a fill: with the sheet's +tokens+ (a Pointer, or nil) and their length, and
+        # the address the row widths go, or 0. Packed again for every call, since any of them may
+        # have been grown since the last.
+        def buffers_with(tables, tokens, tokens_len, widths)
+          @buffers_with ||= Runtime.buffer(Columns::BUFFERS_WITH_BYTES)
+          @buffers_with[0, Columns::BUFFERS_WITH_BYTES] =
+            Columns.word(Columns::BUFFERS_WITH_BYTES) +
+            [@window.to_i, @window_cap, @arena.to_i, @arena_cap, @cells.to_i, @cells_cap, @row.to_i, @row_cap,
+             *tables.to_a, tokens.to_i, tokens_len, widths].pack("J*")
+          @buffers_with
+        end
+
         # Makes the window at least +needed+ bytes, what it held kept.
         def grow_window(needed)
           @window, @window_cap = grown(@window, @window_cap, needed, 1)
@@ -108,7 +121,8 @@ module HyperTabular
 
         # Makes +call+ (a block taking the Buffers block and the out block) until it stops
         # asking for room, growing the buffer it names each time. Returns the code it ended
-        # on and the Filled fields: rows, consumed, arena_used, needed, then the failure.
+        # on and the Filled fields: rows, consumed, arena_used, needed, then the failure. A fill's
+        # block makes its own BuffersWith, from the buffers as they are.
         def drive(out, tables = nil)
           loop do
             code = yield buffers(tables)
@@ -234,28 +248,37 @@ module HyperTabular
         # and one for the row's number. Nil until #bind.
         attr_reader :columns, :per_row
 
-        # Positions a copy of the workbook's state on +sheet+ (an entry of Opened#sheets).
-        def initialize(book, sheet, has_header, skip_empty_rows, batch_rows)
+        # Positions a copy of the workbook's state on +sheet+ (an entry of Opened#sheets), as
+        # +options+, the bytes of a RawSheetOptions, say. +tokens+ is the sheet's tokens as the core
+        # takes them, or nil.
+        def initialize(book, sheet, options, batch_rows, tokens = nil)
           @book = book
           @state = book.copy_of_state
           @batch_rows = batch_rows
           @scratch = Book.stingy ? Scratch.new(1, 1, 1, 0) : Scratch.new(0, 4096, 64, 0)
           @out = Runtime.buffer(FILLED_BYTES)
+          unless tokens.nil?
+            @tokens_len = tokens.bytesize
+            @tokens = Runtime.buffer(@tokens_len)
+            @tokens[0, @tokens_len] = tokens
+          end
           _name, _hidden, part, index = sheet
-          code = Runtime.function(:hypertabular_workbook_sheet).call(
-            @state, book.container, book.length, Runtime.pin(part), part.bytesize, index,
-            has_header ? 1 : 0, skip_empty_rows ? 1 : 0, @out
+          raw = Runtime.buffer(options.bytesize)
+          raw[0, options.bytesize] = options
+          code = Runtime.function(:hypertabular_workbook_sheet_with).call(
+            @state, book.container, book.length, Runtime.pin(part), part.bytesize, index, raw, @out
           )
           Book.settle(code, @out[0, FILLED_BYTES].unpack(FILLED))
         end
 
-        # Takes the plan: +specs+ is one packed ColumnSpec per plan column, +sizes+ the bytes
-        # one value of each takes, and +width+ the slots a row needs to reach every source
-        # column the plan reads. Once, before the first #fill. The core keeps a header row's
+        # Takes the plan: +specs+ is one Column.specs entry per plan column, +sizes+ the bytes
+        # one value of each takes, +width+ the slots a row needs to reach every source
+        # column the plan reads, +notes+ whether each column keeps its notes and +widths+ whether
+        # each row's width is kept. Once, before the first #fill. The core keeps a header row's
         # cells in the row's slots — a row the sheet repeats (an ODS number-rows-repeated) is
         # delivered again from them — so the slots are only ever grown here, never replaced.
-        def bind(specs, sizes, width)
-          @columns = Columns.new(specs, sizes, @batch_rows)
+        def bind(specs, sizes, width, notes = true, widths = false)
+          @columns = Columns.new(specs, sizes, @batch_rows, notes, widths)
           @per_row = specs.size + 1
           # A stingy scratch is left to grow into the cell table the hard way, mid-read.
           @scratch.reserve_cells(@batch_rows * @per_row) unless Book.stingy
@@ -267,8 +290,9 @@ module HyperTabular
         # record, byte, expected, found] — that came with them, if one did: the caller raises
         # it after them. The table and the arena are copies.
         def fill
-          call = Runtime.function(:hypertabular_workbook_fill)
-          code, filled = @scratch.drive(@out, @book.tables) do |buffers|
+          call = Runtime.function(:hypertabular_workbook_fill_with)
+          code, filled = @scratch.drive(@out, @book.tables) do
+            buffers = @scratch.buffers_with(@book.tables, @tokens, @tokens_len.to_i, @columns.widths_address)
             call.call(@state, @book.container, @book.length, @columns.specs, @columns.table,
                       @columns.count, @columns.batch_rows, buffers, @out)
           end

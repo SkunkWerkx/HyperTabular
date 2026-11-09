@@ -39,10 +39,14 @@ function explain(error: TabularError): string {
       return `${error.failure?.kind} at line ${error.failure?.line}`
     case 'plan':
       return `plan column ${error.column}`
+    case 'ambiguousColumn':
+      return `columns ${error.first} and ${error.second}`
     case 'io':
     case 'separator':
     case 'noSheet':
     case 'noColumn':
+    case 'range':
+    case 'busy':
     case 'unbound':
     case 'alreadyBound':
     case 'argument':

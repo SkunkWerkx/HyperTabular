@@ -3,8 +3,9 @@
 //! tile reader and the cell storage rather than in a broken container. The first byte
 //! chooses where the rest goes — the whole payload of the first tile's object, or the
 //! storage buffer and (after the first NUL) the cell offsets of its first row — and whether
-//! the parts are deflated, the offsets wide, the sheet options and the batch size. Read
-//! through compare.rs, as the container target is.
+//! the parts are deflated, the offsets wide, the sheet options and the batch size; the next
+//! [`compare::EXTRAS`] choose a range, a skip, a header row and `fill_with`. Read through
+//! compare.rs, as the container target is.
 
 #![no_main]
 
@@ -22,9 +23,13 @@ fuzz_target!(|data: &[u8]| {
     let [sel, rest @ ..] = data else {
         return;
     };
+    let Some((extras, rest)) = rest.split_first_chunk::<{ compare::EXTRAS }>() else {
+        return;
+    };
     let options = SheetOptions::default()
         .with_header(sel & 0x08 != 0)
         .with_empty_rows_skipped(sel & 0x10 != 0);
+    let (options, through_with) = compare::extras(options, extras);
     let max_rows = 1 + usize::from(sel >> 5) * 3;
     let mut shape = NumbersShape {
         deflate: sel & 0x02 != 0,
@@ -61,5 +66,11 @@ fuzz_target!(|data: &[u8]| {
             ],
         }],
     }];
-    compare::compare(&packages::numbers(&sheets, &shape), options, 3, max_rows);
+    compare::compare(
+        &packages::numbers(&sheets, &shape),
+        options,
+        through_with,
+        3,
+        max_rows,
+    );
 });

@@ -25,56 +25,63 @@
 \alias{print.hypertabular_column}
 \title{Plan columns}
 \usage{
-col_bool(source)
+col_bool(source, na = NULL)
 
-col_i8(source, format = NULL)
+col_i8(source, format = NULL, na = NULL)
 
-col_i16(source, format = NULL)
+col_i16(source, format = NULL, na = NULL)
 
-col_i32(source, format = NULL)
+col_i32(source, format = NULL, na = NULL)
 
-col_i64(source, format = NULL)
+col_i64(source, format = NULL, na = NULL)
 
-col_u8(source, format = NULL)
+col_u8(source, format = NULL, na = NULL)
 
-col_u16(source, format = NULL)
+col_u16(source, format = NULL, na = NULL)
 
-col_u32(source, format = NULL)
+col_u32(source, format = NULL, na = NULL)
 
-col_u64(source, format = NULL)
+col_u64(source, format = NULL, na = NULL)
 
-col_f32(source, format = NULL)
+col_f32(source, format = NULL, na = NULL)
 
-col_f64(source, format = NULL)
+col_f64(source, format = NULL, na = NULL)
 
-col_decimal(source, format = NULL)
+col_decimal(source, format = NULL, na = NULL)
 
-col_uuid(source)
+col_uuid(source, na = NULL)
 
-col_timestamp(source)
+col_timestamp(source, options = NULL, na = NULL)
 
-col_unix(source, precision)
+col_unix(source, precision, na = NULL)
 
-col_excel_serial(source, epoch)
+col_excel_serial(source, epoch, na = NULL)
 
-col_date(source, order = NULL)
+col_date(source, order = NULL, options = NULL, months = NULL, na = NULL)
 
-col_datetime(source, order)
+col_datetime(source, order, options = NULL, months = NULL, na = NULL)
 
-col_time(source)
+col_time(source, na = NULL)
 
-col_duration(source)
+col_duration(source, na = NULL)
 
-col_text(source)
+col_text(source, na = NULL, raw = FALSE)
 
 \method{print}{hypertabular_column}(x, ...)
 }
 \arguments{
-\item{source}{The source column: its name in the header (matched exactly, the first of
-equal names) or its position, counted from 1. A position past the end of a row reads as
-an empty cell.}
+\item{source}{The source column: its name in the header (matched exactly; a name the
+header holds twice is an error naming both positions) or its position, counted from 1. A
+position past the end of a row reads as an empty cell.}
+
+\item{na}{The cells this column reads as missing (an exact, unquoted match of the cell's
+bytes, an \code{empty} verdict at origin \code{"token"}), in place of the read's own \code{na}; \code{NULL}
+inherits the read's, and \code{character(0)} declares none.}
 
 \item{format}{A \code{\link[hypercast:num_format]{hypercast::num_format()}}, or \code{NULL} for the invariant notation.}
+
+\item{options}{A \code{\link[hypercast:date_options]{hypercast::date_options()}}, or \code{NULL} for none: the forms the door reads
+beyond its own, and a two-digit year's pivot.}
 
 \item{precision}{The Unix unit: \code{"seconds"}, \code{"milliseconds"}, \code{"microseconds"} or
 \code{"nanoseconds"}.}
@@ -84,6 +91,13 @@ an empty cell.}
 
 \item{order}{The field order: \code{"year_month_day"}, \code{"month_day_year"} or
 \code{"day_month_year"}. \code{NULL}, for \code{col_date()}, reads strict ISO only.}
+
+\item{months}{A \code{\link[hypercast:month_names]{hypercast::month_names()}}, or \code{NULL}: a vocabulary of month names the door
+reads beside the English ones.}
+
+\item{raw}{For \code{col_text()}, \code{TRUE} gives each value as a raw vector of the exact bytes
+(\code{NULL} where the cell faulted), which holds what an R string can't: a NUL, or more than
+\code{INT_MAX} bytes.}
 
 \item{x}{A \code{hypertabular_column}.}
 
@@ -103,23 +117,40 @@ Each factory reads its source through the HyperCast door of the same name, as
 \verb{hypercast::cast_*()} reads text, and gives back what that door gives back (see
 \link[hypercast:hypercast_verdict]{hypercast::hypercast_verdict}): \code{col_bool()} through \code{col_u64()}, \code{col_f32()},
 \code{col_f64()} and \code{col_decimal()} the numbers, under a declared \code{\link[hypercast:num_format]{hypercast::num_format()}}
-(\code{NULL}, the default, is the invariant notation); \code{col_uuid()}; \code{col_timestamp()},
-\code{col_unix()} and \code{col_excel_serial()} the instants; \code{col_date()}, \code{col_datetime()},
-\code{col_time()} and \code{col_duration()} the civil values. \code{col_text()} asks for the cell's text
-itself, cast by nothing: its value is the text, and only an empty cell is a fault.
+(\code{NULL}, the default, is the invariant notation, Western groups of three); \code{col_uuid()};
+\code{col_timestamp()}, \code{col_unix()} and \code{col_excel_serial()} the instants; \code{col_date()},
+\code{col_datetime()}, \code{col_time()} and \code{col_duration()} the civil values. \code{col_text()} asks for
+the cell's text itself, cast by nothing: its value is the text, and only an empty cell is a
+fault.
+
+A format is declared, never guessed: \verb{1,23,456} is refused under the default, and read
+under \code{hypercast::num_format_with_grouping(hypercast::num_format(), "indian")} declared
+for that column, while a Western column beside it reads \verb{1,234,567}.
 
 A workbook's typed cells (numbers, dates, booleans, errors) go through the door as the
 cast matrix in the project's \code{docs/design.md} says: a stored number through the door's
 typed twin, never through text, and a typed cell through \code{col_text()} as its canonical
 text.
+
+Everything a column declares is judged by the core before anything is read: a plan the
+core can't honour is an R error naming the column. A format or date options packed by a
+hypercast whose layouts this hypertabular's core doesn't read is such an error, naming both
+packages' versions.
 }
 \examples{
 plan <- list(
   id = col_i32("id"),
   amount = col_decimal("amount", hypercast::num_format(",", ".")),
   when = col_date(3, order = "day_month_year"),
-  note = col_text("note")
+  note = col_text("note", na = c("", "-"))
 )
 plan$id
+
+# A column of Indian-grouped numbers, declared as such.
+col_i64("lakhs", hypercast::num_format_with_grouping(hypercast::num_format(), "indian"))
+}
+\seealso{
+Other plans:
+\code{\link[=suggest_plan]{suggest_plan()}}
 }
 \concept{plans}

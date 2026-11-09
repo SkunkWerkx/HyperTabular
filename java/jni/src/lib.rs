@@ -117,6 +117,82 @@ unsafe extern "C" {
         buffers: *const c_void,
         out: *mut c_void,
     ) -> i32;
+    fn hypertabular_delimited_init_with(state: *mut c_void, options: *const c_void) -> i32;
+    fn hypertabular_delimited_fill_with(
+        state: *mut c_void,
+        input: *const u8,
+        input_len: usize,
+        last: u32,
+        specs: *const c_void,
+        columns: *const c_void,
+        column_count: usize,
+        max_rows: usize,
+        buffers: *const c_void,
+        out: *mut c_void,
+    ) -> i32;
+    fn hypertabular_transcode(
+        encoding: u32,
+        input: *const u8,
+        input_len: usize,
+        last: u32,
+        out: *mut u8,
+        cap: usize,
+        progress: *mut c_void,
+    ) -> i32;
+    fn hypertabular_faults(
+        columns: *const c_void,
+        column_count: usize,
+        rows: usize,
+        row_widths: *const u32,
+        expected_width: u32,
+        long_rows: u32,
+        cursor: *mut u64,
+        out: *mut c_void,
+        cap: usize,
+        written: *mut usize,
+    ) -> i32;
+    fn hypertabular_suggest(
+        input: *const u8,
+        input_len: usize,
+        arena: *const u8,
+        arena_len: usize,
+        cells: *const c_void,
+        typed: *const u8,
+        rows: usize,
+        columns: usize,
+        formats: *const c_void,
+        out: *mut c_void,
+    ) -> i32;
+    fn hypertabular_workbook_sheet_with(
+        state: *mut c_void,
+        container: *const u8,
+        container_len: usize,
+        part: *const u8,
+        part_len: usize,
+        index: u32,
+        options: *const c_void,
+        out: *mut c_void,
+    ) -> i32;
+    fn hypertabular_workbook_fill_with(
+        state: *mut c_void,
+        container: *const u8,
+        container_len: usize,
+        specs: *const c_void,
+        columns: *const c_void,
+        column_count: usize,
+        max_rows: usize,
+        buffers: *const c_void,
+        out: *mut c_void,
+    ) -> i32;
+    fn hypertabular_range_parse(text: *const u8, len: usize, out: *mut c_void) -> i32;
+    fn hypertabular_batch_check(
+        specs: *const c_void,
+        column_count: usize,
+        batch_rows: u64,
+        buffer_bytes: u64,
+        flags: u32,
+        out: *mut c_void,
+    ) -> i32;
 }
 
 const CLASS: &[u8] = b"io/github/skunkwerkx/hypertabular/Native\0";
@@ -140,7 +216,7 @@ macro_rules! native {
 
 /// One native per C export, named after it, and `jniNatives`, the count the Java side holds
 /// its own declarations to. Every address and `usize` is a `J`, every `u32` an `I`.
-const NATIVES: [Native; 15] = [
+const NATIVES: [Native; 24] = [
     native!("hypertabularVersion", "()I", native_hypertabular_version),
     native!(
         "hypertabularDelimitedStateSize",
@@ -206,6 +282,51 @@ const NATIVES: [Native; 15] = [
         "hypertabularWorkbookFill",
         "(JJJJJJJJJ)I",
         native_hypertabular_workbook_fill
+    ),
+    native!(
+        "hypertabularDelimitedInitWith",
+        "(JJ)I",
+        native_hypertabular_delimited_init_with
+    ),
+    native!(
+        "hypertabularDelimitedFillWith",
+        "(JJJIJJJJJJ)I",
+        native_hypertabular_delimited_fill_with
+    ),
+    native!(
+        "hypertabularTranscode",
+        "(IJJIJJJ)I",
+        native_hypertabular_transcode
+    ),
+    native!(
+        "hypertabularFaults",
+        "(JJJJIIJJJJ)I",
+        native_hypertabular_faults
+    ),
+    native!(
+        "hypertabularSuggest",
+        "(JJJJJJJJJJ)I",
+        native_hypertabular_suggest
+    ),
+    native!(
+        "hypertabularWorkbookSheetWith",
+        "(JJJJJIJJ)I",
+        native_hypertabular_workbook_sheet_with
+    ),
+    native!(
+        "hypertabularWorkbookFillWith",
+        "(JJJJJJJJJ)I",
+        native_hypertabular_workbook_fill_with
+    ),
+    native!(
+        "hypertabularRangeParse",
+        "(JJJ)I",
+        native_hypertabular_range_parse
+    ),
+    native!(
+        "hypertabularBatchCheck",
+        "(JJJJIJ)I",
+        native_hypertabular_batch_check
     ),
     native!("jniNatives", "()I", native_jni_natives),
 ];
@@ -482,6 +603,239 @@ pub unsafe extern "system" fn native_hypertabular_workbook_fill(
             size(column_count),
             size(max_rows),
             ptr(buffers),
+            ptr_mut(out),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+pub unsafe extern "system" fn native_hypertabular_delimited_init_with(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    state: jlong,
+    options: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe { hypertabular_delimited_init_with(ptr_mut(state), ptr(options)) }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_delimited_fill_with(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    state: jlong,
+    input: jlong,
+    input_len: jlong,
+    last: jint,
+    specs: jlong,
+    columns: jlong,
+    column_count: jlong,
+    max_rows: jlong,
+    buffers: jlong,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_delimited_fill_with(
+            ptr_mut(state),
+            ptr(input),
+            size(input_len),
+            last as u32,
+            ptr(specs),
+            ptr(columns),
+            size(column_count),
+            size(max_rows),
+            ptr(buffers),
+            ptr_mut(out),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_transcode(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    encoding: jint,
+    input: jlong,
+    input_len: jlong,
+    last: jint,
+    out: jlong,
+    cap: jlong,
+    progress: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_transcode(
+            encoding as u32,
+            ptr(input),
+            size(input_len),
+            last as u32,
+            ptr_mut(out),
+            size(cap),
+            ptr_mut(progress),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_faults(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    columns: jlong,
+    column_count: jlong,
+    rows: jlong,
+    row_widths: jlong,
+    expected_width: jint,
+    long_rows: jint,
+    cursor: jlong,
+    out: jlong,
+    cap: jlong,
+    written: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_faults(
+            ptr(columns),
+            size(column_count),
+            size(rows),
+            ptr(row_widths),
+            expected_width as u32,
+            long_rows as u32,
+            ptr_mut(cursor),
+            ptr_mut(out),
+            size(cap),
+            ptr_mut(written),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_suggest(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    input: jlong,
+    input_len: jlong,
+    arena: jlong,
+    arena_len: jlong,
+    cells: jlong,
+    typed: jlong,
+    rows: jlong,
+    columns: jlong,
+    formats: jlong,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_suggest(
+            ptr(input),
+            size(input_len),
+            ptr(arena),
+            size(arena_len),
+            ptr(cells),
+            ptr(typed),
+            size(rows),
+            size(columns),
+            ptr(formats),
+            ptr_mut(out),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_workbook_sheet_with(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    state: jlong,
+    container: jlong,
+    container_len: jlong,
+    part: jlong,
+    part_len: jlong,
+    index: jint,
+    options: jlong,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_workbook_sheet_with(
+            ptr_mut(state),
+            ptr(container),
+            size(container_len),
+            ptr(part),
+            size(part_len),
+            index as u32,
+            ptr(options),
+            ptr_mut(out),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "system" fn native_hypertabular_workbook_fill_with(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    state: jlong,
+    container: jlong,
+    container_len: jlong,
+    specs: jlong,
+    columns: jlong,
+    column_count: jlong,
+    max_rows: jlong,
+    buffers: jlong,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_workbook_fill_with(
+            ptr_mut(state),
+            ptr(container),
+            size(container_len),
+            ptr(specs),
+            ptr(columns),
+            size(column_count),
+            size(max_rows),
+            ptr(buffers),
+            ptr_mut(out),
+        )
+    }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+pub unsafe extern "system" fn native_hypertabular_range_parse(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    text: jlong,
+    len: jlong,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe { hypertabular_range_parse(ptr(text), size(len), ptr_mut(out)) }
+}
+
+#[cfg_attr(feature = "no-panic", no_panic::no_panic)]
+pub unsafe extern "system" fn native_hypertabular_batch_check(
+    _env: *mut JNIEnv,
+    _class: jclass,
+    specs: jlong,
+    column_count: jlong,
+    batch_rows: jlong,
+    buffer_bytes: jlong,
+    flags: jint,
+    out: jlong,
+) -> jint {
+    // SAFETY: the export's contract, which the caller upholds.
+    unsafe {
+        hypertabular_batch_check(
+            ptr(specs),
+            size(column_count),
+            batch_rows as u64,
+            buffer_bytes as u64,
+            flags as u32,
             ptr_mut(out),
         )
     }

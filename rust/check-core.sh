@@ -50,9 +50,19 @@ cargo check --quiet --lib --no-default-features --target x86_64-unknown-linux-gn
 cargo check --quiet --lib --no-default-features --target aarch64-unknown-linux-gnu
 echo "ok"
 
-step "it depends on HyperCast and nothing else"
+step "it depends on HyperCast alone, and through it on nothing but simdutf8"
+# Directly, HyperCast and nothing else. Through it, at most simdutf8 (its SIMD UTF-8 check,
+# from HyperCast 1.1): a HyperCast without it passes too, so this holds on either side of a
+# companion pin that adds it. Any other crate, at any depth, fails.
+direct="$(cargo tree --no-default-features -e normal --depth 1 --prefix none | sed 's/ .*//' | sort -u | tr '\n' ' ')"
+[ "$direct" = "hypercast hypertabular " ] || fail "the core's direct dependencies are: $direct"
 deps="$(cargo tree --no-default-features -e normal --prefix none | sed 's/ .*//' | sort -u | tr '\n' ' ')"
-[ "$deps" = "hypercast hypertabular " ] || fail "the core's dependencies are: $deps"
+for dep in $deps; do
+  case "$dep" in
+    hypertabular|hypercast|simdutf8) ;;
+    *) fail "the core depends on $dep (all of them: $deps)" ;;
+  esac
+done
 echo "ok: $deps"
 
 step "the shared library exports what exports.rs declares, and imports no allocator"

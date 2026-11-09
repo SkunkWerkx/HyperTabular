@@ -63,6 +63,18 @@ version its manifests require, never from the pin (the runbook's "Release order"
    `release-packages` last 90 days, which covers both reviews; until then R users install
    either package from its GitHub Release.
 
+   Before any HyperCast submission to CRAN, check this package against the HyperCast tarball
+   about to be submitted, from this checkout:
+
+   ```sh
+   .github/scripts/r_revdep_check.sh hypercast_X.Y.Z.tar.gz hypertabular_A.B.C.tar.gz
+   ```
+
+   It installs that HyperCast into a temporary library and runs `R CMD check --as-cran
+   --no-manual` on HyperTabular's tarball against it, and fails on anything beyond the
+   incoming NOTE a new submission gets. A failure holds the HyperCast submission until both
+   packages agree.
+
 Every pull request, the weekly schedule and a `purpose=board` dispatch test against the HyperCast
 commit and green run `.github/hyper.json`'s `companions` block pins, never against HyperCast's
 registries. To move the pin (the runbook's "Moving a companion pin"):

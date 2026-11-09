@@ -95,6 +95,123 @@ A plan whose positions are known can still be given up front —
 `DelimitedReader.Open(path, Dialect.Csv, plan)`, `book.Sheet(0, SheetOptions.Default, plan)` —
 and is bound before the header is read.
 
+## A messier file
+
+Everything about a file is still declared, on the `Dialect` and on the `SheetOptions`, whose defaults
+read as before: lines to pass over, records to discard, what a record of the wrong width is, the
+encoding, and what stands for no value.
+
+```csharp
+using System.Linq;
+using System.Text;
+using HyperCast;
+using HyperTabular;
+
+// Windows-1252, with a title line above the table, NA for nothing and rows that stop short.
+var dialect = Dialect.Csv with
+{
+    Skip = 1,
+    ShortRows = ShortRows.Pad,
+    Encoding = TextEncoding.Windows1252,
+    Tokens = new Tokens("NA"),
+};
+
+byte[] input = [.. "Exported by hand\nname,amount\ncaf"u8, 0xE9, .. ",NA\ntea\nmilk,12x4\n"u8];
+using var reader = new DelimitedReader(input.AsMemory(), dialect, [
+    Column.Text(0),
+    Column.Double(1).WithTokens("NA", "-"), // in place of the dialect's
+]);
+var batch = reader.Read()!;
+foreach (var row in batch)
+{
+    Console.WriteLine($"{row.GetString(0)} {row.Verdict(1).Reason} {row.Origin(1)} {row.Fault(1)?.Detail}");
+}
+// What went wrong, and only that: a blank, a token and a padded cell aren't problems.
+foreach (var problem in batch.Faults())
+{
+    Console.WriteLine($"line {problem.Line} column {problem.SourceColumn} {problem.Reason} {problem.Detail}");
+}
+
+// A plan to look at, from a sample of the text. It reads nothing until it's handed to a read.
+var found = DelimitedReader.Suggest(
+    "id,total,day\n1,\"1,234.50\",2026-01-07\n2,12.00,2026-01-08\n"u8.ToArray(), Dialect.Csv);
+foreach (var column in found.Report)
+{
+    Console.WriteLine($"{column.Name} {column.Status} {column.Door} {column.Matched} of {column.Sampled}");
+}
+
+// A sheet takes the part of it that's the table; its plan's ordinals count from B here.
+var options = SheetOptions.Default with { Range = SheetRange.Parse("B2:D40") };
+Console.WriteLine($"{options.Range.FirstColumn} {options.Range.LastRow}");
+```
+
+A `TabularException` of `TabularFailure.Encoding` comes after every intact row before it, and its
+`Byte` alone counts the original bytes: a read's spans are all the decoded text's. A sheet's `Range`
+is parsed by the core, so `SheetRange.Parse("A5:F200")` means what it means in every binding, with
+`new SheetRange(firstRow, firstColumn, lastRow, lastColumn)` for what that can't say, such as every
+row from the fifth (`new SheetRange(5, 0, 0, 0)`). A plan's ordinals count from the range's first
+column, while `Batch.Line` and a problem's `SourceColumn` stay the sheet's own. `Skip` and `HeaderRow`,
+on a `Dialect` and on `SheetOptions`, count from zero; `SkipEmptyRows` and `SkipBlankLines` work on what
+they leave.
+
+`Notes = false`, on a `Dialect` or `SheetOptions`, drops the detail on a `Fault` and `Origin`, which
+then say `FaultDetail.None` and `Origin.Cell`: the read costs a little less, and `Faults` can't list a
+formula with no cached value. `Column.WithDateOptions` hands a date door HyperCast's `DateOptions`, and
+on a sheet it and `WithTokens` reach only a text cell. A cell's detail is on `batch.Fault(column, row)`,
+`row.Fault(column)`, `Get<T>`'s `Fault` and `Faults()`; `CellVerdict.ToFault()` has only what the verdict
+holds. `Faults()` belongs to its batch: going on with it after the next read throws
+`InvalidOperationException`.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied. Read
+the report first: only a resolved column reads through its door in the plan, the rest as text. With no
+format declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read
+only with `,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the
+plan is in whichever is left. `1,234` and `1.234` read both ways, so they come back ambiguous and read
+as text until a format is declared or another cell settles them, which takes in a column of prices at
+three decimals; `SuggestOptions.DateOrder` does the same for `01/02/2026`. `2,5` beside `2.5` is
+unresolved, and `1,23,456`, Indian grouping, is text until the column declares Indian grouping, because
+nothing says its culture. A sheet's number cell has no notation, so a column of them is a number under
+any format, where text holding the same digits asks. A column of `0` and `1` is `bool`, `007` and an
+integer past `long` are text, and a typed date in a sheet is text, for a plan to change by hand. With
+nothing to choose between, a resolved number is planned in `,` groups of three, and
+`SuggestedColumn.Format` names what the plan uses: a later `1,23,456` is refused.
+`DelimitedReader.Suggest` takes a path or memory. A headerless file is opened twice, so no suggestion
+is offered of a stream. `Sheet.Suggest` answers from the sheet's first row whatever has been read of it,
+and leaves it unbound and where it was. A failure past a whole sample, an `IOException` or a
+`TabularException`, only sets `Truncated`; one among the sampled rows is thrown, and so is a cancellation
+or a `ThreadInterruptedException` wherever it comes.
+
+**To keep every row of a sheet, set `SkipEmptyRows` to `false`.** By default a row whose only cells
+are formulas with no cached value is filtered out as empty, with nothing to say so; off, those rows are
+delivered, their cells at `Origin.Uncached`.
+
+A column given no format reads `NumFormat.Invariant`, which is Western: `1,234,567` is 1234567 and
+`1,23,456` is `Malformed`, and a format that names no policy is the same. If a column of Indian numbers
+comes back refused, declare it, one column at a time, so an Indian column reads beside a Western one in
+the same read:
+
+```csharp
+using HyperCast;
+using HyperTabular;
+
+var indian = NumFormat.Invariant with { Grouping = NumGrouping.Indian };
+Column[] plan =
+[
+    Column.Int32(0, indian),                // 1,23,456 is 123456, and 1,234,567 is Malformed
+    Column.Int32(1, NumFormat.Invariant),   // 1,234,567 is 1234567, and 1,23,456 is Malformed
+];
+```
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `NumFormat.Detect` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `Column.Double` reads `1,2345` as
+1.2345, `12,34` as 12.34 and `0,125` as 0.125. A format holding the retired grouping bit `256` (the words
+`351` and `863`), which only a reflective decoder can make, is an `ArgumentException` when the plan is
+bound, before any cell, naming the plan column, with HyperCast's refusal as its inner exception, and in
+a suggest's options before it opens anything. HyperCast's
+[grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and
+the locales neither policy matches.
+
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
@@ -106,8 +223,9 @@ rows, not once per cell.
 - **Header first.** A `DelimitedReader` opened without a plan — from a `Stream`,
   `ReadOnlyMemory<byte>` or a path — and a sheet started without one
   (`book.Sheet(index or name, options)`) read the header straight away. `Header` is the list
-  of names, with `Ordinal(name)` (exact, case-sensitive, untrimmed, first match;
-  `KeyNotFoundException` naming the column when it is missing), `TryOrdinal`, and
+  of names, with `Ordinal(name)` (exact, case-sensitive, untrimmed; `KeyNotFoundException`
+  naming the column when it is missing, and its subclass `DuplicateColumnException`, naming both
+  positions, when two columns share the name), `TryOrdinal`, which takes the first of those, and
   `Ordinal(ReadOnlySpan<byte>)` to match the raw UTF-8. `Bind(plan[, batchRows])` then
   declares the plan, once (`InvalidOperationException` on a second call, and on `Read()`
   before it — not final: bind and read). `IsBound` says which; `ColumnCount` is the header's
@@ -121,7 +239,9 @@ rows, not once per cell.
   table is at most 8 MiB. Past it is the plan's `ArgumentException` too.
 - **One batch type.** `Read()` returns a `Batch` — `Rows`, `Columns`, `Line(row)`,
   `Verdicts(column)`, `Values<T>(column)` for a whole column, `Get<T>(column, row)` for any
-  one cell, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was cast from —
+  one cell, `Fault` and `Origin` for what a cell's verdict says beside itself, `Faults()` for what
+  went wrong in the batch, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was
+  cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
   the next `Read()`, and the same type for delimited text and for a sheet.
 - **Whole columns as the core wrote them.** `Values<T>` lends the primitive doors as their
@@ -132,29 +252,44 @@ rows, not once per cell.
   writes RFC 9562 byte order, which is not `Guid`'s layout, so it is read with `Get<Guid>`.
 - **Rows, when that is the shape.** `foreach (var row in batch)` visits each `Row` — a
   `ref struct` view of (batch, index) with `Index`, `Line`, `Get<T>(column)`,
-  `Verdict(column)`, `TryGetText`, `GetString`, `GetChars`, `TryGetChars` and `Raw` —
-  allocating nothing; `batch.Row(i)` picks one. `reader.Rows()` and `sheet.Rows()` go on
+  `Verdict(column)`, `Fault(column)`, `Origin(column)`, `TryGetText`, `GetString`, `GetChars`,
+  `TryGetChars` and `Raw` —
+  allocating nothing; `batch.Row(i)` picks one. Going on with a loop after the next `Read()` throws
+  `InvalidOperationException`, rather than answer for the next batch; the check costs nothing
+  measurable (BenchmarkDotNet, .NET 11 RC 3, Apple M6, 2026-11-08, two interleaved runs with and
+  without it: 930 against 941 ns to walk 4096 rows, and 5.99 against 5.96 ms to read and walk a
+  200 000-row file, both within the run's error). `reader.Rows()` and `sheet.Rows()` go on
   across batches, reading as each runs out; a row is valid for its own iteration only.
-- **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header and whether empty rows are skipped; the plan states
-  each column's door and, for numbers, its `NumFormat`.
-- **HyperCast is the judge.** `Verdict<T>`, `Fault`, `NumFormat`, `UnixPrecision`,
-  `DateOrder` and `ExcelEpoch` are HyperCast's own types, from its package. A text cell
+- **The core decides how much a batch may ask for.** A `batchRows` or `bufferBytes` of 0, and a batch
+  past 4 GiB (214 million rows of one `Int32` column, 1.8 million of 100 text columns), are an
+  `ArgumentOutOfRangeException` from the core, when a reader or a sheet opens or a plan is bound, before
+  anything is allocated. A `bufferBytes` past 1 GiB starts there. One array past what .NET holds in one
+  is refused the same way, naming that. `Suggest` is never refused for the size of its own batches: the core
+  says what fits and the sampler reads as many as it takes. A row that alone is past the limit is an
+  `ArgumentException` naming its width.
+- **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and the
+  encoding; `SheetOptions` states a sheet's header, its range and whether empty rows are skipped;
+  the plan states each column's door and, for numbers, its `NumFormat`. `Suggest` reads a sample
+  to propose a plan, only when asked, and applies nothing.
+- **HyperCast is the judge.** `Verdict<T>`, `Fault`, `FaultDetail`, `NumFormat`, `DateOptions`,
+  `UnixPrecision`, `DateOrder` and `ExcelEpoch` are HyperCast's own types, from its package. A text cell
   means exactly what `Cast` would say of the same text; a typed workbook cell is converted
   by the door directly (a stored `2.5` through the decimal door is `2.5`).
 - **A bad value is a verdict; a broken file is an exception.** A cell that does not cast
-  is a `Fault` in its column and the read goes on. A record of the wrong width, input that
+  is a `Fault` in its column and the read goes on, and `Batch.Faults` lists a batch's. A record of the wrong width, input that
   ends inside a quoted cell, a workbook whose container or parts cannot be read, is a
   `TabularException`, raised after every intact row before it.
 - **Text is zero-copy.** `TryGetText` hands back a span into the reader's own buffer — the
   input, or a workbook's shared strings; only a cell with `""` inside, or a typed workbook
-  cell said as text, is written to an arena.
+  cell said as text, is written to an arena. Text in a declared encoding is decoded into a buffer
+  of the reader's, so its spans are into that, even from memory.
 - **UTF-16 without strings.** `GetChars(column, row)` decodes a text cell into a
   `ReadOnlySpan<char>` in an arena the batch keeps — made on first use, only ever appended
   to while the batch is current, started over at the next `Read()` — for the BCL's
   `ReadOnlySpan<char>` parsers (`Enum.Parse<T>`, `ISpanParsable<T>`); an empty cell is an
   empty span. `TryGetChars(column, row, destination, out written)` decodes into the
-  caller's buffer instead. Invalid UTF-8 is replaced exactly as `GetString` replaces it.
+  caller's buffer instead. A cell whose bytes aren't UTF-8 is `Malformed`, with no text and no chars,
+  and `Raw` still has its bytes.
 - **Workbooks from streams.** `new Workbook(stream, leaveOpen)` / `Workbook.Open(stream)`
   read an embedded resource or a response to its end into pinned memory the workbook owns —
   exactly the remaining length of a seekable stream, more than `int.MaxValue` refused as
@@ -170,6 +305,16 @@ rows, not once per cell.
   `IAsyncDisposable`, disposing its stream asynchronously unless it was left open. This is
   what a browser's streams (an `HttpClient` response, a picked file), which cannot be read
   synchronously, need.
+- **A stream's code runs in the middle of a read.** A call from it back into its reader —
+  `Read`, `ReadAsync`, `Bind`, a loop over `Rows()` — throws `InvalidOperationException` ("The
+  reader is in the middle of a read; …"), and the read it came from goes on whole. A second read
+  or a bind while a `ReadAsync` is still waiting on its stream is refused the same way. `Dispose`
+  is never refused: from the stream, or while a `ReadAsync` is still waiting on it, it disposes the
+  reader at once, and that read ends with `ObjectDisposedException` ("The reader was disposed in
+  the middle of a read.") when the stream returns. It hands out no batch, and every later call
+  throws `ObjectDisposedException`. A `Read` inside `foreach (var row in reader.Rows())`
+  makes the loop's next step throw, as a batch's own loop does. What the stream throws reaches the
+  caller and isn't final: the next read goes on from where the reader was.
 - **.NET 10 and 11.** The package builds `net10.0` and `net11.0` from one source, and package
   validation holds their public APIs identical. On .NET 10 it serves Windows, Linux and
   macOS, framework-dependent or Native AOT, and Blazor WebAssembly. iOS, Mac Catalyst and
@@ -232,15 +377,15 @@ wires it into a Blazor WebAssembly project with no configuration: a `NativeFileR
 hands the archive to the linker beside HyperCast's (the two share no symbols), the SDK's
 generated pinvoke table calls each export by symbol so `"*"` resolves every one (with the
 archive missing, `wasm-ld` reports an undefined symbol per export). No
-`EmccExportedFunction` list is needed: the smoke test reaches all fourteen exports through
+`EmccExportedFunction` list is needed: the smoke test calls every export a read takes through
 that table alone, and fails at the link with the archive unlinked. The archive reaches the
 linker by that path and nowhere else: the same targets file takes it back out of restore's
 copy-local list, so a consumer's output carries only the linked `dotnet.native.wasm`.
 
 That link happens whether or not the app ends up reading anything. The targets file is
 evaluated before the trimmer runs and cannot see what it removes, so a client bundle whose
-trimmer drops `HyperTabular` entirely still links the archive and exports all 14 entry
-points into `dotnet.native.wasm`, as HyperCast's package does for its own.
+trimmer drops `HyperTabular` entirely still links the archive and all its entry points into
+`dotnet.native.wasm`, as HyperCast's package does for its own.
 
 **WebAssembly on .NET 10 and later, as linked.** The static library is built with
 `-Zbuild-std` (on stable Rust, with `RUSTC_BOOTSTRAP=1` for that one build), for plain wasm

@@ -78,6 +78,7 @@ def test_the_stub_and_the_loaded_backend_name_the_same_surface():
         "Sheet",
         "SheetInfo",
         "Batch",
+        "Range",
         "ColumnData",
         "Row",
         "Rows",

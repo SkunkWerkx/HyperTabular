@@ -4,11 +4,14 @@ package hypertabular
 // same file the Rust and C# bindings replay — through this binding: from memory, from an
 // io.Reader read through buffers too small for a record, from a source that hands over one
 // byte at a time, and from a file, in batches of one row, of two and of many — each of the
-// three also opened header first, its plan bound after. How the input is cut up, and when
-// the plan is given, is the binding's business and must not change the answer.
+// three also opened header first, its plan bound after, and with the notes off. How the input
+// is cut up, and when the plan is given, is the binding's business and must not change the
+// answer. A key this file doesn't know fails the decode, so that one added to the corpus can't be
+// passed over.
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,33 +34,150 @@ import (
 )
 
 type corpusCase struct {
-	Name    string `json:"name"`
-	Input   string `json:"input"`
-	Dialect struct {
-		Separator      string `json:"separator"`
-		Quoting        bool   `json:"quoting"`
-		HasHeader      bool   `json:"has_header"`
-		SkipBlankLines bool   `json:"skip_blank_lines"`
+	Name     string `json:"name"`
+	Input    string `json:"input"`
+	InputHex string `json:"input_hex"`
+	Dialect  struct {
+		Separator      string   `json:"separator"`
+		Quoting        bool     `json:"quoting"`
+		HasHeader      bool     `json:"has_header"`
+		SkipBlankLines bool     `json:"skip_blank_lines"`
+		Skip           uint32   `json:"skip"`
+		HeaderRow      uint32   `json:"header_row"`
+		ShortRows      string   `json:"short_rows"`
+		LongRows       string   `json:"long_rows"`
+		Encoding       string   `json:"encoding"`
+		Tokens         []string `json:"tokens"`
 	} `json:"dialect"`
 	Plan []corpusColumn `json:"plan"`
 	// null when the dialect declares no header, [] for an input with no record.
-	Header  *[]string      `json:"header"`
-	Rows    [][]corpusCell `json:"rows"`
-	Failure *corpusFailure `json:"failure"`
+	Header   *[]string       `json:"header"`
+	Rows     [][]corpusCell  `json:"rows"`
+	Problems []corpusProblem `json:"problems"`
+	Suggest  *corpusSuggest  `json:"suggest"`
+	Failure  *corpusFailure  `json:"failure"`
+}
+
+// bytes is the case's input, the original bytes when they aren't UTF-8.
+func (c *corpusCase) bytes(t *testing.T) []byte {
+	t.Helper()
+	if c.InputHex != "" {
+		return unhex(t, c.InputHex)
+	}
+	return []byte(c.Input)
+}
+
+func unhex(t *testing.T, text string) []byte {
+	t.Helper()
+	data, err := hex.DecodeString(text)
+	if err != nil {
+		t.Fatalf("%q: %v", text, err)
+	}
+	return data
+}
+
+// dialect is the case's dialect as this binding declares it.
+func (c *corpusCase) dialect(t *testing.T) Dialect {
+	t.Helper()
+	dialect := Dialect{
+		Separator:      c.Dialect.Separator[0],
+		Quoting:        c.Dialect.Quoting,
+		HasHeader:      c.Dialect.HasHeader,
+		SkipBlankLines: c.Dialect.SkipBlankLines,
+		Skip:           c.Dialect.Skip,
+		HeaderRow:      c.Dialect.HeaderRow,
+		Tokens:         NewTokens(c.Dialect.Tokens...),
+	}
+	switch c.Dialect.ShortRows {
+	case "", "reject":
+	case "pad":
+		dialect.ShortRows = ShortRowsPad
+	default:
+		t.Fatalf("%s: short_rows %q", c.Name, c.Dialect.ShortRows)
+	}
+	switch c.Dialect.LongRows {
+	case "", "reject":
+	case "report":
+		dialect.LongRows = LongRowsReport
+	case "truncate":
+		dialect.LongRows = LongRowsTruncate
+	default:
+		t.Fatalf("%s: long_rows %q", c.Name, c.Dialect.LongRows)
+	}
+	switch c.Dialect.Encoding {
+	case "":
+	case "windows-1252":
+		dialect.Encoding = Windows1252
+	case "latin-1":
+		dialect.Encoding = Latin1
+	case "utf-16le":
+		dialect.Encoding = UTF16LE
+	default:
+		t.Fatalf("%s: encoding %q", c.Name, c.Dialect.Encoding)
+	}
+	return dialect
+}
+
+// corpusProblem is an entry of a batch's faults list, in the corpus's shape.
+type corpusProblem struct {
+	Row          int     `json:"row"`
+	Line         int     `json:"line"`
+	PlanColumn   *int    `json:"plan_column"`
+	SourceColumn *int    `json:"source_column"`
+	Reason       *string `json:"reason"`
+	Fault        []int   `json:"fault"`
+	Detail       *string `json:"detail"`
+	Origin       *string `json:"origin"`
+	Expected     *int    `json:"expected"`
+	Found        *int    `json:"found"`
+}
+
+// corpusSuggest is what hypertabular_suggest says of a case's input.
+type corpusSuggest struct {
+	Columns    []corpusSuggested `json:"columns"`
+	Truncated  bool              `json:"truncated"`
+	SampleRows *int              `json:"sample_rows"`
+	Format     *corpusFormat     `json:"format"`
+}
+
+type corpusSuggested struct {
+	Door    string `json:"door"`
+	Param   uint32 `json:"param"`
+	Status  string `json:"status"`
+	Matched int    `json:"matched"`
+	Sampled int    `json:"sampled"`
+}
+
+type corpusFormat struct {
+	DecimalSep string `json:"decimal_sep"`
+	GroupSep   string `json:"group_sep"`
+	Flags      uint32 `json:"flags"`
+	Currency   string `json:"currency"` // absent ⇒ none declared
+}
+
+func (f *corpusFormat) format() hypercast.NumFormat {
+	return hypercast.NumFormat{
+		DecimalSep: f.DecimalSep,
+		GroupSep:   f.GroupSep,
+		Styles:     hypercast.NumStyles(f.Flags),
+		Currency:   f.Currency,
+	}
 }
 
 type corpusColumn struct {
-	Door      string `json:"door"`
-	Ordinal   int    `json:"ordinal"`
-	Precision uint32 `json:"precision"`
-	Order     uint32 `json:"order"`
-	Epoch     uint32 `json:"epoch"`
-	Format    *struct {
-		DecimalSep string `json:"decimal_sep"`
-		GroupSep   string `json:"group_sep"`
-		Flags      uint32 `json:"flags"`
-		Currency   string `json:"currency"` // absent ⇒ none declared
-	} `json:"format"`
+	Door      string        `json:"door"`
+	Ordinal   int           `json:"ordinal"`
+	Precision uint32        `json:"precision"`
+	Order     uint32        `json:"order"`
+	Epoch     uint32        `json:"epoch"`
+	Format    *corpusFormat `json:"format"`
+	// Absent inherits the dialect's or the sheet's, [] declares none.
+	Tokens  *[]string `json:"tokens"`
+	Options *struct {
+		Flags  []string `json:"flags"`
+		Pivot  uint32   `json:"pivot"`
+		Months [][2]any `json:"months"`
+	} `json:"options"`
 }
 
 // A cell is a verdict in HyperCast's corpus shape, with `text` for the text door, and — for
@@ -68,6 +188,9 @@ type corpusCell struct {
 	Text       *string         `json:"text"`
 	Fault      []int           `json:"fault"`
 	Raw        *string         `json:"raw"`
+	RawHex     *string         `json:"raw_hex"`
+	Detail     *string         `json:"detail"`
+	Origin     *string         `json:"origin"`
 	Seconds    int64           `json:"seconds"`
 	Nanos      int64           `json:"nanos"`
 	Year       int             `json:"year"`
@@ -134,27 +257,128 @@ func delimitedCorpus(t *testing.T) []corpusCase {
 		t.Fatal(err)
 	}
 	var cases []corpusCase
-	if err := json.Unmarshal(data, &cases); err != nil {
+	if err := decodeStrictly(data, &cases); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
 	return cases
 }
 
+// decodeStrictly fails on a key the destination doesn't have, at any level.
+func decodeStrictly(data []byte, into any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(into)
+}
+
+// junkEverywhere is the corpus's decode, once for every place in it that holds an object: a
+// made-up key put there has to fail it. decode says whether a document decodes.
+func junkEverywhere(t *testing.T, path string, decode func([]byte) error) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []any
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	places := map[string]bool{}
+	for _, one := range cases {
+		var object func(place string, value any)
+		object = func(place string, value any) {
+			switch value := value.(type) {
+			case []any:
+				for _, item := range value {
+					object(place+"/[]", item)
+				}
+			case map[string]any:
+				for key, inner := range value {
+					object(place+"/"+key, inner)
+				}
+				if places[place] {
+					return
+				}
+				places[place] = true
+				value["no such key"] = true
+				document, err := json.Marshal([]any{one})
+				delete(value, "no such key")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if decode(document) == nil {
+					t.Errorf("%s: a key this replay doesn't know was passed over at %q", path, place)
+				}
+			}
+		}
+		object("", one)
+	}
+	if len(places) < 8 {
+		t.Errorf("%s: only %d places hold an object: %v", path, len(places), places)
+	}
+}
+
+func TestEveryDelimitedCorpusKeyIsRead(t *testing.T) {
+	junkEverywhere(t, repositoryFile(t, "corpus", "delimited.json"), func(document []byte) error {
+		var cases []corpusCase
+		return decodeStrictly(document, &cases)
+	})
+}
+
+// format is the entry's format. No format means hypercast.Invariant, flags 95 (corpus/README.md).
 func (c *corpusColumn) format() hypercast.NumFormat {
 	if c.Format == nil {
 		return hypercast.Invariant
 	}
-	return hypercast.NumFormat{
-		DecimalSep: c.Format.DecimalSep,
-		GroupSep:   c.Format.GroupSep,
-		Styles:     hypercast.NumStyles(c.Format.Flags),
-		Currency:   c.Format.Currency,
-	}
+	return c.Format.format()
 }
 
-// column is the plan entry as this binding declares it: the door named as HyperCast's
-// corpus names its types, with what the door declares beside it.
+// dateOptions is the entry's date options, in HyperCast's own type.
+func (c *corpusColumn) dateOptions(t *testing.T) hypercast.DateOptions {
+	t.Helper()
+	var options hypercast.DateOptions
+	options.Pivot = int(c.Options.Pivot)
+	for _, flag := range c.Options.Flags {
+		switch flag {
+		case "compact_date":
+			options.Shapes |= hypercast.CompactDate
+		case "space_separator":
+			options.Shapes |= hypercast.SpaceSeparator
+		case "hour_offset":
+			options.Shapes |= hypercast.HourOffset
+		default:
+			t.Fatalf("date flag %q", flag)
+		}
+	}
+	if len(c.Options.Months) > 0 {
+		names := make([]hypercast.MonthName, 0, len(c.Options.Months))
+		for _, entry := range c.Options.Months {
+			names = append(names, hypercast.MonthName{Month: time.Month(entry[0].(float64)), Name: entry[1].(string)})
+		}
+		months, err := hypercast.NewMonthNames(names...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		options.Months = months
+	}
+	return options
+}
+
+// column is the plan entry as this binding declares it, with its tokens and date options.
 func (c *corpusColumn) column(t *testing.T) Column {
+	t.Helper()
+	column := c.door(t)
+	if c.Tokens != nil {
+		column = column.WithTokens(*c.Tokens...)
+	}
+	if c.Options != nil {
+		column = column.WithDateOptions(c.dateOptions(t))
+	}
+	return column
+}
+
+// door is the plan entry's door: named as HyperCast's corpus names its types, with what the door
+// declares beside it.
+func (c *corpusColumn) door(t *testing.T) Column {
 	t.Helper()
 	switch c.Door {
 	case "bool":
@@ -468,10 +692,32 @@ func assertCell(t *testing.T, label string, b *Batch, column, row int, expected 
 				t.Errorf("%s: fault span (%d,%d), want (%d,%d)", label, fault.Offset, fault.Length, expected.Fault[0], expected.Fault[1])
 			}
 			// The cell's own text is still to hand, for the diagnostic a fault deserves.
-			if raw := string(b.Raw(column, row)); expected.Raw == nil || raw != *expected.Raw {
+			switch raw := b.Raw(column, row); {
+			case expected.RawHex != nil:
+				if !bytes.Equal(raw, unhex(t, *expected.RawHex)) {
+					t.Errorf("%s: raw bytes %x, want %s", label, raw, *expected.RawHex)
+				}
+			case expected.Raw == nil || string(raw) != *expected.Raw:
 				t.Errorf("%s: raw text %q, want %v", label, raw, expected.Raw)
 			}
 		}
+	}
+
+	// The note beside the verdict: with notes off there's none, and it says so.
+	wantDetail, wantOrigin := "none", "cell"
+	if b.columns.notes {
+		if expected.Detail != nil {
+			wantDetail = *expected.Detail
+		}
+		if expected.Origin != nil {
+			wantOrigin = *expected.Origin
+		}
+	}
+	if detail := b.Detail(column, row).String(); detail != wantDetail {
+		t.Errorf("%s: detail %q, want %q", label, detail, wantDetail)
+	}
+	if origin := b.Origin(column, row).String(); origin != wantOrigin {
+		t.Errorf("%s: origin %q, want %q", label, origin, wantOrigin)
 	}
 
 	if value, expectation := got(b, column, row), want(t, label, door, expected); !reflect.DeepEqual(value, expectation) {
@@ -505,6 +751,9 @@ func assertRowView(t *testing.T, label string, b *Batch, column, row int) {
 	}
 	if raw := string(view.Raw(column)); raw != string(b.Raw(column, row)) {
 		t.Errorf("%s: the row's raw text %q, the batch's %q", label, raw, b.Raw(column, row))
+	}
+	if view.Detail(column) != b.Detail(column, row) || view.Origin(column) != b.Origin(column, row) {
+		t.Errorf("%s: the row's note %v %v, the batch's %v %v", label, view.Detail(column), view.Origin(column), b.Detail(column, row), b.Origin(column, row))
 	}
 	if b.Columns()[column].Door() != DoorText {
 		return
@@ -543,7 +792,7 @@ func assertFailure(t *testing.T, label string, actual error, expected *corpusFai
 	if failure.Record != expected.Record || failure.Line != expected.Line || failure.Byte != expected.Byte {
 		t.Errorf("%s: failure %+v, want %+v", label, *failure, *expected)
 	}
-	if kind == ColumnCount && (failure.Expected != expected.Expected || failure.Found != expected.Found) {
+	if failure.Expected != expected.Expected || failure.Found != expected.Found {
 		t.Errorf("%s: failure %+v, want %+v", label, *failure, *expected)
 	}
 }
@@ -553,12 +802,7 @@ func assertFailure(t *testing.T, label string, actual error, expected *corpusFai
 func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Column) (*DelimitedReader, error)) {
 	t.Helper()
 	boundHeap()
-	dialect := Dialect{
-		Separator:      c.Dialect.Separator[0],
-		Quoting:        c.Dialect.Quoting,
-		HasHeader:      c.Dialect.HasHeader,
-		SkipBlankLines: c.Dialect.SkipBlankLines,
-	}
+	dialect := c.dialect(t)
 	plan := make([]Column, len(c.Plan))
 	for index := range c.Plan {
 		plan[index] = c.Plan[index].column(t)
@@ -593,6 +837,7 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 
 	seen := 0
 	var ended error
+	var problems []corpusProblem
 	for {
 		b, err := r.Read()
 		if err != nil {
@@ -605,9 +850,13 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 		if b.Rows() == 0 {
 			t.Fatalf("%s: Read returned an empty batch and no error", label)
 		}
+		problems = appendProblems(t, label, problems, b, seen)
 		for row := 0; row < b.Rows(); row, seen = row+1, seen+1 {
 			if seen >= len(c.Rows) {
 				t.Fatalf("%s: more than the %d rows expected", label, len(c.Rows))
+			}
+			if len(c.Rows[seen]) != len(plan) {
+				t.Fatalf("%s, row %d: %d cells in the corpus for a plan of %d", label, seen, len(c.Rows[seen]), len(plan))
 			}
 			for column := range plan {
 				assertCell(t, fmt.Sprintf("%s, row %d, column %d", label, seen, column), b, column, row, &c.Rows[seen][column])
@@ -617,6 +866,7 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 	if seen != len(c.Rows) {
 		t.Errorf("%s: %d rows, want %d", label, seen, len(c.Rows))
 	}
+	assertProblems(t, label, problems, c.Problems, r.notes)
 	assertFailure(t, label, ended, c.Failure)
 	// However the input ended is final: the same error, again.
 	if _, again := r.Read(); again != ended {
@@ -624,18 +874,106 @@ func replay(t *testing.T, label string, c *corpusCase, open func(Dialect, []Colu
 	}
 }
 
+// appendProblems is the list so far and this batch's Faults, in the corpus's shape: rows counted
+// from base, and each entry either a cell's or a row's.
+func appendProblems(t *testing.T, label string, problems []corpusProblem, b *Batch, base int) []corpusProblem {
+	t.Helper()
+	for problem := range b.Faults() {
+		entry := corpusProblem{Row: base + problem.Row, Line: problem.Line}
+		if problem.Line != b.Line(problem.Row) {
+			t.Errorf("%s: a problem on line %d of a row on line %d", label, problem.Line, b.Line(problem.Row))
+		}
+		if problem.PlanColumn >= 0 {
+			plan, source := problem.PlanColumn, problem.SourceColumn
+			reason := map[hypercast.CastFailure]string{hypercast.Empty: "empty", hypercast.Malformed: "malformed", hypercast.OutOfRange: "out_of_range"}[problem.Reason]
+			entry.PlanColumn, entry.SourceColumn, entry.Reason = &plan, &source, &reason
+			if problem.Reason != hypercast.Empty {
+				entry.Fault = []int{problem.Offset, problem.Length}
+			} else if problem.Offset != 0 || problem.Length != 0 {
+				t.Errorf("%s: an uncached formula's span: %+v", label, problem)
+			}
+			if problem.Expected != 0 || problem.Found != 0 {
+				t.Errorf("%s: a cell with a row's widths: %+v", label, problem)
+			}
+		} else {
+			if problem.SourceColumn != -1 || problem.Reason != 0 || problem.Offset != 0 || problem.Length != 0 {
+				t.Errorf("%s: a row that's half a cell: %+v", label, problem)
+			}
+			expected, found := problem.Expected, problem.Found
+			entry.Expected, entry.Found = &expected, &found
+		}
+		if problem.Detail != 0 {
+			detail := problem.Detail.String()
+			entry.Detail = &detail
+		}
+		if problem.Origin != OriginCell {
+			origin := problem.Origin.String()
+			entry.Origin = &origin
+		}
+		problems = append(problems, entry)
+	}
+	return problems
+}
+
+// assertProblems holds what Faults listed to what the corpus says. With notes off the list has no
+// detail or origin to give, and no formula with no cached value.
+func assertProblems(t *testing.T, label string, got, expected []corpusProblem, notes bool) {
+	t.Helper()
+	if !notes {
+		kept := make([]corpusProblem, 0, len(expected))
+		for _, entry := range expected {
+			if entry.Origin != nil && *entry.Origin == "uncached" {
+				continue
+			}
+			entry.Detail, entry.Origin = nil, nil
+			kept = append(kept, entry)
+		}
+		expected = kept
+	}
+	if len(got) == 0 && len(expected) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, expected) {
+		show := func(list []corpusProblem) string {
+			text, _ := json.Marshal(list)
+			return string(text)
+		}
+		t.Errorf("%s: faults %s, want %s", label, show(got), show(expected))
+	}
+}
+
 // assertLookups holds a header's lookups to its names: every name is found where it first
-// is, as a string and as bytes, and a name that is not there is an error that names it.
+// is, as a string and as bytes; the strict lookups refuse a name two columns share, naming the
+// two; and a name that is not there is an error that names it.
 func assertLookups(t *testing.T, label string, header Header) {
 	t.Helper()
-	for ordinal, name := range header {
+	for _, name := range header {
 		first := slices.Index(header, name)
-		if found, err := header.Ordinal(name); found != first || err != nil || first > ordinal {
-			t.Errorf("%s: Ordinal(%q) = %d, %v; want %d", label, name, found, err, first)
+		if found, ok := header.Find(name); found != first || !ok {
+			t.Errorf("%s: Find(%q) = %d, %v; want %d", label, name, found, ok, first)
 		}
 		if found, ok := header.FindBytes([]byte(name)); found != first || !ok {
 			t.Errorf("%s: FindBytes(%q) = %d, %v; want %d", label, name, found, ok, first)
 		}
+		assertOrdinal := func(which string, found int, err error) {
+			t.Helper()
+			second := slices.Index(header[first+1:], name)
+			if second < 0 {
+				if found != first || err != nil {
+					t.Errorf("%s: %s(%q) = %d, %v; want %d", label, which, name, found, err, first)
+				}
+				return
+			}
+			var ambiguous *AmbiguousColumnError
+			if !errors.Is(err, ErrAmbiguousColumn) || !errors.As(err, &ambiguous) ||
+				ambiguous.Name != name || ambiguous.First != first || ambiguous.Second != first+1+second || found != -1 {
+				t.Errorf("%s: %s(%q) = %d, %v; want it to name %d and %d", label, which, name, found, err, first, first+1+second)
+			}
+		}
+		found, err := header.Ordinal(name)
+		assertOrdinal("Ordinal", found, err)
+		found, err = header.OrdinalBytes([]byte(name))
+		assertOrdinal("OrdinalBytes", found, err)
 	}
 	missing := strings.Join(header, "|") + "?"
 	var noColumn *NoColumnError
@@ -700,7 +1038,7 @@ func TestCorpusDelimited(t *testing.T) {
 	doors := map[Door]bool{}
 	for index := range corpus {
 		c := &corpus[index]
-		input := []byte(c.Input)
+		input := c.bytes(t)
 		for _, planned := range c.Plan {
 			doors[planned.column(t).Door()] = true
 		}
@@ -738,7 +1076,8 @@ func TestCorpusDelimited(t *testing.T) {
 			for _, line := range bytes.SplitAfter(input, []byte("\n")) {
 				window = max(window, len(line))
 			}
-			if !bytes.Contains(input, []byte(`"`)) {
+			// (Under an encoding memory is decoded through a buffer, which this would cap.)
+			if !bytes.Contains(input, []byte(`"`)) && c.Dialect.Encoding == "" {
 				replay(t, fmt.Sprintf("%s (memory in %d-byte windows, %d rows a batch)", c.Name, window, batchRows), c,
 					func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
 						return NewDelimitedReaderBytes(input, dialect, plan, BatchRows(batchRows), rowCeiling(window))
@@ -750,6 +1089,11 @@ func TestCorpusDelimited(t *testing.T) {
 						return OpenDelimited(path, dialect, plan, BatchRows(batchRows), BufferBytes(32))
 					})
 			}
+			// The notes off: the same rows, and nothing said of why.
+			replay(t, fmt.Sprintf("%s (memory, notes off, %d rows a batch)", c.Name, batchRows), c,
+				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
+					return NewDelimitedReaderBytes(input, dialect, plan, BatchRows(batchRows), Notes(false))
+				})
 			// Header first, the plan bound after: the same reads, whatever the source.
 			replay(t, fmt.Sprintf("%s (memory, bound after the header, %d rows a batch)", c.Name, batchRows), c,
 				func(dialect Dialect, plan []Column) (*DelimitedReader, error) {
@@ -775,5 +1119,207 @@ func TestCorpusDelimited(t *testing.T) {
 		if !doors[door] {
 			t.Errorf("no corpus case casts through %v", door)
 		}
+	}
+}
+
+// corpusDoors is a door as the corpus names it, and corpusColumn.door the other way.
+var corpusDoors = map[Door]string{
+	DoorBool: "bool", DoorI8: "i8", DoorI16: "i16", DoorI32: "i32", DoorI64: "i64",
+	DoorU8: "u8", DoorU16: "u16", DoorU32: "u32", DoorU64: "u64", DoorF32: "f32", DoorF64: "f64",
+	DoorExact: "decimal", DoorUuid: "uuid", DoorTimestamp: "timestamp", DoorUnix: "unix",
+	DoorExcelSerial: "excel_serial", DoorDateOnly: "date", DoorDateOnlyOrdered: "date_ordered",
+	DoorDateTime: "datetime", DoorTimeOfDay: "time", DoorSpan: "duration", DoorText: "text",
+}
+
+// assertSuggestion holds a suggestion to what the corpus says of the columns: the param is put back
+// together from the report, as what RawSuggestion held.
+func assertSuggestion(t *testing.T, label string, found *Suggestion, expected *corpusSuggest) {
+	t.Helper()
+	if found.Truncated != expected.Truncated {
+		t.Errorf("%s: truncated %v, want %v", label, found.Truncated, expected.Truncated)
+	}
+	got := make([]corpusSuggested, 0, len(found.Report))
+	masked := make([]corpusSuggested, 0, len(found.Report))
+	for index := range found.Report {
+		report := &found.Report[index]
+		param := report.Param
+		if len(report.Candidates) > 0 {
+			param = 0
+			for _, candidate := range report.Candidates {
+				switch {
+				case candidate.Format == nil:
+					param |= 1 << uint32(candidate.Order)
+				case candidate.Format.DecimalSep == ".":
+					param |= notationCommaGroups
+				default:
+					param |= notationCommaDecimal
+				}
+			}
+		}
+		want := expected.Columns[index]
+		numeric := report.Status == SuggestResolved && report.Door.numeric()
+		if numeric {
+			// The plan is in the one notation the param left, and comma groups is also what's used
+			// with no separator to prove it. The export's param is held to below.
+			planned := commaGroups
+			if want.Param == notationCommaDecimal {
+				planned = commaDecimal
+			}
+			want.Param = 0
+			if expected.Format != nil {
+				planned = expected.Format.format()
+			}
+			if report.Format == nil || *report.Format != planned || found.Plan[index].Format() != planned {
+				t.Errorf("%s: column %d is planned in %+v, reported %+v, want %+v", label, index, found.Plan[index].Format(), report.Format, planned)
+			}
+		} else if report.Format != nil {
+			t.Errorf("%s: column %d, not a resolved number, reports the format %+v", label, index, *report.Format)
+		}
+		masked = append(masked, want)
+		got = append(got, corpusSuggested{corpusDoors[report.Door], param, report.Status.String(), report.Matched, report.Sampled})
+		if report.Ordinal != index {
+			t.Errorf("%s: column %d reports ordinal %d", label, index, report.Ordinal)
+		}
+		if planned := found.Plan[index]; planned.Ordinal() != index ||
+			(report.Status == SuggestResolved) != (planned.Door() == report.Door) && report.Door != DoorText {
+			t.Errorf("%s: column %d plans %v from %+v", label, index, planned, *report)
+		}
+	}
+	if !reflect.DeepEqual(got, masked) {
+		t.Errorf("%s: columns %+v, want %+v", label, got, masked)
+	}
+}
+
+// suggestOptions is what the corpus declares for a case's suggestion.
+func (c *corpusSuggest) options() SuggestOptions {
+	var options SuggestOptions
+	if c.SampleRows != nil {
+		options.SampleRows = *c.SampleRows
+	}
+	if c.Format != nil {
+		format := c.Format.format()
+		options.Format = &format
+	}
+	return options
+}
+
+// Every case that says what to suggest: from memory and from a file; through the export, over the
+// cells the case's own rows say; and a plan that reads back without refusing what it resolved.
+func TestEverySuggestionIsWhatTheCorpusSays(t *testing.T) {
+	directory, files := tempDir(t)
+	seen := 0
+	for index, c := range delimitedCorpus(t) {
+		if c.Suggest == nil {
+			continue
+		}
+		seen++
+		input, dialect, options := c.bytes(t), c.dialect(t), c.Suggest.options()
+		found, err := SuggestDelimitedBytes(input, dialect, options)
+		if err != nil {
+			t.Errorf("%s: %v", c.Name, err)
+			continue
+		}
+		assertSuggestion(t, c.Name+" (memory)", found, c.Suggest)
+		if files {
+			path := filepath.Join(directory, fmt.Sprintf("suggest-%d.txt", index))
+			if err := os.WriteFile(path, input, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fromFile, err := SuggestDelimited(path, dialect, options)
+			if err != nil {
+				t.Errorf("%s: %v", c.Name, err)
+			} else {
+				assertSuggestion(t, c.Name+" (file)", fromFile, c.Suggest)
+			}
+		}
+
+		// The export, over the case's own rows: a cell with no text in the case is blank here, as a
+		// read's empty verdict is.
+		sample := len(c.Rows)
+		if c.Suggest.SampleRows != nil {
+			sample = *c.Suggest.SampleRows
+		}
+		var text []byte
+		var cells []rawSpan
+		for column := range c.Plan {
+			for _, row := range c.Rows[:sample] {
+				var cell []byte
+				switch {
+				case row[column].RawHex != nil:
+					cell = unhex(t, *row[column].RawHex)
+				case row[column].Text != nil:
+					cell = []byte(*row[column].Text)
+				}
+				cells = append(cells, rawSpan{offset: uint32(len(text)), len: uint32(len(cell))})
+				text = append(text, cell...)
+			}
+		}
+		formats := make([]hypercast.RawNumFormat, len(c.Plan))
+		if options.Format != nil {
+			format, err := options.Format.Raw()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for column := range formats {
+				formats[column] = format
+			}
+		}
+		direct, ok := nativeSuggest(text, cells, nil, sample, formats)
+		if !ok {
+			t.Fatalf("%s: no room", c.Name)
+		}
+		for column, want := range c.Suggest.Columns {
+			got := direct[column]
+			status := map[uint32]string{1: "resolved", 2: "ambiguous", 3: "unresolved"}[got.status]
+			if corpusDoors[Door(got.door)] != want.Door || got.param != want.Param || status != want.Status ||
+				int(got.matched) != want.Matched || int(got.sampled) != want.Sampled {
+				t.Errorf("%s: the export says %+v of column %d, want %+v", c.Name, got, column, want)
+			}
+		}
+
+		// What's resolved takes every cell it saw, and refuses none.
+		reader, err := NewDelimitedReaderBytes(input, dialect, found.Plan)
+		if err != nil {
+			t.Errorf("%s: read back: %v", c.Name, err)
+			continue
+		}
+		read := 0
+		for read < sample {
+			batch, err := reader.Read()
+			if err != nil {
+				t.Errorf("%s: read back: %v", c.Name, err)
+				break
+			}
+			for problem := range batch.Faults() {
+				report := &found.Report[problem.PlanColumn]
+				if report.Status == SuggestResolved && report.Door != DoorText && problem.Row+read < sample {
+					t.Errorf("%s: read back refused %+v", c.Name, problem)
+				}
+			}
+			read += batch.Rows()
+		}
+		_ = reader.Close()
+	}
+	if seen < 12 {
+		t.Errorf("%d cases say what to suggest", seen)
+	}
+}
+
+// Every case the corpus has, whether it says what to suggest or not: a suggestion fails where a
+// read of the case fails, and nowhere else.
+func TestSuggestFailsOnlyWhereAReadOfTheCaseFails(t *testing.T) {
+	planned, failed := 0, 0
+	for _, c := range delimitedCorpus(t) {
+		if _, err := SuggestDelimitedBytes(c.bytes(t), c.dialect(t), SuggestOptions{}); err == nil {
+			planned++
+		} else {
+			failed++
+			if c.Failure == nil {
+				t.Errorf("%s: %v", c.Name, err)
+			}
+		}
+	}
+	if planned <= 80 || failed == 0 {
+		t.Errorf("%d planned, %d failed", planned, failed)
 	}
 }

@@ -15,6 +15,288 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
 
 ### Added
 
+- **Reading a messier delimited file.** A dialect can now pass over physical lines (`skip`),
+  discard records ahead of the header (`header_row`), pad short records and cut long ones
+  (`short_rows`, `long_rows`), and declare tokens that stand for no value, for every column or
+  column by column; a column can declare date options and month names to its door. A batch says
+  what failed in a cell (`detail`), and where its verdict came from (`origin`), beside the verdict
+  it always gave. Through the new exports `hypertabular_delimited_init_with` and
+  `hypertabular_delimited_fill_with` and their size-tagged structs; the 1.0 exports keep their
+  layouts and their masking of a format's flags, and a block from `_init` is still its 64 bytes, though
+  `hypertabular_delimited_state_size` now reports 80. A Rust reader takes those notes unless
+  `DelimitedOptions::notes(false)` says otherwise, a sheet unless `SheetOptions::with_notes(false)`
+  does, and that costs, against notes off (Apple M6, 2026-11-06, `docs/delimited.md`): +6.7% on
+  `cells`, +1.8% on multi-byte cells, nothing measurable on typed batches and +11.2% where four cells
+  in five fail. Notes off still costs the options' checks, +0.9% to +2.6%. Rust keeps each distinct
+  token list or month vocabulary for the life of the process, so that `Column` and `Dialect` stay
+  `Copy`: a server building them from request data grows without bound. *(Rust and Go; each other
+  binding's entry is below)*
+- **Reading a file in Windows-1252, Latin-1 or UTF-16LE.** A dialect declares the encoding
+  (`Dialect::with_encoding`, never sniffed), and the new export `hypertabular_transcode` decodes it
+  to UTF-8 ahead of the fill, holding nothing between calls. A lone surrogate or a final half unit
+  is a structural failure, `Failure::ENCODING`, raised after every intact row, whose `byte` is
+  the original input's offset; nothing is ever replaced. Everything else about a read, spans
+  included, speaks of the decoded text. *(Rust and Go; each other binding's entry is below)*
+- **Reading part of a sheet.** A sheet can now be read through a range like `A5:F200`
+  (`Range::parse`, or `hypertabular_range_parse`), pass over rows (`skip`) and discard rows ahead of
+  the header (`header_row`). A plan's ordinals count from the range's first column, while a row's
+  number stays the sheet's own. A range's edge never walks a repeat, and a read ends at the range's
+  last row, so a failure in a row past it isn't met, though what opening reads is met regardless:
+  all of an ODS's `content.xml` and every chunk of a Numbers document. A workbook's text cells also
+  take the tokens and date options a delimited column does, and its cells report `detail` and
+  `origin` as delimited ones do, typed cells included. Through the new exports
+  `hypertabular_workbook_sheet_with` and `hypertabular_workbook_fill_with`; the 1.0 exports keep
+  their layouts and their masking of a format's flags. *(Rust and Go; each other binding's entry is below)*
+- **A workbook says when a formula has no cached result.** `hypertabular_workbook_fill_with` reads
+  one, XLSX's `<f>` with no `<v>` or an empty one and ODS's `table:formula` with no value, as `Empty`
+  at `origin` `uncached`; a cached empty string, a blank and a cached error don't change, nor do the
+  rows a sheet delivers, and `hypertabular_workbook_fill` says plain `Empty` as it did. So a row whose
+  only cells are formulas with nothing spelled is still an empty row: `skip_empty_rows` leaves it out
+  and nothing says so, a table of nothing but such formulas can read as no rows, and turning the
+  filter off delivers them marked. No Numbers file here holds a formula with no result, so none is
+  read as one. *(Rust and Go; each other binding's entry is below)*
+- **A list of what went wrong in a batch.** The new export `hypertabular_faults` writes a batch's
+  `Malformed` and `OutOfRange` cells, formulas with no cached value and long rows under
+  `long_rows = report` into a caller's array of a new 32-byte `RawProblem`, a few at a time from a
+  cursor; blanks, declared tokens and padding aren't listed. Rust's `Batch::faults` yields each as a
+  `Problem`, with `line` and `source_column`. It can't name a row the empty-row filter left out.
+  `corpus/delimited.json` and `corpus/workbook.json` carry `problems` on every case they read, and
+  old cases differ by that key alone. *(Rust and Go; each other binding's entry is below)*
+- **A kept batch's faults list.** A binding whose batch outlives the read keeps copies of it, and Rust's
+  new `KeptBatch` works the batch's faults list out from them when it's asked for, the same list
+  `Batch::faults` gave: each column's `Batch::verdicts`, `Batch::notes` (new), `Batch::source_column`
+  and each row's `Batch::line`, with `Batch::reported_widths` for a read that reports long rows, the last
+  two now public, go into `KeptColumn`s, and `KeptBatch::faults` yields `Problem`s through `KeptFaults`.
+  `KeptFaults` is `Send` and `Sync`, and `CellNote` is exported beside `CellVerdict`. *(Rust; TypeScript
+  takes its list through it)*
+- **Asking what a source's columns look like.** The new export `hypertabular_suggest` tries each
+  column of a sample against the doors, in the order bool, `i32`, `i64`, `f64`, ISO date, date under
+  a declared order, timestamp, UUID, and writes a new 20-byte `RawSuggestion`: door, param, status
+  (`resolved`, `ambiguous` or `unresolved`) and matched and sampled counts. It's its own call and is
+  never applied: nothing is sniffed in a read, and declaring the locale, a number format and a date
+  order, stays the recommended route, with this a starting point for a plan to inspect. With no format
+  declared, each of two notations has to read the whole column, `,` grouping digits or `,` as the
+  decimal. `1,234,567`, `1,234.5` and `2.5` read only under the first, and `1.234.567`, `1.234,5`, `2,5`
+  and `0,125` only under the second, and those are resolved, `param` `4`, in that notation. `1,234` and
+  `1.234` read under both, and come back ambiguous, as `01/02/2026` does, until a format or a date order
+  is declared or a value settles them: that takes in a column of prices at three decimals, which reads
+  as text until then. `1,234` beside `2.5` is a resolved `f64`, and `2,5` beside `2.5` is unresolved. A
+  binding's plan reads any other resolved number with no format declared in `NumFormat::INVARIANT`, flags
+  `95`, so a later `1,23,456` is `Malformed`. Some answers can surprise, and are printed: `0` and `1` are bool, `F`
+  and `No` read `false`; `1,23,456`, Indian grouping, is text with no format declared, and declaring
+  Indian grouping for the column makes it a number; a workbook's date, time and
+  duration cells suggest text through the text door; `007` (or `٠٠٧` in a format's native digits) and an integer past `i64` stay text, with
+  no note, a declared symbol's `E` (`EUR`) being no exponent. A workbook's number cell has no notation, so the export takes a byte a cell saying which were
+  typed, and a column of them is a number under any format, whose plan reads every one, while text
+  holding `1.234` keeps its question, beside them too. A binding's `SuggestOptions` takes a date order,
+  for every column or for one, that answers a date the sample left open. Rust's `DelimitedReader::suggest`, `DelimitedReader::suggest_slice` and `Sheet::suggest`
+  sample up to 1,000 rows of a path, bytes or a sheet, never a stream, and return a plan, a report and
+  whether rows lie past the sample. `corpus/delimited.json` gains cases with a `suggest` key. *(Rust and Go; each
+  other binding's entry is below)*
+- **Go has all of that.** `Dialect` adds `Skip`, `HeaderRow`, `ShortRows`, `LongRows`, `Encoding` and
+  `Tokens`, and `SheetOptions` adds `Skip`, `HeaderRow`, `Range` and `Tokens`, with `ParseRange` and
+  `NewRange`. A column has `WithTokens` and `WithDateOptions`. A batch has `Detail`, `Origin` and
+  `Faults`, and a row `Detail` and `Origin`; `Notes(false)` turns the notes off for a reader or a
+  sheet, whose constructors now take options. `SuggestDelimited`, `SuggestDelimitedBytes` and
+  `Sheet.Suggest` return a `*Suggestion`; a `SampleRows` of 0 is not set, so 1,000, where Rust's
+  `sample_rows(0)` is 1, because a struct can't tell a field left out from 0. A `Faults` list ranged over past the next `Read()` panics. Every instance of the translated core is now 64 KiB larger,
+  four pages to start where it was three.
+  *(Go)*
+- **C and C++ have all of that.** The nine new exports are in `hypertabular.h`, and `c/README.md`
+  lists them. In `hypertabular.hpp`, `Dialect` adds `with_skip`, `with_header_row`, `with_short_rows`,
+  `with_long_rows`, `with_encoding` and `with_tokens`, and `SheetOptions` adds `with_skip`,
+  `with_header_row`, `with_range`, `with_tokens` and `with_notes`, with `Range::parse` and `Range::of`.
+  A column has `tokens` and `date_options`. A batch has `detail`, `origin` and `faults`, a row `detail`
+  and `origin`; `DelimitedOptions` has `with_notes`. `DelimitedReader::suggest`,
+  `DelimitedReader::suggest_bytes` and `Sheet::suggest` return a `Suggestion`. `Header::require`
+  refuses a name two columns share, with `ErrorKind::ambiguous_column`, and `ordinal` still takes the
+  first. A `faults()` walk past the next `read()` ends the program with `std::abort()`. A column given no format is `NumFormat::invariant()`, Western grouping, as every binding's is.
+  *(C and C++)*
+- **C# has all of that.** Every read now takes the size-tagged fills, and the 23 exports are declared
+  three times each, none past Mono's twelve integer arguments. `Dialect` adds `Skip`, `HeaderRow`,
+  `ShortRows`, `LongRows`, `Encoding`, `Tokens` and `Notes`, and `SheetOptions` adds `Skip`, `HeaderRow`,
+  `Range`, `Tokens` and `Notes`, with `SheetRange.Parse`, `TryParse` and its constructor. A column has
+  `WithTokens` and `WithDateOptions`. A batch has `Fault`, `Origin` and `Faults()`, a row `Fault` and
+  `Origin`, and `Get<T>`'s `Fault` carries HyperCast's detail. `DelimitedReader.Suggest`, from a path or
+  memory, and `Sheet.Suggest` return a `Suggestion`. `Header.Ordinal` refuses a name two columns share
+  with the new `DuplicateColumnException`, a `KeyNotFoundException`, where it took the first; `TryOrdinal`
+  takes the first. `TabularFailure.Encoding` is new. A column given no format is `NumFormat.Invariant`,
+  Western grouping. A walk of a batch's rows with `GetEnumerator` now throws `InvalidOperationException`
+  past the next `Read`, where it followed the batch on. A batch kept past every other reference to its reader or workbook now stays readable, where the collector could free the text under it. *(C#)*
+- **Java has all of that, on both paths.** Every read now takes the size-tagged fills, through FFM on
+  JDK 25 and JNI below it, whose 23 natives each carry `no_panic`. `Dialect` adds `withSkip`,
+  `withHeaderRow`, `withShortRows`, `withLongRows`, `withEncoding`, `withTokens` and `withNotes`, and
+  `SheetOptions` adds `withSkip`, `withHeaderRow`, `withRange`, `withTokens` and `withNotes`, with
+  `Range.parse`, `tryParse` and its constructor. A column has `withTokens` and `withDateOptions`. A batch
+  has `detail`, `origin` and `faults()`, a row `detail` and `origin`, and a walk of a batch's rows now throws
+  `ConcurrentModificationException` past the next `read()`, where it followed the batch on. `DelimitedReader.suggest`, from a
+  path or memory, and `Sheet.suggest` return a `Suggestion`. `Header.ordinal` refuses a name two columns
+  share with the new `AmbiguousColumnException`, a `NoSuchElementException`, where it took the first;
+  `findOrdinal` takes the first. `TabularFailure.ENCODING` is new, and a text cell that isn't UTF-8 is
+  `null` from `text`, `string` and `chars` beside its `MALFORMED`, where 1.0 replaced its bytes. A column
+  given no format is `NumFormat.INVARIANT`, Western grouping. A stream is read once a call, so finished rows come
+  back however long it then blocks. When a read fills what it asked for, the next asks for more, up to 64 MiB,
+  so one long record from a stream that fills every read no longer costs the square of its length: 1 GiB took
+  175 s and takes under a second. A file never paid that (1 GiB, 0.4 s). A stream whose reads come back short
+  still does, in Java and in Rust alike, since a fill looks again from the record's start: 256 MiB at 64 KiB per
+  read takes about 22 s in either, and 1 GiB at just under 1 MiB per read about the same.
+  *(Java)*
+- **Swift has all of that.** Every read now takes the size-tagged fills, and the four 1.0 exports they
+  replace stay reachable, internally, for the test that still crosses them. `Dialect` adds `skip`,
+  `headerRow`, `shortRows`, `longRows`, `encoding`, `tokens` and `notes`, and `SheetOptions` adds `skip`,
+  `headerRow`, `range`, `tokens` and `notes`, with `SheetRange(parsing:)` and its initializer, both throwing
+  `RangeError`. A column has `withTokens` and `withDateOptions`. A batch has `fault(_:row:)`, `origin(_:row:)`
+  and `faults()`, a row `fault` and `origin`, and `get`'s `.fault` carries HyperCast's detail.
+  `DelimitedReader.suggest`, from a path or bytes, and `Sheet.suggest` return a `Suggestion`.
+  `Header.ordinal(of:)` refuses a name two columns share with the new `AmbiguousColumn`, where it took the
+  first; `firstIndex(of:)` takes the first. A plan or a suggest's options holding a retired grouping word is
+  `PlanError.refused(column:)`. `TabularFailure.encoding` is new. A column given no format is
+  `NumFormat.invariant`, Western grouping. A `Row`, a slice or `reversed()` of a batch's rows, now the new
+  `Batch.Rows`, or a walk of them kept past the next `read()` now stops the program with a precondition failure,
+  where it read the next batch's cells as its own. A batch or a row that outlives its reader or sheet now stays
+  readable, where it read freed memory. *(Swift)*
+- **Python has all of that.** `Dialect` adds `skip`, `header_row`, `short_rows`, `long_rows`, `encoding`
+  and `tokens`; `SheetOptions` adds `skip`, `header_row`, `range`, `tokens` and `notes`; `Column` adds
+  `with_tokens` and `with_date_options`; readers take `notes=`, and `open_async` and `read_async` all of
+  it. `Fault` carries HyperCast's `detail`; `batch.origin`, `column.origin` and `row.origin` say where a
+  verdict came from, and `batch.faults()` lists a batch's `Problem`s. `DelimitedReader.suggest`,
+  `suggest_bytes` and `sheet.suggest` answer with a plan and a report. `Header.ordinal` now raises
+  `AmbiguousColumn`, a `ValueError`, for a name two columns share, where it took the first; `get` keeps
+  that. The extension's delimited read now goes through the Rust API, so that a text cell that isn't
+  UTF-8 is `MALFORMED` where a `str` used to replace what it couldn't decode, a header name that isn't
+  UTF-8 raises `TabularError` where it was replaced, and a `Header`'s bytes are its decoded UTF-8. A
+  column in Indian grouping reads beside a Western one, delimited and sheet, and a format holding the
+  retired bit raises `ValueError` before any cell. A second read of a reader over an asynchronous stream,
+  from another coroutine or thread while one awaits the stream, raises `RuntimeError`, where it could
+  deliver rows out of order or twice. The move is slower, and measured so: on an Apple M6 on 2026-11-07, against 1.0's extension in the same session (a plain timing loop, each the best of 5 in the lowest of three rounds), an xlsx sheet of 500k rows and 3 columns reads in 107.0 ms against 101.2 ms, a 97 MiB delimited file of 2M rows and 6 columns in 83.9 ms against 78.6 ms and from `bytes` in 75.2 ms against 73.9 ms, and a file of 2M rows whose 6M cells are all bad in 98.7 ms against 87.4 ms. A faults list costs
+  a read nothing until it's asked for, and asked of those 6M bad cells, batch by batch, the same read takes
+  5.05 s against 103.1 ms without it (Apple M6, 2026-11-08, in one session, the lowest of three rounds of each). *(Python)*
+- **Ruby has all of that, on both paths.** The Fiddle table takes the size-tagged fills and the rest of the 23
+  exports, and the Magnus extension answers the same. `Dialect` adds `skip:`, `header_row:`, `short_rows:`,
+  `long_rows:`, `encoding:` and `tokens:`; `SheetOptions` adds `skip:`, `header_row:`, `range:` (a
+  `HyperTabular::Range`), `tokens:` and `notes:`; `Column` adds `with_tokens` and `with_date_options`; readers
+  take `notes:`. `Fault` carries HyperCast's `detail`, with `Batch::BLANK` beside `Batch::EMPTY`; `origin` on a
+  batch, a column and a row says where a verdict came from, and `batch.faults` lists a batch's `Problem`s, their
+  spans in characters. `DelimitedReader.suggest`, `suggest_string` and `sheet.suggest` answer with a plan and a
+  report. `Header#ordinal` now raises `AmbiguousColumn`, an `ArgumentError`, for a name two columns share, where
+  it took the first; `get` keeps that. A column in Indian grouping reads beside a Western one, delimited and
+  sheet, a plan with no format is Western, and a format holding the retired bit raises before any cell. A stream
+  that stalls hands over the rows it finished, and a stream that raises raises to the caller without ending the
+  read. A `batch_rows` no memory holds is a `NoMemoryError` naming it, and on both paths the arrays a batch sizes
+  are asked for zeroed and left untouched, where a large one had its every page written, enough at `1 << 40` to
+  take a machine down. It's slower, and measured so: on an Apple M6 on 2026-11-07, against 1.0 in the same session (a plain timing
+  loop, each the best of 3 in the lowest of three rounds, Magnus then Fiddle), an xlsx sheet of 500k rows and 3
+  columns reads in 146.7 and 146.4 ms against 139.4 and 140.4 ms, a 92 MiB delimited file of 2M rows and 6 columns
+  in 54.8 and 57.1 ms against 51.3 and 53.1 ms and from a string in 58.4 and 59.8 ms against 56.4 and 54.9 ms,
+  its values in 114.1 and 119.2 ms against 111.9 and 113.3 ms, and every verdict in 787 and 784 ms against 782 and
+  789 ms. A file of 2M rows whose 6M cells are all bad reads in 104.0 and 105.7 ms against 89.3 and 90.6 ms, and
+  with every verdict in 4.57 and 4.74 s against 4.08 and 4.09 s. `notes: false` takes most of that back (93.3 and
+  94.2 ms, 4.08 and 4.05 s). A faults list costs a read nothing until it's asked for, and asked of those 6M bad
+  cells, batch by batch, the same read takes 6.34 and 6.33 s. *(Ruby)*
+- **PHP has all of that, through the Rust API.** The extension now reads through the Rust reader and
+  sheet, every PHP-callable body under the same panic guard. `Dialect` adds `skip`, `headerRow`,
+  `shortRows`, `longRows`, `encoding` and `tokens`; `SheetOptions` adds `skip`, `headerRow`, `range` (a new
+  `Range`, with `Range::parse`), `tokens` and `notes`; `Column` adds `withTokens` and `withDateOptions`;
+  readers take `notes:`. `Batch::detail()` and `Row::detail()` are HyperCast's `DetailedFault`, `origin()` on a
+  batch and a row says where a verdict came from, and `Batch::faults()` with no column lists the batch's
+  `Problem`s, their spans in bytes; with a column it is still that column's faults keyed by row.
+  `DelimitedReader::suggest`, `suggestString` and `Sheet::suggest` answer with a `Suggestion`.
+  `Header::ordinal()` now throws `AmbiguousColumn`, an `InvalidArgumentException`, for a name two columns
+  share, where it returned the first; `find()` keeps that. `TabularFailure::Encoding` is new, and a header
+  name that isn't UTF-8 is that failure. A column in Indian grouping reads beside a Western one, delimited
+  and sheet, a column with no format is Western, and a format holding the retired word is an
+  `InvalidArgumentException` before any cell, HyperCast's own refusal its previous exception. A stream is
+  read one `fread()` a fill, so a stream that stalls hands over the rows it finished, and a stream's
+  failure goes to the caller without ending the read. A stream wrapper's PHP calling back into the
+  reader it feeds, or the `rows()` iterating it, mid-read, is a `LogicException`, and the read goes on.
+  A suggestion past a whole sample says `truncated` for an `fread()` that returns `false`, and rethrows
+  what a stream wrapper's PHP throws. It's slower than the extension was when it drove
+  the core directly, and measured so: on an Apple M6 on 2026-11-07, against that build in the same session (a plain timing loop, each the best of 5 in the lowest of three rounds),
+  an xlsx sheet of 500k rows and 3 columns reads in 152.3 ms against 143.3 ms, an 87 MiB delimited file of
+  2M rows and 6 columns in 67.4 ms against 63.7 ms, its values in 102.2 ms against 99.0 ms, every verdict
+  in 169.6 ms against 167.7 ms, and from a string in 63.2 ms against 64.4 ms. A file of 2M rows whose 6M
+  cells are all bad reads in 118.1 ms against 106.0 ms, and with every verdict in 524.7 ms against
+  515.8 ms; `notes: false` takes most of that back (109.5 ms and 517.5 ms). A faults list costs a read
+  nothing until it's asked for, and asked of those 6M bad cells, batch by batch, the same read takes
+  1.69 s. *(PHP)*
+- **TypeScript has all of that, through the Rust API.** Every `#[napi]` body stays under `catch_unwind`.
+  `Dialect` takes `skip`, `headerRow`, `shortRows`, `longRows`, `encoding` and `tokens`; `SheetOptions`
+  takes `skip`, `headerRow`, `range` (a `Range`, from `Range.parse` or `Range.of`, or its text),
+  `tokens` and `notes`, and `DelimitedOptions` takes `notes`; `Column` has `withTokens`,
+  `withDateOptions` and a `format` getter. `detail()` and `origin()` on a batch and a row say what
+  failed in a cell and where its verdict came from, and `Batch.faults()` is the batch's `Problem`s,
+  worked out through Rust's `KeptBatch` when it's asked for, a new array each call.
+  `DelimitedReader.suggest`, `suggestBytes` and `Sheet.suggest` answer an outcome of a `Suggestion`.
+  `Header.require` answers `ambiguousColumn`, with `first` and `second`, for a name two columns share;
+  `ordinal()` takes the first. A size the core refuses is the `argument` error in the core's words, a
+  zero included, and a size is any whole number, 2^53 and past it included, the core judging it;
+  `sampleRows: 0` means 1, and left out it is the thousand. `close()` answers `{ ok: true, value: null
+  }`. A call back into a reader or sheet from JavaScript it runs mid-call, a getter in a plan or a
+  setter on `Object.prototype`, is the `busy` error and the outer call goes on; a getter (`isBound`,
+  `header`, `columnCount`, `records`), which answered `false` or `null` there, throws it, an `Error`
+  with `code` `ERR_HYPERTABULAR_BUSY` and `kind` `busy`, each its own property, defined with no setter run. A column in Indian grouping reads beside a
+  Western one, a column with no format is Western, and a format holding the retired word is a `plan`
+  error before any cell. A `Batch` and a `Row` are now plain JavaScript, and a batch's copy an
+  `ArrayBuffer` V8 owns, so a synchronous loop no longer holds every batch it drops until the event loop
+  turns. Three passes over a 91 MB file of 2M rows and 6 columns in one synchronous loop, in Docker capped
+  at 4 GiB on an Apple M6 on 2026-11-07, peaked at 1991 MB (`for (const read of reader)` and `while` over
+  `read()`) and past 3.3 GB, where the run was stopped (`rows()`, holding a `Row` or not), before, and
+  now, in five runs each, at 125 to 126 MB for both loops, 71 to 74 MB with `rows()` and 69 to 73 MB
+  holding a `Row` on Node 26.13 (84 to 86, 66 to 69 and 66 to 71 MB on the 22.14 floor), and at 69 MB
+  with `batchRows: 1` (62 MB on 22.14). The WebAssembly fallback's memory is the module's own, never
+  shrinks and can't pass 4 GiB, and a batch's copy there still goes back only once the loop yields: the
+  same loops peaked at 1640 MB and past 3.3 GB before, and at 980 MB now, 215 MB yielding after every
+  read and 281 MB after every 64. All of it costs, measured in the same Docker on 2026-11-07 against
+  HEAD's binding over HEAD's core, in the same session (a plain timing loop, each the best of 5 in the
+  lowest of three rounds, each side run twice, yielding after each pass): the 91 MB file reads in 187.8
+  ms against 172.5 ms, an xlsx sheet of 300k rows and 8 columns as text in 410.2 ms against 408.7 ms,
+  and a file of 2M rows whose 6M cells are all bad in 143.9 ms against 128.3 ms, 130.9 ms against 129.6
+  ms with `notes: false`; that loop's peak RSS is 155 MB against 702 MB. *(TypeScript)*
+- **R has all of that, through the `_with` exports.** `delimited_dialect()` and the delimited readers take
+  `skip`, `header_row`, `fill`, `long_rows` (`"reject"`, `"truncate"` or `"report"`), `na` and `encoding`;
+  `sheet_reader()` and `read_sheet()` take `skip`, `header_row`, `na` and `range`; every `col_*()` takes
+  `na`, `col_timestamp()`, `col_date()` and `col_datetime()` take `options` (and the last two `months`),
+  and `col_text(raw = TRUE)` gives each cell's bytes. Each verdict gains `detail` (a factor, `"unknown"`
+  for a code the installed hypercast doesn't name, its number in `detail_code`) and `origin`, a batch
+  gains `row` and `original_names`, and repeated output names are made unique with `_1`, `_2`, ....
+  `problems()` lists a batch's or a table's problems, from 1, when it's asked; text the core accepted that
+  R can't hold is `ok` with an `NA` value and a `host_conversion` row there. `suggest_plan()` prints a
+  plan to paste and `$plan` reads back; its report's `param` is the door's parameter, as every binding's
+  is (an ambiguous date's is the first candidate's order, a number's 0); a failure among the sampled rows is its `failure`, with no plan,
+  and past a whole sample a structural failure or a connection's read error only says `truncated`.
+  `close()` on a reader, a sheet reader and a workbook lets go now and is safe twice. A plan holding a
+  format the core refuses is an R error naming the column before the source is opened, and a stale
+  packed layout (351 or 863) one naming both packages' versions; a name the header holds twice is
+  refused (`which the header holds at columns 1 and 2`); sizes are the core's to judge, a `batch_rows`
+  or `buffer_bytes` of 0 is refused, `sample_rows = 0` means 1, and a row past the limit is an R error
+  naming its width. A column in Indian grouping reads beside a Western one. `"encoding"` is a new
+  failure kind. A call back into a reader from a handler, an `on.exit`, a finalizer or a connection's R
+  code mid-read is an R error and the read goes on. An interrupt mid-read loses nothing inside the read:
+  the reader reads on, every row once and numbered right (a file's reader always does), or refuses
+  every further read, naming the interrupt (a pipe or socket cut part-way); `close()` always works.
+  An interrupt landing in the caller's own code after `read_batch()` returns can lose that one batch,
+  which no R function can prevent; it shows as a gap in `row`. A connection's own read error is an R
+  error of class `hypertabular_io_error`, a connection closed mid-read is an R error saying so, and a
+  text-mode connection is refused, pointing to `file("stdin")` or a raw vector. `suggest_plan()` on a
+  sheet refuses `batch_rows = 0` as the core does. *(R)*
+- **`corpus/delimited.json` gains the two grouping policies**: `Western grouping refuses an Indian group`,
+  `no format is Western grouping` and `Indian grouping reads an Indian group` tell flags `95`, no format and
+  flags `607` apart on `1,23,456`, `an Indian column beside a Western one` reads both in one read, and
+  `corpus/README.md` says a plan entry with no `format` means flags `95`. Further cases pin `12,34`,
+  `1,2,345` and the other shapes neither policy reads. The suggester's cases cover each shape of the delimiter rule, alone and beside cells
+  that settle or conflict.
+- **`corpus/workbook.json` gains `suggest.xlsx`, `suggest.ods` and `suggest.numbers`**, with a `suggest`
+  key on the cases that declare nothing, a comma decimal and Western grouping, each read by every binding's
+  sheet: number cells and text cells holding the same digits, apart and in one column.
+- **`corpus/workbook.json` holds a range's last column to its word**: `a range's last column ends the table` reads
+  `B4:C12` of `ranges.xlsx`, `ranges.ods` and `ranges.numbers`, three cases, where every earlier range ran to the
+  sheet's own edge and a read that dropped the last column passed every replay.
+- **`corpus/workbook.json` carries `detail` and `origin` on its cells**, and `ranges.xlsx`,
+  `ranges.ods`, `ranges.numbers`, `uncached.xlsx`, `uncached.ods` and `dates.xlsx`, `dates.ods` and
+  `dates.numbers` join its packages, the last three the first whose text a declared field order or
+  month names decide. Every case it
+  had reads the same otherwise, including the four cells of `numbers-data.xlsx` and one each of
+  `basic.xlsx` and `basic-1904.xlsx` that are now `uncached`.
 - **A TypeScript binding for Node and Bun, on npm as `@skunkwerkx/hypertabular`.** A napi-rs
   addon over the core, ten packages: the root, eight platform addons and the WebAssembly
   fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.14.0 || >=23.6.0` and Bun. npm or `bun add` installs it, and Node runs either.
@@ -64,22 +346,137 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   a .NET 10 Native AOT publish links the core in. *(C#)*
 
 ### Changed
+
+- **UTF-8 is checked with SIMD, through HyperCast.** HyperCast 1.1's text door validates 64 bytes
+  and more with simdutf8 in native builds (NEON on aarch64, AVX2 or SSE 4.2 on x86_64, detected
+  at run time) and in a wasm32 build with simd128, which reaches every delimited batch's region
+  check and every workbook cell of 64 bytes or more. Go's translated core and the other
+  WebAssembly builds have no simd128 and keep core's check, unchanged. Verdicts and fault spans
+  are unchanged everywhere. simdutf8 is now in the core's dependency closure, below HyperCast,
+  `no_std` and allocation-free: `rust/check-core.sh` requires HyperCast as the one direct
+  dependency and allows nothing below it but simdutf8, so it holds with a HyperCast either side
+  of the change.
+  Text that fails costs more than before, since the SIMD check reads it whole before core finds
+  the span (HyperCast's `docs/benchmarks.md`: a bad first byte in 4,100 bytes went from 1.2 ns
+  to 244 ns on an Apple M6). Against 1.0 in one session (Apple M6, 2026-11-08,
+  `docs/delimited.md`), a delimited file whose every cell is multi-byte now reads 32.1% slower,
+  where validating it with core's check cost 146.2%; a workbook's cells under 64 bytes, as most are,
+  keep core's check. R's `inst/AUTHORS` names simdutf8 and the work
+  it builds on, and its author, the simd-json.rs developers and the simdjson authors are
+  copyright holders in `Authors@R`.
+  *(all packages)*
+- **The core decides how much memory a batch may ask for.** One function, `kernel/size.rs`'s
+  `check_batch`, reached through the new export `hypertabular_batch_check`, counts a batch's values,
+  verdicts, notes, row widths and cell table, and refuses anything past 4 GiB, a fixed limit, before
+  anything is allocated, at open and again when a plan is bound. C#, Java, Go, Swift, C++, Python,
+  Ruby, PHP, TypeScript and R lose their own size checks and raise their usual argument error with the
+  core's words. A path's sizes are judged before its file is opened, in every binding.
+- **A suggestion is never refused for the size of its own batch.** Nobody set that number. The core says
+  how many rows fit its 64 MiB budget (`sample_rows` in `HyperTabularRawBatchCheck`, which is now 48 bytes,
+  with `width`), and the sampler reads as many batches as the sample takes, with the same answer. A row
+  that alone is past the limit is `Error::RowTooWide` and each binding's own spelling, naming its width.
+- **An explicit `batch_rows` or `buffer_bytes` of 0 is refused.** Rust and C++ read it as 1, and Rust's
+  `Error` gains `ZeroBatchRows`, `ZeroBufferBytes`, `BatchTooLarge`, `RowTooWide` and `NoMemory`. An option left out
+  keeps its default, and `SampleRows = 0` still means one row. Go's `SheetOptions` is a struct, so its
+  `BatchRows: 0` is now the default where it was an error; the `BatchRows(0)` option is what's refused.
+  Java's, Ruby's, Python's and PHP's `SheetOptions` no longer judge a 0 when they're made: the sheet
+  does when it's opened. A negative count is still refused when they're made. Swift's 0 throws `BatchSizeError` where it trapped.
+- **Ruby's over-large batch is an `ArgumentError`**, as in every other binding, where it was a
+  `NoMemoryError` naming `batch_rows`; arrays are still asked for zeroed and left untouched. On a
+  Ruby whose allocator is calloc, a refused allocation now raises rather than handing out a null
+  pointer, and an allocation refused during a refill leaves a read that can be asked again.
+- **A stray quote can't hide a separator or a line end.** A quote opens a quoted cell only as the
+  cell's first byte, and once that cell closes, later quotes are literal up to the next separator or
+  line end. This changes what a 1.0 read returns when a closed quoted cell is followed by more quotes,
+  or a quote sits inside an unquoted cell: `"x"y"z,w"` is now two cells, `x"y"z` and `w"`, where 1.0
+  read one, `x"y"z,w`; `12" pipe,1` is two cells where 1.0 failed with `unclosed_quote`; and three lines
+  1.0 merged into one cell are three records, which can now be a `column_count` failure if their widths
+  differ. Quoted text itself reads as it did (`"x"y"z"` is still `x"y"z`), a file with well-formed
+  quoting reads the same, and no 1.0 case in `corpus/delimited.json` moved. The 1.0 exports change too;
+  there's no legacy mode. It costs, on one Apple M6 on 2026-11-05 (`docs/delimited.md`): +1.0% to +3.8%
+  on `structure` by engine, +3.5% to +6.9% on an all-quoted file, +0.9% on `cells` and +0.1% on typed
+  batches. *(all packages)*
+- **Text that isn't valid UTF-8 is `Malformed`, on every read.** With no encoding declared, a cell read
+  through the text door whose bytes aren't UTF-8 is now that cell's `Malformed` verdict, at the
+  offending byte: `\xe9t\xe9` is `Malformed` at offset 0. 1.0 handed such bytes out as text, and Rust's
+  `text_str` replaced them with U+FFFD; a caller reading a Latin-1 file that way now gets faults, and
+  should declare the file's `encoding`, or read a cell's bytes back with `raw`. A header name that isn't
+  valid UTF-8 can't carry a verdict, so it's a structural failure, the new `Failure::ENCODING` (27)
+  and `FailureKind::Encoding`, where 1.0 returned the bytes. The 1.0 exports change too. It costs
+  (Apple M6, 2026-11-06, `docs/delimited.md`, `docs/workbook.md`): +6.8% on `cells`, +146.2% on a file
+  whose every cell is multi-byte, +2.9% on typed batches with a text column, and +19.3% reading
+  `text_heavy` from a workbook, whose real files moved +0.5% to +1.3%. A batch with an invalid cell
+  pays for its region and then each cell. Those figures predate HyperCast's SIMD check (above). The
+  release with it, against tag `v1.0.0` over HyperCast 1.0.0 in one session (Apple M6, 2026-11-08,
+  `docs/delimited.md`, `docs/workbook.md`), with notes and the options' checks in it too: +12.5% on
+  `cells`, +32.1% on the multi-byte file, +131.4% on a file with one bad byte in every batch
+  (18.15 ms against 8.79 ms for the same file valid), +5.7% on typed batches, +25.8% where four
+  cells in five fail (HyperCast 1.1's doors are +14.5% of that under 1.0's core), +18.3% on
+  `text_heavy` and +3.8% on the xlsx read, the other real files level. *(all packages)*
+- **`hypertabular_delimited_state_size` reports 80 bytes, where 1.0 reported 64**, and
+  `HyperTabularDelimitedState_SIZE` in the header is 80: the block `_init_with` writes holds what it
+  was asked for after the first 64. A block only ever given to `hypertabular_delimited_init` may still
+  be 64 bytes, and the core reads and writes no more of it. A 1.0 caller that allocates what the
+  function reports works as before. One that requires the reported size to equal its own 64-byte block
+  now fails that check against 1.1, as 1.0's cgo Go binding did. Such a caller keeps its 64 bytes
+  for `_init` and drops the equality, or allocates what the function reports, as `_init_with` needs.
+  *(C, and any caller of the C ABI)*
+- **A name two columns share is refused where a plan is built from names.** Rust's `Header::require`
+  now returns the new `Error::AmbiguousColumn { name, first, second }` for `id,name,id` and `"id"`,
+  naming positions `0` and `2`, where 1.0 returned `0` and left the second `id` unread with nothing said.
+  Code that relied on that gets the error at `?`, and says which it wants by position (`Column::i32(2)`)
+  or asks for the first with `Header::ordinal`, which keeps its signature and its first match. Plans
+  by position, and the names a header reports, don't change. `Error` is `#[non_exhaustive]`, so a match
+  already needs its wildcard arm. Every binding's strict lookup refuses the same way, each entry above
+  naming its error, and its optional lookup keeps the first match. *(all packages)*
+- **A Rust delimited reader refuses a `NumFormat` with flag bits HyperCast doesn't define**, or
+  with grouping policy `11`: `Error::Plan` when the plan is bound, where 1.0 ignored them.
+  `hypertabular_delimited_fill` and `hypertabular_workbook_fill` still ignore every flag from bit 8
+  up, as 1.0 did, so they read every format as Western (and what that answers has moved, in the entry
+  below); `hypertabular_delimited_fill_with`
+  and `hypertabular_workbook_fill_with` read them all and refuse what they can't honour. A Rust
+  sheet refuses them as a delimited reader does. *(Rust)*
 - **Unicode is credited.** HyperCast's core carries Unicode's case folding data, so every package
   names `MIT AND Unicode-3.0` and carries `LICENSE-UNICODE` where its format allows; PHP's release zips
   and Swift's hold only the library, and the README is their notice. R names Unicode, Inc. in
   `Authors@R` and `inst/AUTHORS`.
-
 - **The JavaScript toolchain is Bun.** Every dependency tree here (`typescript/`, its browser
   smoke and consumer-test harness, `ruby/wasm-smoke/`) is locked by `bun.lock` and installed with
   `bun install --frozen-lockfile`, and CI, the local loop and Dependabot follow. npm keeps what
   publishing needs: `npm pack` and `npm publish`, and the consumer scenarios that install as an
   npm user does. Node still runs the suite, and the packages install from npm with either tool.
+- **No legacy grouping, so a grouped number 1.0 read can now be refused.** HyperCast 1.1 has two grouping
+  policies. Western is the default and flags `95`: a plan with no format, an all-zero format and every
+  binding's `Invariant` are all Western, and a 1.0 export, which reads 8 bits of flags, reads every format
+  Western. Indian is flags `607`, and only ever declared. These shapes read in 1.0 and are `Malformed`,
+  detail `group_size`, by default now: `1,23,456`, `12,34,567`, `12,34`, `1,2`, `1234,567`, `1,2,345`,
+  `1,2345,678`, `1234,567,890`, `1,234,56,789`, `0,125` and `0,000`, and under a space-group format `1 2 345`
+  and `1234 567`, which were already `Malformed` under the default comma. They also gave
+  wrong values: `0,125` read 125, `12,34` 1234 and `1234,567` 1234567. So a file that held them reads faults
+  there. `1,000`, `1,234,567` and `0125` still read. **To read an Indian column, declare it on that column:**
+  `NumFormat::INVARIANT.with_grouping(Grouping::Indian)` in Rust,
+  `hypercast.Invariant.WithGrouping(hypercast.GroupingIndian)` in Go,
+  `NumFormat::invariant().with_grouping(hypercast::Grouping::indian)` in C++,
+  `NumFormat.Invariant with { Grouping = NumGrouping.Indian }` in C#,
+  `NumFormat.INVARIANT.withGrouping(Grouping.INDIAN)` in Java, and flags `607` in C. One read
+  can hold an Indian column beside a Western one. An Indian format refuses `1,234,567`, and neither policy
+  reads `0,125`, `12,34` or `1,2,345`. Under a comma decimal `0,125` is 0.125, and `0.125` is refused. What
+  it costs is measured in HyperCast's `docs/benchmarks.md`, and [its notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have the shapes and
+  the locales neither policy matches. *(all packages)*
+- **A format with a retired grouping bit is refused before any cell.** Value `256` is retired and never
+  reused, so a stale `351` or `863` can't change meaning: `Error::Plan` in Rust, an error from Go's
+  constructors, `Bind` and `Suggest`, `ErrorKind::plan` in C++, an `ArgumentException` from C#'s, in Java `NumFormat`'s own constructor, so
+  that no plan can hold one, and `HYPERTABULAR_ERR_CONTRACT` from
+  `hypertabular_delimited_fill_with`, `hypertabular_workbook_fill_with` and `hypertabular_suggest`, whose
+  format isn't let off by a `size` of `0`. `hypertabular_delimited_fill` and `hypertabular_workbook_fill`
+  can't see the bit and read those formats Western. A suggest judges every format its options declare
+  before it opens anything: one replaced by a later one, one past the sample, an empty
+  source and a broken one are all the format's refusal, never the file's. `RawSuggestion::NOTATION_FLAGS` is `95`.
+  `hypertabular` now re-exports HyperCast's `Grouping`.
+  Every other binding refuses it as its entry above says. *(all packages)*
 - **Numbers read as HyperCast 1.1 reads them.** White space after a leading sign is now part
   of a number in a delimited cell and in an XLSX or ODS numeric cell, so `- 12` is -12 where it
-  was `Malformed`. A numeric column given no format reads HyperCast's invariant format, strict
-  Western grouping included, so `1,5` is `Malformed` where the group size went unchecked; in
-  Rust, `NumFormat::INVARIANT` keeps the unchecked reading and `NumFormat::STRICT` declares the
-  strict one. *(all packages)*
+  was `Malformed`. *(all packages)*
 - **PHP — breaking: the package is a native extension, installed with PIE.** `pie install
   skunkwerkx/hypercast:<version>` and then `pie install skunkwerkx/hypertabular:<version>`
   install `ext-hypertabular`, an ext-php-rs extension that requires `ext-hypercast` 1.1 and
@@ -90,7 +487,8 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   PHP 8.3. The API keeps its names and behaviour, with these differences: `Batch`, `Row`,
   `Sheet` and `Header` cannot be constructed; rows come through a forward-only `RowIterator`;
   `Workbook::sheet()` raises a `TypeError` for anything but an int or a string; and
-  `Tabular::isAvailable()` is true only when ext-hypercast is loaded. Stubs ship in
+  `Tabular::isAvailable()` is true only when ext-hypercast is loaded; 1.0's `Scratch`, the suite's hook
+  into a workbook's buffers, is gone, its buffers the Rust reader's own. Stubs ship in
   `php/stubs/`. *(PHP)*
 - **Rust — minimum Rust is now 1.89** (was 1.88), the floor the Hyper* crates share. Builds
   from this repository and the Python sdist need `rustc` 1.89. *(Rust, Python)*
@@ -109,8 +507,8 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   without it, delimited reads went from 61.3 to 34.4 ms and an xlsx read from 700 to 485 ms, with
   memory and allocations unchanged; an ods open is level. Every memory access is still
   bounds-checked, which `go/internal/core/bounds_test.go` now pins, and the whole suite runs on
-  s390x under QEMU to prove the big-endian path. It remains 1.7–2.1x slower than the cgo binding.
-  *(Go)*
+  s390x under QEMU to prove the big-endian path. It remains slower than the cgo binding: 1.7–2.3x
+  per read on 2026-11-08, against that binding over 1.0's core and over this release's alike. *(Go)*
 - **Java runs on JDK 21.** The jar is multi-release: its base reaches the core through JNI,
   from a library (`libhypertabular_jni`) built for every platform, and JDK 25 and later keep
   FFM. The API, verdicts, exceptions and messages are the same on both, except that the load
@@ -159,8 +557,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   stable, knows no runtime past .NET 10 and stops in its SDK validation on net11.0; the 0.16
   previews know .NET 11, and the harness takes them (`*-*`) until 0.16.0 ships stable.
   The in-process toolchain that sidestepped it is gone, so each benchmark runs in its own
-  process, BenchmarkDotNet's default; the README's C# row was measured in-process and
-  stands until the harness is run again. *(repository only)*
+  process, BenchmarkDotNet's default, as the README's C# row now is. *(repository only)*
 
 ### Fixed
 
@@ -189,6 +586,81 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   them through the ancestor chain and nothing is redefined, as in HyperUuid and HyperCast.
   Method lookup and both backends' behaviour are unchanged; `spec/native_backend_spec.rb`
   requires the gem under warnings and requires an empty stderr. *(ruby)*
+- **C# — a stream that calls back into its reader is refused.** A `Read`, `ReadAsync`, `Bind` or
+  `Rows()` loop from inside the reader's stream, or a second read while a `ReadAsync` waited on it,
+  was answered from buffers the outer read had offsets into, and that read could hand out bytes that
+  were never in the input. Each now throws `InvalidOperationException`, and the outer read goes on
+  whole. A `Dispose` from there ends that read with `ObjectDisposedException` where it read on, and a
+  `Read` inside `foreach (var row in reader.Rows())` makes the loop's next step throw where it went on
+  in the next batch. *(C#)*
+- **Java — a stream that calls back into its reader is refused**, on both paths. A `read()`, `bind`
+  or `forEachRow` from inside the reader's stream corrupted the outer read, silently or with a
+  structural failure that wasn't in the input; each now throws `IllegalStateException`, and the outer
+  read goes on whole. A `close()` from there ends that read with a message saying so. On JDK 21 to 24
+  a shared arena's segment handed to `DelimitedReader.of(MemorySegment, …)` or
+  `Workbook.of(MemorySegment)` is copied when it's opened: closed by another thread in the middle of
+  a native call, it was read after it was freed, where JDK 25 refuses that close until the call
+  returns. A file read a thread interrupt ended now says so on every later read, where it said only
+  that the channel was closed, and an interrupt past a whole `suggest` sample is thrown, not reported
+  as `truncated()`. *(Java)*
+- **Go — a source that calls back into its reader is refused.** A `Read` from inside the reader's
+  `io.Reader` moved the buffer under the outer read, which then delivered rows lost, garbled or from
+  the wrong line with no error, or a structural failure that wasn't in the input; a `Close` from
+  there was accepted, though the read in hand went on to return a batch. A `Read`, `Bind` or `Close`
+  from there now returns the new `ErrBusy` (`errors.Is`), closes nothing, and the outer read goes on
+  whole. A `batch.All()` ranged over past the next `Read` or a `Close`, and a `reader.All()` or
+  `sheet.All()` with either in its body, panic as a stale `Faults()` does, where they yielded the next
+  batch's rows, or lost some and yielded others twice. Under TinyGo a `batch.All()` loop allocates five times,
+  where it allocated three. *(Go)*
+- **Swift — a source that calls back into its reader is refused.** A `read()` from inside the
+  reader's `Source` freed the buffer the source was writing into, and a read could come back with a
+  row from the wrong line. A `read()`, `bind(_:)` or `forEachRow` from there now
+  throws the new `PlanError.busy`, and the outer read goes on whole. *(Swift)*
+- **C++ — a source or a `for_each_row` callback that calls back in is refused.** A `read()` from
+  inside a `DelimitedReader`'s source wrote into the buffer it had freed, and one from a
+  `for_each_row` callback freed the cells under the walk, or the walk went on through the next
+  batch. A `read()` or `bind()` from either, on a reader or a sheet, is now the new
+  `ErrorKind::busy`, and the outer read goes on whole. A reader or sheet destroyed or moved from
+  there, and a batch's row walk past the next `read()`, end the program with `std::abort()`, as a
+  stale faults walk does. *(C++)*
+- **Ruby — an IO or a plan that calls back into its reader is refused**, on both backends. A
+  `read`, `each`, `bind` or `close` from inside the reader's IO moved the buffer under the outer
+  read, which then handed out rows from the wrong line or lost them, or raised a structural failure
+  that wasn't in the input; a second `bind` from the plan's own `each` was accepted. Each now raises
+  `RuntimeError` ("the reader is in the middle of a call; nothing that call runs can call back into
+  it", TypeScript's sentence), and the outer call goes on whole. *(ruby)*
+- **Ruby — an exception that lands mid-read loses nothing**, on both backends. `Timeout.timeout`,
+  `Thread#raise` or Ctrl-C's `Interrupt` landing after the core had read a batch, before the reader
+  had moved on with it, made every later row's line wrong (`DelimitedReader`) or dropped the batch
+  (`Sheet`); one that landed as the IO answered dropped what it had handed over, and one that landed
+  in a read blocked on a pipe or socket stitched the bytes around the ones Ruby dropped into wrong
+  rows. Such an exception now waits until the reader and the core agree, or until the IO's answer is
+  held, and the batch it lands on is handed over by the next `read`, or by the next walk if it
+  landed as `read` or `each` handed the batch out. The IO's own read still isn't held up while it
+  blocks, so a `Timeout` still breaks it; that read raises the exception and every later one raises
+  `RuntimeError` naming it. Since Ruby can't tell such an exception from the IO's own error
+  (`Timeout.timeout(t, Errno::ETIMEDOUT)` raises one), anything the IO's read raises is now final,
+  as in Rust and Go: a transient `IOError` or `SystemCallError` the reader went on after, it now
+  refuses after. A walk left part-way through a batch
+  (`break`, `first`, an exception from the block) leaves the rest of that batch behind, as Rust and
+  Python do. On Fiddle, one that landed as a grown buffer was attached left the core reading memory
+  the reader no longer held; the core is now handed a String that is never changed after, and the
+  one before is let go of only once the next is held. Anything raised inside a read once the core
+  has read past a batch makes every later read raise `RuntimeError` naming it. *(ruby)*
+- **Python — Ctrl-C reaches a read of a path waiting on a FIFO.** `DelimitedReader.open`,
+  `DelimitedReader.suggest` and `Workbook.open` read a file as CPython does: a signal that cuts an
+  open or a read short runs its handler, and its `KeyboardInterrupt` isn't final, where the read
+  waited for more data and then lost the batch it had read. A stream that hands over more than it
+  was asked for, or something other than `bytes`, is final, where the next read went on without what
+  it had handed over, sync and async; and a reader closed while a read awaits its stream ends that
+  read with `ValueError` saying so. On Linux and macOS a missing path now raises CPython's own
+  `FileNotFoundError` (`[Errno 2] No such file or directory: '<path>'`, with `filename` set), where
+  it was Rust's `No such file or directory (os error 2)` with none; Windows keeps Rust's. *(python)*
+- **Python — a reader or sheet in the middle of a call says so.** A call into a `DelimitedReader`
+  or `Sheet` from another thread while one is inside a read, or from a stream's own `read`, raised
+  PyO3's `RuntimeError` "Already borrowed"; it now raises `RuntimeError` ("the reader is in the
+  middle of a call; nothing that call runs can call back into it", or "the sheet …"), the words
+  every binding uses, and the outer read goes on whole. *(python)*
 
 ## [1.0.0] — 2026-10-25
 

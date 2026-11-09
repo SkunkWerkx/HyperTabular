@@ -11,13 +11,15 @@
 //! [`Sheet`] is one forward-only read of one sheet; several can be open at once, each
 //! with its own buffers, all borrowing the workbook.
 
-use crate::batch::{Batch, Columns, Origin, Row};
+use crate::batch::{Batch, Columns, Home, Row};
 use crate::column;
 use crate::kernel::abi::{
-    ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened, Slot, Span,
+    ColumnSpecWith, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened,
+    RawBatchCheck, RawRange, RawSheetOptions, Slot, Span,
 };
 use crate::kernel::workbook::part::WINDOW_MIN;
 use crate::kernel::workbook::{FORMAT_NUMBERS, FORMAT_XLSX, Memory, State, book, rows};
+use crate::suggest::{Sample, SampleSource, SuggestOptions, Suggestion, check_width};
 use crate::{Column, Error, Header};
 use hypercast::ExcelEpoch;
 use std::borrow::Cow;
@@ -50,6 +52,103 @@ pub struct SheetInfo {
     index: u32,
 }
 
+#[cfg(feature = "php")]
+impl SheetInfo {
+    /// The part the sheet is in, which the PHP binding's `SheetInfo` has always shown.
+    pub(crate) fn part(&self) -> &[u8] {
+        &self.part
+    }
+
+    /// The sheet's place within its part, as the core numbers it, likewise.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
+    }
+}
+
+/// The part of a sheet a read keeps: its corners, 1-based like the `A5:F200` they're written as,
+/// and included. The first column is ordinal `0` of a plan, while a cell's line and source column
+/// stay the sheet's own.
+///
+/// A range that runs past the sheet's end reads what's there, and adds no rows of its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Range {
+    first_row: u32,
+    first_column: u32,
+    last_row: u32,
+    last_column: u32,
+}
+
+impl Range {
+    /// `A5:F200`: both corners, in capitals, the second no less than the first in either
+    /// direction. The core reads it, so every binding agrees on what one is.
+    ///
+    /// # Errors
+    /// [`Error::Range`] for anything else, `A5` alone, `a5:f200` or `F200:A5`.
+    pub fn parse(text: &str) -> Result<Range, Error> {
+        rows::parse_range(text.as_bytes())
+            .map(
+                |RawRange {
+                     first_row,
+                     first_column,
+                     last_row,
+                     last_column,
+                 }| Range {
+                    first_row,
+                    first_column,
+                    last_row,
+                    last_column,
+                },
+            )
+            .ok_or_else(|| Error::Range(text.to_owned()))
+    }
+
+    /// A range from its four numbers, each 1-based, with `0` for no limit on that side. That's
+    /// how to say what `A5:F200` can't: every row from the fifth, or columns `B` to `D` of all of
+    /// them.
+    ///
+    /// # Errors
+    /// [`Error::Range`] if a last is before its first.
+    pub fn new(
+        first_row: u32,
+        first_column: u32,
+        last_row: u32,
+        last_column: u32,
+    ) -> Result<Range, Error> {
+        let inverted = |first: u32, last: u32| first != 0 && last != 0 && first > last;
+        if inverted(first_row, last_row) || inverted(first_column, last_column) {
+            return Err(Error::Range(format!(
+                "rows {first_row} to {last_row}, columns {first_column} to {last_column}"
+            )));
+        }
+        Ok(Range {
+            first_row,
+            first_column,
+            last_row,
+            last_column,
+        })
+    }
+
+    /// The first row, or `0` for no limit.
+    pub const fn first_row(&self) -> u32 {
+        self.first_row
+    }
+
+    /// The first column, `A` being `1`, or `0` for no limit.
+    pub const fn first_column(&self) -> u32 {
+        self.first_column
+    }
+
+    /// The last row, or `0` for no limit.
+    pub const fn last_row(&self) -> u32 {
+        self.last_row
+    }
+
+    /// The last column, or `0` for no limit.
+    pub const fn last_column(&self) -> u32 {
+        self.last_column
+    }
+}
+
 /// How a sheet is read.
 ///
 /// Start with [`SheetOptions::new`] or [`SheetOptions::default`] and change settings
@@ -66,9 +165,27 @@ pub struct SheetOptions {
     pub has_header: bool,
     /// Whether rows with no cell in them — and the rows a gap in the row numbers stands
     /// for — are left out rather than delivered as rows of empty cells.
+    ///
+    /// **Set this to `false` to keep every row.** A row whose only cells are formulas with nothing
+    /// spelled where a value goes counts as empty, and nothing says it was left out. That depends
+    /// on the writer: `<f>…</f>` or `<f>…</f><v />` counts as empty, and `<f>…</f><v></v>` holds a
+    /// cell, so a table of nothing but formulas from the first kind of writer can read as no rows.
+    /// With this off those rows are delivered, their cells at
+    /// [`Origin::Uncached`](crate::Origin::Uncached).
     pub skip_empty_rows: bool,
     /// The most rows a batch holds (at least one).
     pub batch_rows: usize,
+    /// Rows of the sheet to pass over at the start of the range, empty ones included. Their cells
+    /// aren't judged, so a bad cell there doesn't matter; the XML is still tokenized, or for Numbers
+    /// stepped over by its offsets.
+    pub skip: u32,
+    /// Rows to read and discard after those, as `skip_empty_rows` delivers them, so with it on an
+    /// empty row doesn't count.
+    pub header_row: u32,
+    /// The part of the sheet to read, or all of it.
+    pub range: Option<Range>,
+    tokens: &'static [u8],
+    notes: bool,
 }
 
 impl Default for SheetOptions {
@@ -84,6 +201,11 @@ impl SheetOptions {
             has_header: true,
             skip_empty_rows: true,
             batch_rows: 4096,
+            skip: 0,
+            header_row: 0,
+            range: None,
+            tokens: &[],
+            notes: true,
         }
     }
 
@@ -100,11 +222,81 @@ impl SheetOptions {
         }
     }
 
-    /// The same options with another batch size.
+    /// The same options with another batch size. Opening a sheet refuses `0`, and a batch of the
+    /// plan asking for more than the core allows ([`Error::ZeroBatchRows`],
+    /// [`Error::BatchTooLarge`]).
     pub const fn with_batch_rows(self, rows: usize) -> SheetOptions {
         SheetOptions {
-            batch_rows: if rows == 0 { 1 } else { rows },
+            batch_rows: rows,
             ..self
+        }
+    }
+
+    /// The core's answer on this batch size for `specs`, ahead of everything a sheet allocates.
+    fn checked(&self, specs: &[ColumnSpecWith]) -> Result<(), Error> {
+        column::check_sizes(specs, self.batch_rows, 0, self.size_flags()).map(|_| ())
+    }
+
+    fn size_flags(&self) -> u32 {
+        let mut flags = RawBatchCheck::SHEET;
+        if self.notes {
+            flags |= RawBatchCheck::NOTES;
+        }
+        flags
+    }
+
+    /// The same options passing over this many rows at the start of the range.
+    pub const fn with_skip(self, skip: u32) -> SheetOptions {
+        SheetOptions { skip, ..self }
+    }
+
+    /// The same options reading and discarding this many rows before the header or the first
+    /// row of data.
+    pub const fn with_header_row(self, header_row: u32) -> SheetOptions {
+        SheetOptions { header_row, ..self }
+    }
+
+    /// The same options reading only this part of the sheet.
+    pub const fn with_range(self, range: Range) -> SheetOptions {
+        SheetOptions {
+            range: Some(range),
+            ..self
+        }
+    }
+
+    /// The same options with these tokens for no value: a text cell whose exact bytes are one of
+    /// them is `Empty`, whatever its door, and [`Batch::origin`] says
+    /// [`Origin::Token`](crate::Origin::Token). A number, a boolean or a date is never one, whatever
+    /// it would print as. A column's own replace them ([`Column::tokens`]).
+    ///
+    /// Each distinct list is kept for the life of the process, so that options can stay `Copy`: a
+    /// program building lists from request data grows without bound.
+    pub fn with_tokens(self, tokens: &[&str]) -> SheetOptions {
+        SheetOptions {
+            tokens: column::packed_tokens(tokens),
+            ..self
+        }
+    }
+
+    /// The same options writing a note beside each verdict, for [`Batch::detail`] and
+    /// [`Batch::origin`], or not. They're on by default; off, the two answer nothing.
+    pub const fn with_notes(self, notes: bool) -> SheetOptions {
+        SheetOptions { notes, ..self }
+    }
+
+    /// The options as the core's state takes them.
+    fn raw(&self) -> RawSheetOptions {
+        let range = self.range.unwrap_or_default();
+        RawSheetOptions {
+            size: RawSheetOptions::SIZE,
+            has_header: u32::from(self.has_header),
+            skip_empty_rows: u32::from(self.skip_empty_rows),
+            skip: self.skip,
+            header_row: self.header_row,
+            first_row: range.first_row,
+            first_column: range.first_column,
+            last_row: range.last_row,
+            last_column: range.last_column,
         }
     }
 }
@@ -387,8 +579,8 @@ impl<'a> Workbook<'a> {
     }
 
     /// The shared strings' bytes, which every batch of every sheet indexes — what the
-    /// Python binding shares among them rather than copying into each.
-    #[cfg(feature = "python")]
+    /// Python and PHP bindings share among them rather than copying into each.
+    #[cfg(any(feature = "python", feature = "php"))]
     pub(crate) fn strings(&self) -> &[u8] {
         &self.strings
     }
@@ -414,9 +606,9 @@ impl<'a> Workbook<'a> {
     }
 
     /// The sheet `which` of a workbook shared behind an `Arc`, read by a sheet that holds a
-    /// clone of it — which is what lets the Python binding keep a sheet in an object of its
+    /// clone of it — which is what lets the Python and PHP bindings keep a sheet in an object of its
     /// own, beside the workbook rather than borrowing from it.
-    #[cfg(feature = "python")]
+    #[cfg(any(feature = "python", feature = "php"))]
     pub(crate) fn shared_sheet(
         book: &std::sync::Arc<Workbook<'static>>,
         which: SheetRef<'_>,
@@ -432,10 +624,10 @@ impl<'a> Workbook<'a> {
     }
 }
 
-/// The workbook a sheet reads from: borrowed, or — for the Python binding — shared.
+/// The workbook a sheet reads from: borrowed, or — for the Python and PHP bindings — shared.
 enum Book<'w> {
     Borrowed(&'w Workbook<'w>),
-    #[cfg(feature = "python")]
+    #[cfg(any(feature = "python", feature = "php"))]
     Shared(std::sync::Arc<Workbook<'static>>),
 }
 
@@ -443,7 +635,7 @@ impl<'w> Book<'w> {
     fn get(&self) -> &Workbook<'w> {
         match self {
             Book::Borrowed(book) => book,
-            #[cfg(feature = "python")]
+            #[cfg(any(feature = "python", feature = "php"))]
             Book::Shared(book) => book,
         }
     }
@@ -456,22 +648,29 @@ impl<'w> Sheet<'w> {
         options: SheetOptions,
         plan: Option<&[Column]>,
     ) -> Result<Sheet<'w>, Error> {
+        // A plan that can't be honoured says so at `bind`, so this judges the sizes without it.
+        options.checked(
+            &plan
+                .and_then(|plan| column::specs_with(plan).ok())
+                .unwrap_or_default(),
+        )?;
         let workbook = book.get();
-        let info = match which {
-            SheetRef::Index(index) => workbook
-                .sheets
-                .get(index)
+        let source = match which {
+            SheetRef::Index(index) => (index < workbook.sheets.len())
+                .then_some(index)
                 .ok_or_else(|| Error::NoSheet(format!("at index {index}")))?,
             SheetRef::Name(name) => workbook
                 .sheets
                 .iter()
-                .find(|sheet| sheet.name == name)
+                .position(|sheet| sheet.name == name)
                 .ok_or_else(|| Error::NoSheet(format!("named {name:?}")))?,
         };
+        let info = &workbook.sheets[source];
         let (part, index) = (info.part.clone(), info.index);
         let state = copy_of(&workbook.state);
         let mut sheet = Sheet {
             book,
+            source,
             options,
             state,
             scratch: Scratch {
@@ -490,13 +689,12 @@ impl<'w> Sheet<'w> {
             sheet.bind(plan)?;
         }
         let mut out = Filled::default();
-        let code = rows::sheet(
+        let code = rows::sheet_with(
             &mut sheet.state,
             &sheet.book.get().container,
             &part,
             index,
-            options.has_header,
-            options.skip_empty_rows,
+            &options.raw(),
             &mut out,
         );
         settle(code, &out)?;
@@ -510,6 +708,8 @@ impl<'w> Sheet<'w> {
 /// A forward-only read of one sheet. See the module documentation.
 pub struct Sheet<'w> {
     book: Book<'w>,
+    /// The sheet's place in the workbook's list.
+    source: usize,
     options: SheetOptions,
     state: Box<State>,
     scratch: Scratch,
@@ -531,6 +731,12 @@ fn tables<'b>(book: &'b Workbook<'_>) -> Tables<'b> {
         strings: &book.strings,
         table: &book.table,
         kinds: &book.kinds,
+    }
+}
+
+impl SampleSource for Sheet<'_> {
+    fn next_batch(&mut self) -> Result<Option<Batch<'_>>, Error> {
+        self.read()
     }
 }
 
@@ -567,6 +773,72 @@ impl<'w> Sheet<'w> {
         Ok(())
     }
 
+    /// Reads a sample of this sheet through the text door and says what its columns look like: a
+    /// plan to look at, change and pass to a read, and a report.
+    ///
+    /// It's its own read of the sheet from its first row, under the sheet's options, so it leaves
+    /// this one where it is and with the plan it has, and answers the same bound, unbound or part
+    /// of the way through. See [`DelimitedReader::suggest`](crate::DelimitedReader::suggest),
+    /// though the most rows a sample holds here is this sheet's batch size.
+    ///
+    /// A typed number is judged by its value and has no notation, whichever is declared: a column
+    /// of them is a number under any format, and its plan reads every one, since a typed cell reads
+    /// the same under them all. A text cell holding `1.234` keeps its question, in a column of its
+    /// own or beside typed numbers. A boolean is judged by `true` or `false`. A date cell says
+    /// `2023-03-15T00:00:00`, with a time on it even at midnight, which has no zone and so isn't a
+    /// timestamp, and a time or a duration isn't a door this tries: all of those suggest text,
+    /// which reads what the sheet says. So a column of workbook dates is a text column here: a
+    /// plan that wants dates names the door itself.
+    ///
+    /// The width is the header's, or the first row's, so a row wider than that isn't sampled past
+    /// it.
+    ///
+    /// # Errors
+    /// [`Error::Plan`] first, before anything is read, for any format declared in `options` the
+    /// core would refuse, and [`Error::Structure`] for a failure among the sampled rows.
+    pub fn suggest(&self, options: &SuggestOptions) -> Result<Suggestion, Error> {
+        options.check_formats()?;
+        let book = self.book.get();
+        let open = |read: SheetOptions| {
+            Sheet::open(
+                Book::Borrowed(book),
+                SheetRef::Index(self.source),
+                read,
+                None,
+            )
+        };
+        let limit = options.rows_within(self.options.batch_rows);
+        // Notes, for what the sample's second door says of a cell, in `Sample::take`.
+        let read = self.options.with_notes(true).with_batch_rows(1);
+        // A headerless sheet's width is its first row's, which a read says through a plan of one
+        // column, whose cells are verdicts as the sample's will be.
+        let width = if read.has_header {
+            None
+        } else {
+            let mut first = open(read)?;
+            first.bind(&[Column::text(0)])?;
+            let mut widths = [0];
+            first.read_widths(&mut widths)?;
+            Some(widths[0] as usize)
+        };
+        let mut sheet = open(read)?;
+        let width = width.unwrap_or_else(|| sheet.header().map_or(0, Header::len));
+        check_width(width)?;
+        if width != 0 {
+            let plan = Sample::sheet_plan(width);
+            // One row more than the sample, so that a row past it costs no second batch to find, in
+            // as many batches as the core says that takes.
+            sheet.options.batch_rows =
+                column::sample_rows(&column::specs_with(&plan)?, limit + 1, read.size_flags())?;
+            sheet.bind(&plan)?;
+        }
+        let mut sample = Sample::of_sheet(width, limit);
+        if width != 0 {
+            sample.read_from(&mut sheet)?;
+        }
+        sample.judge(sheet.header(), options)
+    }
+
     /// The options the sheet is read with.
     pub fn options(&self) -> SheetOptions {
         self.options
@@ -582,23 +854,36 @@ impl<'w> Sheet<'w> {
         if self.columns.is_some() {
             return Err(Error::AlreadyBound);
         }
-        let (specs, width, widest) = column::specs(plan)?;
-        let batch_rows = self.options.batch_rows.max(1);
+        let (_, width, _) = column::specs(plan)?;
+        let specs = column::specs_with(plan)?;
+        self.options.checked(&specs)?;
+        let batch_rows = self.options.batch_rows;
         let per_row = plan.len() + 1;
         let cells = batch_rows * per_row;
         if self.scratch.cells.len() < cells {
-            self.scratch.cells.resize(cells, Span::default());
+            // Nothing in the table is kept: it's only ever written before it's read.
+            self.scratch.cells = column::zeroed(cells).ok_or_else(|| Error::NoMemory {
+                bytes: (cells as u64).saturating_mul(size_of::<Span>() as u64),
+            })?;
         }
         // What the slots hold — a header row still to be repeated — is kept.
         if self.row.len() < width {
             let more = width - self.row.len();
             self.row
                 .try_reserve_exact(more)
-                .map_err(|_| Error::Plan { column: widest })?;
+                .map_err(|_| Error::NoMemory {
+                    bytes: (more as u64).saturating_mul(size_of::<Slot>() as u64),
+                })?;
             self.row.resize(width, Slot::default());
         }
         self.per_row = per_row;
-        self.columns = Some(Columns::new(plan, specs, batch_rows));
+        self.columns = Some(Columns::with_options(
+            plan,
+            specs,
+            batch_rows,
+            self.options.notes,
+            false,
+        )?);
         Ok(())
     }
 
@@ -641,6 +926,11 @@ impl<'w> Sheet<'w> {
     /// delivered, and again on every call after. A sheet opened without a plan returns
     /// [`Error::Unbound`] until one is bound.
     pub fn read(&mut self) -> Result<Option<Batch<'_>>, Error> {
+        self.read_widths(&mut [])
+    }
+
+    /// [`Sheet::read`], with `widths`, unless it's empty, getting the cells each row had.
+    fn read_widths(&mut self, widths: &mut [u32]) -> Result<Option<Batch<'_>>, Error> {
         let Some(columns) = self.columns.as_mut() else {
             return Err(Error::Unbound);
         };
@@ -654,20 +944,24 @@ impl<'w> Sheet<'w> {
         let tables = tables(book);
         let max_rows = columns.batch_rows();
         let state = &mut *self.state;
-        let (specs, buffers) = columns.for_core();
+        let tokens = self.options.tokens;
+        let (specs, buffers, _) = columns.for_core_with();
         let (code, out) = self
             .scratch
             .drive(&mut self.row, false, tables, |memory, out| {
                 // SAFETY: every buffer has room for `max_rows` values of its column's door
-                // and as many verdicts, which is what `Columns` allocated.
+                // and as many verdicts and notes, which is what `Columns` allocated; the specs'
+                // lists are interned.
                 unsafe {
-                    rows::fill(
+                    rows::fill_with(
                         state,
                         &book.container,
                         specs,
                         buffers,
                         max_rows,
                         memory,
+                        tokens,
+                        widths,
                         out,
                     )
                 }
@@ -689,7 +983,12 @@ impl<'w> Sheet<'w> {
             self.per_row,
             &book.strings,
             &self.scratch.arena,
-            Origin::Workbook,
+            Home::Workbook {
+                first_column: self
+                    .options
+                    .range
+                    .map_or(0, |range| range.first_column().saturating_sub(1)),
+            },
         )))
     }
 }

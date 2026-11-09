@@ -56,14 +56,14 @@ REGISTRY_HOST=host.docker.internal typescript/consumer-tests/run.sh /tmp/npm-loc
 Negative controls: `CORPUS_DIR=$(mktemp -d) run.sh <dir> plain` fails on the corpus read;
 `FLOOR_IMAGE=node:22.13.0-alpine run.sh <dir> floor` fails the install with `EBADENGINE`.
 
-## What the runs established (2026-11-01, Apple M6, Node 26.13.0, npm 11.20.0, Docker 29.9.2)
+## What the runs established (2026-11-07, Apple M6, Node 26.13.0, npm 12.2.2, Docker 29.9.2)
 
 Every scenario passed from a local pack of the darwin-arm64 addon and the WASI
 module, with HyperCast's own darwin-arm64 and WASI packages published beside them through
 `HYPERCAST_TARBALLS`, and both negative controls failed as stated (an empty `CORPUS_DIR` on the
-corpus read, the 22.12.0 image with `EBADENGINE`). The floor scenario loaded `wasm32-wasip1` on
-`node:22.13.0-alpine` with engine-strict, `node:22-alpine` and `node:24-alpine`, since a local
-pack carries no musl addon.
+corpus read, the `node:22.13.0-alpine` image with `EBADENGINE`). The floor scenario loaded
+`wasm32-wasip1` on `node:22.14.0-alpine` with engine-strict, `node:22-alpine` and
+`node:24-alpine`, since a local pack carries no musl addon.
 
 - **The peer.** Every install brought `@skunkwerkx/hypercast` in beside the package as npm 7
   and later do for a peer, and on every backend the peer's door agreed with the cell's

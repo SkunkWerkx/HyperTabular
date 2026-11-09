@@ -20,30 +20,42 @@
 }
 \description{
 A read delivers its rows as a \code{hypertabular_batch}: one HyperCast verdict per plan column,
-and the line each row came from. \code{read_batch()} returns one batch at a time;
+and where each row came from. \code{read_batch()} returns one batch at a time;
 \code{\link[=read_delimited]{read_delimited()}} and \code{\link[=read_sheet]{read_sheet()}} return the whole read as a \code{hypertabular_table}, a
-batch that also carries the \code{header} and the \code{failure} the read ended on.
+batch that also carries the \code{header} and the \code{failure} the read ended on. Every vector in
+either is R's own, and stays good after the reader moves on, is closed, or is collected.
 }
 \details{
 \code{columns} is a named list holding, per plan column, a \code{hypercast_verdict} (see
 \link[hypercast:hypercast_verdict]{hypercast::hypercast_verdict}): a data frame of one row per row read, with the value
 where the cell cast (in the R type HyperCast's own door returns for it, and its exact parts
-where one column cannot carry them), and \code{ok}, \code{reason}, \code{offset} and \code{length} where it
-did not. Every cell is a verdict; no cell is an error. \code{hypercast::is_ok()},
-\code{hypercast::faults()} and \code{hypercast::optional()} read these verdicts as they read
-hypercast's own.
+where one column cannot carry them), and \code{ok}, \code{reason}, \code{offset}, \code{length}, \code{detail} and
+\code{detail_code} where it did not. Every cell is a verdict; no cell is an error.
+\code{hypercast::is_ok()}, \code{hypercast::faults()} and \code{hypercast::optional()} read these verdicts
+as they read hypercast's own. A detail code the installed hypercast has no name for reads
+as \code{"unknown"}, its number kept in \code{detail_code}. The names of \code{columns} are the plan's
+(else the header's, else \code{V} and the position), made unique where they repeat as
+\code{make.unique(sep = "_")} makes them; \code{original_names} keeps them as given.
 
-Each verdict also has a \code{raw} column: the text of each faulted cell, the text its
-\code{offset} and \code{length} index (\code{NA} where the cell cast). For delimited text that is the
-cell as the file holds it, quotes resolved; for a workbook, a text cell's text, or a typed
-cell said as text (the whole of which its span covers). The span counts in the units
-\code{substr()} counts \code{raw} in, so \code{substr(raw, offset + 1, offset + length)} is the offending
-text: characters, or bytes for a cell that is not valid UTF-8, whose \code{raw} is marked
-\code{"bytes"}. A cell holding a NUL byte, which no R string can, has \code{raw} \code{NA} and a span in
-bytes, and through \code{col_text()} is \code{out_of_range} at the NUL.
+Each verdict also has a \code{raw} column, the text of each faulted cell, the text its \code{offset}
+and \code{length} index (\code{NA} where the cell cast), and an \code{origin} column: \code{"cell"} for a value
+the source holds, \code{"token"} for a cell the read's or the column's \code{na} matched, \code{"padded"}
+for a cell a short record lacked under \code{fill = TRUE}, and \code{"uncached"} for a workbook
+formula with no cached value. For delimited text \code{raw} is the cell as the file holds it,
+quotes resolved; for a workbook, a text cell's text, or a typed cell said as text (the whole
+of which its span covers). The span counts in the units \code{substr()} counts \code{raw} in, so
+\code{substr(raw, offset + 1, offset + length)} is the offending text: characters, or bytes for a
+cell that is not valid UTF-8, whose \code{raw} is marked \code{"bytes"}.
+
+Text R can't hold (a NUL byte inside it, or more than \code{INT_MAX} bytes) is \code{ok} with an \code{NA}
+value, through \code{col_text()} as through \code{hypercast::cast_text()}: \code{ok} says the core accepted
+the cell, and the \code{NA} that R can't represent it. So checking \code{ok} alone doesn't guarantee a
+usable character value; \code{col_text(raw = TRUE)} gives the exact bytes, and \code{\link[=problems]{problems()}}
+lists each such cell as a \code{"host_conversion"} row. A faulted cell holding a NUL has \code{raw}
+\code{NA} and a span in bytes.
 
 \code{line} is, per row, the 1-based line its record starts on (delimited text) or its 1-based
-row number in the sheet.
+row number in the sheet, and \code{row} its 1-based place among the rows the read delivered.
 
 \code{as.data.frame()} gives the values alone, one column per plan column, \code{NA} where a cell
 did not cast.
@@ -62,6 +74,7 @@ Other reads:
 \code{\link[=delimited_reader]{delimited_reader()}},
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}},
 \code{\link[=workbook]{workbook()}}
 }

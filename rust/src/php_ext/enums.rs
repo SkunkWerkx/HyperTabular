@@ -340,6 +340,11 @@ pub enum TabularFailure {
     /// read (expected is the version).
     #[php(value = 26)]
     Iwa,
+    /// Text that isn't valid UTF-8 where no cell's verdict can carry it, a header name; or a unit
+    /// that a dialect's declared `Encoding` has no character for, whose `byte` alone counts the
+    /// original input rather than the decoded text.
+    #[php(value = 27)]
+    Encoding,
 }
 
 impl TabularFailure {
@@ -360,6 +365,7 @@ impl TabularFailure {
             24 => TabularFailure::SharedString,
             25 => TabularFailure::TooLarge,
             26 => TabularFailure::Iwa,
+            27 => TabularFailure::Encoding,
             _ => TabularFailure::Container,
         }
     }
@@ -381,14 +387,101 @@ pub enum WorkbookFormat {
     Numbers,
 }
 
-impl WorkbookFormat {
-    /// The format the core reported.
-    pub(crate) fn from_code(code: u32) -> Option<WorkbookFormat> {
+/// What a record with fewer cells than the width is.
+#[php_enum]
+#[php(name = "HyperTabular\\ShortRows")]
+#[derive(Clone, Copy)]
+pub enum ShortRows {
+    /// A structural failure.
+    #[php(value = 0)]
+    Reject,
+    /// A row whose missing cells are `Empty`, at `Origin::Padded`.
+    #[php(value = 1)]
+    Pad,
+}
+
+/// What a record with more cells than the width is.
+#[php_enum]
+#[php(name = "HyperTabular\\LongRows")]
+#[derive(Clone, Copy)]
+pub enum LongRows {
+    /// A structural failure.
+    #[php(value = 0)]
+    Reject,
+    /// A row cut to the width, and listed by `Batch::faults()` with the width it had.
+    #[php(value = 1)]
+    Report,
+    /// A row cut to the width, and nothing said.
+    #[php(value = 2)]
+    Truncate,
+}
+
+/// What a delimited file's bytes are, declared and never sniffed. A workbook declares its own.
+#[php_enum]
+#[php(name = "HyperTabular\\Encoding")]
+#[derive(Clone, Copy)]
+pub enum Encoding {
+    /// UTF-8, read in place. A cell that isn't valid is that cell's `Malformed` verdict.
+    #[php(value = 0)]
+    Utf8,
+    /// Windows-1252. The five bytes the code page leaves undefined are their C1 controls, as WHATWG
+    /// has them. `EF BB BF` is three characters here, not a byte-order mark.
+    #[php(value = 1)]
+    Windows1252,
+    /// Latin-1 (ISO-8859-1): every byte the code point of its value.
+    #[php(value = 2)]
+    Latin1,
+    /// UTF-16, little-endian, with or without a byte-order mark. A lone surrogate, or half a code
+    /// unit at the end of the input, is `TabularFailure::Encoding`.
+    #[php(value = 3)]
+    Utf16Le,
+}
+
+/// Where a cell's verdict came from: `Batch::origin()`.
+#[php_enum]
+#[php(name = "HyperTabular\\Origin")]
+#[derive(Clone, Copy)]
+pub enum Origin {
+    /// A door judged the cell's own text.
+    #[php(value = 0)]
+    Cell,
+    /// The cell's exact unquoted bytes are a declared token, so it is `Empty` and no door ran.
+    #[php(value = 1)]
+    Token,
+    /// The row has no such cell: padding for a short row, or an ordinal past the row's end.
+    #[php(value = 2)]
+    Padded,
+    /// A workbook's formula cell with no cached value. It is `Empty` and no door ran.
+    #[php(value = 3)]
+    Uncached,
+}
+
+impl Origin {
+    /// The origin the core noted; a code this binding doesn't know is the cell's.
+    pub(crate) fn from_code(code: u16) -> Origin {
         match code {
-            1 => Some(WorkbookFormat::Xlsx),
-            2 => Some(WorkbookFormat::Ods),
-            3 => Some(WorkbookFormat::Numbers),
-            _ => None,
+            1 => Origin::Token,
+            2 => Origin::Padded,
+            3 => Origin::Uncached,
+            _ => Origin::Cell,
         }
     }
+}
+
+/// What a sample says of a column.
+#[php_enum]
+#[php(name = "HyperTabular\\SuggestStatus")]
+#[derive(Clone, Copy)]
+pub enum SuggestStatus {
+    /// One door and one declaration take every cell, and the plan reads the column through them.
+    #[php(value = 1)]
+    Resolved,
+    /// Every cell is read, but the sample can't say which declaration it's written in, as `1,234`
+    /// can't: `SuggestedColumn::$candidates` are the choices. The plan reads it as text.
+    #[php(value = 2)]
+    Ambiguous,
+    /// There's nothing to go on, or a cell no door took beside cells one did. The plan reads it as
+    /// text.
+    #[php(value = 3)]
+    Unresolved,
 }

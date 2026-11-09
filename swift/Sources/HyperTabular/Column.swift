@@ -69,15 +69,54 @@ public struct Column: Equatable, Sendable {
     public let door: Door
     /// The numeric notation, read by the numeric doors.
     public let format: NumFormat
+    /// What stands for no value in this column: `nil` takes the dialect's or the sheet's. See
+    /// ``withTokens(_:)``.
+    public let tokens: [String]?
+    /// The forms the date and time doors take beside their strict ones: see ``withDateOptions(_:)``.
+    public let dateOptions: DateOptions
     /// What the door declares beside itself, as the core numbers it.
     let declared: UInt32
 
-    private init(_ ordinal: Int, _ door: Door, declared: UInt32 = 0, format: NumFormat = .invariant) {
+    init(_ ordinal: Int, _ door: Door, declared: UInt32 = 0, format: NumFormat = .invariant) {
         precondition(ordinal >= 0, "A column's ordinal is zero-based; got \(ordinal)")
         self.ordinal = ordinal
         self.door = door
         self.declared = declared
         self.format = format
+        tokens = nil
+        dateOptions = .none
+    }
+
+    private init(_ column: Column, tokens: [String]?, dateOptions: DateOptions) {
+        ordinal = column.ordinal
+        door = column.door
+        declared = column.declared
+        format = column.format
+        self.tokens = tokens
+        self.dateOptions = dateOptions
+    }
+
+    /// This column, with tokens of its own in place of the dialect's or the sheet's: a cell whose
+    /// exact, unquoted bytes are one of them is empty, at ``Origin/token``, whatever the door.
+    /// Matched as the tokens' UTF-8 bytes. `[]` is none at all, where a list elsewhere would apply;
+    /// a typed workbook cell is never a token.
+    public func withTokens(_ tokens: [String]) -> Column {
+        Column(self, tokens: tokens, dateOptions: dateOptions)
+    }
+
+    /// This column, reading the forms `options` allows beside its door's strict ones, in the
+    /// doors that take them: ``Door/date``, ``Door/dateOrdered``, ``Door/dateTime``,
+    /// ``Door/timestamp`` and ``Door/time``. The others ignore them.
+    public func withDateOptions(_ options: DateOptions) -> Column {
+        Column(self, tokens: tokens, dateOptions: options)
+    }
+
+    /// Whether `door` reads a number under a ``NumFormat``.
+    static func isNumeric(_ door: Door) -> Bool {
+        switch door {
+        case .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .f32, .f64, .decimal: true
+        default: false
+        }
     }
 
     /// A `Bool` column.
@@ -188,12 +227,13 @@ public struct Column: Equatable, Sendable {
     }
 
     /// The column as the core reads it, the format laid out by HyperCast as its own doors lay
-    /// it out (the 92-byte size-tagged layout). `NumFormat` has already refused what the
-    /// native format cannot carry — equal separators, a separator or sign over 8 UTF-8 bytes,
-    /// a currency symbol over 16, a symbol with a digit or whitespace in it — so nothing here
-    /// can fail.
-    var spec: HyperTabularColumnSpec {
-        var spec = HyperTabularColumnSpec()
+    /// it out (the 92-byte size-tagged layout). What it points at, its tokens and its months,
+    /// ``Columns`` holds and adds. `NumFormat` has already refused what the native format cannot
+    /// carry when it was made; a format that got past that (a stale grouping word) is what
+    /// ``Columns``'s judge refuses, as ``PlanError/refused(column:)``.
+    var spec: HyperTabularColumnSpecWith {
+        var spec = HyperTabularColumnSpecWith()
+        spec.size = columnSpecSize
         spec.ordinal = UInt32(ordinal)
         spec.door = door.rawValue
         spec.param = declared

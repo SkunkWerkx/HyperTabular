@@ -1,5 +1,7 @@
 import Foundation
+import HyperTabularCore
 import XCTest
+
 @testable import HyperTabular
 
 /// Replays the shared conformance corpus (`corpus/delimited.json` at the repository root) —
@@ -40,12 +42,15 @@ final class CorpusTests: XCTestCase {
     // without a mark — and the positions a failure reports into the wrong ones.
     struct Case: Decodable {
         let name: String
-        let input: String
+        let input: String?
+        let input_hex: String?
         let dialect: Declared
         let plan: [Entry]
         let header: [String]?
         let rows: [[Cell]]
+        let problems: [Listed]
         let failure: Failure?
+        let suggest: Suggested?
     }
 
     struct Declared: Decodable {
@@ -53,6 +58,12 @@ final class CorpusTests: XCTestCase {
         let quoting: Bool
         let has_header: Bool
         let skip_blank_lines: Bool
+        let skip: UInt32?
+        let header_row: UInt32?
+        let short_rows: String?
+        let long_rows: String?
+        let tokens: [String]?
+        let encoding: String?
     }
 
     struct Entry: Decodable {
@@ -62,6 +73,56 @@ final class CorpusTests: XCTestCase {
         let order: UInt32?
         let epoch: UInt32?
         let format: Notation?
+        let tokens: [String]?
+        let options: DatesDeclared?
+    }
+
+    struct DatesDeclared: Decodable {
+        let flags: [String]?
+        let pivot: Int?
+        let months: [Month]?
+    }
+
+    /// `[month, name]`.
+    struct Month: Decodable {
+        let month: Int
+        let name: String
+
+        init(from decoder: Decoder) throws {
+            var pair = try decoder.unkeyedContainer()
+            month = try pair.decode(Int.self)
+            name = try pair.decode(String.self)
+        }
+    }
+
+    /// One entry of a case's `problems`.
+    struct Listed: Decodable, Equatable {
+        var row: Int
+        var line: Int
+        var plan_column: Int?
+        var source_column: Int?
+        var reason: String?
+        var detail: String?
+        var origin: String?
+        var fault: [Int]?
+        var expected: Int?
+        var found: Int?
+    }
+
+    /// What a case says of its suggestion.
+    struct Suggested: Decodable {
+        let columns: [SuggestedEntry]
+        let truncated: Bool
+        let sample_rows: Int?
+        let format: Notation?
+    }
+
+    struct SuggestedEntry: Decodable {
+        let door: String
+        let param: UInt32
+        let status: String
+        let matched: Int
+        let sampled: Int
     }
 
     struct Notation: Decodable {
@@ -85,6 +146,9 @@ final class CorpusTests: XCTestCase {
         let expect: String
         let fault: [Int]?
         let raw: String?
+        let raw_hex: String?
+        let detail: String?
+        let origin: String?
         let text: String?
         let value: Value?
         let magnitude: String?
@@ -165,24 +229,96 @@ final class CorpusTests: XCTestCase {
 
     // MARK: - the case, as this binding's types
 
-    func dialect(of vector: Case) -> Dialect {
-        Dialect(
-            separator: vector.dialect.separator.unicodeScalars.first!,
-            quoting: vector.dialect.quoting,
-            hasHeader: vector.dialect.has_header,
-            skipBlankLines: vector.dialect.skip_blank_lines)
+    /// The bytes of a case's input.
+    func bytes(of vector: Case) -> [UInt8] {
+        vector.input_hex.map(Self.hex) ?? Array(vector.input!.utf8)
     }
 
-    func format(of entry: Entry) -> NumFormat {
-        guard let format = entry.format else { return .invariant }
-        return NumFormat(
-            decimalSeparator: format.decimal_sep.unicodeScalars.first!,
-            groupSeparator: format.group_sep.unicodeScalars.first!,
-            styles: NumStyles(rawValue: format.flags),
+    static func hex(_ text: String) -> [UInt8] {
+        var bytes = [UInt8]()
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            bytes.append(UInt8(text[index..<next], radix: 16)!)
+            index = next
+        }
+        return bytes
+    }
+
+    func dialect(of vector: Case, notes: Bool = true) -> Dialect {
+        let declared = vector.dialect
+        return Dialect(
+            separator: declared.separator.unicodeScalars.first!,
+            quoting: declared.quoting,
+            hasHeader: declared.has_header,
+            skipBlankLines: declared.skip_blank_lines,
+            skip: declared.skip ?? 0,
+            headerRow: declared.header_row ?? 0,
+            shortRows: declared.short_rows.map {
+                switch $0 {
+                case "reject": .reject
+                case "pad": .pad
+                case let other: fatalError("unknown short_rows \(other)")
+                }
+            } ?? .reject,
+            longRows: declared.long_rows.map {
+                switch $0 {
+                case "reject": .reject
+                case "report": .report
+                case "truncate": .truncate
+                case let other: fatalError("unknown long_rows \(other)")
+                }
+            } ?? .reject,
+            encoding: declared.encoding.map {
+                switch $0 {
+                case "utf-8": .utf8
+                case "windows-1252": .windows1252
+                case "latin-1": .latin1
+                case "utf-16le": .utf16LE
+                case let other: fatalError("unknown encoding \(other)")
+                }
+            } ?? .utf8,
+            tokens: declared.tokens ?? [],
+            notes: notes)
+    }
+
+    /// A corpus flags value mixes leniences and grouping, which HyperCast's type keeps apart.
+    func format(_ format: Notation) -> NumFormat {
+        NumFormat(
+            decimalSeparator: format.decimal_sep, groupSeparator: format.group_sep,
+            styles: NumStyles(rawValue: format.flags & 0xFF),
+            grouping: Grouping(rawValue: format.flags & ~0xFF)!,
             currencySymbol: format.currency ?? "")
     }
 
+    func format(of entry: Entry) -> NumFormat {
+        entry.format.map(format) ?? .invariant
+    }
+
     func column(of entry: Entry) -> Column {
+        var column = door(of: entry)
+        if let tokens = entry.tokens {
+            column = column.withTokens(tokens)
+        }
+        if let options = entry.options {
+            var flags: DateOptions.Flags = []
+            for flag in options.flags ?? [] {
+                switch flag {
+                case "compact_date": flags.insert(.compactDate)
+                case "space_separator": flags.insert(.spaceSeparator)
+                case "hour_offset": flags.insert(.hourOffset)
+                default: fatalError("unknown date flag \(flag)")
+                }
+            }
+            column = column.withDateOptions(
+                DateOptions(
+                    flags: flags, pivot: options.pivot,
+                    months: options.months.map { MonthNames($0.map { (month: $0.month, name: $0.name) }) }))
+        }
+        return column
+    }
+
+    func door(of entry: Entry) -> Column {
         let ordinal = entry.ordinal
         let format = format(of: entry)
         switch entry.door {
@@ -273,15 +409,7 @@ final class CorpusTests: XCTestCase {
                 sign: cell.negative! ? .minus : .plus, exponent: -cell.scale!,
                 significand: Decimal(string: cell.magnitude!)!)
         case .uuid:
-            let hex = cell.value!.string
-            var bytes = [UInt8]()
-            var index = hex.startIndex
-            while index < hex.endIndex {
-                let next = hex.index(index, offsetBy: 2)
-                bytes.append(UInt8(hex[index..<next], radix: 16)!)
-                index = next
-            }
-            return bytes.withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
+            return Self.hex(cell.value!.string).withUnsafeBytes { UUID(uuid: $0.load(as: uuid_t.self)) }
         case .timestamp, .unix, .excelSerial: return instant()
         case .date, .dateOrdered: return day()
         case .dateTime:
@@ -307,11 +435,25 @@ final class CorpusTests: XCTestCase {
 
     /// Holds one cell of the batch in hand to what the corpus says of it.
     func assertCell(
-        _ label: String, _ batch: Batch, _ column: Int, _ row: Int, _ expected: Cell
+        _ label: String, _ batch: Batch, _ column: Int, _ row: Int, _ expected: Cell, notes: Bool = true
     ) {
         let verdict = batch.verdict(column, row: row)
         XCTAssertEqual(batch.verdicts(column)[row], verdict, label)
         let door = batch.columns[column].door
+
+        // The note beside the verdict: with notes off there is none, and it says so.
+        let detail = FaultDetail(code: UInt32(batch.note(column, row).detail))
+        XCTAssertEqual(
+            batch.note(column, row).detail == 0 ? nil : detail.description, notes ? expected.detail : nil,
+            "\(label): detail")
+        XCTAssertEqual(
+            Self.originName(batch.origin(column, row: row)), notes ? expected.origin ?? "cell" : "cell",
+            "\(label): origin")
+        XCTAssertEqual(batch.fault(column, row: row) == nil, expected.expect == "ok", label)
+        if let listed = batch.fault(column, row: row) {
+            XCTAssertEqual(listed, verdict.fault, label)
+            XCTAssertEqual(listed.detailCode, UInt32(batch.note(column, row).detail), label)
+        }
 
         guard expected.expect == "ok" else {
             let reason: CastFailure? =
@@ -328,11 +470,20 @@ final class CorpusTests: XCTestCase {
                 XCTAssertEqual(verdict.offset, span[0], "\(label): fault offset")
                 XCTAssertEqual(verdict.length, span[1], "\(label): fault length")
                 // The cell's own text is still to hand, for the diagnostic a fault deserves.
-                XCTAssertEqual(
-                    String(decoding: batch.raw(column, row: row), as: UTF8.self), expected.raw,
-                    "\(label): raw text")
+                if let hex = expected.raw_hex {
+                    XCTAssertEqual(Array(batch.raw(column, row: row)), Self.hex(hex), "\(label): raw bytes")
+                } else {
+                    XCTAssertEqual(
+                        String(decoding: batch.raw(column, row: row), as: UTF8.self), expected.raw,
+                        "\(label): raw text")
+                }
             }
-            XCTAssertEqual(typed(batch, column, row), verdict.fault.map { .fault($0) }, label)
+            let answered = typed(batch, column, row)
+            XCTAssertEqual(answered, verdict.fault.map { .fault($0) }, label)
+            if case .fault(let fault) = answered {
+                XCTAssertEqual(
+                    fault.detailCode, UInt32(batch.note(column, row).detail), "\(label): the accessor's detail")
+            }
             if door == .text {
                 XCTAssertNil(batch.text(column, row: row), label)
                 XCTAssertNil(batch.string(column, row: row), label)
@@ -360,8 +511,90 @@ final class CorpusTests: XCTestCase {
         "unclosed_quote": .unclosedQuote, "column_count": .columnCount, "row_too_long": .rowTooLong,
         "not_a_zip": .notAZip, "container": .container, "encrypted": .encrypted, "method": .method,
         "missing_part": .missingPart, "xml": .xml, "deflate": .deflate, "not_a_workbook": .notAWorkbook,
-        "shared_string": .sharedString, "too_large": .tooLarge,
+        "shared_string": .sharedString, "too_large": .tooLarge, "iwa": .iwa, "encoding": .encoding,
     ]
+
+    static func originName(_ origin: Origin) -> String {
+        switch origin {
+        case .cell: "cell"
+        case .token: "token"
+        case .padded: "padded"
+        case .uncached: "uncached"
+        }
+    }
+
+    /// The problems a batch lists, in the corpus's shape, its rows counted across the read.
+    func listed(_ label: String, _ batch: Batch, base: Int) -> [Listed] {
+        batch.faults().map { problem in
+            XCTAssertEqual(problem.line, batch.line(problem.row), label)
+            var entry = Listed(row: base + problem.row, line: problem.line)
+            if let plan = problem.planColumn {
+                entry.plan_column = plan
+                entry.source_column = problem.sourceColumn
+                switch problem.reason {
+                case .empty:
+                    entry.reason = "empty"
+                    XCTAssertEqual(problem.offset, 0, label)
+                    XCTAssertEqual(problem.length, 0, label)
+                case .malformed:
+                    entry.reason = "malformed"
+                    entry.fault = [problem.offset, problem.length]
+                default:
+                    entry.reason = "out_of_range"
+                    entry.fault = [problem.offset, problem.length]
+                }
+                XCTAssertEqual(problem.expected, 0, label)
+                XCTAssertEqual(problem.found, 0, label)
+            } else {
+                XCTAssertNil(problem.sourceColumn, label)
+                XCTAssertNil(problem.reason, label)
+                XCTAssertEqual(problem.offset, 0, label)
+                XCTAssertEqual(problem.length, 0, label)
+                XCTAssertEqual(problem.detailCode, 0, label)
+                entry.expected = problem.expected
+                entry.found = problem.found
+            }
+            if problem.detailCode != 0 { entry.detail = problem.detail?.description }
+            if problem.origin != .cell { entry.origin = Self.originName(problem.origin) }
+            return entry
+        }
+    }
+
+    /// What the corpus lists, as a read with these notes sees it: with notes off there is no detail
+    /// or origin to give, and no formula with no cached value.
+    func expectedProblems(_ problems: [Listed], notes: Bool) -> [Listed] {
+        notes
+            ? problems
+            : problems.filter { $0.origin != "uncached" }.map {
+                var entry = $0
+                entry.detail = nil
+                entry.origin = nil
+                return entry
+            }
+    }
+
+    /// Holds every ``Row`` of a batch, met by `for`, to the batch's own accessors.
+    func assertRows(_ label: String, _ batch: Batch) {
+        var index = 0
+        for row in batch {
+            XCTAssertEqual(row.index, index, label)
+            XCTAssertEqual(row.line, batch.line(index), label)
+            for column in batch.columns.indices {
+                XCTAssertEqual(row.verdict(column), batch.verdict(column, row: index), label)
+                XCTAssertEqual(row.origin(column), batch.origin(column, row: index), label)
+                XCTAssertEqual(row.fault(column), batch.fault(column, row: index), label)
+                XCTAssertEqual(row.fault(column)?.detailCode, batch.fault(column, row: index)?.detailCode, label)
+                XCTAssertEqual(Array(row.raw(column)), Array(batch.raw(column, row: index)), label)
+                if batch.columns[column].door == .text {
+                    XCTAssertEqual(row.string(column), batch.string(column, row: index), label)
+                    XCTAssertEqual(
+                        row.text(column).map { Array($0) }, batch.text(column, row: index).map { Array($0) }, label)
+                }
+            }
+            index += 1
+        }
+        XCTAssertEqual(index, batch.rows, label)
+    }
 
     func expectedFailure(_ failure: Failure?) -> TabularError? {
         failure.map { failure in
@@ -376,7 +609,9 @@ final class CorpusTests: XCTestCase {
     /// no plan — with the plan bound once the header has been read. The two must agree.
     func replay(_ label: String, _ vector: Case, open: (Dialect, [Column]?) throws -> DelimitedReader) {
         for headerFirst in [false, true] {
-            replay(headerFirst ? "\(label), header first" : label, vector, headerFirst: headerFirst, open: open)
+            replay(
+                headerFirst ? "\(label), header first" : label, vector, headerFirst: headerFirst, notes: true,
+                open: open)
         }
     }
 
@@ -391,11 +626,21 @@ final class CorpusTests: XCTestCase {
         }
         if let names = reader.header, !names.isEmpty {
             XCTAssertEqual(reader.columnCount, names.count, label)
-            // Every name finds its own column, or the first of its name.
+            // Every name finds its own column, or the first of its name, and is refused by the strict
+            // lookup if it is not the only one.
             for (ordinal, name) in names.enumerated() {
-                XCTAssertEqual(names.firstIndex(of: name), names.firstIndex { $0.utf8.elementsEqual(name.utf8) }, label)
-                XCTAssertLessThanOrEqual(try names.ordinal(of: name), ordinal, label)
-                XCTAssertEqual(try names.ordinal(of: names.bytes(at: ordinal)), try names.ordinal(of: name), label)
+                let first = names.firstIndex(of: name)
+                XCTAssertEqual(first, names.firstIndex { $0.utf8.elementsEqual(name.utf8) }, label)
+                XCTAssertLessThanOrEqual(try XCTUnwrap(first), ordinal, label)
+                XCTAssertEqual(names.firstIndex(of: names.bytes(at: ordinal)), first, label)
+                if names.filter({ $0.utf8.elementsEqual(name.utf8) }).count > 1 {
+                    XCTAssertThrowsError(try names.ordinal(of: name), label) {
+                        XCTAssertTrue($0 is AmbiguousColumn, label)
+                    }
+                } else {
+                    XCTAssertEqual(try names.ordinal(of: name), ordinal, label)
+                    XCTAssertEqual(try names.ordinal(of: names.bytes(at: ordinal)), ordinal, label)
+                }
             }
         }
         try reader.bind(plan)
@@ -405,16 +650,18 @@ final class CorpusTests: XCTestCase {
         }
     }
 
-    private func replay(
-        _ label: String, _ vector: Case, headerFirst: Bool, open: (Dialect, [Column]?) throws -> DelimitedReader
+    func replay(
+        _ label: String, _ vector: Case, headerFirst: Bool, notes: Bool,
+        open: (Dialect, [Column]?) throws -> DelimitedReader
     ) {
         let plan = vector.plan.map(column(of:))
         let rows = vector.rows
         var seen = 0
+        var problems = [Listed]()
         var failure: TabularError?
         do {
             // A header that is itself broken fails the open, after no rows at all.
-            let reader = try open(dialect(of: vector), headerFirst ? nil : plan)
+            let reader = try open(dialect(of: vector, notes: notes), headerFirst ? nil : plan)
             XCTAssertEqual(reader.header.map(Array.init), vector.header, "\(label): header")
             if headerFirst {
                 try bindHeaderFirst(label, reader, plan)
@@ -423,14 +670,18 @@ final class CorpusTests: XCTestCase {
             do {
                 while let batch = try reader.read() {
                     XCTAssertGreaterThan(batch.rows, 0, label)
+                    assertRows(label, batch)
+                    problems += listed(label, batch, base: seen)
                     for row in 0..<batch.rows {
                         guard seen < rows.count else {
                             XCTFail("\(label): more rows than the corpus lists")
                             return
                         }
+                        XCTAssertEqual(rows[seen].count, plan.count, label)
                         for column in plan.indices {
                             assertCell(
-                                "\(label), row \(seen), column \(column)", batch, column, row, rows[seen][column])
+                                "\(label), row \(seen), column \(column)", batch, column, row, rows[seen][column],
+                                notes: notes)
                         }
                         seen += 1
                     }
@@ -447,6 +698,7 @@ final class CorpusTests: XCTestCase {
         }
         XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
         XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
+        XCTAssertEqual(problems, expectedProblems(vector.problems, notes: notes), "\(label): problems")
     }
 
     /// A source that hands the input over at most `chunk` bytes at a time.
@@ -506,12 +758,12 @@ final class CorpusTests: XCTestCase {
 
     func testDelimitedCorpus() throws {
         let corpus = try corpus()
-        XCTAssertGreaterThanOrEqual(corpus.count, 30)
+        XCTAssertGreaterThanOrEqual(corpus.count, 123)
         // The decoder kept what the file says: a byte-order mark is three bytes of input.
-        XCTAssertTrue(corpus.contains { Array($0.input.utf8.prefix(3)) == [0xEF, 0xBB, 0xBF] })
+        XCTAssertTrue(corpus.contains { Array(bytes(of: $0).prefix(3)) == [0xEF, 0xBB, 0xBF] })
         for vector in corpus {
             let name = vector.name
-            let input = Array(vector.input.utf8)
+            let input = bytes(of: vector)
             for batchRows in [1, 2, 1024] {
                 replay("\(name) (memory, \(batchRows) rows a batch)", vector) { dialect, plan in
                     guard let plan else {
@@ -519,12 +771,19 @@ final class CorpusTests: XCTestCase {
                     }
                     return try DelimitedReader(bytes: input, dialect: dialect, plan: plan, batchRows: batchRows)
                 }
-                replay("\(name) (a string's utf8, \(batchRows) rows a batch)", vector) { dialect, plan in
-                    guard let plan else {
-                        return try DelimitedReader(bytes: vector.input.utf8, dialect: dialect, batchRows: batchRows)
+                replay(
+                    "\(name) (memory, notes off, \(batchRows) rows a batch)", vector, headerFirst: false, notes: false
+                ) { dialect, plan in
+                    try DelimitedReader(bytes: input, dialect: dialect, plan: plan ?? [], batchRows: batchRows)
+                }
+                if let text = vector.input {
+                    replay("\(name) (a string's utf8, \(batchRows) rows a batch)", vector) { dialect, plan in
+                        guard let plan else {
+                            return try DelimitedReader(bytes: text.utf8, dialect: dialect, batchRows: batchRows)
+                        }
+                        return try DelimitedReader(
+                            bytes: text.utf8, dialect: dialect, plan: plan, batchRows: batchRows)
                     }
-                    return try DelimitedReader(
-                        bytes: vector.input.utf8, dialect: dialect, plan: plan, batchRows: batchRows)
                 }
                 input.withUnsafeBytes { bytes in
                     replay("\(name) (memory in place, \(batchRows) rows a batch)", vector) { dialect, plan in
@@ -565,7 +824,7 @@ final class CorpusTests: XCTestCase {
     func testDelimitedCorpusFromAnAsyncSequence() async throws {
         let corpus = try corpus()
         for vector in corpus {
-            let input = Array(vector.input.utf8)
+            let input = bytes(of: vector)
             for (chunk, batchRows, bufferBytes) in [
                 (1, 1, 3), (5, 2, 7), (64, 1024, DelimitedReader.defaultBufferBytes),
             ] {
@@ -594,6 +853,7 @@ final class CorpusTests: XCTestCase {
         let plan = vector.plan.map(column(of:))
         let rows = vector.rows
         var seen = 0
+        var problems = [Listed]()
         var failure: TabularError?
         do {
             let reader = try await open(dialect(of: vector), headerFirst ? nil : plan)
@@ -609,6 +869,7 @@ final class CorpusTests: XCTestCase {
             }
             do {
                 while let batch = try await reader.readAsync() {
+                    problems += listed(label, batch, base: seen)
                     for row in batch {
                         guard seen < rows.count else {
                             XCTFail("\(label): more rows than the corpus lists")
@@ -637,6 +898,7 @@ final class CorpusTests: XCTestCase {
         }
         XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
         XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
+        XCTAssertEqual(problems, expectedProblems(vector.problems, notes: true), "\(label): problems")
     }
 
     func testDelimitedCorpusFromFiles() throws {
@@ -645,7 +907,7 @@ final class CorpusTests: XCTestCase {
             .appendingPathComponent("hypertabular-corpus-\(UUID().uuidString).csv").path
         defer { try? FileManager.default.removeItem(atPath: path) }
         for vector in corpus {
-            try Data(vector.input.utf8).write(to: URL(fileURLWithPath: path))
+            try Data(bytes(of: vector)).write(to: URL(fileURLWithPath: path))
             for (batchRows, bufferBytes) in [(1, 3), (2, 7), (1024, DelimitedReader.defaultBufferBytes)] {
                 replay("\(vector.name) (file through \(bufferBytes) bytes, \(batchRows) rows a batch)", vector) {
                     dialect, plan in
@@ -659,5 +921,188 @@ final class CorpusTests: XCTestCase {
                 }
             }
         }
+    }
+
+    // MARK: - suggestions
+
+    /// A door's name in the corpus.
+    static func doorName(_ door: Door) -> String {
+        switch door {
+        case .bool: "bool"
+        case .i8: "i8"
+        case .i16: "i16"
+        case .i32: "i32"
+        case .i64: "i64"
+        case .u8: "u8"
+        case .u16: "u16"
+        case .u32: "u32"
+        case .u64: "u64"
+        case .f32: "f32"
+        case .f64: "f64"
+        case .decimal: "decimal"
+        case .uuid: "uuid"
+        case .timestamp: "timestamp"
+        case .unix: "unix"
+        case .excelSerial: "excel_serial"
+        case .date: "date"
+        case .dateOrdered: "date_ordered"
+        case .dateTime: "datetime"
+        case .time: "time"
+        case .duration: "duration"
+        case .text: "text"
+        }
+    }
+
+    static let commaDecimal = NumFormat(decimalSeparator: ",", groupSeparator: ".", styles: .all)
+
+    /// Holds a suggestion to what a corpus case says of it, its param put back together from the
+    /// report.
+    func assertSuggestion(_ label: String, _ found: Suggestion, _ expected: Suggested) {
+        XCTAssertEqual(found.truncated, expected.truncated, label)
+        XCTAssertEqual(found.report.count, expected.columns.count, label)
+        XCTAssertEqual(found.plan.count, expected.columns.count, label)
+        let declared = expected.format.map(format)
+        for (index, report) in found.report.enumerated() where index < expected.columns.count {
+            let want = expected.columns[index]
+            let place = "\(label), column \(index)"
+            var param = want.param
+            var got = report.param
+            if !report.candidates.isEmpty {
+                got = 0
+                for candidate in report.candidates {
+                    switch candidate {
+                    case .numFormat(let notation): got |= notation.decimalSeparator == "." ? 1 << 1 : 1 << 2
+                    case .dateOrder(let order): got |= 1 << order.rawValue
+                    }
+                }
+            }
+            if report.status == .resolved && Column.isNumeric(report.door) {
+                // The plan is in the one notation the param left, and comma groups is also what's used
+                // with no separator to prove it. The export's param is held to in its own replay.
+                let planned = declared ?? (param == 1 << 2 ? Self.commaDecimal : .invariant)
+                param = 0
+                XCTAssertEqual(report.format, planned, place)
+                XCTAssertEqual(found.plan[index].format, planned, place)
+            } else {
+                XCTAssertNil(report.format, place)
+            }
+            XCTAssertEqual(Self.doorName(report.door), want.door, place)
+            XCTAssertEqual(got, param, place)
+            XCTAssertEqual("\(report.status)", want.status, place)
+            XCTAssertEqual(report.matched, want.matched, place)
+            XCTAssertEqual(report.sampled, want.sampled, place)
+            XCTAssertEqual(report.ordinal, index, place)
+            XCTAssertEqual(found.plan[index].ordinal, index, place)
+            XCTAssertEqual(found.plan[index].door, report.status == .resolved ? report.door : .text, place)
+        }
+    }
+
+    /// What the corpus declares for a case's suggestion.
+    func options(of suggest: Suggested) -> SuggestOptions {
+        SuggestOptions(sampleRows: suggest.sample_rows ?? 1000, format: suggest.format.map(format))
+    }
+
+    /// Every case that says what to suggest: from memory and from a file; through the export, over
+    /// the cells the case's own rows say; and a plan that reads back without refusing what it resolved.
+    func testEverySuggestionIsWhatTheCorpusSays() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hypertabular-suggest-\(UUID().uuidString).csv").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var seen = 0
+        for vector in try corpus() {
+            guard let suggest = vector.suggest else { continue }
+            seen += 1
+            let input = bytes(of: vector)
+            let dialect = dialect(of: vector)
+            let options = options(of: suggest)
+            let found = try DelimitedReader.suggest(bytes: input, dialect: dialect, options: options)
+            assertSuggestion("\(vector.name) (memory)", found, suggest)
+            try Data(input).write(to: URL(fileURLWithPath: path))
+            assertSuggestion(
+                "\(vector.name) (file)",
+                try DelimitedReader.suggest(contentsOfFile: path, dialect: dialect, options: options),
+                suggest)
+            assertTheExportSays(vector, suggest, options)
+
+            // What's resolved takes every cell it saw, and refuses none.
+            let sample = suggest.sample_rows ?? Int.max
+            let reader = try DelimitedReader(bytes: input, dialect: dialect, plan: found.plan)
+            var read = 0
+            while read < sample, let batch = try reader.read() {
+                for problem in batch.faults() where problem.row + read < sample {
+                    if let plan = problem.planColumn, found.report[plan].status == .resolved,
+                        found.report[plan].door != .text
+                    {
+                        XCTFail("\(vector.name): read back refused \(problem)")
+                    }
+                }
+                read += batch.rows
+            }
+        }
+        XCTAssertGreaterThanOrEqual(seen, 19)
+    }
+
+    /// The export, over a case's own rows: a cell with no text in the case is blank here, as a read's
+    /// empty verdict is.
+    private func assertTheExportSays(_ vector: Case, _ suggest: Suggested, _ options: SuggestOptions) {
+        let sample = suggest.sample_rows ?? vector.rows.count
+        let width = vector.plan.count
+        var text = [UInt8]()
+        var cells = [HyperTabularSpan]()
+        for column in 0..<width {
+            for row in 0..<sample {
+                let cell = vector.rows[row][column]
+                let bytes = cell.raw_hex.map(Self.hex) ?? cell.text.map { Array($0.utf8) } ?? []
+                var span = HyperTabularSpan()
+                span.offset = UInt32(text.count)
+                span.len = UInt32(bytes.count)
+                cells.append(span)
+                text += bytes
+            }
+        }
+        var formats = [HyperTabularRawNumFormat](repeating: HyperTabularRawNumFormat(), count: width)
+        if let format = options.format {
+            var raw = Interop.rawFormat(format)
+            for index in 0..<width {
+                withUnsafeBytes(of: &raw) { source in
+                    withUnsafeMutableBytes(of: &formats[index]) { $0.copyMemory(from: source) }
+                }
+            }
+        }
+        var found = [HyperTabularRawSuggestion](repeating: HyperTabularRawSuggestion(), count: width)
+        XCTAssertEqual(
+            hypertabular_suggest(
+                text, UInt(text.count), nil, 0, cells, nil, UInt(sample), UInt(width), formats, &found),
+            HYPERTABULAR_OK, vector.name)
+        for column in 0..<width {
+            let want = suggest.columns[column]
+            let place = "\(vector.name): the export, column \(column)"
+            XCTAssertEqual(found[column].door, Self.doorCode(want.door), place)
+            XCTAssertEqual(found[column].param, want.param, place)
+            XCTAssertEqual(found[column].status, ["resolved": 1, "ambiguous": 2, "unresolved": 3][want.status], place)
+            XCTAssertEqual(Int(found[column].matched), want.matched, place)
+            XCTAssertEqual(Int(found[column].sampled), want.sampled, place)
+        }
+    }
+
+    private static func doorCode(_ name: String) -> UInt32? {
+        (1...22).lazy.compactMap { Door(rawValue: UInt32($0)) }.first { doorName($0) == name }?.rawValue
+    }
+
+    /// Every case the corpus has: a suggestion fails where a read of the case fails, and nowhere else.
+    func testASuggestionFailsOnlyWhereAReadOfTheCaseFails() throws {
+        var planned = 0
+        var failed = 0
+        for vector in try corpus() {
+            do {
+                _ = try DelimitedReader.suggest(bytes: bytes(of: vector), dialect: dialect(of: vector))
+                planned += 1
+            } catch let error as TabularError {
+                failed += 1
+                XCTAssertNotNil(vector.failure, "\(vector.name): \(error)")
+            }
+        }
+        XCTAssertGreaterThan(planned, 80)
+        XCTAssertGreaterThan(failed, 0)
     }
 }

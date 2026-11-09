@@ -1,7 +1,7 @@
 // The binding's promise: nothing throws for data or for an argument of the wrong type. Every
 // factory, every opener, every reader, batch, row and header method is called with every value
 // below in each position, and each call must return what it promises: a column, a well-formed
-// outcome (`ok` true with a value, or `ok` false with an error whose kind is one of nine and
+// outcome (`ok` true with a value, or `ok` false with an error whose kind is one of thirteen and
 // whose message is a string), or a well-formed verdict (HyperCast's: a reason of three and a
 // span of two whole numbers inside the cell's raw text).
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
@@ -120,6 +120,9 @@ const KINDS = [
   'plan',
   'noSheet',
   'noColumn',
+  'ambiguousColumn',
+  'range',
+  'busy',
   'unbound',
   'alreadyBound',
   'structure',
@@ -201,6 +204,11 @@ test('no Column factory throws, and a column it cannot honour is refused at bind
         assert.ok(column instanceof Column, ctx)
         assert.equal(column.door, name, ctx)
         calls++
+        for (const [third, c] of [hostile[0], hostile[17], hostile[30]]) {
+          const ctx2 = `${ctx}.withTokens(${third})`
+          const tokened = call(ctx2, () => (column.withTokens as Loose).call(column, c))
+          assert.ok(tokened instanceof Column, ctx2)
+        }
         if (!column.valid) {
           const bound = DelimitedReader.fromBytes('a\n1\n', null, [column])
           assert.ok(!bound.ok && bound.error.kind === 'plan' && bound.error.column === 0, ctx)
@@ -235,6 +243,34 @@ test('no opener throws, for any argument in any position', () => {
         call(name, () => fromBytes(value, second)),
       )
     }
+    for (const [other, second] of hostile) {
+      outcome(
+        `suggestBytes(${name}, ${other})`,
+        call(name, () => (DelimitedReader.suggestBytes as Loose)('a,b\n1,2\n', value, second)),
+      )
+      outcome(
+        `suggestBytes(${other}, ${name})`,
+        call(name, () => (DelimitedReader.suggestBytes as Loose)(second, value)),
+      )
+      outcome(
+        `Range.of(${name}, ${other})`,
+        call(name, () => (api.Range.of as Loose)(value, second, 0, 0)),
+      )
+    }
+    outcome(
+      `suggest(${name})`,
+      call(name, () => (DelimitedReader.suggest as Loose)(value)),
+    )
+    outcome(
+      `suggest(missing, ${name})`,
+      call(name, () =>
+        (DelimitedReader.suggest as Loose)(path.join(__dirname, 'no such file'), value),
+      ),
+    )
+    outcome(
+      `Range.parse(${name})`,
+      call(name, () => (api.Range.parse as Loose)(value)),
+    )
     outcome(
       `Workbook.fromBytes(${name})`,
       call(name, () => (Workbook.fromBytes as Loose)(value)),
@@ -267,6 +303,10 @@ test('no reader, sheet, batch, row or header method throws', () => {
           `sheet.read after bind(${name})`,
           call(name, () => s.read()),
         )
+        outcome(
+          `sheet.suggest(${name})`,
+          call(name, () => (s.suggest as Loose).call(s, value)),
+        )
       }
     }
     const reader = DelimitedReader.fromBytes('id,name\n1,x\n2,y\n')
@@ -291,14 +331,16 @@ test('no reader, sheet, batch, row or header method throws', () => {
   const closedSheet = opened.value.sheet(0)
   assert.ok(closedReader.ok && closedSheet.ok)
   for (const closed of [closedReader.value, closedSheet.value]) {
-    closed.close()
-    closed.close()
+    assert.deepEqual(closed.close(), { ok: true, value: null })
+    assert.deepEqual(closed.close(), { ok: true, value: null })
     for (const result of [closed.read(), closed.bind([Column.i32(0)])]) {
       assert.ok(!result.ok && result.error.kind === 'closed', JSON.stringify(result))
     }
     assert.equal(closed.header, null)
     assert.equal(closed.isBound, false)
   }
+  const suggested = closedSheet.value.suggest()
+  assert.ok(!suggested.ok && suggested.error.kind === 'closed')
   assert.equal(closedReader.value.records, null)
   assert.equal(closedReader.value.columnCount, null)
 
@@ -319,6 +361,9 @@ test('no reader, sheet, batch, row or header method throws', () => {
     assert.equal(typeof call(first, () => (b.line as Loose).call(b, a)), 'number')
     assert.ok(Array.isArray(call(first, () => (b.column as Loose).call(b, a))))
     assert.equal(typeof call(first, () => (b.faultCount as Loose).call(b, a)), 'number')
+    call(first, () => (row.detail as Loose).call(row, a))
+    call(first, () => (row.origin as Loose).call(row, a))
+    assert.ok(Array.isArray(call(first, () => (b.faults as Loose).call(b, a))))
     call(first, () => (b.row as Loose).call(b, a))
     for (const [second, c] of hostile) {
       const ctx = `batch.get(${first}, ${second})`
@@ -329,6 +374,8 @@ test('no reader, sheet, batch, row or header method throws', () => {
         raw,
       )
       assert.equal(typeof call(ctx, () => (b.rawString as Loose).call(b, a, c)), 'string')
+      call(ctx, () => (b.detail as Loose).call(b, a, c))
+      call(ctx, () => (b.origin as Loose).call(b, a, c))
     }
   }
 })
@@ -349,6 +396,9 @@ test('a cell asked for where the batch has none is the contract violation', () =
   assert.equal(b.line(9), 0)
   assert.deepEqual(b.column(3), [])
   assert.equal(b.row(1), null)
+  assert.equal(b.detail(1, 0), null)
+  assert.equal(b.origin(1, 0), null)
+  assert.equal(b.origin(0, 0), 'cell')
 })
 
 test('under WASI, a Proxy whose prototype lookup throws still throws (the recorded loss)', {
@@ -360,4 +410,20 @@ test('under WASI, a Proxy whose prototype lookup throws still throws (the record
     const read = DelimitedReader.fromBytes('n\n1\n', null, [Column.i32(0)])
     assert.ok(read.ok)
   }
+})
+
+// A batch's copy is private to the package: a batch and a row carry no property of their own
+// that reaches it, by name or by symbol, so nothing outside can alter or detach it.
+test("a batch's copy is out of reach", () => {
+  const read = DelimitedReader.fromBytes('a,b\n1,x\n', null, [Column.i32(0), Column.i32(1)])
+  assert.ok(read.ok)
+  const batch = read.value.read()
+  assert.ok(batch.ok && batch.value !== null)
+  for (const held of [batch.value, batch.value.row(0)]) {
+    assert.deepEqual(Object.getOwnPropertyNames(held), [])
+    assert.deepEqual(Object.getOwnPropertySymbols(held), [])
+  }
+  assert.ok(batch.value instanceof api.Batch)
+  assert.ok(batch.value.row(0) instanceof api.Row)
+  assert.throws(() => new (api.Batch as unknown as new () => unknown)(), TypeError)
 })

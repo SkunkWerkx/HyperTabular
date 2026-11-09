@@ -1,7 +1,9 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.DateOptions;
 import io.github.skunkwerkx.hypercast.DateOrder;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
+import io.github.skunkwerkx.hypercast.MonthNames;
 import io.github.skunkwerkx.hypercast.NumFormat;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
 import java.util.Objects;
@@ -23,18 +25,43 @@ public final class Column {
     private final Door door;
     private final int declared;
     private final NumFormat format;
+    /** The column's own tokens; {@code null} inherits the dialect's or the sheet's. */
+    private final Tokens tokens;
+
+    private final DateOptions dateOptions;
+    private final MonthNames months;
 
     private Column(int ordinal, Door door, int declared, NumFormat format) {
+        this(ordinal, door, declared, format, null, null, null);
+    }
+
+    private Column(
+            int ordinal,
+            Door door,
+            int declared,
+            NumFormat format,
+            Tokens tokens,
+            DateOptions dateOptions,
+            MonthNames months) {
         if (ordinal < 0) {
             throw new IllegalArgumentException("ordinal must not be negative; got " + ordinal);
         }
         // A NumFormat validated itself when it was built, as HyperCast's own doors validate
-        // it; the core reads it in its own layout and refuses nothing a NumFormat can hold.
+        // it, and its canonical constructor and Grouping.of refuse a grouping word no door
+        // accepts, so a column cannot hold one: the core refuses nothing a NumFormat can hold.
         Objects.requireNonNull(format, "format");
         this.ordinal = ordinal;
         this.door = door;
         this.declared = declared;
         this.format = format;
+        this.tokens = tokens;
+        this.dateOptions = dateOptions;
+        this.months = months;
+    }
+
+    /** The column a suggestion plans: a door and what it declares, as the core numbers them. */
+    static Column planned(int ordinal, Door door, int declared, NumFormat format) {
+        return new Column(ordinal, door, declared, format);
     }
 
     private static Column plain(int ordinal, Door door) {
@@ -68,6 +95,73 @@ public final class Column {
      */
     public NumFormat format() {
         return format;
+    }
+
+    /**
+     * This column with a list of its own of what stands for no value, ahead of the dialect's or
+     * the sheet's. With no tokens, nothing does.
+     *
+     * @param tokens the tokens, matched as their exact UTF-8 bytes
+     * @return the changed column
+     */
+    public Column withTokens(String... tokens) {
+        return new Column(ordinal, door, declared, format, Tokens.of(tokens), dateOptions, months);
+    }
+
+    /**
+     * This column's own list of what stands for no value.
+     *
+     * @return the tokens, or {@code null} if the column inherits the dialect's or the sheet's
+     */
+    public Tokens tokens() {
+        return tokens;
+    }
+
+    /**
+     * This column with the date forms it also accepts: a compact date, a space before the time, an
+     * hour-only offset, a pivot for a two-digit year. Read by the date doors alone.
+     *
+     * @param options the options
+     * @return the changed column
+     */
+    public Column withDateOptions(DateOptions options) {
+        return new Column(ordinal, door, declared, format, tokens, Objects.requireNonNull(options, "options"), months);
+    }
+
+    /**
+     * This column with the date forms it also accepts and the month names it reads.
+     *
+     * @param options the options
+     * @param months the month names
+     * @return the changed column
+     */
+    public Column withDateOptions(DateOptions options, MonthNames months) {
+        return new Column(
+                ordinal,
+                door,
+                declared,
+                format,
+                tokens,
+                Objects.requireNonNull(options, "options"),
+                Objects.requireNonNull(months, "months"));
+    }
+
+    /**
+     * The date forms this column also accepts.
+     *
+     * @return the options, or {@code null} for none
+     */
+    public DateOptions dateOptions() {
+        return dateOptions;
+    }
+
+    /**
+     * The month names this column reads.
+     *
+     * @return the names, or {@code null} for none
+     */
+    public MonthNames months() {
+        return months;
     }
 
     /** What the door declares beside itself, as the core numbers it; {@code 0} for none. */
@@ -439,18 +533,24 @@ public final class Column {
                 && ordinal == that.ordinal
                 && door == that.door
                 && declared == that.declared
-                && format.equals(that.format);
+                && format.equals(that.format)
+                && Objects.equals(tokens, that.tokens)
+                && Objects.equals(dateOptions, that.dateOptions)
+                && Objects.equals(months, that.months);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(ordinal, door, declared, format);
+        return Objects.hash(ordinal, door, declared, format, tokens, dateOptions, months);
     }
 
     @Override
     public String toString() {
         return "Column[ordinal=" + ordinal + ", door=" + door
                 + (declared == 0 ? "" : ", declared=" + declared)
-                + (format.equals(NumFormat.INVARIANT) ? "" : ", format=" + format) + "]";
+                + (format.equals(NumFormat.INVARIANT) ? "" : ", format=" + format)
+                + (tokens == null ? "" : ", tokens=" + tokens)
+                + (dateOptions == null ? "" : ", dateOptions=" + dateOptions)
+                + (months == null ? "" : ", months=" + months) + "]";
     }
 }

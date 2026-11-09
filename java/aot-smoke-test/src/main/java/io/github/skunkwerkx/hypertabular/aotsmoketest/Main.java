@@ -11,9 +11,14 @@ import io.github.skunkwerkx.hypertabular.Batch;
 import io.github.skunkwerkx.hypertabular.Column;
 import io.github.skunkwerkx.hypertabular.DelimitedReader;
 import io.github.skunkwerkx.hypertabular.Dialect;
+import io.github.skunkwerkx.hypertabular.Door;
+import io.github.skunkwerkx.hypertabular.Encoding;
 import io.github.skunkwerkx.hypertabular.Header;
+import io.github.skunkwerkx.hypertabular.Problem;
+import io.github.skunkwerkx.hypertabular.Range;
 import io.github.skunkwerkx.hypertabular.Sheet;
 import io.github.skunkwerkx.hypertabular.SheetOptions;
+import io.github.skunkwerkx.hypertabular.Suggestion;
 import io.github.skunkwerkx.hypertabular.Tabular;
 import io.github.skunkwerkx.hypertabular.TabularException;
 import io.github.skunkwerkx.hypertabular.TabularFailure;
@@ -74,7 +79,7 @@ public final class Main {
     }
 
     /**
-     * Reads one row through all twenty-two doors, one file header-first, one broken file and one workbook, prints every answer,
+     * Reads one row through all twenty-two doors, one file header-first, one broken file, one workbook and the 1.1 reader's declarations, prints every answer,
      * and exits non-zero if any of them was wrong.
      *
      * @param args ignored
@@ -284,6 +289,33 @@ public final class Main {
             expect("not a workbook", e.failure() == TabularFailure.NOT_A_ZIP);
         }
 
+        // The entry points only the 1.1 reader's declarations cross: a decoded encoding, a batch's
+        // faults, a suggestion, a range, and a sheet read through it.
+        try (DelimitedReader reader = DelimitedReader.of(
+                new byte[] {'n', '\n', (byte) 0xE9, '\n'},
+                Dialect.CSV.withEncoding(Encoding.LATIN_1),
+                List.of(Column.text(0), Column.i32(0)))) {
+            Batch batch = reader.read();
+            expect("transcode", "\u00e9".equals(batch.string(0, 0)));
+            Problem problem = batch.faults().iterator().next();
+            expect("faults", problem.reason() == CastFailure.MALFORMED && problem.line() == 2);
+        }
+        Suggestion found = DelimitedReader.suggest("a\n1\n".getBytes(StandardCharsets.UTF_8), Dialect.CSV);
+        expect(
+                "suggest",
+                found.plan().get(0).door() == Door.BOOL && found.report().get(0).matched() == 1);
+        expect("range", Range.parse("B4:E12").equals(new Range(4, 2, 12, 5)));
+        try (InputStream smoke = Main.class.getResourceAsStream("/basic.xlsx")) {
+            byte[] bytes = Objects.requireNonNull(smoke, "basic.xlsx").readAllBytes();
+            try (Workbook book = Workbook.of(bytes);
+                    Sheet sheet =
+                            book.sheet(0, SheetOptions.DEFAULT.withHeader(false).withRange(Range.parse("A1:B2")))) {
+                expect("sheet with a range", !sheet.suggest().plan().isEmpty());
+            }
+        } catch (IOException e) {
+            expect("basic.xlsx: " + e, false);
+        }
+
         System.out.println(failures == 0 ? "smoke test passed." : "smoke test FAILED (" + failures + ").");
         System.exit(failures == 0 ? 0 : 1);
     }
@@ -302,7 +334,7 @@ public final class Main {
         long natives = Arrays.stream(core.getDeclaredMethods())
                 .filter(m -> Modifier.isNative(m.getModifiers()))
                 .count();
-        require(natives == (ffm ? 0 : 15), expected + " expected, but Native declares " + natives + " natives");
+        require(natives == (ffm ? 0 : 23), expected + " expected, but Native declares " + natives + " natives");
         String major = "n/a (image)";
         if (System.getProperty("org.graalvm.nativeimage.imagecode") == null) {
             try (InputStream in = core.getResourceAsStream("Native.class")) {

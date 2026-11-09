@@ -571,7 +571,619 @@ pub fn corpus_packages() -> Vec<(&'static str, Vec<u8>)> {
             "broken.xlsx",
             xlsx(&[("Data", broken)], SHARED, false, true),
         ),
+        ("ranges.xlsx", ranges_xlsx()),
+        ("ranges.ods", ranges_ods()),
+        ("ranges.numbers", ranges_numbers()),
+        ("uncached.xlsx", uncached_xlsx()),
+        ("uncached.ods", uncached_ods()),
+        ("dates.xlsx", dates_xlsx()),
+        ("dates.ods", dates_ods()),
+        ("dates.numbers", dates_numbers()),
+        ("suggest.xlsx", suggest_xlsx()),
+        ("suggest.ods", suggest_ods()),
+        ("suggest.numbers", suggest_numbers()),
+        ("grouping.xlsx", grouping_xlsx()),
+        ("grouping.ods", grouping_ods()),
+        ("grouping.numbers", grouping_numbers()),
     ]
+}
+
+/// The table the date fixtures hold, in text a declared field order has to decide, in each format's
+/// own spelling, stored so that their bytes owe nothing to a deflate:
+///
+/// ```text
+///      A           B                    C
+///  1   day         stamp                named
+///  2   01/02/2026  01/02/2026 10:30:00  7-Okt-2026
+///  3   13/02/2026  13/02/2026 10:30:00  Okt-07-2026
+///  4   02/13/2026  02/13/2026 10:30:00  7-Foo-2026
+///  5   2025-12-09, stored in all three, which has no field order to declare
+/// ```
+const DATE_ROWS: [[&str; 3]; 4] = [
+    ["day", "stamp", "named"],
+    ["01/02/2026", "01/02/2026 10:30:00", "7-Okt-2026"],
+    ["13/02/2026", "13/02/2026 10:30:00", "Okt-07-2026"],
+    ["02/13/2026", "02/13/2026 10:30:00", "7-Foo-2026"],
+];
+
+/// [`DATE_ROWS`] as XLSX, a serial under a date format in the last row.
+pub fn dates_xlsx() -> Vec<u8> {
+    let mut data = String::new();
+    for (index, cells) in DATE_ROWS.iter().enumerate() {
+        data.push_str(&format!("<row r=\"{}\">", index + 1));
+        for cell in cells {
+            data.push_str(&format!("<c t=\"str\"><v>{cell}</v></c>"));
+        }
+        data.push_str("</row>");
+    }
+    data.push_str("<row r=\"5\"><c s=\"1\"><v>46000</v></c><c s=\"1\"><v>46000</v></c><c s=\"1\"><v>46000</v></c></row>");
+    xlsx(&[("Data", &data)], "", false, false)
+}
+
+/// [`DATE_ROWS`] as ODS, a date value in the last row.
+pub fn dates_ods() -> Vec<u8> {
+    let mut rows = String::new();
+    for cells in DATE_ROWS {
+        rows.push_str("<table:table-row>");
+        for cell in cells {
+            rows.push_str(&format!(
+                "<table:table-cell office:value-type=\"string\"><text:p>{cell}</text:p></table:table-cell>"
+            ));
+        }
+        rows.push_str("</table:table-row>");
+    }
+    rows.push_str("<table:table-row><table:table-cell table:number-columns-repeated=\"3\" office:value-type=\"date\" office:date-value=\"2025-12-09\"/></table:table-row>");
+    ods(
+        &format!("<table:table table:name=\"Data\">{rows}</table:table>"),
+        false,
+    )
+}
+
+/// [`DATE_ROWS`] as Numbers, a date cell in the last row.
+pub fn dates_numbers() -> Vec<u8> {
+    // 2025-12-09T00:00:00Z, in seconds since 2001-01-01.
+    let day = 786_931_200.0;
+    let mut rows: Vec<Vec<NCell>> = DATE_ROWS
+        .iter()
+        .map(|cells| {
+            cells
+                .iter()
+                .map(|cell| NCell::Text((*cell).to_string()))
+                .collect()
+        })
+        .collect();
+    rows.push(vec![NCell::Date(day, false); 3]);
+    numbers(
+        &[NSheet {
+            name: "Data".to_string(),
+            hidden: false,
+            tables: vec![NTable {
+                name: "Table 1".to_string(),
+                header_rows: 0,
+                rows,
+            }],
+        }],
+        &NumbersShape {
+            deflate: false,
+            ..NumbersShape::default()
+        },
+    )
+}
+
+/// A cell of the table the suggester's fixtures hold: what the format stores it as.
+#[derive(Clone, Copy)]
+enum Stored {
+    Number(f64),
+    Text(&'static str),
+    Bool(bool),
+}
+
+/// The table the suggester's fixtures hold, in each format's own spelling, stored so that their
+/// bytes owe nothing to a deflate. A number here is a typed one and a quoted cell a text one, so
+/// `A` and `B` look alike through the text door and aren't alike at all:
+///
+/// ```text
+///      A       B         C        D        E       F           G
+///  1   native  text      mixed    whole    decimal big         flag
+///  2   1.234   "1.234"   1.5      1        1.25    3000000000  TRUE
+///  3   2.345   "2.345"   "1.234"  2        "2,5"   2           FALSE
+///  4   12.345  "12.345"  2        3000000  2       5           TRUE
+/// ```
+const SUGGEST_ROWS: [[Stored; 7]; 3] = {
+    use Stored::{Bool, Number, Text};
+    [
+        [
+            Number(1.234),
+            Text("1.234"),
+            Number(1.5),
+            Number(1.0),
+            Number(1.25),
+            Number(3_000_000_000.0),
+            Bool(true),
+        ],
+        [
+            Number(2.345),
+            Text("2.345"),
+            Text("1.234"),
+            Number(2.0),
+            Text("2,5"),
+            Number(2.0),
+            Bool(false),
+        ],
+        [
+            Number(12.345),
+            Text("12.345"),
+            Number(2.0),
+            Number(3_000_000.0),
+            Number(2.0),
+            Number(5.0),
+            Bool(true),
+        ],
+    ]
+};
+
+/// `SUGGEST_ROWS`'s header row.
+const SUGGEST_HEADER: [&str; 7] = ["native", "text", "mixed", "whole", "decimal", "big", "flag"];
+
+/// [`SUGGEST_ROWS`] as XLSX.
+pub fn suggest_xlsx() -> Vec<u8> {
+    stored_xlsx(&SUGGEST_HEADER, &SUGGEST_ROWS)
+}
+
+/// [`SUGGEST_ROWS`] as ODS.
+pub fn suggest_ods() -> Vec<u8> {
+    stored_ods(&SUGGEST_HEADER, &SUGGEST_ROWS)
+}
+
+/// [`SUGGEST_ROWS`] as Numbers.
+pub fn suggest_numbers() -> Vec<u8> {
+    stored_numbers(&SUGGEST_HEADER, &SUGGEST_ROWS)
+}
+
+/// The table the grouping fixtures hold, in each format's own spelling, stored so that their bytes
+/// owe nothing to a deflate. Column `C` holds a shape of each policy, so a plan can read the same
+/// cells both ways, and a typed number is the same under either:
+///
+/// ```text
+///      A           B           C
+///  1   indian      western     both
+///  2   "1,23,456"  "1,234,567" "1,23,456"
+///  3   "12,34,567" "1,234"     "1,234,567"
+///  4   1234        1234        1234
+/// ```
+const GROUPING_ROWS: [[Stored; 3]; 3] = {
+    use Stored::{Number, Text};
+    [
+        [Text("1,23,456"), Text("1,234,567"), Text("1,23,456")],
+        [Text("12,34,567"), Text("1,234"), Text("1,234,567")],
+        [Number(1234.0), Number(1234.0), Number(1234.0)],
+    ]
+};
+
+/// `GROUPING_ROWS`'s header row.
+const GROUPING_HEADER: [&str; 3] = ["indian", "western", "both"];
+
+/// [`GROUPING_ROWS`] as XLSX.
+pub fn grouping_xlsx() -> Vec<u8> {
+    stored_xlsx(&GROUPING_HEADER, &GROUPING_ROWS)
+}
+
+/// [`GROUPING_ROWS`] as ODS.
+pub fn grouping_ods() -> Vec<u8> {
+    stored_ods(&GROUPING_HEADER, &GROUPING_ROWS)
+}
+
+/// [`GROUPING_ROWS`] as Numbers.
+pub fn grouping_numbers() -> Vec<u8> {
+    stored_numbers(&GROUPING_HEADER, &GROUPING_ROWS)
+}
+
+/// A table of [`Stored`] cells as XLSX, with its header row.
+fn stored_xlsx<const N: usize>(header: &[&str; N], rows: &[[Stored; N]]) -> Vec<u8> {
+    let mut data = String::from("<row r=\"1\">");
+    for name in header {
+        data.push_str(&format!("<c t=\"str\"><v>{name}</v></c>"));
+    }
+    data.push_str("</row>");
+    for (index, cells) in rows.iter().enumerate() {
+        data.push_str(&format!("<row r=\"{}\">", index + 2));
+        for cell in cells {
+            data.push_str(&match cell {
+                Stored::Number(value) => format!("<c><v>{value}</v></c>"),
+                Stored::Text(text) => format!("<c t=\"str\"><v>{text}</v></c>"),
+                Stored::Bool(value) => format!("<c t=\"b\"><v>{}</v></c>", u8::from(*value)),
+            });
+        }
+        data.push_str("</row>");
+    }
+    xlsx(&[("Data", &data)], "", false, false)
+}
+
+/// A table of [`Stored`] cells as ODS, with its header row.
+fn stored_ods<const N: usize>(header: &[&str; N], stored: &[[Stored; N]]) -> Vec<u8> {
+    let text = |cell: &str| {
+        format!(
+            "<table:table-cell office:value-type=\"string\"><text:p>{cell}</text:p></table:table-cell>"
+        )
+    };
+    let mut rows = String::from("<table:table-row>");
+    for name in header {
+        rows.push_str(&text(name));
+    }
+    rows.push_str("</table:table-row>");
+    for cells in stored {
+        rows.push_str("<table:table-row>");
+        for cell in cells {
+            rows.push_str(&match cell {
+                Stored::Number(value) => format!(
+                    "<table:table-cell office:value-type=\"float\" office:value=\"{value}\"/>"
+                ),
+                Stored::Text(cell) => text(cell),
+                Stored::Bool(value) => format!(
+                    "<table:table-cell office:value-type=\"boolean\" office:boolean-value=\"{value}\"/>"
+                ),
+            });
+        }
+        rows.push_str("</table:table-row>");
+    }
+    ods(
+        &format!("<table:table table:name=\"Data\">{rows}</table:table>"),
+        false,
+    )
+}
+
+/// A table of [`Stored`] cells as Numbers, with its header row.
+fn stored_numbers<const N: usize>(header: &[&str; N], stored: &[[Stored; N]]) -> Vec<u8> {
+    let mut rows: Vec<Vec<NCell>> = vec![
+        header
+            .iter()
+            .map(|name| NCell::Text((*name).to_string()))
+            .collect(),
+    ];
+    for cells in stored {
+        rows.push(
+            cells
+                .iter()
+                .map(|cell| match cell {
+                    Stored::Number(value) => NCell::Number(*value),
+                    Stored::Text(text) => NCell::Text((*text).to_string()),
+                    Stored::Bool(value) => NCell::Bool(*value),
+                })
+                .collect(),
+        );
+    }
+    numbers(
+        &[NSheet {
+            name: "Data".to_string(),
+            hidden: false,
+            tables: vec![NTable {
+                name: "Table 1".to_string(),
+                header_rows: 0,
+                rows,
+            }],
+        }],
+        &NumbersShape {
+            deflate: false,
+            ..NumbersShape::default()
+        },
+    )
+}
+
+/// The strings `ranges_xlsx` names by index.
+const RANGE_STRINGS: &str =
+    "<si><t>Quarterly report</t></si><si><t>NA</t></si><si><t>footer</t></si>";
+
+/// The table the range fixtures hold, in each format's own spelling, row and column being
+/// the sheet's own:
+///
+/// ```text
+///      A                 B       C      D     E           F
+///  1   Quarterly report
+///  2
+///  3   as of                     stray
+///  4                     id      name   amt   day
+///  5   left              1       alpha  1.5   2025-12-09  right
+///  6                     2       NA     NA    20260107
+///  7
+///  8                     3       rep    12a   true
+///  9                     3       rep    12a   true
+/// 10                     3       rep    12a   true
+/// 11                     4              -     #N/A
+/// 12                     merged  (merged into B)  7.25
+/// 13
+/// 14   footer
+/// 15   wide              wide    wide   wide
+/// ```
+///
+/// Rows 8 to 10 are one row repeated where the format can say so, and row 15's four cells one
+/// cell repeated, so that a range can cut each. Rows 2 and 13 are gaps in XLSX and Numbers and
+/// empty rows in ODS.
+pub fn ranges_xlsx() -> Vec<u8> {
+    let data = "<row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row>\
+<row r=\"3\"><c r=\"A3\" t=\"inlineStr\"><is><t>as of</t></is></c><c r=\"C3\" t=\"str\"><v>stray</v></c></row>\
+<row r=\"4\"><c r=\"B4\" t=\"str\"><v>id</v></c><c r=\"C4\" t=\"str\"><v>name</v></c><c r=\"D4\" t=\"str\"><v>amt</v></c><c r=\"E4\" t=\"str\"><v>day</v></c></row>\
+<row r=\"5\"><c r=\"A5\" t=\"str\"><v>left</v></c><c r=\"B5\"><v>1</v></c><c r=\"C5\" t=\"str\"><v>alpha</v></c><c r=\"D5\"><v>1.5</v></c><c r=\"E5\" s=\"1\"><v>46000</v></c><c r=\"F5\" t=\"str\"><v>right</v></c></row>\
+<row r=\"6\"><c r=\"B6\"><v>2</v></c><c r=\"C6\" t=\"s\"><v>1</v></c><c r=\"D6\" t=\"s\"><v>1</v></c><c r=\"E6\" t=\"str\"><v>20260107</v></c></row>\
+<row r=\"7\"/>\
+<row r=\"8\"><c r=\"B8\"><v>3</v></c><c r=\"C8\" t=\"str\"><v>rep</v></c><c r=\"D8\" t=\"str\"><v>12a</v></c><c r=\"E8\" t=\"b\"><v>1</v></c></row>\
+<row r=\"9\"><c r=\"B9\"><v>3</v></c><c r=\"C9\" t=\"str\"><v>rep</v></c><c r=\"D9\" t=\"str\"><v>12a</v></c><c r=\"E9\" t=\"b\"><v>1</v></c></row>\
+<row r=\"10\"><c r=\"B10\"><v>3</v></c><c r=\"C10\" t=\"str\"><v>rep</v></c><c r=\"D10\" t=\"str\"><v>12a</v></c><c r=\"E10\" t=\"b\"><v>1</v></c></row>\
+<row r=\"11\"><c r=\"B11\"><v>4</v></c><c r=\"D11\" t=\"str\"><v>-</v></c><c r=\"E11\" t=\"e\"><v>#N/A</v></c></row>\
+<row r=\"12\"><c r=\"B12\" t=\"str\"><v>merged</v></c><c r=\"C12\"/><c r=\"D12\"><v>7.25</v></c></row>\
+<row r=\"14\"><c r=\"A14\" t=\"s\"><v>2</v></c></row>\
+<row r=\"15\"><c r=\"A15\" t=\"str\"><v>wide</v></c><c r=\"B15\" t=\"str\"><v>wide</v></c><c r=\"C15\" t=\"str\"><v>wide</v></c><c r=\"D15\" t=\"str\"><v>wide</v></c></row>";
+    // Fine to row 2, and row 3 names a shared string that is not there.
+    let broken = "<row r=\"1\"><c t=\"s\"><v>0</v></c></row>\
+<row r=\"2\"><c t=\"s\"><v>1</v></c></row>\
+<row r=\"3\"><c t=\"s\"><v>99</v></c></row>\
+<row r=\"4\"><c t=\"s\"><v>2</v></c></row>";
+    xlsx(
+        &[("Data", data), ("Broken", broken)],
+        RANGE_STRINGS,
+        false,
+        true,
+    )
+}
+
+/// [`ranges_xlsx`]'s table as ODS.
+pub fn ranges_ods() -> Vec<u8> {
+    let text = |value: &str| {
+        format!(
+            "<table:table-cell office:value-type=\"string\"><text:p>{value}</text:p></table:table-cell>"
+        )
+    };
+    let number = |value: &str| {
+        format!("<table:table-cell office:value-type=\"float\" office:value=\"{value}\"/>")
+    };
+    let gap = "<table:table-cell/>";
+    let row = |cells: &[&str]| format!("<table:table-row>{}</table:table-row>", cells.concat());
+    let rows = [
+        row(&[&text("Quarterly report")]),
+        "<table:table-row/>".to_string(),
+        row(&[&text("as of"), gap, &text("stray")]),
+        row(&[gap, &text("id"), &text("name"), &text("amt"), &text("day")]),
+        row(&[
+            &text("left"),
+            &number("1"),
+            &text("alpha"),
+            &number("1.5"),
+            "<table:table-cell office:value-type=\"date\" office:date-value=\"2025-12-09\"/>",
+            &text("right"),
+        ]),
+        row(&[gap, &number("2"), &text("NA"), &text("NA"), &text("20260107")]),
+        "<table:table-row><table:table-cell table:number-columns-repeated=\"6\"/></table:table-row>"
+            .to_string(),
+        format!(
+            "<table:table-row table:number-rows-repeated=\"3\">{gap}{}{}{}\
+<table:table-cell office:value-type=\"boolean\" office:boolean-value=\"true\"/></table:table-row>",
+            number("3"),
+            text("rep"),
+            text("12a"),
+        ),
+        row(&[
+            gap,
+            &number("4"),
+            gap,
+            &text("-"),
+            "<table:table-cell office:value-type=\"string\" calcext:value-type=\"error\"><text:p>#N/A</text:p></table:table-cell>",
+        ]),
+        row(&[
+            gap,
+            &text("merged"),
+            "<table:covered-table-cell/>",
+            &number("7.25"),
+        ]),
+        "<table:table-row/>".to_string(),
+        row(&[&text("footer")]),
+        "<table:table-row><table:table-cell table:number-columns-repeated=\"4\" office:value-type=\"string\"><text:p>wide</text:p></table:table-cell></table:table-row>"
+            .to_string(),
+    ]
+    .concat();
+    ods(
+        &format!("<table:table table:name=\"Data\">{rows}</table:table>"),
+        false,
+    )
+}
+
+/// Every spelling of a formula with no result XLSX is known to have, beside the ones that look
+/// like it and have a result. Assembled here, by hand: a writer only spells a few of them, and each
+/// comment says which. Column A says what column B is, except in the rows that hold nothing else.
+pub fn uncached_xlsx() -> Vec<u8> {
+    // Each row's number, whether column A labels it, then column B's attributes and contents, or
+    // `None` for a row with no cell there.
+    let rows: [(u32, bool, &str, Option<&str>); 19] = [
+        // No result.
+        (2, true, "", Some("<f>A1+1</f>")),
+        // openpyxl over the standard library's writer, as in `basic.xlsx`.
+        (3, true, "", Some("<f>A1+1</f><v />")),
+        // openpyxl over lxml's.
+        (4, true, "", Some("<f>A1+1</f><v></v>")),
+        (5, true, "", Some("<f t=\"shared\" si=\"0\"/>")),
+        (6, true, "", Some("<f>A1+1</f><v>  </v>")),
+        // Numbers' export of `=\"\"`, in `numbers-data.xlsx`: a type, and no value of it.
+        (7, true, " t=\"str\"", Some("<f>A1</f>")),
+        (8, true, " t=\"b\"", Some("<f>A1</f><v></v>")),
+        // A cell that is blank, and a row too short to reach column B.
+        (9, true, "", Some("")),
+        (10, true, "", None),
+        // Results.
+        (11, true, "", Some("<f>A1+1</f><v>3</v>")),
+        (12, true, " t=\"e\"", Some("<f>1/0</f><v>#DIV/0!</v>")),
+        (13, true, " t=\"str\"", Some("<f>A1</f><v>hi</v>")),
+        // A result that is empty text: Google's and LibreOffice's export, then Excel's.
+        (14, true, " t=\"str\"", Some("<f>\"\"</f><v></v>")),
+        (15, true, " t=\"str\"", Some("<f>\"\"</f><v/>")),
+        (16, true, " t=\"b\"", Some("<f>TRUE()</f><v>1</v>")),
+        // Rows that hold nothing else, in both of the forms a 1.0 fill tells apart.
+        (17, false, "", Some("<f>A1+1</f>")),
+        (18, false, "", Some("<f>A1+1</f><v></v>")),
+        // A row that holds nothing.
+        (19, false, "", None),
+        // No result, with a cell after it.
+        (20, true, "", Some("<f>A1+1</f>")),
+    ];
+    let mut data = String::from(
+        "<row r=\"1\"><c r=\"A1\" t=\"str\"><v>form</v></c><c r=\"B1\" t=\"str\"><v>value</v></c></row>",
+    );
+    for (number, labelled, attributes, contents) in rows {
+        data.push_str(&format!("<row r=\"{number}\">"));
+        if labelled {
+            data.push_str(&format!("<c r=\"A{number}\" t=\"str\"><v>a label</v></c>"));
+        }
+        if let Some(contents) = contents {
+            data.push_str(&format!("<c r=\"B{number}\"{attributes}>{contents}</c>"));
+        }
+        // A blank, or a result of no text, at a row's end is past its last cell.
+        if matches!(number, 9 | 15 | 20) {
+            data.push_str(&format!("<c r=\"C{number}\"><v>9</v></c>"));
+        }
+        data.push_str("</row>");
+    }
+    xlsx(&[("Data", &data)], "", false, true)
+}
+
+/// Every way ODS can say a formula with no result, beside the ones that look like it and have a
+/// result. Assembled here, by hand: LibreOffice's writer always has a result to give, so of these
+/// it writes only `<text:p/>` for `=\"\"`.
+pub fn uncached_ods() -> Vec<u8> {
+    let formula = "table:formula=\"of:=[.A1]+1\"";
+    let label = "<table:table-cell office:value-type=\"string\"><text:p>a label</text:p></table:table-cell>";
+    let row = |cell: String| format!("<table:table-row>{label}{cell}</table:table-row>");
+    // A blank, or a result of no text, at a row's end is past its last cell.
+    let after = "<table:table-cell office:value-type=\"float\" office:value=\"9\"/>";
+    let rows = [
+        "<table:table-row><table:table-cell office:value-type=\"string\"><text:p>form</text:p></table:table-cell>\
+<table:table-cell office:value-type=\"string\"><text:p>value</text:p></table:table-cell></table:table-row>"
+            .to_string(),
+        // 2 to 4: nothing said.
+        row(format!("<table:table-cell {formula}/>")),
+        row(format!("<table:table-cell {formula}></table:table-cell>")),
+        row(format!("<table:covered-table-cell {formula}/>")),
+        // 5 to 10: a type, and no value of it, whatever is shown.
+        row(format!("<table:table-cell {formula} office:value-type=\"float\"/>")),
+        row(format!(
+            "<table:table-cell {formula} office:value-type=\"float\"><text:p>7</text:p></table:table-cell>"
+        )),
+        row(format!("<table:table-cell {formula} office:value-type=\"boolean\"/>")),
+        row(format!("<table:table-cell {formula} office:value-type=\"date\"/>")),
+        row(format!("<table:table-cell {formula} office:value-type=\"time\"/>")),
+        row(format!("<table:table-cell {formula} office:value-type=\"float\" office:value=\"\"/>")),
+        // 11: over two columns.
+        row(format!("<table:table-cell {formula} table:number-columns-repeated=\"2\"/>")),
+        // 12 and 13: a cell that is blank, and a row too short to reach column B.
+        row(format!("<table:table-cell/>{after}")),
+        format!("<table:table-row>{label}</table:table-row>"),
+        // 14 to 16: results.
+        row(format!(
+            "<table:table-cell {formula} office:value-type=\"float\" office:value=\"3\"><text:p>3</text:p></table:table-cell>"
+        )),
+        row(format!(
+            "<table:table-cell {formula} office:value-type=\"string\" office:string-value=\"\" calcext:value-type=\"error\"><text:p>#DIV/0!</text:p></table:table-cell>"
+        )),
+        row(format!(
+            "<table:table-cell {formula} office:value-type=\"string\" office:string-value=\"hi\"><text:p>hi</text:p></table:table-cell>"
+        )),
+        // 17 to 20: a result that is empty text. The first is LibreOffice's and Google's `=\"\"`.
+        row(format!("<table:table-cell {formula}><text:p/></table:table-cell>{after}")),
+        row(format!("<table:table-cell {formula} office:value-type=\"string\" office:string-value=\"\"/>")),
+        row(format!(
+            "<table:table-cell {formula} office:value-type=\"string\"><text:p/></table:table-cell>"
+        )),
+        row(format!("<table:table-cell {formula} office:value-type=\"string\"/>")),
+        // 21: text, shown and of no declared type.
+        row(format!("<table:table-cell {formula}><text:p>shown</text:p></table:table-cell>")),
+        // 22 to 24: rows that hold nothing else, and a row that holds nothing.
+        format!("<table:table-row><table:table-cell/><table:table-cell {formula}/></table:table-row>"),
+        format!("<table:table-row><table:table-cell/><table:table-cell {formula} office:value-type=\"float\"/></table:table-row>"),
+        "<table:table-row/>".to_string(),
+        // 25 to 27: one row, repeated, a formula in it with its value missing.
+        format!(
+            "<table:table-row table:number-rows-repeated=\"3\">{label}<table:table-cell {formula} office:value-type=\"float\"/></table:table-row>"
+        ),
+    ]
+    .concat();
+    ods(
+        &format!("<table:table table:name=\"Data\">{rows}</table:table>"),
+        true,
+    )
+}
+
+/// [`ranges_xlsx`]'s table as Numbers, its empty rows left out of their tiles and its tiles
+/// seven rows each, so a range cuts across one.
+pub fn ranges_numbers() -> Vec<u8> {
+    use NCell::{Bool, Date, Empty, Error, Merged, Number, Text};
+    let text = |value: &str| Text(value.to_string());
+    // 2025-12-09T00:00:00Z, in seconds since 2001-01-01.
+    let day = 786_931_200.0;
+    let repeated = vec![
+        Empty,
+        Number(3.0),
+        text("rep"),
+        text("12a"),
+        Bool(true),
+        Empty,
+    ];
+    let rows = vec![
+        vec![text("Quarterly report"), Empty, Empty, Empty, Empty, Empty],
+        vec![Empty; 6],
+        vec![text("as of"), Empty, text("stray"), Empty, Empty, Empty],
+        vec![
+            Empty,
+            text("id"),
+            text("name"),
+            text("amt"),
+            text("day"),
+            Empty,
+        ],
+        vec![
+            text("left"),
+            Number(1.0),
+            text("alpha"),
+            Number(1.5),
+            Date(day, false),
+            text("right"),
+        ],
+        vec![
+            Empty,
+            Number(2.0),
+            text("NA"),
+            text("NA"),
+            text("20260107"),
+            Empty,
+        ],
+        vec![Empty; 6],
+        repeated.clone(),
+        repeated.clone(),
+        repeated,
+        vec![Empty, Number(4.0), Empty, text("-"), Error, Empty],
+        vec![Empty, text("merged"), Merged, Number(7.25), Empty, Empty],
+        vec![Empty; 6],
+        vec![text("footer"), Empty, Empty, Empty, Empty, Empty],
+        vec![
+            text("wide"),
+            text("wide"),
+            text("wide"),
+            text("wide"),
+            Empty,
+            Empty,
+        ],
+    ];
+    numbers(
+        &[NSheet {
+            name: "Data".to_string(),
+            hidden: false,
+            tables: vec![NTable {
+                name: "Table 1".to_string(),
+                header_rows: 0,
+                rows,
+            }],
+        }],
+        &NumbersShape {
+            tile_size: 7,
+            sparse: true,
+            ..NumbersShape::default()
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------------------

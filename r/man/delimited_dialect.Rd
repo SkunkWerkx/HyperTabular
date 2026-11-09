@@ -8,7 +8,13 @@ delimited_dialect(
   separator = ",",
   quoting = TRUE,
   has_header = TRUE,
-  skip_blank_lines = TRUE
+  skip_blank_lines = TRUE,
+  skip = 0,
+  header_row = 0,
+  fill = FALSE,
+  long_rows = "reject",
+  na = character(),
+  encoding = "utf-8"
 )
 }
 \arguments{
@@ -16,10 +22,33 @@ delimited_dialect(
 
 \item{quoting}{Whether \verb{"} quotes cells.}
 
-\item{has_header}{Whether the first record is a header: read when the reader opens, never
-delivered as a row.}
+\item{has_header}{Whether the first record read is a header: read when the reader opens,
+never delivered as a row.}
 
 \item{skip_blank_lines}{Whether a completely empty line is skipped.}
+
+\item{skip}{Physical lines to pass over after a byte-order mark, before anything is read of
+them, so a quote in one means nothing.}
+
+\item{header_row}{Records to read and discard after those, ahead of the header if there is
+one. A blank line the dialect skips isn't a record.}
+
+\item{fill}{What a record with fewer cells than the width is: \code{FALSE}, a
+\code{"column_count"} failure; \code{TRUE}, a row whose missing cells are \code{empty} verdicts at origin
+\code{"padded"}.}
+
+\item{long_rows}{What a record with more cells than the width is: \code{"reject"}, a
+\code{"column_count"} failure; \code{"truncate"}, a row cut to the width; \code{"report"}, a row cut to
+the width that \code{\link[=problems]{problems()}} lists, with the record's own width.}
+
+\item{na}{The cells every column reads as missing, unless it declares its own: an exact,
+unquoted match of the cell's bytes is an \code{empty} verdict at origin \code{"token"}.
+\code{character(0)} declares none.}
+
+\item{encoding}{What the input's bytes are: \code{"utf-8"}, read in place, or
+\code{"windows-1252"}, \code{"latin-1"} or \code{"utf-16le"}, decoded to UTF-8 ahead of the read. Never
+sniffed. A unit the encoding has no character for ends the read in an \code{"encoding"}
+failure, after every row before it.}
 }
 \value{
 A \code{hypertabular_dialect}.
@@ -27,13 +56,16 @@ A \code{hypertabular_dialect}.
 \description{
 How delimited text is cut into cells, declared rather than sniffed: the separator, whether
 \verb{"} quotes cells (RFC 4180, \code{""} for a literal quote), whether the first record is a
-header, and whether a completely empty line is skipped rather than read as a row of one
-empty cell. Rows end at \verb{\\n}, \verb{\\r\\n} or \verb{\\r}; a UTF-8 byte-order mark at the start is
-skipped. The first record fixes the number of cells every later one must have.
+header, whether a completely empty line is skipped rather than read as a row of one empty
+cell, what comes before the header, what a record of another width is, what stands for
+no value, and what encoding the bytes are in. Rows end at \verb{\\n}, \verb{\\r\\n} or \verb{\\r}; a UTF-8
+byte-order mark at the start is skipped. The header, or else the first record, fixes the
+width every later record is held to.
 }
 \examples{
 delimited_dialect()
 delimited_dialect("\t", has_header = FALSE)
+delimited_dialect(skip = 2, fill = TRUE, na = c("NA", "-"), encoding = "windows-1252")
 }
 \seealso{
 Other reads:
@@ -41,6 +73,7 @@ Other reads:
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_batch}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}},
 \code{\link[=workbook]{workbook()}}
 }

@@ -4,9 +4,10 @@ import HyperTabular
 // Every native entry point the binding declares, crossed through the public API, with the
 // answers checked: the version probe, the header, the fill through all twenty-two doors
 // (from a stream read through a buffer too small for the record), the unescape behind a
-// raw read, a structural failure, and every workbook entry point. HyperCast's own door is asked the same question
-// once, so both linked-in cores are called. Exits non-zero on the first thing that is
-// wrong, so the build-and-run is the test.
+// raw read, a structural failure, every workbook entry point, and what a read declares: its
+// encoding through the transcoder, the faults walk, a suggestion and a parsed sheet range.
+// HyperCast's own door is asked the same question once, so both linked-in cores are called.
+// Exits non-zero on the first thing that is wrong, so the build-and-run is the test.
 
 func check(_ condition: Bool, _ what: String) {
     guard condition else {
@@ -134,6 +135,37 @@ do {
     } catch let error as TabularError {
         check(error.kind == .notAZip, "not a workbook, got \(error)")
     }
+
+    // A messier file: a title line, Windows-1252 and a token, with what went wrong listed.
+    var messy = Dialect.csv
+    messy.skip = 1
+    messy.encoding = .windows1252
+    messy.tokens = ["NA"]
+    let declared = try DelimitedReader(
+        bytes: Array("title\nname,amount\ncaf".utf8) + [0xE9] + Array(",NA\ntea,12x4\n".utf8), dialect: messy,
+        plan: [.text(0), .f64(1)])
+    guard let messyBatch = try declared.read() else {
+        check(false, "a declared read")
+        exit(1)
+    }
+    check(messyBatch.string(0, row: 0) == "caf\u{E9}", "transcoded")
+    check(messyBatch.origin(1, row: 0) == .token, "a token's origin")
+    let problems = Array(messyBatch.faults())
+    check(problems.count == 1 && problems[0].line == 4 && problems[0].sourceColumn == 1, "the faults walk")
+    check(messyBatch.fault(1, row: 1)?.reason == .malformed, "a cell's fault")
+
+    // A plan to look at, from a sample of the text and of a sheet.
+    let found = try DelimitedReader.suggest(bytes: Array("id,day\n1,2026-01-07\n".utf8), dialect: .csv)
+    check(found.report.map(\.status) == [.resolved, .resolved] && found.plan.count == 2, "a suggestion")
+    let suggested = try book.sheet(named: "Data").suggest()
+    check(suggested.report.first?.name == "id", "a sheet's suggestion")
+
+    // A sheet's range, parsed by the core, and the table it leaves.
+    var ranged = SheetOptions()
+    ranged.range = try SheetRange(parsing: "B1:C3")
+    check(ranged.range == (try SheetRange(firstRow: 1, firstColumn: 2, lastRow: 3, lastColumn: 3)), "a parsed range")
+    let part = try book.sheet(named: "Data", options: ranged)
+    check(part.header?.count == 2, "a ranged sheet's header (\(part.header?.count ?? -1))")
 
     print("hypertabular \(version) smoke test passed")
 } catch {

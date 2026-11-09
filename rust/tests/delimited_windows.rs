@@ -42,6 +42,44 @@ fn a_slice_read_in_windows_loses_nothing() {
     }
 }
 
+/// Stray quotes can't hide a row at a seam: each record comes back as written, whether the
+/// windows or the stream's buffer cut it, because a read only restarts at a row boundary.
+#[test]
+fn a_stray_quote_loses_nothing_at_a_seam() {
+    let mut data = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..300 {
+        data.extend_from_slice(format!("{i}\" pipe,\"x\"y\"{i}\n").as_bytes());
+        expected.push((format!("{i}\" pipe"), format!("x\"y\"{i}")));
+    }
+    let plan = [Column::text(0), Column::text(1)];
+    let dialect = Dialect::CSV.with_header(false);
+    let collect = |reader: &mut DelimitedReader<'_>| {
+        let mut out = Vec::new();
+        while let Some(batch) = reader.read().unwrap() {
+            for row in batch {
+                out.push((
+                    row.text_str(0).unwrap().into_owned(),
+                    row.text_str(1).unwrap().into_owned(),
+                ));
+            }
+        }
+        out
+    };
+    for window in [64, 65, 100, 4096, data.len()] {
+        let mut reader = DelimitedReader::from_slice(&data, dialect, &plan).unwrap();
+        reader.limit_window(window);
+        assert_eq!(collect(&mut reader), expected, "window {window}");
+    }
+    for buffer in [1, 5, 64, 4096] {
+        let mut reader = DelimitedReader::options()
+            .buffer_bytes(buffer)
+            .from_reader(std::io::Cursor::new(&data), dialect, &plan)
+            .unwrap();
+        assert_eq!(collect(&mut reader), expected, "buffer {buffer}");
+    }
+}
+
 #[test]
 fn a_record_longer_than_a_window_is_too_long_and_not_a_hang() {
     let data = rows(10);
@@ -234,5 +272,56 @@ mod asynchronous {
             };
             assert_eq!(again, failure);
         }
+    }
+}
+
+#[test]
+fn a_decoded_record_answers_to_the_row_ceiling() {
+    use hypertabular::Encoding;
+    let dialect = Dialect::CSV
+        .with_header(false)
+        .with_encoding(Encoding::Windows1252);
+    let plan = [Column::text(0)];
+    // Three bytes decoded from each one read: what the ceiling counts is what's buffered.
+    let input = [0x80u8; 8];
+    for start in [1, 2, 3, 64] {
+        let mut reader = DelimitedReader::options()
+            .buffer_bytes(start)
+            .from_reader(&input[..], dialect, &plan)
+            .unwrap();
+        reader.limit_ceiling(16);
+        match reader.read().map(|batch| batch.map(|b| b.rows())) {
+            Err(Error::Structure(failure)) => assert_eq!(failure.kind, FailureKind::RowTooLong),
+            other => panic!("{other:?}"),
+        }
+        // One character that doesn't fit at all is the same, and not a hang.
+        let mut reader = DelimitedReader::options()
+            .buffer_bytes(start.min(2))
+            .from_reader(&input[..1], dialect, &plan)
+            .unwrap();
+        reader.limit_ceiling(2);
+        match reader.read().map(|batch| batch.map(|b| b.rows())) {
+            Err(Error::Structure(failure)) => assert_eq!(failure.kind, FailureKind::RowTooLong),
+            other => panic!("{other:?}"),
+        }
+    }
+    // A failure found as the buffer filled is the failure, not a record too long. The source's
+    // first read holds both, and a unit that has no character needs no room to be found.
+    let dialect = dialect.with_encoding(Encoding::Utf16Le);
+    let mut input = Vec::new();
+    for unit in "abcd".encode_utf16() {
+        input.extend_from_slice(&unit.to_le_bytes());
+    }
+    input.extend_from_slice(&[0x00, 0xDC]);
+    let mut reader = DelimitedReader::options()
+        .buffer_bytes(10)
+        .from_reader(&input[..], dialect, &plan)
+        .unwrap();
+    reader.limit_ceiling(4);
+    match reader.read().map(|batch| batch.map(|b| b.rows())) {
+        Err(Error::Structure(failure)) => {
+            assert_eq!((failure.kind, failure.byte), (FailureKind::Encoding, 8));
+        }
+        other => panic!("{other:?}"),
     }
 }

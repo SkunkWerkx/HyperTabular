@@ -23,8 +23,10 @@ import java.util.RandomAccess;
  * }
  *
  * <p>A name is matched exactly: case-sensitive and untrimmed, as the Rust core's
- * {@code Header::ordinal} matches it. When two columns share a name, the first is the one
- * found.
+ * {@code Header::ordinal} matches it. {@link #ordinal(String)} will not pick between two columns
+ * that share a name, and says so with an {@link AmbiguousColumnException}; a
+ * {@code Column.i32(position)} says which. {@link #findOrdinal(String)} and {@link #indexOf} keep
+ * the first and say nothing of the other.
  *
  * <p>The names are decoded from UTF-8 once, when the header is read (bytes that are not UTF-8
  * are replaced, as {@link String#String(byte[], java.nio.charset.Charset)} replaces them), and
@@ -116,16 +118,22 @@ public final class Header extends AbstractList<String> implements RandomAccess {
     }
 
     /**
-     * The ordinal of the first column named exactly {@code name}.
+     * The ordinal of the one column named exactly {@code name}.
      *
      * @param name the column's name
      * @return its ordinal
      * @throws NoSuchElementException if no column has that name; the message names it
+     * @throws AmbiguousColumnException if two columns have it; the message names both
      */
     public int ordinal(String name) {
         int found = indexOf(Objects.requireNonNull(name, "name"));
         if (found < 0) {
             throw missing(name);
+        }
+        for (int index = found + 1; index < names.length; index++) {
+            if (names[index].equals(name)) {
+                throw new AmbiguousColumnException(name, found, index);
+            }
         }
         return found;
     }
@@ -142,17 +150,23 @@ public final class Header extends AbstractList<String> implements RandomAccess {
     }
 
     /**
-     * The ordinal of the first column whose name is exactly the bytes {@code utf8Name} — the
+     * The ordinal of the one column whose name is exactly the bytes {@code utf8Name} — the
      * Rust core's {@code Header::ordinal}, byte for byte.
      *
      * @param utf8Name the column's name, as UTF-8
      * @return its ordinal
      * @throws NoSuchElementException if no column has that name; the message names it
+     * @throws AmbiguousColumnException if two columns have it; the message names both
      */
     public int ordinal(MemorySegment utf8Name) {
-        int found = indexOf(utf8Name);
+        int found = indexOf(utf8Name, 0);
         if (found < 0) {
             throw missing(new String(utf8Name.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8));
+        }
+        int second = indexOf(utf8Name, found + 1);
+        if (second >= 0) {
+            throw new AmbiguousColumnException(
+                    new String(utf8Name.toArray(ValueLayout.JAVA_BYTE), StandardCharsets.UTF_8), found, second);
         }
         return found;
     }
@@ -165,7 +179,7 @@ public final class Header extends AbstractList<String> implements RandomAccess {
      * @return its ordinal, or empty if no column has that name
      */
     public OptionalInt findOrdinal(MemorySegment utf8Name) {
-        int found = indexOf(utf8Name);
+        int found = indexOf(utf8Name, 0);
         return found < 0 ? OptionalInt.empty() : OptionalInt.of(found);
     }
 
@@ -175,6 +189,7 @@ public final class Header extends AbstractList<String> implements RandomAccess {
      * @param utf8Name the column's name, as UTF-8
      * @return its ordinal
      * @throws NoSuchElementException if no column has that name; the message names it
+     * @throws AmbiguousColumnException if two columns have it; the message names both
      */
     public int ordinal(byte[] utf8Name) {
         return ordinal(MemorySegment.ofArray(Objects.requireNonNull(utf8Name, "utf8Name")));
@@ -207,11 +222,11 @@ public final class Header extends AbstractList<String> implements RandomAccess {
         return -1;
     }
 
-    private int indexOf(MemorySegment utf8Name) {
+    private int indexOf(MemorySegment utf8Name, int from) {
         Objects.requireNonNull(utf8Name, "utf8Name");
         MemorySegment all = MemorySegment.ofArray(utf8);
-        int start = 0;
-        for (int index = 0; index < ends.length; index++) {
+        int start = from == 0 ? 0 : ends[from - 1];
+        for (int index = from; index < ends.length; index++) {
             int end = ends[index];
             if (end - start == utf8Name.byteSize()
                     && all.asSlice(start, end - start).mismatch(utf8Name) == -1) {

@@ -2,12 +2,19 @@
 % Please edit documentation in R/workbook.R
 \name{workbook}
 \alias{workbook}
+\alias{close.hypertabular_workbook}
 \title{Workbooks}
 \usage{
 workbook(source)
+
+\method{close}{hypertabular_workbook}(con, ...)
 }
 \arguments{
 \item{source}{The workbook: a file path or a raw vector.}
+
+\item{con}{A \code{hypertabular_workbook}.}
+
+\item{...}{Ignored.}
 }
 \value{
 A \code{hypertabular_workbook}: a list of \code{format} (\code{"xlsx"}, \code{"ods"} or \code{"numbers"}),
@@ -23,6 +30,10 @@ in), lists its sheets and loads its shared strings and styles: what \code{\link[
 a name. Its sheets can be read at once, each with a reader of its own.
 }
 \details{
+\code{close()} lets go of the workbook's native memory now rather than at the next garbage
+collection: no sheet can be opened from it after, and the sheets already open read on, each
+holding what it needs until it is closed itself. It is safe to call again.
+
 A workbook that cannot be read (not a zip, encrypted, a part missing or broken) is not an
 R error: \code{workbook()} returns it with its \code{failure} set (a \link{hypertabular_failure}) and no
 sheets, and \code{\link[=read_sheet]{read_sheet()}} returns its failure as the table's.
@@ -32,6 +43,7 @@ path <- system.file("extdata", "basic.xlsx", package = "hypertabular")
 book <- workbook(path)
 book
 read_sheet(book, "Data", list(id = col_i32("id"), amount = col_decimal("amount")))
+close(book)
 workbook(charToRaw("not a workbook"))$failure
 }
 \seealso{
@@ -41,6 +53,7 @@ Other reads:
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_batch}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}}
 }
 \concept{reads}

@@ -34,15 +34,16 @@ it with it, as their \code{failure}; \code{\link[=workbook]{workbook()}} returns
 with its \code{failure} set. A cell that does not cast is never a failure: it is a verdict.
 }
 \details{
-\code{kind} is one of \code{"unclosed_quote"}, \code{"column_count"}, \code{"row_too_long"} (delimited
-text), \code{"not_a_zip"}, \code{"container"}, \code{"encrypted"}, \code{"method"}, \code{"missing_part"},
-\code{"xml"}, \code{"deflate"}, \code{"not_a_workbook"}, \code{"shared_string"}, \code{"too_large"} and \code{"iwa"}
-(workbooks). For delimited text \code{record} is the zero-based index of the offending record
-(the header and skipped blank lines counted), \code{line} the 1-based line it starts on and
-\code{byte} its byte offset; for \code{"column_count"}, \code{expected} is the cells of the first record
-and \code{found} this one's. For a workbook \code{record} is the part being read (\code{6} a worksheet,
-\code{10} a Numbers part), \code{line} the sheet row and \code{byte} the offset in the part's inflated
-bytes.
+\code{kind} is one of \code{"unclosed_quote"}, \code{"column_count"}, \code{"row_too_long"} and \code{"encoding"}
+(delimited text: a unit its declared encoding has no character for), and \code{"not_a_zip"},
+\code{"container"}, \code{"encrypted"}, \code{"method"}, \code{"missing_part"}, \code{"xml"}, \code{"deflate"},
+\code{"not_a_workbook"}, \code{"shared_string"}, \code{"too_large"} and \code{"iwa"} (workbooks). For
+delimited text \code{record} is the zero-based index of the offending record (the header and
+skipped blank lines counted), \code{line} the 1-based line it starts on and \code{byte} its byte
+offset in the decoded text (for \code{"encoding"} alone, the unit's offset in the original
+input); for \code{"column_count"}, \code{expected} is the width every record is held to and \code{found}
+this one's. For a workbook \code{record} is the part being read (\code{6} a worksheet, \code{10} a Numbers
+part), \code{line} the sheet row and \code{byte} the offset in the part's inflated bytes.
 }
 \examples{
 t <- read_delimited(charToRaw("a,b\n1,2\n3\n"), list(col_i32("a")))
@@ -55,6 +56,7 @@ Other reads:
 \code{\link[=delimited_reader]{delimited_reader()}},
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_batch}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}},
 \code{\link[=workbook]{workbook()}}
 }
