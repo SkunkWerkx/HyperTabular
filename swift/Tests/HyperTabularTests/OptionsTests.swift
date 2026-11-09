@@ -290,30 +290,40 @@ final class OptionsTests: XCTestCase {
         }
         let plan: [Column] = [.text(0), .i32(1)]
         let text = utf8("name,n\nalice,1\n\"say \"\"hi\"\"\",2x\n")
-        let path = NSTemporaryDirectory() + "hypertabular-outlives-\(UUID().uuidString).csv"
-        XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: Data(text)))
-        defer { try? FileManager.default.removeItem(atPath: path) }
+        // A WASI sandbox has no file system to write a file into: every way to open but a file.
+        #if !os(WASI)
+            let path = NSTemporaryDirectory() + "hypertabular-outlives-\(UUID().uuidString).csv"
+            XCTAssertTrue(FileManager.default.createFile(atPath: path, contents: Data(text)))
+            defer { try? FileManager.default.removeItem(atPath: path) }
+        #endif
         var position = 0
         var latin1 = Dialect.csv
         latin1.encoding = .latin1
-        let opens: [(String, () throws -> DelimitedReader)] = [
-            ("bytes", { try DelimitedReader(bytes: text, dialect: .csv, plan: plan) }),
-            ("file", { try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: plan) }),
-            (
-                "source",
-                {
-                    position = 0
-                    return try DelimitedReader(
-                        reading: { buffer in
-                            let count = min(buffer.count, text.count - position)
-                            buffer.copyBytes(from: text[position..<position + count])
-                            position += count
-                            return count
-                        }, dialect: .csv, plan: plan)
-                }
-            ),
-            ("decoded", { try DelimitedReader(bytes: text, dialect: latin1, plan: plan) }),
-        ]
+        #if os(WASI)
+            let file: [(String, () throws -> DelimitedReader)] = []
+        #else
+            let file: [(String, () throws -> DelimitedReader)] = [
+                ("file", { try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: plan) })
+            ]
+        #endif
+        let opens: [(String, () throws -> DelimitedReader)] =
+            file + [
+                ("bytes", { try DelimitedReader(bytes: text, dialect: .csv, plan: plan) }),
+                (
+                    "source",
+                    {
+                        position = 0
+                        return try DelimitedReader(
+                            reading: { buffer in
+                                let count = min(buffer.count, text.count - position)
+                                buffer.copyBytes(from: text[position..<position + count])
+                                position += count
+                                return count
+                            }, dialect: .csv, plan: plan)
+                    }
+                ),
+                ("decoded", { try DelimitedReader(bytes: text, dialect: latin1, plan: plan) }),
+            ]
         for (name, open) in opens {
             let batch = try kept(open)
             XCTAssertNil(gone, name)

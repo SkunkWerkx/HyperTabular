@@ -14,11 +14,13 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -270,8 +272,12 @@ class NativeTest {
     /** What the header says of each shape's size, held against what this binding lays out, by the header's name for it. */
     @Test
     void everyShapeIsTheSizeTheHeaderSays() throws Exception {
-        String header = Files.readString(
-                CorpusTest.CORPUS_DIRECTORY.resolveSibling("include").resolve("hypertabular.h"));
+        Path path = CorpusTest.CORPUS_DIRECTORY.resolveSibling("include").resolve("hypertabular.h");
+        Assumptions.assumeTrue(
+                Files.exists(path),
+                "include/ isn't in this tree: the Alpine run copies java/ and corpus/ only, and every other leg"
+                        + " holds the sizes to the header.");
+        String header = Files.readString(path);
         Object[][] sizes = {
             {"RawDelimitedOptions", Abi.DELIMITED_OPTIONS_BYTES},
             {"RawDialect", Abi.DIALECT_BYTES},

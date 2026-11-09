@@ -943,8 +943,14 @@ def test_sizes_are_checked():
     with pytest.raises(TypeError):
         DelimitedReader(b"", Dialect.CSV, plan, 1024)  # type: ignore[misc]
     # The core judges the batch before anything is allocated.
+    # On a 64-bit host the request saturates; on a 32-bit one (Pyodide) `sys.maxsize` rows ask less.
+    asks = (
+        "batch_rows asks for 18446744073709551615 bytes"
+        if sys.maxsize > 2**32
+        else r"batch_rows asks for \d+ bytes, past the limit of 4294967296$"
+    )
     for plan in ([Column.i32(0)], [Column.text(0)]):
-        with pytest.raises(ValueError, match="batch_rows asks for 18446744073709551615 bytes"):
+        with pytest.raises(ValueError, match=asks):
             DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=sys.maxsize)
     # A plan of no columns has no arrays, and a cell table no larger than its budget.
     assert [
@@ -990,6 +996,8 @@ def test_the_core_judges_sizes_before_a_stream_is_read():
         DelimitedReader.open("no such file", Dialect.CSV, batch_rows=0)
     with pytest.raises(ValueError, match="^buffer_bytes must be at least 1$"):
         DelimitedReader.open("no such file", Dialect.CSV, buffer_bytes=0)
+    if sys.platform == "emscripten":
+        return  # Pyodide's loop cannot be run from a test
 
     class AsyncUnreadable:
         async def read(self, _size: int) -> bytes:
@@ -1004,6 +1012,7 @@ def test_the_core_judges_sizes_before_a_stream_is_read():
         asyncio.run(opened())
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
 def test_the_core_judges_sizes_for_an_asyncio_read():
     """A stream is opened asynchronously, and the core is asked the same way, before it's read."""
 

@@ -67,10 +67,13 @@ final class GroupingTests: XCTestCase {
     }
 
     func testAStalePolicyIsRefusedAtEveryDelimitedDoor() async throws {
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("hypertabular-grouping-\(UUID().uuidString).csv").path
-        defer { try? FileManager.default.removeItem(atPath: path) }
-        try Data(Self.bytes).write(to: URL(fileURLWithPath: path))
+        // A WASI sandbox has no file system to write a file into: every door but the path's.
+        #if !os(WASI)
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("hypertabular-grouping-\(UUID().uuidString).csv").path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            try Data(Self.bytes).write(to: URL(fileURLWithPath: path))
+        #endif
         let bytes = Self.bytes
         for (flags, format, refused) in Support.policies {
             let plan: [Column] = [.i32(0, format: format)]
@@ -85,9 +88,11 @@ final class GroupingTests: XCTestCase {
             holds("stream, \(flags)", refused) {
                 _ = try DelimitedReader(reading: chunks(bytes), dialect: .csv, plan: plan)
             }
-            holds("path, \(flags)", refused) {
-                _ = try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: plan)
-            }
+            #if !os(WASI)
+                holds("path, \(flags)", refused) {
+                    _ = try DelimitedReader(contentsOfFile: path, dialect: .csv, plan: plan)
+                }
+            #endif
             do {
                 _ = try await DelimitedReader(
                     bytes: CorpusTests.ShortReads(bytes, chunk: 7), dialect: .csv, plan: plan)
@@ -97,12 +102,17 @@ final class GroupingTests: XCTestCase {
                 XCTAssertEqual(error as? PlanError, .refused(column: 0), "async, \(flags)")
             }
 
-            let unbound: [DelimitedReader] = [
-                try DelimitedReader(bytes: bytes, dialect: .csv),
-                try DelimitedReader(reading: chunks(bytes), dialect: .csv),
-                try DelimitedReader(contentsOfFile: path, dialect: .csv),
-                try await DelimitedReader(bytes: CorpusTests.ShortReads(bytes, chunk: 7), dialect: .csv),
-            ]
+            #if os(WASI)
+                let file: [DelimitedReader] = []
+            #else
+                let file = [try DelimitedReader(contentsOfFile: path, dialect: .csv)]
+            #endif
+            let unbound: [DelimitedReader] =
+                file + [
+                    try DelimitedReader(bytes: bytes, dialect: .csv),
+                    try DelimitedReader(reading: chunks(bytes), dialect: .csv),
+                    try await DelimitedReader(bytes: CorpusTests.ShortReads(bytes, chunk: 7), dialect: .csv),
+                ]
             for reader in unbound {
                 holds("bind, \(flags)", refused) { try reader.bind(plan) }
                 XCTAssertEqual(reader.isBound, !refused, "bind, \(flags)")
@@ -122,10 +132,12 @@ final class GroupingTests: XCTestCase {
             holds("suggest memory, \(flags)", refused) {
                 _ = try DelimitedReader.suggest(bytes: bytes, dialect: .csv, options: SuggestOptions(format: format))
             }
-            holds("suggest path, \(flags)", refused, column: 1) {
-                _ = try DelimitedReader.suggest(
-                    contentsOfFile: path, dialect: .csv, options: SuggestOptions(columnFormats: [1: format]))
-            }
+            #if !os(WASI)
+                holds("suggest path, \(flags)", refused, column: 1) {
+                    _ = try DelimitedReader.suggest(
+                        contentsOfFile: path, dialect: .csv, options: SuggestOptions(columnFormats: [1: format]))
+                }
+            #endif
         }
     }
 

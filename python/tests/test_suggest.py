@@ -9,6 +9,7 @@ it's Rust's own path, and the corpus's cases hold what it shares.
 from __future__ import annotations
 
 import io
+import sys
 import zipfile
 from enum import IntEnum
 from pathlib import Path
@@ -829,7 +830,9 @@ def test_a_suggestion_is_not_refused_for_the_size_of_its_own_batch():
     # At exactly the limit with no plan, and a sample past every batch.
     book = Workbook.open(WORKBOOKS / "basic.xlsx")
     at_the_limit = book.sheet(0, SheetOptions(batch_rows=1 << 29))
-    assert at_the_limit.suggest(SuggestOptions(sample_rows=1 << 40)) == book.sheet(
+    # A count past a 32-bit host's `usize` (Pyodide) is Python's OverflowError, as every count is.
+    past_every_batch = min(1 << 40, sys.maxsize)
+    assert at_the_limit.suggest(SuggestOptions(sample_rows=past_every_batch)) == book.sheet(
         0, SheetOptions()
     ).suggest(SuggestOptions(sample_rows=4096))
 

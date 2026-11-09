@@ -216,8 +216,10 @@ final class NativeTests: XCTestCase {
     /// What the header says of each shape's size, held against the module the header makes, by the
     /// header's name for it.
     func testEveryShapeIsTheSizeTheHeaderSays() throws {
-        let path = try XCTUnwrap(CorpusTests.corpusDirectory).deletingLastPathComponent()
-            .appendingPathComponent("include/hypertabular.h").path
+        guard let corpus = CorpusTests.corpusDirectory else {
+            throw XCTSkip("a WASI sandbox has no view of the source tree, so of the header")
+        }
+        let path = corpus.deletingLastPathComponent().appendingPathComponent("include/hypertabular.h").path
         guard let header = try? String(contentsOfFile: path, encoding: .utf8) else {
             throw XCTSkip("the header is not beside the corpus on this host")
         }

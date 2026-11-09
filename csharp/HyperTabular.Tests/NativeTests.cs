@@ -205,7 +205,10 @@ public sealed unsafe class NativeTests
 	[Fact]
 	void Every_shape_is_the_size_the_header_says()
 	{
-		var header = File.ReadAllText(Path.Combine(CorpusTests._corpusDirectory, "..", "include", "hypertabular.h"));
+		var path = Path.Combine(CorpusTests._corpusDirectory, "..", "include", "hypertabular.h");
+		if (!File.Exists(path))
+			Assert.Skip("include/ isn't in this tree: the Alpine run copies csharp/ and corpus/ only, and every other leg holds the sizes to the header.");
+		var header = File.ReadAllText(path);
 		int Said(string name)
 		{
 			var match = Regex.Match(header, $@"#define HyperTabular{name}_SIZE (\d+)");

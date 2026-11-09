@@ -336,7 +336,8 @@ RSpec.describe "a call back in, and an exception mid-call" do
       main = Thread.current
       writer = finish.call(w, 2)
       Thread.new do
-        Thread.pass until main.status == "sleep"
+        # Asleep isn't enough: the exception has to land in the IO's read, not on the way to it.
+        Thread.pass until main.status == "sleep" && main.backtrace&.any? { |frame| frame.include?("readpartial") }
         main.raise(Interrupt, "in the pipe")
       end
       expect { held.read }.to raise_error(Interrupt, "in the pipe")

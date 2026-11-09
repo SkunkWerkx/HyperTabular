@@ -283,7 +283,8 @@ the stream again. A stream that hands over more than it was asked for, or someth
 `bytes`, has lost what it handed over, so that is final: every later read raises the same error. A
 file the binding opens itself (`DelimitedReader.open`, `DelimitedReader.suggest` and
 `Workbook.open`) is read as CPython reads one: Ctrl-C reaches an open or a read waiting on a FIFO,
-its `KeyboardInterrupt` isn't final, and the next read goes on from where it was. An I/O error from
+its `KeyboardInterrupt` isn't final, and the next read goes on from where it was. Under PyPy a signal
+doesn't cut a blocked open or read short, so there Ctrl-C lands when the writer next writes. An I/O error from
 such a file is final, and every later read raises the same one. A broken record is final
 everywhere. A reader closed while one of its reads awaits the stream, from inside the stream's own
 `read` or from another task, ends that read with `ValueError` saying so.

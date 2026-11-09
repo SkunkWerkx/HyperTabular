@@ -44,6 +44,9 @@ RSpec.describe "a messier file" do
       end
     rescue HyperTabular::TabularError => e
       ended = [e.kind, e.record, e.line, e.byte]
+    ensure
+      # A reader opened on a path holds its file, and Windows won't delete a file held open.
+      held.close if held && source.respond_to?(:call)
     end
     [rows, faults, ended]
   end
@@ -559,7 +562,7 @@ RSpec.describe "a messier file" do
     Tempfile.create(["a", ".csv"]) do |file|
       file.write("a\nx\n")
       file.close
-      batch = reader.open(file.path, csv, [column.i32(0)], notes: false).read
+      batch = reader.open(file.path, csv, [column.i32(0)], notes: false, &:read)
       expect(batch.get(0, 0).detail).to be_nil
     end
     expect { reader.open("/no/such.csv", csv, notes: false) }.to raise_error(Errno::ENOENT)

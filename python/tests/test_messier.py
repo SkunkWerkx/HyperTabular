@@ -10,6 +10,7 @@ import asyncio
 import gc
 import io
 import os
+import sys
 import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -549,6 +550,7 @@ _ENCODED = [
 ]
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide has no threads")
 @pytest.mark.parametrize(("encoding", "codec"), _ENCODED)
 def test_a_stalled_stream_s_finished_rows_reach_the_caller(encoding: Encoding, codec: str) -> None:
     """A stalled stream's finished rows reach the caller."""
@@ -572,6 +574,7 @@ def test_a_stalled_stream_s_finished_rows_reach_the_caller(encoding: Encoding, c
     assert _timed(reader.read, stream.go.set) is None
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide has no threads")
 def test_a_pipe_s_finished_rows_reach_the_caller() -> None:
     """A buffered file object's ``read(n)`` waits for all of ``n``: a pipe is why it's read1 here."""
     made, kept = os.pipe()
@@ -588,6 +591,7 @@ def test_a_pipe_s_finished_rows_reach_the_caller() -> None:
             os.close(kept)
 
 
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide has no threads")
 @pytest.mark.parametrize(("encoding", "codec"), _ENCODED)
 def test_a_stalled_async_stream_s_finished_rows_reach_the_caller(
     encoding: Encoding, codec: str

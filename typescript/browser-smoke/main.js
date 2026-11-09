@@ -44,6 +44,10 @@ function check(ok, context) {
 
 const decoder = new TextDecoder()
 const encoder = new TextEncoder()
+// A corpus case or cell gives bytes that aren't UTF-8 as hex (`input_hex`, `raw_hex`).
+function hex(text) {
+  return Uint8Array.from(text.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16))
+}
 const reasons = { empty: 'empty', malformed: 'malformed', out_of_range: 'outOfRange' }
 const camel = (name) => name.replace(/_(.)/g, (_whole, letter) => letter.toUpperCase())
 
@@ -96,7 +100,9 @@ function checkCell(ctx, entry, verdict, raw, cell) {
   check(offset + length <= raw.length, `${ctx}: span ${offset}+${length} past ${raw.length}`)
   if (cell.fault !== undefined) {
     check(offset === cell.fault[0] && length === cell.fault[1], `${ctx}: span`)
-    check(decoder.decode(raw) === cell.raw, `${ctx}: raw`)
+    if (cell.raw_hex !== undefined)
+      check(same(Array.from(raw), Array.from(hex(cell.raw_hex))), `${ctx}: raw`)
+    else check(decoder.decode(raw) === cell.raw, `${ctx}: raw`)
   }
   if (cell.expect === 'empty') check(offset === 0 && length === 0 && raw.length === 0, ctx)
 }
@@ -152,7 +158,9 @@ try {
   // named exports. The imports are dynamic so that a failure to load lands in `#out` as a
   // FAIL line instead of leaving the page blank.
   const api = await import('@skunkwerkx/hypertabular-wasm32-wasip1')
-  const { NumFormat } = await import('@skunkwerkx/hypercast-wasm32-wasip1')
+  const { DateOptions, DateStyles, MonthNames, NumFormat } = await import(
+    '@skunkwerkx/hypercast-wasm32-wasip1'
+  )
   const { Column, DelimitedReader, Workbook } = api
   log(`loaded: target=${api.__napiBindingTarget}`)
 
@@ -165,7 +173,8 @@ try {
       const declared = NumFormat.declare({
         decimalSep: f.decimal_sep,
         groupSep: f.group_sep,
-        flags: f.flags,
+        flags: f.flags & 0xff,
+        grouping: f.flags & ~0xff,
         currency: f.currency,
       })
       check(declared.ok, `${key}: ${declared.message}`)
@@ -184,10 +193,47 @@ try {
         return Column.dateOrdered(ordinal, entry.order)
       case 'datetime':
         return Column.datetime(ordinal, entry.order)
+      case 'bool':
+      case 'uuid':
+      case 'timestamp':
+      case 'date':
+      case 'time':
+      case 'duration':
+      case 'text':
+        formatOf(entry)
+        return Column[door](ordinal)
       default:
         return Column[door](ordinal, formatOf(entry))
     }
   }
+  const DATE_FLAGS = {
+    compact_date: DateStyles.CompactDate,
+    space_separator: DateStyles.SpaceSeparator,
+    hour_offset: DateStyles.HourOffset,
+  }
+  const planned = (entry) => {
+    let column = columnOf(entry)
+    if (entry.tokens !== undefined) column = column.withTokens(entry.tokens)
+    if (entry.options !== undefined) {
+      const { flags, pivot, months: names } = entry.options
+      let months
+      if (names !== undefined) {
+        const declared = MonthNames.declare(names)
+        check(declared.ok, `months: ${declared.message}`)
+        months = declared.value
+      }
+      const declared = DateOptions.declare({
+        flags: flags.reduce((all, flag) => all | DATE_FLAGS[flag], 0),
+        pivot,
+        months,
+      })
+      check(declared.ok, `date options: ${declared.message}`)
+      column = column.withDateOptions(declared.value)
+    }
+    check(column.valid, JSON.stringify(entry))
+    return column
+  }
+  const ENCODINGS = { 'windows-1252': 'windows1252', 'latin-1': 'latin1', 'utf-16le': 'utf16le' }
   const opened = (ctx, outcome) => {
     check(
       outcome.ok,
@@ -198,18 +244,28 @@ try {
 
   const delimited = parse(delimitedText)
   for (const c of delimited) {
+    const d = c.dialect
     const dialect = {
-      separator: c.dialect.separator,
-      quoting: c.dialect.quoting,
-      hasHeader: c.dialect.has_header,
-      skipBlankLines: c.dialect.skip_blank_lines,
+      separator: d.separator,
+      quoting: d.quoting,
+      hasHeader: d.has_header,
+      skipBlankLines: d.skip_blank_lines,
+      skip: d.skip,
+      headerRow: d.header_row,
+      shortRows: d.short_rows,
+      longRows: d.long_rows,
+      tokens: d.tokens,
     }
-    const bytes = encoder.encode(c.input)
+    if (d.encoding !== undefined) {
+      dialect.encoding = ENCODINGS[d.encoding]
+      check(dialect.encoding !== undefined, `${c.name}: encoding ${d.encoding}`)
+    }
+    const bytes = c.input_hex !== undefined ? hex(c.input_hex) : encoder.encode(c.input)
     for (const batchRows of [1, 4096]) {
       for (const bufferBytes of [1, undefined]) {
         for (const headerFirst of [false, true]) {
           const ctx = `delimited.json ${c.name} (${batchRows} rows, buffer ${bufferBytes}${headerFirst ? ', header first' : ''})`
-          const plan = c.plan.map(columnOf)
+          const plan = c.plan.map(planned)
           const options = { batchRows, bufferBytes }
           const reader = opened(
             ctx,
@@ -245,8 +301,12 @@ try {
         hasHeader: c.options.has_header,
         skipEmptyRows: c.options.skip_empty_rows,
         batchRows,
+        skip: c.options.skip,
+        headerRow: c.options.header_row,
+        tokens: c.options.tokens,
+        range: c.options.range,
       }
-      const sheet = opened(ctx, book.sheet(c.sheet, options, c.plan.map(columnOf)))
+      const sheet = opened(ctx, book.sheet(c.sheet, options, c.plan.map(planned)))
       check(same(sheet.header?.names ?? null, c.header ?? null), `${ctx}: header`)
       replay(ctx, sheet, c.plan, c.rows, c.failure, batchRows, c.numbers)
     }

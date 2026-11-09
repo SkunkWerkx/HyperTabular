@@ -338,7 +338,8 @@ failing_reads <- function(fail) {
 test_that("past a whole sample a connection's error says there is more; inside it, it's raised", {
   path <- tempfile(fileext = ".csv")
   on.exit(unlink(path), add = TRUE)
-  writeLines(c("a", as.character(seq_len(20000))), path)
+  # Bytes, so Windows writes no CR: the 64-byte read below is counted in LF rows.
+  writeBin(charToRaw(paste0(c("a", seq_len(20000)), "\n", collapse = "")), path)
   on.exit(suppressMessages(untrace("readBin", where = asNamespace("hypertabular"))), add = TRUE)
   # The first read, of 64 bytes, holds the header and 23 whole rows, which the first batch
   # delivers; the second read is the one that fails, just past a sample of 23.

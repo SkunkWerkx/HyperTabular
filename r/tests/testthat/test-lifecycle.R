@@ -196,11 +196,14 @@ test_that("garbage collected at every allocation, a read is whole", {
   expect_identical(p, problems(want))
 })
 
+# The child gets this process's libraries from its script, not R_LIBS or a quoted -e: neither the
+# separator nor the quoting is the same on Windows.
 rscript <- function(code) {
-  out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), c("-e", shQuote(code)),
-                                  stdout = TRUE, stderr = TRUE,
-                                  env = paste0("R_LIBS=", paste(.libPaths(), collapse = ":"))))
-  out
+  script <- tempfile(fileext = ".R")
+  on.exit(unlink(script), add = TRUE)
+  writeLines(c(paste0(".libPaths(", deparse1(.libPaths()), ")"), code), script)
+  suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), shQuote(script),
+                           stdout = TRUE, stderr = TRUE))
 }
 
 test_that("both packages load in either order, in fresh processes", {

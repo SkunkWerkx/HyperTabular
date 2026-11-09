@@ -174,6 +174,12 @@ needs_fifo = pytest.mark.skipif(
     not hasattr(os, "mkfifo") or sys.platform == "emscripten",
     reason="no named pipes, or no thread to write one",
 )
+# Under PyPy a signal doesn't cut a blocked open or read short, so Ctrl-C lands only when the writer
+# writes (8.00 s in CI): the binding has no interrupted call to run the handler from.
+cuts_a_blocked_call_short = pytest.mark.skipif(
+    sys.implementation.name == "pypy",
+    reason="PyPy doesn't cut a blocked open or read short on a signal",
+)
 
 
 def _interrupted_within(seconds: float, call: Callable[[], Any]) -> float:
@@ -218,6 +224,7 @@ class _Writer:
 
 
 @needs_fifo
+@cuts_a_blocked_call_short
 def test_ctrl_c_reaches_a_read_of_a_path_waiting_on_its_writer_and_the_read_goes_on(
     tmp_path: Path,
 ) -> None:
@@ -238,6 +245,7 @@ def test_ctrl_c_reaches_a_read_of_a_path_waiting_on_its_writer_and_the_read_goes
 
 
 @needs_fifo
+@cuts_a_blocked_call_short
 def test_ctrl_c_reaches_an_open_waiting_on_a_fifo_s_writer(tmp_path: Path) -> None:
     """Opening a FIFO waits for its writer, and Ctrl-C ends the wait; the next open goes on."""
     fifo = tmp_path / "unwritten.csv"
@@ -253,6 +261,7 @@ def test_ctrl_c_reaches_an_open_waiting_on_a_fifo_s_writer(tmp_path: Path) -> No
 
 
 @needs_fifo
+@cuts_a_blocked_call_short
 @pytest.mark.parametrize(
     "call",
     [

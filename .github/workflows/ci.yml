@@ -835,7 +835,9 @@ jobs:
           dotnet build "$SMOKE_PROJECT" -c Release -f net11.0-ios -r ios-arm64 -p:EnableCodeSigning=false -p:ValidateXcodeVersion=false
           app=$(find "$SMOKE_BIN/net11.0-ios/ios-arm64" -maxdepth 1 -name '*.app')
           nm -g "$app/HyperTabular.AppleSmokeTest" > device-symbols.txt
-          for symbol in hypertabular_version hypertabular_delimited_fill hypertabular_workbook_open hypertabular_workbook_fill; do
+          # The exports the binding calls: a trimmed device app keeps those alone, so a plain fill
+          # the binding no longer calls (it calls the _with ones) isn't there to find.
+          for symbol in hypertabular_version hypertabular_delimited_fill_with hypertabular_workbook_open hypertabular_workbook_fill_with; do
             grep -q " T _$symbol\$" device-symbols.txt \
               || { echo "::error::the iOS device app does not define $symbol; the core was not linked in"; exit 1; }
           done

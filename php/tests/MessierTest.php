@@ -689,7 +689,9 @@ final class MessierTest extends TestCase
      */
     public function testAPipesFinishedRowsComeToTheCaller(): void
     {
-        [$readable, $writable] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        // PHP's socket pair on Windows is emulated over loopback TCP and takes only PF_INET.
+        $family = PHP_OS_FAMILY === 'Windows' ? STREAM_PF_INET : STREAM_PF_UNIX;
+        [$readable, $writable] = stream_socket_pair($family, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
         stream_set_timeout($readable, 3);
         fwrite($writable, "a\n1\n2\n");
         $started = hrtime(true);
