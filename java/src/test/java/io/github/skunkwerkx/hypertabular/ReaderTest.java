@@ -598,10 +598,25 @@ final class ReaderTest {
             assertThrows(IllegalStateException.class, reader::read);
             assertThrows(IllegalStateException.class, reader::read);
 
-            // Exact, case-sensitive and untrimmed; a duplicate resolves to the first.
-            assertEquals(1, header.ordinal("name"));
+            // Exact, case-sensitive and untrimmed.
+            assertEquals(2, header.ordinal("score"));
+            assertEquals(2, header.ordinal(utf8("score")));
+            // A name that appears twice: the strict lookup won't choose, and the optional one says the first.
+            AmbiguousColumnException twice = assertThrows(AmbiguousColumnException.class, () -> header.ordinal("name"));
+            assertEquals("name", twice.name());
+            assertEquals(1, twice.first());
+            assertEquals(3, twice.second());
+            assertEquals(
+                    "The header names two columns \"name\", at positions 1 and 3: say which by position.",
+                    twice.getMessage());
+            assertEquals(
+                    3,
+                    assertThrows(AmbiguousColumnException.class, () -> header.ordinal(utf8("name")))
+                            .second());
+            assertThrows(NoSuchElementException.class, () -> header.ordinal("name"));
             assertEquals(1, header.indexOf("name"));
-            assertEquals(1, header.ordinal(utf8("name")));
+            assertEquals(OptionalInt.of(1), header.findOrdinal("name"));
+            assertEquals(OptionalInt.of(1), header.findOrdinal(utf8("name")));
             assertEquals(OptionalInt.of(2), header.findOrdinal("score"));
             assertEquals(OptionalInt.empty(), header.findOrdinal("Score"));
             assertEquals(OptionalInt.empty(), header.findOrdinal(" score"));
@@ -796,7 +811,7 @@ final class ReaderTest {
     }
 
     @Test
-    void textThatIsNotUtf8IsReplacedAsTheStringIs() {
+    void textThatIsNotUtf8IsMalformedAtTheFirstBadSequence() {
         byte[][] cells = {
             {'a', (byte) 0xFF, 'b'},
             {(byte) 0xC3},
@@ -807,6 +822,7 @@ final class ReaderTest {
             {(byte) 0xF0, (byte) 0x9F, (byte) 0x98},
             {(byte) 0xE0, (byte) 0x80, (byte) 0x80, 'q'},
         };
+        int[][] spans = {{1, 1}, {0, 1}, {1, 2}, {0, 1}, {0, 1}, {0, 1}, {0, 3}, {0, 1}};
         java.io.ByteArrayOutputStream text = new java.io.ByteArrayOutputStream();
         for (byte[] cell : cells) {
             text.writeBytes(cell);
@@ -818,15 +834,14 @@ final class ReaderTest {
             assertEquals(cells.length, batch.rows());
             for (int row = 0; row < batch.rows(); row++) {
                 String label = "cell " + row;
-                String expected = new String(cells[row], StandardCharsets.UTF_8);
-                assertEquals(expected, batch.string(0, row), label);
-                assertEquals(expected, batch.chars(0, row).toString(), label);
-                char[] into = new char[expected.length()];
-                assertEquals(expected.length(), batch.getChars(0, row, into, 0), label);
-                assertEquals(expected, new String(into), label);
-                if (expected.length() > 1) {
-                    assertEquals(-1, batch.getChars(0, row, new char[expected.length() - 1], 0), label);
-                }
+                CellVerdict verdict = batch.verdict(0, row);
+                assertEquals(new CellVerdict(CastFailure.MALFORMED, spans[row][0], spans[row][1]), verdict, label);
+                assertNull(batch.text(0, row), label);
+                assertNull(batch.string(0, row), label);
+                assertNull(batch.chars(0, row), label);
+                assertEquals(0, batch.getChars(0, row, new char[8], 0), label);
+                // The bytes stay readable, and the one place they come back as a string replaces.
+                assertEquals(new String(cells[row], StandardCharsets.UTF_8), batch.rawString(0, row), label);
             }
         }
     }

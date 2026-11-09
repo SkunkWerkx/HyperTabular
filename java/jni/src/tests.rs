@@ -43,7 +43,7 @@ fn camel(snake: &str) -> String {
 
 /// Every export once, by the name the natives are registered under, with its descriptor:
 /// pointers and `usize`s are `J`, `u32`s `I`, and the return the export's own width.
-const EXPORTS: [(&str, &str); 14] = [
+const EXPORTS: [(&str, &str); 23] = [
     ("hypertabular_version", "()I"),
     ("hypertabular_delimited_state_size", "()J"),
     ("hypertabular_delimited_init", "(JJ)I"),
@@ -58,6 +58,15 @@ const EXPORTS: [(&str, &str); 14] = [
     ("hypertabular_workbook_sheet", "(JJJJJIIIJ)I"),
     ("hypertabular_workbook_header", "(JJJJJ)I"),
     ("hypertabular_workbook_fill", "(JJJJJJJJJ)I"),
+    ("hypertabular_delimited_init_with", "(JJ)I"),
+    ("hypertabular_delimited_fill_with", "(JJJIJJJJJJ)I"),
+    ("hypertabular_transcode", "(IJJIJJJ)I"),
+    ("hypertabular_faults", "(JJJJIIJJJJ)I"),
+    ("hypertabular_suggest", "(JJJJJJJJJJ)I"),
+    ("hypertabular_workbook_sheet_with", "(JJJJJIJJ)I"),
+    ("hypertabular_workbook_fill_with", "(JJJJJJJJJ)I"),
+    ("hypertabular_range_parse", "(JJJ)I"),
+    ("hypertabular_batch_check", "(JJJJIJ)I"),
 ];
 
 #[test]
@@ -80,7 +89,7 @@ fn the_table_is_one_native_per_export_and_the_count() {
     }
     assert!(names_unique(&NATIVES));
     // SAFETY: takes nothing it reads.
-    assert_eq!(unsafe { native_jni_natives(ENV, CLASS_ARG) }, 15);
+    assert_eq!(unsafe { native_jni_natives(ENV, CLASS_ARG) }, 24);
 }
 
 #[test]
@@ -481,6 +490,396 @@ thread_local! {
 }
 
 const CLASS_TOKEN: usize = 0x1000;
+
+/// The bytes of a `Filled` result, zeroed, 8-byte aligned.
+const FILLED_WORDS: usize = 8;
+
+#[test]
+fn the_batch_check_through_the_native_is_the_exports() {
+    for (rows, buffer, flags) in [
+        (16_u64, 1024_u64, 0_u32),
+        (0, 1024, 0),
+        (16, 0, 0),
+        (1 << 30, 1024, 4),
+        (u64::MAX, u64::MAX, 2),
+    ] {
+        let mut jni = [0xAAu64; 4];
+        let mut direct = [0xAAu64; 4];
+        // SAFETY: no specs, as a count of 0 says, and `out` is 32 bytes on 8-byte alignment.
+        let (x, y) = unsafe {
+            (
+                native_hypertabular_batch_check(
+                    ENV,
+                    CLASS_ARG,
+                    0,
+                    0,
+                    rows as jlong,
+                    buffer as jlong,
+                    flags as jint,
+                    addr(jni.as_mut_ptr()),
+                ),
+                hypertabular_batch_check(
+                    null(),
+                    0,
+                    rows,
+                    buffer,
+                    flags,
+                    direct.as_mut_ptr().cast(),
+                ),
+            )
+        };
+        assert_eq!(x, y, "{rows} {buffer} {flags}");
+        assert_eq!(jni, direct, "{rows} {buffer} {flags}");
+    }
+}
+
+#[test]
+fn the_range_parse_through_the_native_is_the_exports() {
+    for text in [&b"B2:C3"[..], b"", b"nonsense", b"C3:B2", b"A1"] {
+        let mut jni = [0xAAu32; 4];
+        let mut direct = [0xAAu32; 4];
+        // SAFETY: each pointer is live memory of the size beside it.
+        let (x, y) = unsafe {
+            (
+                native_hypertabular_range_parse(
+                    ENV,
+                    CLASS_ARG,
+                    addr(text.as_ptr()),
+                    text.len() as jlong,
+                    addr(jni.as_mut_ptr()),
+                ),
+                hypertabular_range_parse(
+                    text.as_ptr(),
+                    text.len(),
+                    direct.as_mut_ptr().cast::<c_void>(),
+                ),
+            )
+        };
+        assert_eq!(x, y, "{text:?}");
+        assert_eq!(jni, direct, "{text:?}");
+    }
+    let text = b"B2:C3";
+    let mut out = [0u32; 4];
+    // SAFETY: as above.
+    let rc = unsafe {
+        native_hypertabular_range_parse(
+            ENV,
+            CLASS_ARG,
+            addr(text.as_ptr()),
+            text.len() as jlong,
+            addr(out.as_mut_ptr()),
+        )
+    };
+    assert_eq!(rc, 0);
+    assert_eq!(out, [2, 2, 3, 3]);
+}
+
+#[test]
+fn a_transcode_through_the_native_is_the_exports() {
+    // windows-1252: 0x80 is the euro sign. The last byte is one windows-1252 leaves undefined.
+    for input in [&b"\x80a"[..], b"\x81"] {
+        let mut out_a = [0u8; 32];
+        let mut out_b = [0u8; 32];
+        let mut progress_a = [0u64; 4];
+        let mut progress_b = [0u64; 4];
+        // SAFETY: each pointer is live memory of the size beside it.
+        let (x, y) = unsafe {
+            (
+                native_hypertabular_transcode(
+                    ENV,
+                    CLASS_ARG,
+                    1,
+                    addr(input.as_ptr()),
+                    input.len() as jlong,
+                    1,
+                    addr(out_a.as_mut_ptr()),
+                    out_a.len() as jlong,
+                    addr(progress_a.as_mut_ptr()),
+                ),
+                hypertabular_transcode(
+                    1,
+                    input.as_ptr(),
+                    input.len(),
+                    1,
+                    out_b.as_mut_ptr(),
+                    out_b.len(),
+                    progress_b.as_mut_ptr().cast::<c_void>(),
+                ),
+            )
+        };
+        assert_eq!(x, y);
+        assert_eq!(out_a, out_b);
+        assert_eq!(progress_a, progress_b);
+    }
+    // A bad encoding is refused alike.
+    let mut progress = [0u64; 4];
+    let mut out = [0u8; 4];
+    // SAFETY: as above.
+    let rc = unsafe {
+        native_hypertabular_transcode(
+            ENV,
+            CLASS_ARG,
+            99,
+            addr(b"a".as_ptr()),
+            1,
+            1,
+            addr(out.as_mut_ptr()),
+            4,
+            addr(progress.as_mut_ptr()),
+        )
+    };
+    assert!(rc < 0);
+}
+
+#[test]
+fn a_delimited_init_with_through_the_native_is_the_exports() {
+    // Size, separator ',', quoting 1, skip blanks 0, engine 0, skip 0, header row 0, reject,
+    // reject: then the same words with an engine no core has.
+    let good: [u8; 24] = [
+        24, 0, 0, 0, b',', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut bad = good;
+    bad[7] = 200;
+    // SAFETY: takes no arguments.
+    let size = unsafe { hypertabular_delimited_state_size() };
+    for options in [good, bad] {
+        let mut a = state(size);
+        let mut b = state(size);
+        // SAFETY: each state is the core's size and aligned; the options are its 24 bytes.
+        let (x, y) = unsafe {
+            (
+                native_hypertabular_delimited_init_with(
+                    ENV,
+                    CLASS_ARG,
+                    addr(a.as_mut_ptr()),
+                    addr(options.as_ptr()),
+                ),
+                hypertabular_delimited_init_with(
+                    b.as_mut_ptr().cast::<c_void>(),
+                    options.as_ptr().cast::<c_void>(),
+                ),
+            )
+        };
+        assert_eq!(x, y);
+        assert_eq!(a, b);
+    }
+}
+
+#[test]
+fn a_fill_with_with_nothing_to_fill_is_the_exports() {
+    let options: [u8; 24] = [
+        24, 0, 0, 0, b',', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    // SAFETY: takes no arguments.
+    let size = unsafe { hypertabular_delimited_state_size() };
+    let mut a = state(size);
+    let mut b = state(size);
+    let mut buffers = [0u64; 18];
+    buffers[0] = 144;
+    let input = b"";
+    let mut out_a = [0u64; FILLED_WORDS];
+    let mut out_b = [0u64; FILLED_WORDS];
+    // SAFETY: every pointer is live memory of the size beside it, none read past a zero length.
+    unsafe {
+        assert_eq!(
+            native_hypertabular_delimited_init_with(
+                ENV,
+                CLASS_ARG,
+                addr(a.as_mut_ptr()),
+                addr(options.as_ptr()),
+            ),
+            hypertabular_delimited_init_with(
+                b.as_mut_ptr().cast::<c_void>(),
+                options.as_ptr().cast::<c_void>(),
+            )
+        );
+        let x = native_hypertabular_delimited_fill_with(
+            ENV,
+            CLASS_ARG,
+            addr(a.as_mut_ptr()),
+            addr(input.as_ptr()),
+            0,
+            1,
+            0,
+            0,
+            0,
+            1,
+            addr(buffers.as_ptr()),
+            addr(out_a.as_mut_ptr()),
+        );
+        let y = hypertabular_delimited_fill_with(
+            b.as_mut_ptr().cast::<c_void>(),
+            input.as_ptr(),
+            0,
+            1,
+            null(),
+            null(),
+            0,
+            1,
+            buffers.as_ptr().cast::<c_void>(),
+            out_b.as_mut_ptr().cast::<c_void>(),
+        );
+        assert_eq!(x, y);
+    }
+    assert_eq!(out_a, out_b);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn faults_with_nothing_to_walk_is_the_exports() {
+    let mut cursor_a = 0u64;
+    let mut cursor_b = 0u64;
+    let mut written_a = 7usize;
+    let mut written_b = 7usize;
+    let mut out_a = [0u64; 8];
+    let mut out_b = [0u64; 8];
+    // SAFETY: no column and no row: nothing is read past the live pointers.
+    let (x, y) = unsafe {
+        (
+            native_hypertabular_faults(
+                ENV,
+                CLASS_ARG,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                addr(&raw mut cursor_a),
+                addr(out_a.as_mut_ptr()),
+                1,
+                addr(&raw mut written_a),
+            ),
+            hypertabular_faults(
+                null(),
+                0,
+                0,
+                null(),
+                0,
+                0,
+                &raw mut cursor_b,
+                out_b.as_mut_ptr().cast::<c_void>(),
+                1,
+                &raw mut written_b,
+            ),
+        )
+    };
+    assert_eq!(x, y);
+    assert_eq!((written_a, cursor_a), (written_b, cursor_b));
+}
+
+#[test]
+fn a_suggestion_through_the_native_is_the_exports() {
+    // One column of two rows, 1 and 2.5: a suggestion for F64. Spans are {offset, len}.
+    let input = b"12.5";
+    let cells: [u32; 4] = [0, 1, 1, 3];
+    let mut out_a = [0u32; 5];
+    let mut out_b = [0u32; 5];
+    // SAFETY: two rows of one column over the live cells; the formats are null, as allowed.
+    let (x, y) = unsafe {
+        (
+            native_hypertabular_suggest(
+                ENV,
+                CLASS_ARG,
+                addr(input.as_ptr()),
+                input.len() as jlong,
+                addr(input.as_ptr()),
+                0,
+                addr(cells.as_ptr()),
+                0,
+                2,
+                1,
+                0,
+                addr(out_a.as_mut_ptr()),
+            ),
+            hypertabular_suggest(
+                input.as_ptr(),
+                input.len(),
+                input.as_ptr(),
+                0,
+                cells.as_ptr().cast::<c_void>(),
+                null(),
+                2,
+                1,
+                null(),
+                out_b.as_mut_ptr().cast::<c_void>(),
+            ),
+        )
+    };
+    assert_eq!(x, y);
+    assert_eq!(x, 0);
+    assert_eq!(out_a, out_b);
+    assert_eq!(out_a[2], 1, "{out_a:?}");
+    assert_eq!((out_a[3], out_a[4]), (2, 2), "{out_a:?}");
+}
+
+#[test]
+fn the_workbook_with_calls_on_a_non_workbook_are_the_exports() {
+    let container = b"not a workbook";
+    let options: [u32; 9] = [36, 1, 1, 0, 0, 0, 0, 0, 0];
+    let mut buffers = [0u64; 18];
+    buffers[0] = 144;
+    // SAFETY: takes no arguments.
+    let size = unsafe { hypertabular_workbook_state_size() };
+    let mut a = state(size);
+    let mut b = state(size);
+    let mut out_a = [0u64; FILLED_WORDS];
+    let mut out_b = [0u64; FILLED_WORDS];
+    // SAFETY: each pointer is live memory of the size beside it. An unopened state is what the
+    // core refuses, and it does so alike through both.
+    unsafe {
+        let x = native_hypertabular_workbook_sheet_with(
+            ENV,
+            CLASS_ARG,
+            addr(a.as_mut_ptr()),
+            addr(container.as_ptr()),
+            container.len() as jlong,
+            addr(container.as_ptr()),
+            0,
+            0,
+            addr(options.as_ptr()),
+            addr(out_a.as_mut_ptr()),
+        );
+        let y = hypertabular_workbook_sheet_with(
+            b.as_mut_ptr().cast::<c_void>(),
+            container.as_ptr(),
+            container.len(),
+            container.as_ptr(),
+            0,
+            0,
+            options.as_ptr().cast::<c_void>(),
+            out_b.as_mut_ptr().cast::<c_void>(),
+        );
+        assert_eq!(x, y);
+        assert_eq!(out_a, out_b);
+        let x = native_hypertabular_workbook_fill_with(
+            ENV,
+            CLASS_ARG,
+            addr(a.as_mut_ptr()),
+            addr(container.as_ptr()),
+            container.len() as jlong,
+            0,
+            0,
+            0,
+            1,
+            addr(buffers.as_ptr()),
+            addr(out_a.as_mut_ptr()),
+        );
+        let y = hypertabular_workbook_fill_with(
+            b.as_mut_ptr().cast::<c_void>(),
+            container.as_ptr(),
+            container.len(),
+            null(),
+            null(),
+            0,
+            1,
+            buffers.as_ptr().cast::<c_void>(),
+            out_b.as_mut_ptr().cast::<c_void>(),
+        );
+        assert_eq!(x, y);
+        assert_eq!(out_a, out_b);
+    }
+}
 
 unsafe extern "system" fn find_class(_env: *mut JNIEnv, name: *const c_char) -> jclass {
     LOAD.with(|l| {

@@ -45,7 +45,7 @@ $reader = DelimitedReader::open('people.csv', Dialect::csv());
 echo 'header: [' . implode(', ', $reader->header()) . "]\n"; // ['id', 'name', 'score']
 $header = $reader->headerIndex(); // the same names, looked up by name
 $reader->bind([
-    Column::i32($header->ordinal('id')), // an OutOfBoundsException naming a missing column
+    Column::i32($header->ordinal('id')), // an OutOfBoundsException naming a missing column, an AmbiguousColumn a doubled one
     Column::text($header->ordinal('name')),
     Column::f64($header->ordinal('score')),
 ]);
@@ -53,7 +53,7 @@ $reader->bind([
 while (($batch = $reader->read()) !== null) {
     // A column at a time — null where a cell did not cast…
     echo 'ids: [' . implode(', ', $batch->values(0)) . "]\n";
-    echo 'faults: ' . count($batch->faults(2)) . "\n";
+    echo 'faults: ' . count($batch->faults(2)) . "\n"; // that column's, keyed by row
 
     // …or a row at a time, each cell as HyperCast's union.
     foreach ($batch as $row) {
@@ -91,43 +91,193 @@ foreach ($sheet->rows() as $row) {
 }
 ```
 
+## A messier file
+
+Everything about a file is still declared, on the `Dialect` and on the `SheetOptions`, whose defaults
+read as before: lines to pass over, records to discard, what a record of the wrong width is, the
+encoding, and what stands for no value.
+
+```php
+<?php
+
+use HyperTabular\Column;
+use HyperTabular\DelimitedReader;
+use HyperTabular\Dialect;
+use HyperTabular\Encoding;
+use HyperTabular\Range;
+use HyperTabular\SheetOptions;
+use HyperTabular\ShortRows;
+
+// Windows-1252, with a title line above the table, NA for nothing and rows that stop short.
+$dialect = new Dialect(',', skip: 1, shortRows: ShortRows::Pad, encoding: Encoding::Windows1252, tokens: ['NA']);
+$data = "Exported by hand\nname,amount\ncaf\xE9,NA\ntea\nmilk,12x4\n";
+$plan = [
+    Column::text(0),
+    Column::f64(1)->withTokens(['NA', '-']), // in place of the dialect's
+];
+$reader = DelimitedReader::fromString($data, $dialect, $plan);
+while (($batch = $reader->read()) !== null) {
+    foreach ($batch as $row) {
+        $detail = $row->detail(1)?->detail->name ?? '-';
+        echo "{$row->value(0)} {$row->get(1)->reason->name} {$row->origin(1)->name} {$detail}\n";
+    }
+    // What went wrong, and only that: a blank, a token and a padded cell aren't problems.
+    foreach ($batch->faults() as $problem) {
+        echo "line {$problem->line} column {$problem->sourceColumn} {$problem->reason->name} {$problem->detail->name}\n";
+    }
+}
+
+// A plan to look at, from a sample of the text. It reads nothing until it's handed to a read.
+$found = DelimitedReader::suggestString("id,total,day\n1,\"1,234.50\",2026-01-07\n2,12.00,2026-01-08\n", Dialect::csv());
+foreach ($found->report as $column) {
+    echo "{$column->name} {$column->status->name} {$column->door->name} {$column->matched} of {$column->sampled}\n";
+}
+
+// A sheet takes the part of it that's the table; its plan's ordinals count from B here.
+$options = new SheetOptions(range: Range::parse('B2:D40'));
+echo "{$options->range->firstColumn} {$options->range->lastRow}\n";
+```
+
+A `TabularException` of kind `TabularFailure::Encoding` comes after every intact row before it, and its
+`byte` alone counts the original bytes: a read's spans are all the decoded text's. A declared encoding
+decodes a string too, through `$bufferBytes` at a time, so it isn't read in place. A sheet's `Range` is
+parsed by the core, so `Range::parse('A5:F200')` means what it means in every binding, with
+`new Range($firstRow, $firstColumn, $lastRow, $lastColumn)`, 1-based and `0` for no limit, for what that
+can't say, such as every row from the fifth. A plan's ordinals count from the range's first column,
+while `Batch::line()` and a problem's `sourceColumn` stay the sheet's own.
+
+A `Fault` is HyperCast's three fields, and what failed in the cell is beside it:
+`$batch->detail($column, $row)` and `$row->detail($column)` are HyperCast's `DetailedFault`, the fault's
+reason and span with its `FaultDetail`, or `null` where the cell cast or nothing in it failed (a token,
+padding). `$batch->origin($column, $row)` and `$row->origin($column)` say where a cell's verdict came
+from: `Origin::Cell`, `Token`, `Padded` or `Uncached`. `$batch->faults()` is a list of `Problem`s, the
+row, the line, the plan and source columns, the reason, detail, origin and span, a long row reported
+with its `expected` and `found`; `$batch->faults($column)` is still one column's `Fault`s keyed by row.
+The list is worked out when it's first asked for and kept. A batch is a copy, so the list and the batch
+both stay right after the next read and after the reader has gone; nothing here goes stale. A span
+counts bytes, on the verdict and the list alike, so `substr($row->raw(1), $fault->offset,
+$fault->length)` is the text that failed.
+
+`notes: false`, on a reader's factory or in `SheetOptions`, drops the detail and the origin, which then
+say `null` and `Origin::Cell`: the read costs a little less, and `faults()` can't list a formula with no
+cached value. `Column::withDateOptions()` hands a date door HyperCast's `DateOptions` and `MonthNames`,
+and on a sheet it and `withTokens()` reach only a text cell; `withTokens([])` says a column has none,
+the dialect's included. Every distinct list of tokens, and every distinct list of month names, is kept
+for the life of the process, as the Rust API keeps them, and under FPM or any long-running server
+that's the worker's life, every request it serves: declare them, don't build a new list per file from
+what the files say.
+
+A stream that stalls still hands over every row it has finished: a read asks the stream for more only
+when it has no finished row in hand, and each ask is one `fread()`, declared encodings included. What
+the stream throws, or an `fread()` that fails, goes to the caller and isn't final: the reader stays
+where it was, and the next read asks the stream again. A broken record is final, the same
+`TabularException` object from every later read. A stream wrapper's PHP runs in the middle of a read, so a
+call it makes back into that reader, or into the `rows()` iterating it, is a `\LogicException` and the
+read goes on; the reader's `dialect()`, and any other reader, are there to use.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied. Read
+the report first: only a resolved column reads through its door in the plan, the rest as text. With no
+format declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read
+only with `,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the
+plan is in whichever is left. `1,234` and `1.234` read both ways, so they come back
+`SuggestStatus::Ambiguous` and read as text until a format is declared or another cell settles them,
+which takes in a column of prices at three decimals; `new SuggestOptions(dateOrder: ...)` does the same
+for `01/02/2026`. `2,5` beside `2.5` is `SuggestStatus::Unresolved`, and `1,23,456`, Indian grouping, is
+text until the column declares Indian grouping, because nothing says its culture.
+
+`DelimitedReader::suggest($path, $dialect, $options)` and `suggestString($utf8, $dialect, $options)`
+sample a file (opened as `open()` opens it, stream wrappers included) or a string, and
+`$sheet->suggest($options)` a sheet, whatever it has been up to, leaving it where it was.
+`new SuggestOptions(0)` means 1 and a negative count is refused; options left out, or declaring only a
+format, sample `SuggestOptions::DEFAULT_SAMPLE_ROWS`, a thousand rows, at most a batch. A headerless
+file is opened twice, so no suggestion is offered of a stream. A failure among the sampled rows is
+thrown, and one past them, a broken record or an `fread()` that returns `false`, only says `truncated`.
+What a stream wrapper's own PHP throws is yours, and is thrown wherever it comes, sample or not: an
+`\ErrorException` your error handler made of a read's warning included. `columnFormats` and
+`columnDateOrders` map a source column's ordinal to its own declaration, ahead of `format` and
+`dateOrder`, and a format anywhere in them that the core refuses is an `\InvalidArgumentException`
+before anything is opened, whether or not the sample would reach its column. A report's `format` is the
+caller's own object where one was declared; compare two by `packed()`.
+
+A sheet's number cell has no notation, so a column of them is a number under any format, where text
+holding the same digits asks. A column of `0` and `1` is bool, `007` and an integer past int64 are text,
+and a typed date in a sheet is text, for a plan to change by hand. With nothing to choose between, a
+resolved number is planned in `,` groups of three, and `SuggestedColumn::$format` names what the plan
+uses: a later `1,23,456` is refused.
+
+**To keep every row of a sheet, set `skipEmptyRows: false`.** By default a row whose only cells are
+formulas with no cached value is filtered out as empty, with nothing to say so; off, those rows are
+delivered, their cells at `Origin::Uncached`.
+
+A column given no format is Western, the same as `NumFormat::invariant()`: `1,234,567` is 1234567 and
+`1,23,456` is `Malformed`. If a column of Indian numbers comes back refused, declare it, one column at a
+time, so an Indian column reads beside a Western one in the same read:
+
+```php
+$indian = NumFormat::invariant()->withGrouping(NumFormat::GROUPING_INDIAN);
+$either = [
+    Column::i32(0, $indian), // 1,23,456 is 123456, and 1,234,567 is Malformed
+    Column::i32(1), // 1,234,567 is 1234567, and 1,23,456 is Malformed
+];
+```
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `NumFormat::detect()` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `Column::f64` reads `1,2345` as
+1.2345, `12,34` as 12.34 and `0,125` as 0.125. A format holding the retired grouping bit `256` (the
+words `351` and `863`) can't be made or unserialized by HyperCast; one forged past both is refused by its
+`packed()`, which is an `\InvalidArgumentException` here ("Plan column 1's format cannot be honoured",
+HyperCast's exception as its previous) when the plan is bound, before any cell, and in a suggest's
+options before it opens anything. HyperCast's
+[grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
+and the locales neither policy matches.
+
 ## The shape
 
-The core owns no memory and reads no files. `DelimitedReader` and `Sheet` own the buffers —
-one value array and one verdict array per column, the table that locates each cell — allocated
-once, and the core fills them in one call per batch; a column is then made into PHP values the
-first time it is asked for.
+The core owns no memory and reads no files; the Rust reader underneath `DelimitedReader` and `Sheet`
+owns the buffers and grows them, and a batch is copied out of them as it is read, each column made
+into PHP values the first time it is asked for.
 
 - **The header first, if you like.** `DelimitedReader::open`, `fromString`, `fromStream`
   and `Workbook::sheet` take the plan, or leave it out (`null`) to read the header and stop.
   `header()` is the names as an array; `headerIndex()` is a `Header` over the same names —
-  countable, iterable, indexable — with `ordinal($name)` (exact, case-sensitive, first match;
-  an `OutOfBoundsException` naming the column when it is missing) and `find($name)` (`null`
-  instead). `bind($plan)` declares the plan once, before the first read — a second `bind`
-  is a `LogicException`, and so is `read()` until a plan is bound; `isBound()` says which.
-  `columnCount()` is a record's width. Once a delimited header has been read, a plan column
+  countable, iterable, indexable — with `ordinal($name)` (exact and case-sensitive: an
+  `OutOfBoundsException` naming the column when it is missing, and an `AmbiguousColumn`, an
+  `InvalidArgumentException` with `name`, `first` and `second`, when two columns have it, since a
+  plan bound to the first would read the wrong column without a word) and `find($name)` (the first
+  match, `null` when there's none). `bind($plan)` declares the plan once, before the first read —
+  a second `bind` is a `LogicException`, and so is `read()` until a plan is bound; `isBound()` says
+  which. `columnCount()` is a record's width. Once a delimited header has been read, a plan column
   that reads at or past its width is refused with an `InvalidArgumentException` naming the
   column: no record has a cell there.
 - **One batch class.** `read()` returns a `Batch` — `rows()`, `columns()`, `line($row)`,
-  `values($column)`, `faults($column)`, `verdicts($column)`, `get($column, $row)` and
-  `raw($column, $row)` — or `null` once there are no more rows, for delimited text and a
-  sheet alike. A batch owns what it shows: it stays good after the reader has moved on.
+  `values($column)`, `faults()`, `verdicts($column)`, `get($column, $row)`, `origin($column, $row)`,
+  `detail($column, $row)` and `raw($column, $row)` — or `null` once there are no more rows, for
+  delimited text and a sheet alike. A batch owns what it shows: it stays good after the reader has
+  moved on.
 - **Or a row at a time.** A `Batch` iterates its rows as `Row` objects — `index()`,
-  `line()`, `get($column)`, `value($column)`, `fault($column)`, `raw($column)`, each the
-  batch's own answer for that row — and `rows()` on a reader or a sheet is a `RowIterator`
-  over every row left, reading batch after batch, forward only. A row owns what it shows, as
-  its batch does.
-- **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
-  the plan states each column's door and, for numbers, its `HyperCast\NumFormat`.
+  `line()`, `get($column)`, `value($column)`, `fault($column)`, `origin($column)`, `detail($column)`,
+  `raw($column)`, each the batch's own answer for that row — and `rows()` on a reader or a sheet is a
+  `RowIterator` over every row left, reading batch after batch, forward only. A row owns what it
+  shows, as its batch does.
+- **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header, and what the
+  previous section lists; `SheetOptions` states a sheet's header, whether empty rows are skipped, the
+  batch size, its range and the rest; the plan states each column's door and, for numbers, its
+  `HyperCast\NumFormat`.
+- **Sizes are the core's to judge.** A `$batchRows` or `$bufferBytes` of `0` is an
+  `\InvalidArgumentException` saying `batch_rows must be at least 1` (or `buffer_bytes`), and a batch
+  past what the core allows says what it asks for, `batch_rows asks for 5377130496 bytes, past the
+  limit of 4294967296`, before anything is allocated or a file opened; a negative count is refused
+  as no count at all. Left out, a batch is `DelimitedReader::DEFAULT_BATCH_ROWS` rows.
+  `new SheetOptions(batchRows: 0)` is made, and refused by `Workbook::sheet()`.
 - **No async API.** PHP has no event loop of its own to hand a read to; a stream is read as a
   blocking stream, so under an event loop (Amp, ReactPHP) a read holds the loop while it
   waits, as any blocking `fread` does, and a non-blocking stream with nothing to give yet is
   refused with a `RuntimeException`. A workbook is wholly in memory once it is open.
-- **HyperCast is the judge.** `Success`, `Fault`, `CastFailure`, `NumFormat`, `Decimal`,
-  `Duration`, `UnixPrecision`, `DateOrder` and `ExcelEpoch` are the `hypercast` extension's
-  own classes. A text cell means exactly what `HyperCast\Cast` would say of the same text; a
-  typed workbook cell is converted by the door directly.
+- **HyperCast is the judge.** `Success`, `Fault`, `DetailedFault`, `FaultDetail`, `CastFailure`,
+  `NumFormat`, `Decimal`, `Duration`, `DateOptions`, `MonthNames`, `UnixPrecision`, `DateOrder` and
+  `ExcelEpoch` are the `hypercast` extension's own classes. A text cell means exactly what
+  `HyperCast\Cast` would say of the same text; a typed workbook cell is converted by the door directly.
 - **A bad value is a verdict; a broken file is an exception.** A cell that does not cast is
   a `Fault` in its column and the read goes on. A record of the wrong width, input that ends
   inside a quoted cell, a workbook whose container or parts cannot be read, throws
@@ -228,9 +378,17 @@ The API, defaults, verdicts, exceptions and messages are the same in this extens
 - A call with more arguments than a method declares is an `ArgumentCountError`; 1.0, as
   userland PHP, ignored the extras. The classes are internal (`ReflectionClass::isInternal()`
   is `true`), and an exception is reported at the caller's file and line.
-- `Scratch`, the suite's hook into a workbook's buffers, is a class of the extension now, still
-  internal and not for consumers; 1.0's `Native`, `Columns` and `NativePlatform` plumbing is
-  gone.
+- 1.0's `Scratch`, `Native`, `Columns` and `NativePlatform` plumbing is gone: a workbook's buffers
+  are the Rust reader's own.
+- `Header::ordinal()` refuses a name two columns have with an `AmbiguousColumn`, where 1.0 returned
+  the first; `find()` still does. `Batch::faults()` with no column is the batch's list of `Problem`s;
+  with one, it is 1.0's map. A header name that isn't UTF-8 is a `TabularException` of kind
+  `TabularFailure::Encoding`, and a sheet's name is its text with anything that isn't UTF-8
+  replaced, as the core reads it.
+- A size the core refuses says so in the core's words (`batch_rows must be at least 1`, `batch_rows
+  asks for … bytes, past the limit of …`), before a file is opened.
+- A stream's failure goes to the caller and isn't final, the next read asking the stream again; a
+  stream that hands back nothing before its end is still a `RuntimeException`.
 
 ## Verifying provenance
 
@@ -281,8 +439,10 @@ composer bench                 # PHPBench, the same way
 `HYPERTABULAR_PHP_EXTENSION` names another build of this extension for `composer test` and
 `composer bench`, and `HYPERCAST_PHP_EXTENSION` a build of HyperCast's; without it, one the PHP
 already loads is used, else `../HyperCast/rust/target/php/release/`. The suite replays
-`corpus/delimited.json` and `corpus/workbook.json`, the workbook corpus once more with every
-buffer starting at one element. `HYPERTABULAR_CHECK_STUBS=1 composer test` also regenerates the
+`corpus/delimited.json`, through stream buffers starting at one byte, and `corpus/workbook.json`;
+a workbook's buffers are the Rust reader's, whose own suite replays them from one element. The
+`big-sizes` group asks for batches just past the core's limit and reads a 268,000-column sample:
+run it where a mistake is contained (`--exclude-group big-sizes` leaves it out). `HYPERTABULAR_CHECK_STUBS=1 composer test` also regenerates the
 stub and compares it with the committed one (`php tools/generate-stubs.php` rewrites it; it
 needs the cargo-php version the script names, on Linux or macOS). `vendor/bin/phpcs` checks the
 tests, the benchmarks and the tools.

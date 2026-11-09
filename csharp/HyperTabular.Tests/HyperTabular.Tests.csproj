@@ -6,6 +6,8 @@
 		<IsPackable>false</IsPackable>
 		<IsPublishable>false</IsPublishable>
 		<IsTestProject>true</IsTestProject>
+		<!-- The tests that hold the ABI's shapes and the 1.0 exports call Native directly. -->
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
 		<!-- CA1707: test method names are deliberately sentence-shaped. IDE0051: test methods
 		     carry no access modifier (bare void, house style) and are invoked by MTP/xUnit v3's

@@ -15,7 +15,8 @@ namespace HyperTabular;
 public sealed unsafe class Sheet : IBatchSource
 {
 	readonly Workbook _book;
-	readonly SheetOptions _options;
+	readonly SheetInfo _info;
+	SheetOptions _options;
 	/// <summary>The plan's columns and the batch they are read into: <see langword="null"/> until a plan is bound.</summary>
 	Columns? _columns;
 	Batch? _batch;
@@ -31,21 +32,22 @@ public sealed unsafe class Sheet : IBatchSource
 	/// <summary>Starts a read of a sheet, through <paramref name="plan"/> when <paramref name="bound"/>, or with the plan left to <see cref="Bind"/>.</summary>
 	internal Sheet(Workbook book, SheetInfo info, SheetOptions options, ReadOnlySpan<Column> plan, bool bound)
 	{
-		ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.BatchRows, nameof(options));
+		Columns.CheckSizes(default, options.BatchRows, 1, Columns.SheetFlag | (options.Notes ? Columns.NotesFlag : 0));
 		_book = book;
+		_info = info;
 		_options = options;
 		// A copy of the opened state, which the core allows, so that this sheet's read is its own.
 		_state = GC.AllocateArray<ulong>(book.State.Length, pinned: true);
 		book.State.AsSpan().CopyTo(_state);
 		if (bound)
 		{
-			var columns = new Columns(plan, options.BatchRows);
+			var columns = new Columns(plan, options.BatchRows, options.Notes, sheet: true);
 			_perRow = columns.Plan.Length + 1;
 			_scratch = Workbook.Stingy
 				? new Workbook.Scratch(1, 1, 1, columns.Width)
-				: new Workbook.Scratch(0, 4096, checked(options.BatchRows * _perRow), columns.Width);
+				: new Workbook.Scratch(0, 4096, options.BatchRows * _perRow, columns.Width);
 			_columns = columns;
-			_batch = new Batch(columns, workbook: true);
+			_batch = new Batch(this, columns, workbook: true, FirstColumnOf(options));
 		}
 		else
 		{
@@ -59,16 +61,33 @@ public sealed unsafe class Sheet : IBatchSource
 				: new Workbook.Scratch(0, 4096, 64, 64);
 		}
 
+		if (options.Tokens.Packed.Length > 0)
+			_scratch.Tokens = Columns.Pinned(options.Tokens.Packed);
+
+		var raw = new Native.RawSheetOptions
+		{
+			Size = (uint)sizeof(Native.RawSheetOptions),
+			HasHeader = options.HasHeader ? 1u : 0u,
+			SkipEmptyRows = options.SkipEmptyRows ? 1u : 0u,
+			Skip = options.Skip,
+			HeaderRow = options.HeaderRow,
+			FirstRow = options.Range.FirstRow,
+			FirstColumn = options.Range.FirstColumn,
+			LastRow = options.Range.LastRow,
+			LastColumn = options.Range.LastColumn,
+		};
 		Native.RawFilled filled;
 		int code;
 		fixed (byte* part = info.Part)
-			code = Native.hypertabular_workbook_sheet(
-				Columns.Address(_state), book.Container, book.Length, part, (nuint)info.Part.Length, info.Index,
-				options.HasHeader ? 1u : 0u, options.SkipEmptyRows ? 1u : 0u, &filled);
+			code = Native.hypertabular_workbook_sheet_with(
+				Columns.Address(_state), book.Container, book.Length, part, (nuint)info.Part.Length, info.Index, &raw, &filled);
 		Workbook.Settle((code, filled));
 		if (options.HasHeader)
 			_header = ReadHeader();
 	}
+
+	/// <summary>What a plan's ordinal is short of the sheet's own column.</summary>
+	static int FirstColumnOf(in SheetOptions options) => (int)Math.Max(options.Range.FirstColumn, 1) - 1;
 
 	Header ReadHeader()
 	{
@@ -93,21 +112,23 @@ public sealed unsafe class Sheet : IBatchSource
 	/// <exception cref="InvalidOperationException">The sheet already has a plan.</exception>
 	/// <exception cref="ArgumentException">A column's numeric format cannot be honoured, or a column's ordinal is 2²⁰ or more; the sheet is left without a plan.</exception>
 	/// <exception cref="ObjectDisposedException">The workbook has been disposed.</exception>
-	public void Bind(ReadOnlySpan<Column> plan)
+	public void Bind(ReadOnlySpan<Column> plan) => BindPlan(plan, rowWidths: false);
+
+	void BindPlan(ReadOnlySpan<Column> plan, bool rowWidths)
 	{
 		ObjectDisposedException.ThrowIf(_book.Disposed, _book);
 		if (_columns is not null)
 			throw new InvalidOperationException("The sheet already has a plan; a plan is bound once.");
-		var columns = new Columns(plan, _options.BatchRows);
+		var columns = new Columns(plan, _options.BatchRows, _options.Notes, rowWidths, sheet: true);
 		_perRow = columns.Plan.Length + 1;
 		// Grown, never replaced: the cell table only to save the first fill a call, and the
 		// row's slots because what they hold is a header row the sheet may yet repeat.
-		var cells = checked(_options.BatchRows * _perRow);
+		var cells = _options.BatchRows * _perRow;
 		if (!Workbook.Stingy && _scratch.Cells.Length < cells)
 			_scratch.Cells = Columns.Grow(_scratch.Cells, cells);
 		if (_scratch.Row.Length < columns.Width)
 			_scratch.Row = Columns.Grow(_scratch.Row, columns.Width);
-		_batch = new Batch(columns, workbook: true);
+		_batch = new Batch(this, columns, workbook: true, FirstColumnOf(_options));
 		_columns = columns;
 	}
 
@@ -169,4 +190,52 @@ public sealed unsafe class Sheet : IBatchSource
 	/// current batch and is over when the loop moves past it; do not keep one.
 	/// </summary>
 	public RowSequence Rows() => new(this);
+
+	/// <summary>
+	/// Reads a sample of this sheet through the text door and says what its columns look like, as
+	/// <see cref="DelimitedReader.Suggest(string, Dialect, SuggestOptions?)"/> does. It is a read of its
+	/// own, from the sheet's start with the sheet's options, and this one's own read is left as it was.
+	/// Its plan's ordinals count from the range's first column, as any plan's do.
+	/// </summary>
+	/// <remarks>
+	/// A typed number is judged by its value and has no notation, whichever is declared: a column of them
+	/// is a number under any format, and its plan reads every one, since a typed cell reads the same under
+	/// them all. A text cell holding <c>1.234</c> keeps its question, in a column of its own or beside typed
+	/// numbers. A typed date, date-time, time or duration cell reads as its canonical text, which the
+	/// suggester does not take as a date: such a column of a sheet is text, resolved, for a plan to change
+	/// by hand.
+	/// </remarks>
+	/// <param name="options">How the sample is taken and read; <see langword="null"/> takes 1,000 rows with nothing declared.</param>
+	/// <exception cref="ArgumentException">A format the options declare is one HyperCast refuses: first, before anything is read.</exception>
+	/// <exception cref="TabularException">A failure among the sampled rows.</exception>
+	/// <exception cref="ObjectDisposedException">The workbook has been disposed.</exception>
+	public Suggestion Suggest(SuggestOptions? options = null)
+	{
+		ObjectDisposedException.ThrowIf(_book.Disposed, _book);
+		options ??= SuggestOptions.Default;
+		options.CheckFormats();
+		var limit = options.RowsWithin(_options.BatchRows);
+		var width = -1;
+		if (!_options.HasHeader)
+			width = new Sheet(_book, _info, _options with { BatchRows = 1, Notes = false }, default, bound: false).FirstRowWidth();
+		// Notes on, for what the sample's second door says of a cell.
+		var sheet = new Sheet(_book, _info, _options with { BatchRows = 1, Notes = true }, default, bound: false);
+		if (width < 0)
+			width = sheet.Header!.Count;
+		// One row more than the sample, so that a row past it costs no second batch to find, in as many
+		// batches as the core says that takes.
+		var sample = Sample.Of(sheet, plan =>
+		{
+			sheet._options = sheet._options with { BatchRows = Columns.SampleRows(plan, limit + 1, Columns.SheetFlag | Columns.NotesFlag) };
+			sheet.Bind(plan);
+		}, width, limit, sheet: true);
+		return sample.Judge(sheet.Header, options);
+	}
+
+	/// <summary>How many cells the sheet's next row has: 0 for no row.</summary>
+	int FirstRowWidth()
+	{
+		BindPlan([Column.Text(0)], rowWidths: true);
+		return Read() is null ? 0 : (int)_columns!.RowWidths![0];
+	}
 }

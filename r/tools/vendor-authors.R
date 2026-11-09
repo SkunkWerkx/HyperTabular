@@ -4,8 +4,9 @@
 # cargo metadata. Run from the package root by tools/vendor.sh, which leaves src/rust/vendor
 # in place for it: the metadata is read offline against that directory, since the lock names
 # the crates.io source for the core at a version that is not published while a release packs
-# this package. Neither crate has other dependencies today, so the file says so in one line; a
-# crate either comes to depend on gets its line here, and its authors a place in DESCRIPTION.
+# this package. hypercast's one dependency, simdutf8, gets its line here, and its author a
+# place in DESCRIPTION as a copyright holder; so does any crate either comes to depend on. With
+# none, the file says so in one line.
 # The metadata goes through a file: on Windows `system2(stdout = TRUE)` splits captured lines
 # at 8095 bytes, and the break can land inside a string.
 metadata <- tempfile(fileext = ".json")
@@ -32,6 +33,13 @@ lines <- vapply(pkgs, function(p) {
   sprintf("%s %s: %s (%s, %s)", p$name, p$version, credit(p),
           field(p$license, "no license field"), field(p$repository, "no repository field"))
 }, "")
+# simdutf8's own README and crate docs credit the work it builds on; that credit travels with it.
+if (any(vapply(pkgs, function(p) p$name == "simdutf8", FALSE))) {
+  lines <- c(lines, paste("simdutf8 is based on the UTF-8 validation of simdjson",
+                          "(https://github.com/simdjson/simdjson, the simdjson authors),",
+                          "first ported to Rust by the developers of simd-json.rs",
+                          "(https://simd-json.rs)."))
+}
 if (!length(lines)) {
   lines <- paste("No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only",
                  "the hypertabular core and the hypercast crate it judges every cell with, both",

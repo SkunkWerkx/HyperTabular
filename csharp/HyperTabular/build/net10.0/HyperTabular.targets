@@ -26,9 +26,8 @@
        symbol, so the link itself resolves them against the archive (with it missing, wasm-ld
        fails with an undefined symbol per export) and LibraryImport("*") reaches each one
        through that table. No @(EmccExportedFunction) list is needed, because "*" resolution
-       does not need the Emscripten export: HyperTabular.WasmSmokeTest reaches all fourteen
-       exports without one on .NET SDK 11.0.100-rc.2, and fails at the link with the archive
-       unlinked.
+       does not need the Emscripten export: HyperTabular.WasmSmokeTest calls every export a read
+       takes without one, and fails at the link with the archive unlinked.
 
        The archive is built without Rust's standard library and carries none of HyperCast's
        cast_* symbols, so it links beside HyperCast's own browser-wasm archive. It is built

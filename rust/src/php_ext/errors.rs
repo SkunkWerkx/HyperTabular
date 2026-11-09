@@ -31,7 +31,7 @@ pub(crate) fn runtime_exception() -> &'static ClassEntry {
 }
 
 /// `\InvalidArgumentException`'s class entry.
-fn invalid_argument_exception() -> &'static ClassEntry {
+pub(crate) fn invalid_argument_exception() -> &'static ClassEntry {
     // SAFETY: as for `runtime_exception`.
     unsafe { spl_ce_InvalidArgumentException.as_ref() }
         .expect("SPL's InvalidArgumentException is registered")
@@ -100,6 +100,16 @@ pub(crate) fn contract_violation() -> PhpException {
 /// failure kept and thrown again is the same object.
 pub(crate) fn object(exception: &ext_php_rs::types::Zval) -> PhpException {
     PhpException::new(String::new(), 0, runtime_exception()).with_object(exception.shallow_clone())
+}
+
+/// What a call this binding made into PHP failed with, off the engine: the pending exception, or
+/// else `failure` itself. It can be held across more Rust, and more calls into PHP, and thrown
+/// later, as an exception left pending can't be.
+pub(crate) fn taken(failure: PhpException) -> PhpException {
+    match ExecutorGlobals::take_exception() {
+        Some(exception) => object(&super::classes::object_zval(exception.into_raw().cast())),
+        None => failure,
+    }
 }
 
 /// The exception a PHP call this binding made has left pending: returned as the error, it

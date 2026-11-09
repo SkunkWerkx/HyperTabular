@@ -258,7 +258,7 @@ fn caller_is_strict(at: &Located<'_>) -> bool {
 }
 
 /// Whether `arg`, an object, is an instance of the class `name`.
-fn instance_of(arg: &Zval, name: &[u8]) -> bool {
+pub(crate) fn instance_of(arg: &Zval, name: &[u8]) -> bool {
     let Some(object) = arg.object() else {
         return false;
     };
@@ -342,6 +342,54 @@ impl FromZvalMut<'_> for Int {
             return None;
         }
         zval.long().map(Int)
+    }
+}
+
+/// `?int $column = null`.
+pub struct OptInt(pub Option<i64>);
+
+impl FromZvalMut<'_> for OptInt {
+    const TYPE: DataType = DataType::Long;
+    const NULLABLE: bool = true;
+
+    fn from_zval_mut(zval: &mut Zval) -> Option<Self> {
+        if !coerce(zval) {
+            return None;
+        }
+        if zval.is_null() {
+            return Some(OptInt(None));
+        }
+        zval.long().map(|value| OptInt(Some(value)))
+    }
+
+    fn from_missing() -> Option<Self> {
+        Some(OptInt(None))
+    }
+}
+
+/// `bool $notes = true`, which keeps what each cell's detail and origin say.
+pub struct Notes(pub bool);
+
+impl From<bool> for Notes {
+    fn from(value: bool) -> Self {
+        Notes(value)
+    }
+}
+
+impl ext_php_rs::convert::StubLiteral for Notes {
+    fn stub_literal(&self) -> String {
+        if self.0 { "true" } else { "false" }.to_owned()
+    }
+}
+
+impl FromZvalMut<'_> for Notes {
+    const TYPE: DataType = DataType::Bool;
+
+    fn from_zval_mut(zval: &mut Zval) -> Option<Self> {
+        if !coerce(zval) {
+            return None;
+        }
+        zval.bool().map(Notes)
     }
 }
 
@@ -486,6 +534,27 @@ object_arg!(
     SheetOptionsArg,
     "HyperTabular\\SheetOptions"
 );
+
+/// `?SuggestOptions $options = null`.
+pub struct OptSuggestOptions(pub Option<Zval>);
+
+impl FromZvalMut<'_> for OptSuggestOptions {
+    const TYPE: DataType = DataType::object("HyperTabular\\SuggestOptions");
+    const NULLABLE: bool = true;
+
+    fn from_zval_mut(zval: &mut Zval) -> Option<Self> {
+        if !coerce(zval) {
+            return None;
+        }
+        Some(OptSuggestOptions(
+            (!zval.is_null()).then(|| zval.shallow_clone()),
+        ))
+    }
+
+    fn from_missing() -> Option<Self> {
+        Some(OptSuggestOptions(None))
+    }
+}
 
 /// A hand-registered method's arguments: the call's argument zvals, in the frame, after the
 /// engine's count check. `None` when the count check failed (its `ArgumentCountError` pending).

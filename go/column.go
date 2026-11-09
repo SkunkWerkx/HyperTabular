@@ -113,6 +113,10 @@ type Column struct {
 	door    Door
 	param   uint32
 	format  hypercast.NumFormat
+	// tokens is the column's own list, packed, in place of its dialect's when hasTokens says so.
+	tokens    string
+	hasTokens bool
+	date      hypercast.DateOptions
 }
 
 // Ordinal is the zero-based ordinal of the source column. A column past a record's last
@@ -124,6 +128,26 @@ func (c Column) Door() Door { return c.door }
 
 // Format is the numeric notation a numeric door reads; the zero NumFormat for the others.
 func (c Column) Format() hypercast.NumFormat { return c.format }
+
+// WithTokens is the same column answering to these tokens rather than its dialect's or sheet's: a
+// cell whose exact, unquoted bytes are one of them is Empty, whatever its door, and Batch.Origin
+// says OriginToken. No tokens at all means none, so a column can opt out of its dialect's. On a
+// sheet only a text cell can be one.
+func (c Column) WithTokens(tokens ...string) Column {
+	c.tokens = NewTokens(tokens...).packed
+	c.hasTokens = true
+	return c
+}
+
+// WithDateOptions is the same column reading dates under these options and their month vocabulary:
+// the Timestamp, DateOnly, DateOnlyOrdered and DateTime doors read them, as HyperCast's own detailed
+// doors do, and the others ignore them. On a sheet they reach only a text cell, since a typed date
+// cell has no text for them to read. Options HyperCast refuses are the error of whatever binds the
+// plan.
+func (c Column) WithDateOptions(options hypercast.DateOptions) Column {
+	c.date = options
+	return c
+}
 
 // Bool is a bool column: HyperCast's boolean lexicon.
 func Bool(ordinal int) Column { return Column{ordinal: ordinal, door: DoorBool} }
@@ -230,42 +254,51 @@ const maxOrdinal = 1<<20 - 1
 // is a caller's mistake in the plan, reported by the reader's constructor before any input
 // is read; the core judges the same things again and has the last word (the constructor's
 // probe).
-func (c Column) spec() (rawSpec, error) {
+func (c Column) spec() (rawSpec, specExtra, error) {
 	spec := rawSpec{ordinal: uint32(c.ordinal), door: uint32(c.door), param: c.param}
+	extra := specExtra{tokens: c.tokens, hasTokens: c.hasTokens}
 	if c.door < DoorBool || c.door > DoorExcelSerial {
-		return spec, fmt.Errorf("door %d is not a door; build a Column with a constructor such as I32 or Text", uint32(c.door))
+		return spec, extra, fmt.Errorf("door %d is not a door; build a Column with a constructor such as I32 or Text", uint32(c.door))
 	}
 	if c.ordinal < 0 {
-		return spec, fmt.Errorf("ordinal %d is out of range", c.ordinal)
+		return spec, extra, fmt.Errorf("ordinal %d is out of range", c.ordinal)
 	}
 	if c.ordinal > maxOrdinal {
-		return spec, fmt.Errorf("reads source column %d; an ordinal must be below 2^20 (1,048,576)", c.ordinal)
+		return spec, extra, fmt.Errorf("reads source column %d; an ordinal must be below 2^20 (1,048,576)", c.ordinal)
 	}
 	switch c.door {
 	case DoorUnix:
 		if _, ok := hypercast.UnixPrecisionFromCode(c.param); !ok {
-			return spec, fmt.Errorf("undefined UnixPrecision %d", c.param)
+			return spec, extra, fmt.Errorf("undefined UnixPrecision %d", c.param)
 		}
 	case DoorDateOnlyOrdered, DoorDateTime:
 		if _, ok := hypercast.DateOrderFromCode(c.param); !ok {
-			return spec, fmt.Errorf("undefined DateOrder %d", c.param)
+			return spec, extra, fmt.Errorf("undefined DateOrder %d", c.param)
 		}
 	case DoorExcelSerial:
 		if _, ok := hypercast.ExcelEpochFromCode(c.param); !ok {
-			return spec, fmt.Errorf("undefined ExcelEpoch %d", c.param)
+			return spec, extra, fmt.Errorf("undefined ExcelEpoch %d", c.param)
 		}
+	}
+	if c.date != (hypercast.DateOptions{}) {
+		date, err := c.date.Raw()
+		if err != nil {
+			return spec, extra, err
+		}
+		extra.date = date
+		extra.months = string(c.date.Months.Packed())
 	}
 	if !c.door.numeric() {
 		// All zeros is the invariant notation, which the other doors do not read.
-		return spec, nil
+		return spec, extra, nil
 	}
 
 	// HyperCast's NumFormat in the core's 92-byte size-tagged layout, validated by HyperCast
 	// as its own doors validate it.
 	format, err := c.format.Raw()
 	if err != nil {
-		return spec, err
+		return spec, extra, err
 	}
 	spec.format = format
-	return spec, nil
+	return spec, extra, nil
 }

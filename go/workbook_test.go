@@ -4,11 +4,11 @@ package hypertabular
 // binding replays — through this binding: each package opened from memory, from its path and
 // from an io.Reader, each sheet read by index and (where the name finds it) by name, with
 // the plan given and with it bound after the header, in batches of one row, of two, and of
-// more than any sheet has.
+// more than any sheet has, and with the notes off. A key this file doesn't know fails the
+// decode; the one the corpus keeps for its reader is named.
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +22,9 @@ import (
 )
 
 type workbookCase struct {
-	Name   string `json:"name"`
+	Name string `json:"name"`
+	// Note is a sentence for whoever reads the file: no replay reads it.
+	Note   string `json:"note"`
 	File   string `json:"file"`
 	Format string `json:"format"`
 	Epoch  int    `json:"epoch"`
@@ -33,14 +35,41 @@ type workbookCase struct {
 	// Absent for a package the core refuses to open.
 	Sheet   *int `json:"sheet"`
 	Options struct {
-		HasHeader     bool `json:"has_header"`
-		SkipEmptyRows bool `json:"skip_empty_rows"`
+		HasHeader     bool     `json:"has_header"`
+		SkipEmptyRows bool     `json:"skip_empty_rows"`
+		Skip          uint32   `json:"skip"`
+		HeaderRow     uint32   `json:"header_row"`
+		Range         string   `json:"range"`
+		Tokens        []string `json:"tokens"`
 	} `json:"options"`
-	Plan    []corpusColumn `json:"plan"`
-	Header  *[]string      `json:"header"`
-	Rows    [][]corpusCell `json:"rows"`
-	Numbers []int          `json:"numbers"`
-	Failure *corpusFailure `json:"failure"`
+	Plan     []corpusColumn  `json:"plan"`
+	Header   *[]string       `json:"header"`
+	Rows     [][]corpusCell  `json:"rows"`
+	Numbers  []int           `json:"numbers"`
+	Suggest  *corpusSuggest  `json:"suggest"`
+	Problems []corpusProblem `json:"problems"`
+	Failure  *corpusFailure  `json:"failure"`
+}
+
+// options is the case's sheet options as this binding declares them.
+func (c *workbookCase) options(t *testing.T, batchRows int) SheetOptions {
+	t.Helper()
+	options := SheetOptions{
+		HasHeader:     c.Options.HasHeader,
+		SkipEmptyRows: c.Options.SkipEmptyRows,
+		BatchRows:     batchRows,
+		Skip:          c.Options.Skip,
+		HeaderRow:     c.Options.HeaderRow,
+		Tokens:        NewTokens(c.Options.Tokens...),
+	}
+	if c.Options.Range != "" {
+		parsed, err := ParseRange(c.Options.Range)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		options.Range = parsed
+	}
+	return options
 }
 
 func workbookCorpus(t *testing.T) []workbookCase {
@@ -51,14 +80,70 @@ func workbookCorpus(t *testing.T) []workbookCase {
 		t.Fatal(err)
 	}
 	var cases []workbookCase
-	if err := json.Unmarshal(data, &cases); err != nil {
+	if err := decodeStrictly(data, &cases); err != nil {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
 	return cases
 }
 
+func TestEveryWorkbookCorpusKeyIsRead(t *testing.T) {
+	junkEverywhere(t, repositoryFile(t, "corpus", "workbook.json"), func(document []byte) error {
+		var cases []workbookCase
+		return decodeStrictly(document, &cases)
+	})
+}
+
 func TestCorpusWorkbook(t *testing.T) {
 	replayWorkbookCorpus(t)
+}
+
+// Every case that says what to suggest: through this package, and a plan that then reads back
+// refusing nothing it resolved. A typed number has no notation, and a text cell asks what text asks.
+func TestEveryWorkbookSuggestionIsWhatTheCorpusSays(t *testing.T) {
+	seen := 0
+	cases := workbookCorpus(t)
+	for index := range cases {
+		c := &cases[index]
+		if c.Suggest == nil {
+			continue
+		}
+		seen++
+		book, err := OpenWorkbook(repositoryFile(t, "corpus", filepath.FromSlash(c.File)))
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		options := c.options(t, 1024)
+		sheet, err := book.SheetUnbound(*c.Sheet, options)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		found, err := sheet.Suggest(c.Suggest.options())
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		assertSuggestion(t, c.Name, found, c.Suggest)
+		read, err := book.Sheet(*c.Sheet, options, found.Plan)
+		if err != nil {
+			t.Fatalf("%s: %v", c.Name, err)
+		}
+		for {
+			batch, err := read.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", c.Name, err)
+			}
+			for problem := range batch.Faults() {
+				if problem.Reason != hypercast.Empty {
+					t.Errorf("%s: the plan refused %+v", c.Name, problem)
+				}
+			}
+		}
+	}
+	if seen != 15 {
+		t.Errorf("%d cases say what to suggest", seen)
+	}
 }
 
 // The corpus again with every buffer starting at one element and never asked to be large up
@@ -156,7 +241,7 @@ func replayWorkbookCorpus(t *testing.T) {
 			}
 
 			for _, batchRows := range []int{1, 2, 1024} {
-				options := SheetOptions{HasHeader: c.Options.HasHeader, SkipEmptyRows: c.Options.SkipEmptyRows, BatchRows: batchRows}
+				options := c.options(t, batchRows)
 				// Each of those with the plan given, and with it bound after the header.
 				for _, way := range []struct{ named, unbound bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
 					if way.named && !byName {
@@ -185,6 +270,13 @@ func replayWorkbookCorpus(t *testing.T) {
 					}
 					replaySheet(t, label, c, sheet, batchRows)
 				}
+				// The notes off: the same rows, and nothing said of why.
+				label := fmt.Sprintf("%s: %s, %d rows a batch, notes off", c.Name, opening.source, batchRows)
+				sheet, err := book.Sheet(*c.Sheet, options, plan, Notes(false))
+				if err != nil {
+					t.Fatalf("%s: %v", label, err)
+				}
+				replaySheet(t, label, c, sheet, batchRows)
 			}
 		}
 	}
@@ -229,6 +321,7 @@ func replaySheet(t *testing.T, label string, c *workbookCase, sheet *Sheet, batc
 
 	seen := 0
 	var ended error
+	var problems []corpusProblem
 	for {
 		b, err := sheet.Read()
 		if err != nil {
@@ -238,9 +331,13 @@ func replaySheet(t *testing.T, label string, c *workbookCase, sheet *Sheet, batc
 		if b.Rows() < 1 || b.Rows() > batchRows {
 			t.Fatalf("%s: a batch of %d rows", label, b.Rows())
 		}
+		problems = appendProblems(t, label, problems, b, seen)
 		for row := 0; row < b.Rows(); row, seen = row+1, seen+1 {
 			if seen >= len(c.Rows) {
 				t.Fatalf("%s: more than the %d rows expected", label, len(c.Rows))
+			}
+			if len(c.Rows[seen]) != len(c.Plan) {
+				t.Fatalf("%s, row %d: %d cells in the corpus for a plan of %d", label, seen, len(c.Rows[seen]), len(c.Plan))
 			}
 			if b.Line(row) != c.Numbers[seen] {
 				t.Errorf("%s, row %d: row number %d, want %d", label, seen, b.Line(row), c.Numbers[seen])
@@ -253,6 +350,7 @@ func replaySheet(t *testing.T, label string, c *workbookCase, sheet *Sheet, batc
 	if seen != len(c.Rows) {
 		t.Errorf("%s: %d rows, want %d", label, seen, len(c.Rows))
 	}
+	assertProblems(t, label, problems, c.Problems, sheet.notes)
 	assertFailure(t, label, ended, c.Failure)
 	// A sheet that has ended stays ended: the same error, again.
 	if _, again := sheet.Read(); again != ended {
@@ -274,7 +372,7 @@ func TestWhatIsNotThereIsAnErrorOfItsOwn(t *testing.T) {
 			t.Errorf("sheet %d: %v", index, err)
 		}
 	}
-	if _, err := book.Sheet(0, SheetOptions{}, plan); err == nil {
+	if _, err := book.Sheet(0, DefaultSheetOptions, plan, BatchRows(0)); err == nil {
 		t.Error("no rows a batch: no error")
 	}
 	if _, err := OpenWorkbook(missingPath(t, "missing.xlsx")); !errors.Is(err, os.ErrNotExist) {

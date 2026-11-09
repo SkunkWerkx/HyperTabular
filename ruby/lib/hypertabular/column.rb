@@ -25,13 +25,17 @@ module HyperTabular
   # +ordinal+ is the zero-based source column; past a record's last cell it reads as empty.
   # +door+ is a key of DOORS. +declared+ is the Symbol the door was declared with — a Unix
   # precision, a date order, an Excel epoch, as HyperCast names them — or nil. +format+ is
-  # the HyperCast::NumFormat of a numeric door, or nil.
-  Column = Data.define(:ordinal, :door, :declared, :format) do
+  # the HyperCast::NumFormat of a numeric door, or nil: no format is Western grouping, as
+  # HyperCast::NumFormat::INVARIANT is, and Indian grouping is declared per column. +tokens+ is
+  # the list this column answers to in place of its dialect's or sheet's (#with_tokens), nil to
+  # inherit theirs. +date_options+ and +months+ are the HyperCast::DateOptions and
+  # HyperCast::MonthNames the date doors read (#with_date_options), or nil.
+  Column = Data.define(:ordinal, :door, :declared, :format, :tokens, :date_options, :months) do
     # Checks the column as the caller bug it would otherwise become at the first read: an
     # ordinal that is not a non-negative Integer or a format that is not a
     # HyperCast::NumFormat (ArgumentError), an unknown door or an undeclared option
     # (KeyError, as HyperCast raises for the same).
-    def initialize(ordinal:, door:, declared: nil, format: nil)
+    def initialize(ordinal:, door:, declared: nil, format: nil, tokens: nil, date_options: nil, months: nil)
       raise ArgumentError, "ordinal must be an Integer at least 0, and an ordinal must be below 2^20 " \
                            "(1,048,576); got #{ordinal.inspect}" unless
         ordinal.is_a?(Integer) && ordinal.between?(0, Column::MAX_ORDINAL)
@@ -50,7 +54,30 @@ module HyperTabular
         raise ArgumentError, "the #{door} door reads no numeric format"
       end
 
-      super(ordinal: ordinal, door: door, declared: declared, format: format)
+      raise ArgumentError, "date_options must be a HyperCast::DateOptions; got #{date_options.inspect}" unless
+        date_options.nil? || date_options.is_a?(HyperCast::DateOptions)
+      raise ArgumentError, "months must be a HyperCast::MonthNames; got #{months.inspect}" unless
+        months.nil? || months.is_a?(HyperCast::MonthNames)
+
+      super(ordinal: ordinal, door: door, declared: declared, format: format,
+            tokens: tokens.nil? ? nil : Declared.tokens(tokens), date_options: date_options, months: months)
+    end
+
+    # The same column answering to these tokens rather than its dialect's or its sheet's: a cell
+    # whose exact, unquoted bytes are one of them is an :empty Fault, whatever its door, at Origin
+    # :token. An empty list means none, so a column can opt out of what it would inherit. On a
+    # sheet, only a text cell can be one.
+    def with_tokens(list)
+      with(tokens: list)
+    end
+
+    # The same column reading dates under these HyperCast::DateOptions and, optionally, this
+    # HyperCast::MonthNames: the timestamp, date, date_ordered and datetime doors read them, as
+    # HyperCast's own do. On a sheet they reach only a text cell, since a typed date cell has no
+    # text for them to read. A declaration the core refuses is an ArgumentError when the plan is
+    # bound.
+    def with_date_options(options, months = nil)
+      with(date_options: options, months: months)
     end
 
     # A boolean column: HyperCast's boolean lexicon, as true or false.
@@ -145,12 +172,59 @@ module HyperTabular
       plan
     end
 
+    # +plan+ as the runtime takes it: for each column its fixed bytes, its month vocabulary and
+    # its tokens (see #packed_with). What a column declares is judged here, ahead of any input,
+    # so a plan the core would refuse is an ArgumentError naming the column at bind or open, a
+    # retired grouping word among them, and never a read that fails later.
+    def self.specs(plan)
+      specs = plan.each_with_index.map do |column, index|
+        [column.packed_with, column.months&.packed, column.packed_tokens]
+      rescue ArgumentError => e
+        raise ArgumentError, "plan column #{index} cannot be honoured: #{e.message}"
+      end
+      refused = Runtime.refused(specs)
+      return specs if refused.nil?
+
+      raise ArgumentError, "plan column #{refused} cannot be honoured: the core refuses what it declares"
+    end
+
+    # The column a door's code and what it declares name, as the core numbers them, or nil for
+    # a code this version does not know. A numeric door reads +format+.
+    def self.of_code(ordinal, code, param, format = nil)
+      door = DOORS.key(code)
+      return nil if door.nil?
+
+      declares = Column::DECLARES[door]
+      declared = declares&.key(param)
+      return nil if declares && declared.nil?
+
+      new(ordinal: ordinal, door: door, declared: declared, format: Column::NUMERIC.include?(door) ? format : nil)
+    end
+
     # Bytes one value of this column's door takes in a column buffer.
     def value_bytes
       Column::VALUE_BYTES.fetch(door)
     end
 
-    # The 104 little-endian bytes of the core's ColumnSpec: ordinal, door code, what the
+    # The fixed part of the core's ColumnSpecWith, the one every read goes through: its size,
+    # the ordinal, the door code, what the door declares, the notation (see #packed), and the date
+    # options in HyperCast's packed form (twelve zeros, a size of zero, for none). The runtime
+    # appends the two pointers and lengths its months and tokens live at. A format holding the
+    # retired grouping bit raises ArgumentError here, from NumFormat#raw_flags.
+    def packed_with
+      param = declared.nil? ? 0 : Column::DECLARES.fetch(door).fetch(declared)
+      [Column::SPEC_WITH_BYTES, ordinal, DOORS.fetch(door), param].pack("L<4") +
+        (format.nil? ? Column::NO_FORMAT : format.packed) +
+        (date_options.nil? ? Column::NO_DATE_OPTIONS : date_options.packed)
+    end
+
+    # The column's own tokens as the core takes them: nil to inherit, an empty String for none.
+    def packed_tokens
+      tokens.nil? ? nil : Declared.packed_tokens(tokens)
+    end
+
+    # The 104 little-endian bytes of the core's 1.0 ColumnSpec, which no read takes and the 1.0
+    # exports stay proved with: ordinal, door code, what the
     # door declares (numbered as HyperCast numbers it), then the notation in HyperCast's
     # own packed form (its 92-byte size-tagged layout) — all zeros, which the core reads
     # as invariant, for a door that reads none.
@@ -182,4 +256,15 @@ module HyperTabular
 
   # The notation of a door that reads none: ninety-two zero bytes, a size of zero.
   Column::NO_FORMAT = ("\0" * HyperCast::NumFormat::PACKED_BYTES).b.freeze
+
+  # The date options of a column that declares none: a size of zero.
+  Column::NO_DATE_OPTIONS = ("\0" * HyperCast::DateOptions::PACKED_BYTES).b.freeze
+
+  # Bytes in the fixed part of a ColumnSpecWith, Column#packed_with: four words, the notation and
+  # the date options.
+  Column::SPEC_WITH_FIXED = 16 + HyperCast::NumFormat::PACKED_BYTES + HyperCast::DateOptions::PACKED_BYTES
+
+  # Bytes in a whole ColumnSpecWith, what its first word carries: the fixed part, then two
+  # pointers and their lengths.
+  Column::SPEC_WITH_BYTES = Column::SPEC_WITH_FIXED + 4 * [0].pack("J").bytesize
 end

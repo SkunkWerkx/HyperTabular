@@ -2,7 +2,8 @@
 //! inflate layers are left whole so that the fuzzer's mutations land in the tokenizer, the
 //! cell and row readers and the shared strings rather than in a broken directory. The
 //! first byte chooses XLSX or ODS, whether the parts are deflated, the 1904 date system,
-//! the sheet options and the batch size; for XLSX the rest is a sheet's `<sheetData>`
+//! the sheet options and the batch size, and the next [`compare::EXTRAS`] a range, a skip, a
+//! header row and `fill_with`; for XLSX the rest is a sheet's `<sheetData>`
 //! content and, after the first NUL, the shared strings' `<si>` elements; for ODS it is the
 //! spreadsheet's `<table:table>` elements. Read through compare.rs, as the container
 //! target is.
@@ -22,9 +23,13 @@ fuzz_target!(|data: &[u8]| {
     let [sel, rest @ ..] = data else {
         return;
     };
+    let Some((extras, rest)) = rest.split_first_chunk::<{ compare::EXTRAS }>() else {
+        return;
+    };
     let options = SheetOptions::default()
         .with_header(sel & 0x08 != 0)
         .with_empty_rows_skipped(sel & 0x10 != 0);
+    let (options, through_with) = compare::extras(options, extras);
     let deflate = sel & 0x02 != 0;
     let max_rows = 1 + usize::from(sel >> 5) * 3;
     let package = if sel & 1 == 0 {
@@ -41,5 +46,5 @@ fuzz_target!(|data: &[u8]| {
     } else {
         packages::ods(&String::from_utf8_lossy(rest), deflate)
     };
-    compare::compare(&package, options, 2, max_rows);
+    compare::compare(&package, options, through_with, 2, max_rows);
 });

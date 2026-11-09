@@ -5,7 +5,9 @@
 #   CMake       find_package(hypertabular), hypertabular::hypertabular and
 #               hypertabular::hypertabular_static: main.c as each C standard the compiler
 #               has, main.cpp through hypertabular.hpp as C++17, C++20 and C++23 with
-#               exceptions on and off, and corpus.cpp, which replays the conformance corpus
+#               exceptions on and off, corpus.cpp, which replays the conformance corpus, and
+#               aborts.cpp, each way of which passes only by the header's std::abort() of a
+#               caller bug
 #               (CMakeLists.txt has the list; SMOKE_CXX=1 makes the C++ programs required)
 #   pkg-config  `pkg-config --cflags --libs hypertabular`, and the archive in ${libdir} named
 #               directly, from C, and from C++ beside hypercast (not on Windows, where CMake
@@ -160,12 +162,14 @@ if [ "$os" != windows ]; then
   run_program "pkg-config, static" "$work/pc-static" static
   if command -v c++ >/dev/null && [ -n "$hypercast" ]; then
     hypercast_libdir="$(pkg-config --variable=libdir hypercast)"
+    # pkg-config's route is -I, so a warning in hypertabular.hpp fails here as it would a consumer's.
+    cxx_warnings=(-Wall -Wextra -Wpedantic -Wshadow -Werror)
     # shellcheck disable=SC2046
-    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 -o "$work/pc-cxx-shared" "$here/main.cpp" \
+    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 "${cxx_warnings[@]}" -o "$work/pc-cxx-shared" "$here/main.cpp" \
       $(pkg-config --cflags --libs hypertabular hypercast) -Wl,-rpath,"$libdir" -Wl,-rpath,"$hypercast_libdir"
     run_program "pkg-config, C++, shared" "$work/pc-cxx-shared" shared
     # shellcheck disable=SC2046
-    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 -o "$work/pc-cxx-static" "$here/main.cpp" \
+    c++ ${arch_flags[@]+"${arch_flags[@]}"} -std=c++17 "${cxx_warnings[@]}" -o "$work/pc-cxx-static" "$here/main.cpp" \
       $(pkg-config --cflags hypertabular hypercast) "$libdir/libhypertabular.a" "$hypercast_libdir/libhypercast.a"
     run_program "pkg-config, C++, static" "$work/pc-cxx-static" static
   elif [ "${SMOKE_CXX:-}" = 1 ]; then

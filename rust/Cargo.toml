@@ -86,19 +86,20 @@ cdylib = ["staticlib"]
 # which the Forge builds, load-checks and packs for PIE, and which judges every cell with
 # HyperCast's own extension at runtime. Off by default, and outside src/kernel, which no
 # feature reaches.
-php = ["dep:ext-php-rs", "dep:ext-php-rs-build", "std"]
+php = ["dep:ext-php-rs", "dep:ext-php-rs-build", "std", "async"]
 # Proves at link time that no C ABI export can panic: `cargo no-panic` fails with an
 # undefined symbol naming any export the optimizer could not clear of every panic path.
 # Built with std, because the proof needs the unwind edge a panic leaves and a no_std
 # build has to abort; the exports' code is the same either way.
 no-panic = ["dep:no-panic", "exports"]
-# The Python binding: a binding like any other — it allocates every buffer and the core
-# fills them — but written in Rust and linked with the core into one extension module
-# (`hypertabular._native`), so it calls the core's Rust functions instead of loading the
+# The Python binding: written in Rust over this crate's API, and linked with the core into one
+# extension module (`hypertabular._native`), so it calls Rust functions instead of loading the
 # shared library. maturin builds it into the wheels (python/pyproject.toml); the forge's
 # suites build it with `cargo rustc --release --crate-type cdylib --features python`.
-# Nothing under src/kernel knows it exists.
-python = ["dep:pyo3", "std", "hypercast/python-values"]
+# Nothing under src/kernel knows it exists. `async` because a caller's stream is the Rust reader's
+# asynchronous source, whose cancel-safety is what lets a Python exception or an awaited stream
+# stop a read and leave it to go on.
+python = ["dep:pyo3", "std", "async", "hypercast/python-values"]
 # The Ruby binding's fast backend: the gem's Fiddle crossing (ruby/lib/hypertabular/
 # runtime) written again in Rust over the core's own functions and linked with the core
 # into one Magnus extension, which replaces that crossing in place on require. The forge
@@ -124,6 +125,9 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 # The remaining tests are separate crates; allocation counters stay process-isolated.
 [[test]]
+name = "batch_size"
+
+[[test]]
 name = "column_values"
 
 [[test]]
@@ -136,10 +140,16 @@ name = "corpus_workbook"
 name = "delimited_reader"
 
 [[test]]
+name = "grouping"
+
+[[test]]
 name = "header"
 
 [[test]]
 name = "header_first"
+
+[[test]]
+name = "kept_faults"
 
 [[test]]
 name = "kernel_allocation_free"
@@ -152,6 +162,9 @@ name = "reader_allocation_free"
 
 [[test]]
 name = "stream_progress"
+
+[[test]]
+name = "suggest"
 
 [[bench]]
 name = "delimited_benchmarks"

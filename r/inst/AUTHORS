@@ -1,2 +1,3 @@
-No third-party Rust crates are vendored: src/rust/vendor.tar.xz carries only the hypertabular core and the hypercast crate it judges every cell with, both the work of this package's authors (Skunk Werkx, MIT), but for the Unicode data below.
+simdutf8 0.1.5: Hans Kratz <hans@appfour.com> (MIT OR Apache-2.0, https://github.com/rusticstuff/simdutf8)
+simdutf8 is based on the UTF-8 validation of simdjson (https://github.com/simdjson/simdjson, the simdjson authors), first ported to Rust by the developers of simd-json.rs (https://simd-json.rs).
 The vendored hypercast crate's case folding (unicode/CaseFolding-17.0.0.txt and src/fold_table.rs, generated from it) is from the Unicode Character Database, (c) Unicode, Inc., Unicode License v3: https://www.unicode.org/license.txt

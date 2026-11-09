@@ -1,6 +1,8 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.CastFailure;
 import io.github.skunkwerkx.hypercast.Fault;
+import io.github.skunkwerkx.hypercast.FaultDetail;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.Verdict;
 import io.github.skunkwerkx.hypercast.interop.NativeValues;
@@ -18,10 +20,12 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 /**
@@ -47,7 +51,17 @@ public final class Batch implements Iterable<Row> {
 
     private final Columns columns;
     private final boolean workbook;
+    /** What a plan's ordinal is short of the sheet's own column: a range's start. */
+    private final int firstColumn;
+
     private int rows;
+    /** Moves whenever the batch is over, so that a list asked of it never answers for the next. */
+    private long generation;
+    /** The width a long row is held to, as the read last knew it. */
+    private int expected;
+    /** Where {@link #faults()} is answered: the cursor, the count, then the problems. Made on first use. */
+    private Block listed;
+
     private MemorySegment cells;
     private long perRow;
     /** Where an unflagged span's bytes are: the input, or the shared strings. Handed out read-only. */
@@ -79,13 +93,23 @@ public final class Batch implements Iterable<Row> {
     /** For the tests: how many times a char arena was made or replaced. */
     static long charsGrown;
 
-    Batch(Columns columns, boolean workbook) {
+    Batch(Columns columns, boolean workbook, int firstColumn) {
         this.columns = columns;
         this.workbook = workbook;
+        this.firstColumn = firstColumn;
     }
 
     /** Points the batch at what the core just wrote. */
-    Batch fill(int rows, MemorySegment cells, long perRow, MemorySegment base, long baseStart, MemorySegment arena) {
+    Batch fill(
+            int rows,
+            MemorySegment cells,
+            long perRow,
+            MemorySegment base,
+            long baseStart,
+            MemorySegment arena,
+            int expected) {
+        generation++;
+        this.expected = expected;
         this.rows = rows;
         this.cells = cells;
         this.perRow = perRow;
@@ -99,15 +123,21 @@ public final class Batch implements Iterable<Row> {
 
     /** Ends the batch: the reader is about to reuse what it points into. */
     void clear() {
+        generation++;
         rows = 0;
     }
 
     /** Releases the scratch a raw read made, with the reader. */
     void close() {
+        generation++;
         rows = 0;
         if (scratch != null) {
             scratch.close();
             scratch = null;
+        }
+        if (listed != null) {
+            listed.close();
+            listed = null;
         }
     }
 
@@ -144,22 +174,27 @@ public final class Batch implements Iterable<Row> {
 
     /**
      * The batch's rows, in order: what {@code for (Row row : batch)} walks. Each row is a view
-     * of this batch, valid until the next read, as the batch is.
+     * of this batch, valid until the next read, as the batch is. Going on with the iterator after
+     * the next read throws {@link ConcurrentModificationException}, and never answers for the
+     * next batch.
      *
      * @return an iterator over the rows
      */
     @Override
     public Iterator<Row> iterator() {
+        long walkedFor = generation;
         return new Iterator<>() {
             private int next;
 
             @Override
             public boolean hasNext() {
+                stillCurrent(walkedFor);
                 return next < rows;
             }
 
             @Override
             public Row next() {
+                stillCurrent(walkedFor);
                 if (next >= rows) {
                     throw new NoSuchElementException();
                 }
@@ -224,6 +259,169 @@ public final class Batch implements Iterable<Row> {
         }
         Fault<Object> fault = fault(column, row);
         return new CellVerdict(fault.reason(), fault.offset(), fault.length());
+    }
+
+    /** The word a note holds at {@code at}: 0 with notes off. */
+    private int note(int column, int row, long at) {
+        Objects.checkIndex(row, rows);
+        Objects.checkIndex(column, columns.plan.length);
+        return columns.notes == null
+                ? 0
+                : Short.toUnsignedInt(columns.notes[column].get(SHORT, row * Abi.NOTE_BYTES + at));
+    }
+
+    /**
+     * What failed in the cell at ({@code column}, {@code row}): finer than its verdict's reason,
+     * for people diagnosing rejected data.
+     *
+     * @param column index into the plan
+     * @param row row of the batch
+     * @return the detail, one this binding does not name keeping its code; {@code null} for a cell
+     *     that cast, a cell nothing more is known of, and with notes off
+     *     ({@link Dialect#notes()}, {@link SheetOptions#notes()})
+     */
+    public FaultDetail detail(int column, int row) {
+        int code = note(column, row, 0);
+        return code == 0 ? null : FaultDetail.of(code);
+    }
+
+    /**
+     * Where the verdict of the cell at ({@code column}, {@code row}) came from. With notes off
+     * ({@link Dialect#notes()}, {@link SheetOptions#notes()}) every cell says {@link Origin#CELL}:
+     * a token's or a padded cell's verdict is still empty, and nothing was kept of why.
+     *
+     * @param column index into the plan
+     * @param row row of the batch
+     * @return where it came from
+     */
+    public Origin origin(int column, int row) {
+        return Origin.of(note(column, row, 2));
+    }
+
+    /**
+     * Every cell of the batch that went wrong, and every row longer than the width under
+     * {@link LongRows#REPORT}, in row order and within a row in plan order. An empty cell is not
+     * on the list unless it is a formula with no cached value, and a token or padding is not: both
+     * are what was declared. With notes off every cell's detail is {@code null} and its origin
+     * {@link Origin#CELL}, so no uncached formula is listed.
+     *
+     * <p>The list belongs to this batch: going on with it after the next read throws
+     * {@link ConcurrentModificationException}, and never answers for the next batch.
+     *
+     * @return the list, walked from the start each time it is asked for an iterator
+     */
+    public Iterable<Problem> faults() {
+        long listedFor = generation;
+        return () -> new Faults(listedFor);
+    }
+
+    private void stillCurrent(long listedFor) {
+        if (listedFor != generation) {
+            throw new ConcurrentModificationException("The batch this walks is over: the reader has read on.");
+        }
+    }
+
+    /** A walk of {@link #faults()}, a page at a time, each page on the heap before it is walked. */
+    private final class Faults implements Iterator<Problem> {
+        private static final int HELD = 64;
+        private static final long PROBLEMS = 16;
+
+        private final long listedFor;
+        private final Problem[] held = new Problem[HELD];
+        private long cursor;
+        private int count;
+        private int next;
+        private boolean finished;
+
+        Faults(long listedFor) {
+            this.listedFor = listedFor;
+        }
+
+        @Override
+        public boolean hasNext() {
+            stillCurrent(listedFor);
+            if (next == count && !finished) {
+                page();
+            }
+            return next < count;
+        }
+
+        @Override
+        public Problem next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            return held[next++];
+        }
+
+        private void page() {
+            if (listed == null) {
+                listed = new Block(PROBLEMS + HELD * Abi.PROBLEM_BYTES, 8);
+            }
+            MemorySegment memory = listed.segment;
+            memory.set(LONG, 0, cursor);
+            boolean report = columns.rowWidths.address() != 0 && !workbook;
+            int code = Native.faults(
+                    columns.buffers,
+                    columns.plan.length,
+                    rows,
+                    report ? columns.rowWidths : MemorySegment.NULL,
+                    expected,
+                    (report ? LongRows.REPORT : LongRows.REJECT).code(),
+                    memory,
+                    memory.asSlice(PROBLEMS),
+                    HELD,
+                    memory.asSlice(8));
+            if (code != Abi.OK) {
+                throw new IllegalStateException(Workbook.CONTRACT_VIOLATION);
+            }
+            cursor = memory.get(LONG, 0);
+            count = (int) memory.get(LONG, 8);
+            next = 0;
+            finished = count < HELD;
+            for (int index = 0; index < count; index++) {
+                held[index] = problem(memory, PROBLEMS + index * Abi.PROBLEM_BYTES);
+            }
+        }
+    }
+
+    private Problem problem(MemorySegment raw, long at) {
+        int row = raw.get(INT, at);
+        int line = line(row);
+        int planColumn = raw.get(INT, at + Abi.PROBLEM_PLAN_COLUMN);
+        int expectedWidth = raw.get(INT, at + Abi.PROBLEM_EXPECTED);
+        int found = raw.get(INT, at + Abi.PROBLEM_FOUND);
+        if (planColumn == Abi.PROBLEM_ROW_LEVEL) {
+            return new Problem(
+                    row,
+                    line,
+                    OptionalInt.empty(),
+                    OptionalInt.empty(),
+                    null,
+                    null,
+                    Origin.CELL,
+                    0,
+                    0,
+                    expectedWidth,
+                    found);
+        }
+        int offset = raw.get(INT, at + Abi.PROBLEM_OFFSET);
+        int length = raw.get(INT, at + Abi.PROBLEM_LENGTH);
+        int detail = Short.toUnsignedInt(raw.get(SHORT, at + Abi.PROBLEM_DETAIL));
+        CastFailure reason = NativeValues.<Object>fault(raw.get(INT, at + Abi.PROBLEM_REASON), offset, length)
+                .reason();
+        return new Problem(
+                row,
+                line,
+                OptionalInt.of(planColumn),
+                OptionalInt.of(columns.plan[planColumn].ordinal() + firstColumn),
+                reason,
+                detail == 0 ? null : FaultDetail.of(detail),
+                Origin.of(Short.toUnsignedInt(raw.get(SHORT, at + Abi.PROBLEM_ORIGIN))),
+                offset,
+                length,
+                expectedWidth,
+                found);
     }
 
     /**
@@ -373,11 +571,12 @@ public final class Batch implements Iterable<Row> {
      * The cell of a {@link Door#TEXT} column: its bytes, untrimmed — quotes resolved for
      * delimited text, and a typed workbook cell said the canonical way ({@code 42},
      * {@code true}, {@code 2024-01-31T10:30:00}, {@code PT1H30M}) — or {@code null} for a
-     * cell with no bytes at all, which is the one way text fails. A read-only view.
+     * cell with no bytes at all, or one whose bytes are not UTF-8, the two ways text fails. A
+     * read-only view.
      *
      * @param column index into the plan
      * @param row row of the batch
-     * @return the cell's UTF-8 bytes, or {@code null} for an empty cell
+     * @return the cell's UTF-8 bytes, or {@code null} for an empty cell or one that is not UTF-8
      * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
      */
     public MemorySegment text(int column, int row) {
@@ -390,11 +589,12 @@ public final class Batch implements Iterable<Row> {
     }
 
     /**
-     * The cell of a {@link Door#TEXT} column as a string, or {@code null} for an empty cell.
+     * The cell of a {@link Door#TEXT} column as a string, or {@code null} for an empty cell or
+     * one that is not UTF-8, which {@link #verdict} tells apart and {@link #rawString} still reads.
      *
      * @param column index into the plan
      * @param row row of the batch
-     * @return the cell's text, or {@code null} for an empty cell
+     * @return the cell's text, or {@code null} for an empty cell or one that is not UTF-8
      * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
      */
     public String string(int column, int row) {
@@ -404,8 +604,7 @@ public final class Batch implements Iterable<Row> {
 
     /**
      * The cell of a {@link Door#TEXT} column as UTF-16, without making a string: its bytes
-     * decoded (an invalid sequence replaced, as {@link #string} replaces it) into a char array
-     * the batch keeps, and handed out as a read-only view of it — position zero, limit the
+     * decoded into a char array the batch keeps, and handed out as a read-only view of it — position zero, limit the
      * cell's length. Valid until the next read, as everything a batch gives out is: the array
      * is only ever appended to while the batch is current, so a view handed out earlier is
      * never written over, and it starts over with the next batch, so after the first few
@@ -413,7 +612,7 @@ public final class Batch implements Iterable<Row> {
      *
      * @param column index into the plan
      * @param row row of the batch
-     * @return the cell's text, or {@code null} for an empty cell, as {@link #string} says
+     * @return the cell's text, or {@code null} for a cell {@link #string} says it of
      * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
      */
     public CharBuffer chars(int column, int row) {
@@ -447,9 +646,8 @@ public final class Batch implements Iterable<Row> {
 
     /**
      * The cell of a {@link Door#TEXT} column decoded as UTF-16 into {@code destination} from
-     * {@code offset}, an invalid sequence replaced as {@link #string} replaces it. Nothing is
-     * allocated. An empty cell writes nothing and returns {@code 0}; a cell that is not empty
-     * has at least one char.
+     * {@code offset}. Nothing is allocated. An empty cell, and one that is not UTF-8, writes
+     * nothing and returns {@code 0}; any other has at least one char.
      *
      * @param column index into the plan
      * @param row row of the batch
@@ -479,9 +677,9 @@ public final class Batch implements Iterable<Row> {
     /**
      * Decodes {@code length} bytes of UTF-8 from {@code from} at {@code at} into {@code to} at
      * {@code offset}, writing no more than {@code room} chars. Returns how many it wrote, or
-     * {@code -1} if they do not fit. Well-formed text — almost all of it — is decoded here, a
-     * byte at a time; text with anything wrong in it is handed whole to the JDK's own decoder,
-     * so that it is replaced exactly as {@link #string} replaces it.
+     * {@code -1} if they do not fit. A text cell that reaches here has passed the door, so it is
+     * decoded here, a byte at a time; should anything be wrong in it all the same, it is handed
+     * whole to the JDK's own decoder.
      */
     private int decode(MemorySegment from, long at, int length, char[] to, int offset, int room) {
         int written = 0;

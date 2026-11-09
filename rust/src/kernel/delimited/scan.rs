@@ -1,20 +1,38 @@
 //! The block walker: turns a byte buffer into cell ends and rows, 64 bytes at a time.
 //!
-//! Per block: classify (four masks), take the prefix XOR of the quote mask and XOR in the
-//! carried parity — that is the inside-quotes mask — then `structural = (sep | lf | cr) &
-//! !inside`. Structural bits are popped in order with `trailing_zeros` and `x & (x - 1)`;
-//! each one ends a cell, and `\n`/`\r` also end the row (a `\r` immediately followed by
-//! `\n` is one ending — the `\n` is cleared from the mask, or carried into the next block
-//! when the `\r` sits at bit 63). Each cell is reported with how many quotes it contained,
-//! from a popcount of the quote mask between its start and end, which is the whole
-//! "does this cell need unescaping" decision (Sep's `SepColInfo`).
+//! A cell is plain, open or after. A quote opens a quoted cell only as the cell's first byte.
+//! Inside, `""` is a literal quote and a lone `"` closes the quoted part. After that, and in a
+//! cell that never opened, quotes are ordinary bytes until a separator or a line ending. So
+//! plain and after scan alike, and the walker only has to know whether a cell is open. These
+//! rules decide boundaries only: what a cell's text reads as is [`unescape`](super::unescape)'s.
+//!
+//! Per block: classify (four masks), then find `hidden`, the bytes inside quoted cells, and
+//! `structural = (sep | lf | cr) & !hidden`.
+//!
+//! - A block with no quote and no open cell hides nothing.
+//! - Otherwise the block's prefix XOR of the quote mask, XORed with the parity carried in, is
+//!   `inside`. When every quote that turns it on is a cell's first byte, or the second of a
+//!   `""`, `inside` is the answer, which takes a few bit operations whatever the block holds
+//!   (a quote that turns it off is always a close or the first of a `""`).
+//! - Otherwise a stray quote is in the way, and [`walk_stray`] goes through that block's
+//!   cells in order. The same prefix XOR, read from each opening quote, finds its close.
+//!
+//! An open cell carries across blocks. A quote at bit 63 looks at the next byte in the data
+//! to see whether it's half of a `""`.
+//!
+//! Structural bits are popped in order with `trailing_zeros` and `x & (x - 1)`; each one ends
+//! a cell, and `\n`/`\r` also end the row (a `\r` immediately followed by `\n` is one ending —
+//! the `\n` is cleared from the mask, or carried into the next block when the `\r` sits at bit
+//! 63). Each cell is reported with how many quotes it contained, from a popcount of the quote
+//! mask between its start and end, which is the whole "does this cell need unescaping"
+//! decision (Sep's `SepColInfo`).
 //!
 //! What the walker finds goes to a [`Sink`] rather than into arrays of its own: the walker
 //! owns no memory. A sink that collects rows into vectors, and one that writes them into a
 //! caller's buffers, see exactly the same calls.
 //!
-//! The walker is only ever entered at a row boundary — where the quote parity is known to
-//! be zero and no `\r` is pending — so a scan that stops early (the sink is full, or the
+//! The walker is only ever entered at a row boundary — where no cell is open and no `\r` is
+//! pending — so a scan that stops early (the sink is full, or the
 //! data ends mid-row) can be resumed by simply calling again from the returned position.
 //! An unfinished row is never delivered; its bytes are re-scanned once more of it has
 //! arrived, which costs at most one row's worth of work per refill and removes every
@@ -85,6 +103,15 @@ impl Scanner {
     /// A scanner on a specific engine (the conformance suite runs every available one).
     pub fn with_engine(sep: u8, quoting: bool, kind: Kind) -> Scanner {
         Scanner { sep, quoting, kind }
+    }
+
+    /// The same scanner for reading physical lines: a quote is a byte like another.
+    pub fn lines(&self) -> Scanner {
+        Scanner {
+            sep: self.sep,
+            quoting: false,
+            kind: self.kind,
+        }
     }
 
     /// Scans `data[pos..]`, which must start at a row boundary, reporting every complete
@@ -175,6 +202,95 @@ fn from(n: u32) -> u64 {
     if n >= 64 { 0 } else { u64::MAX << n }
 }
 
+/// Bit `n`, or nothing when `n` is past the block.
+#[inline(always)]
+fn bit(n: u32) -> u64 {
+    if n >= 64 { 0 } else { 1u64 << n }
+}
+
+/// The top bit of `x`, as every bit: what carries a parity into the next block.
+#[inline(always)]
+fn top(x: u64) -> u64 {
+    ((x as i64) >> 63) as u64
+}
+
+/// A block's quote masks, for the stray-quote walk.
+#[derive(Clone, Copy)]
+struct Quotes {
+    /// The quotes.
+    quote: u64,
+    /// The inclusive prefix XOR of `quote`.
+    toggled: u64,
+    /// The quotes with another quote right after them.
+    doubled: u64,
+}
+
+/// A cell's quoted state across a block edge. When `open` is false, `parity` is 0. When it's
+/// true, `parity` is what makes the next block's prefix XOR read 1 inside the quotes: 0 only
+/// when that block starts with the second quote of a `""`.
+#[derive(Clone, Copy)]
+struct Carry {
+    open: bool,
+    parity: u64,
+}
+
+/// The bytes a block's quoted cells hide, cell by cell, and the state at the block's end.
+/// `first` is the bit where the first cell starting in this block starts, or 64 for none, and
+/// `ends` is every byte that can end a cell.
+#[inline(always)]
+fn walk_stray(quotes: Quotes, mut ends: u64, first: u32, carry: Carry) -> (u64, Carry) {
+    let Quotes {
+        quote,
+        toggled,
+        doubled,
+    } = quotes;
+    let mut hidden = 0;
+    let mut open = carry.open;
+    let mut parity = carry.parity;
+    let mut start = first;
+    loop {
+        if open || quote & bit(start) != 0 {
+            // Bit `from_bit` is where the quotes begin in this block, and `inside` reads 1
+            // from there until each quote that turns it off.
+            let from_bit = if open { 0 } else { start };
+            if !open {
+                parity = if toggled & bit(start) != 0 {
+                    0
+                } else {
+                    u64::MAX
+                };
+            }
+            let inside = toggled ^ parity;
+            let closes = quote & !inside & !doubled & from(from_bit);
+            if closes == 0 {
+                hidden |= from(from_bit);
+                return (
+                    hidden,
+                    Carry {
+                        open: true,
+                        parity: top(inside),
+                    },
+                );
+            }
+            let close = closes.trailing_zeros() & 63;
+            hidden |= between(from_bit, close);
+            ends &= from(close + 1);
+            open = false;
+        }
+        if ends == 0 {
+            return (
+                hidden,
+                Carry {
+                    open: false,
+                    parity: 0,
+                },
+            );
+        }
+        start = (ends.trailing_zeros() & 63) + 1;
+        ends &= ends - 1;
+    }
+}
+
 /// The walker proper. See the module doc.
 ///
 /// # Safety
@@ -194,7 +310,10 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
     let mut row_start = pos;
     let mut cell_start = pos;
     let mut row_line = line;
-    let mut inside: u64 = 0;
+    let mut carry = Carry {
+        open: false,
+        parity: 0,
+    };
     let mut cr_carry = false;
     let mut quote_acc: u32 = 0;
     let mut block_pos = pos;
@@ -216,10 +335,44 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
         // SAFETY: the caller detected E's features.
         let masks = unsafe { E::classify(block, sep) };
         let quote = masks.quote & quote_all;
-        // SAFETY: as above.
-        let parity = unsafe { E::prefix_xor(quote) } ^ inside;
-        inside = ((parity as i64) >> 63) as u64;
-        let mut structural = (masks.sep | masks.lf | masks.cr) & !parity;
+        let ends = masks.sep | masks.lf | masks.cr;
+        let hidden = if quote == 0 && !carry.open {
+            0
+        } else {
+            // SAFETY: as above.
+            let toggled = unsafe { E::prefix_xor(quote) };
+            // The padding of a last, short block holds no quote.
+            let over_edge = quote >> 63 != 0 && data.get(block_pos + 64) == Some(&b'"');
+            let doubled = (quote >> 1) | (u64::from(over_edge) << 63);
+            let inside = toggled ^ carry.parity;
+            let closing = quote & !inside;
+            // Bit 0 opens a cell only if a cell starts there; bit 0 of an open cell is the
+            // second quote of a `""`.
+            let first = u64::from(carry.open || cell_start == block_pos);
+            let opening = quote & inside & !((ends | quote) << 1 | first);
+            if opening == 0 {
+                carry = Carry {
+                    open: top(inside | (closing & doubled)) != 0,
+                    parity: top(inside),
+                };
+                inside
+            } else {
+                let first = if cell_start >= block_pos {
+                    (cell_start - block_pos) as u32
+                } else {
+                    64
+                };
+                let quotes = Quotes {
+                    quote,
+                    toggled,
+                    doubled,
+                };
+                let (hidden, next) = walk_stray(quotes, ends, first, carry);
+                carry = next;
+                hidden
+            }
+        };
+        let mut structural = ends & !hidden;
         if cr_carry {
             // The previous block ended a row with `\r` and this one starts with its `\n`.
             structural &= !1;
@@ -270,7 +423,7 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
                 1
             };
             // Newlines inside this row's quoted cells advance the line count first.
-            line += (masks.lf & parity & between(row_bit, p)).count_ones();
+            line += (masks.lf & hidden & between(row_bit, p)).count_ones();
             let next = abs + terminator as usize;
             let flow = sink.row(row_start, next, row_line, terminator);
             if flow == Flow::Refused {
@@ -299,7 +452,7 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
 
         quote_acc += (quote & from(cell_bit)).count_ones();
         // Newlines inside a quoted cell of the unfinished row advance the line count.
-        line += (masks.lf & parity & from(row_bit)).count_ones();
+        line += (masks.lf & hidden & from(row_bit)).count_ones();
         block_pos += 64;
     }
 
@@ -313,7 +466,7 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
             unclosed: false,
         };
     }
-    if inside != 0 {
+    if carry.open {
         sink.discard();
         return Stop {
             next: row_start,

@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The core linked in, without std: `cdylib` brings its panic handler, its
-# rust_eh_personality stub and the C library link, and implies `exports`, so the fourteen C
+# rust_eh_personality stub and the C library link, and implies `exports`, so the twenty-two C
 # exports ride along in this library as they do in libhypertabular. HyperCast comes with
 # it, its own `exports` off, as in every library built from this crate.
 hypertabular = { path = "../../rust", default-features = false, features = ["cdylib"] }

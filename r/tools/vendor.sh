@@ -172,6 +172,31 @@ case "${1:-}" in
       echo "vendor.sh: src/rust/vendor.tar.xz does not carry $CRATE $version; run tools/vendor.sh" >&2
       exit 1
     }
+    # The version alone passes a stale core: every file the vendored core carries must be the
+    # checkout's (cargo package's own Cargo.toml, lock and checksums aside; Cargo.toml.orig is
+    # rust/Cargo.toml), and every source under rust/src must be in it.
+    unpacked="$(mktemp -d)"
+    trap 'rm -rf "$unpacked"' EXIT
+    tar -xJf "$PKG/src/rust/vendor.tar.xz" -C "$unpacked" "vendor/$CRATE"
+    stale="$(
+      cd "$unpacked/vendor/$CRATE"
+      find . -type f | sed 's|^\./||' | while read -r f; do
+        case "$f" in .cargo_vcs_info.json | .cargo-checksum.json | Cargo.toml | Cargo.lock) continue ;; esac
+        source="$f"
+        [ "$f" = Cargo.toml.orig ] && source=Cargo.toml
+        cmp -s "$f" "$REPO/rust/$source" || echo "$f"
+      done
+      cd "$REPO/rust"
+      find src -type f | while read -r f; do
+        [ -f "$unpacked/vendor/$CRATE/$f" ] || echo "$f"
+      done
+    )"
+    [ -z "$stale" ] || {
+      echo "vendor.sh: src/rust/vendor.tar.xz's $CRATE differs from rust/ at:" >&2
+      echo "$stale" >&2
+      echo "run tools/vendor.sh" >&2
+      exit 1
+    }
     ;;
   *)
     echo "usage: vendor.sh [--stage | --verify]" >&2

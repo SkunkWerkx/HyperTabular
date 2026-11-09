@@ -17,6 +17,8 @@ type column struct {
 	// (core.go's point), and are nil before the first.
 	values   unsafe.Pointer
 	verdicts []CellVerdict
+	// notes is the door's word on each verdict, pointed at as verdicts is: nil with notes off.
+	notes []rawNote
 
 	// The doors whose Go type is not the core's layout are converted here, once per batch,
 	// the first time the column is asked for: at most one of these is allocated.
@@ -37,56 +39,73 @@ type columns struct {
 	batchRows int
 	// width is the widest ordinal the plan reads, plus one.
 	width int
+	// notes is whether a batch carries a detail and an origin for each cell; widths whether the
+	// fill also says how many cells each row had (core.go's attach makes room for that).
+	notes  bool
+	widths bool
 
-	// The plan as the core reads it, and where each column's two arrays sit in the block of
-	// blockBytes that holds them all: offsets[2i] is column i's values, offsets[2i+1] its
-	// verdicts. The block is laid out in the reader's instance of the core (core.go's
-	// attach); block here is the Go copy a host that cannot view the instance's memory
-	// decodes it into, allocated the first time one does.
+	// The plan as the core reads it, and where each column's arrays sit in the block of
+	// blockBytes that holds them all: offsets[3i] is column i's values, offsets[3i+1] its
+	// verdicts, offsets[3i+2] its notes. The block is laid out in the reader's instance of the
+	// core (core.go's attach); block here is the Go copy a host that cannot view the instance's
+	// memory decodes it into, allocated the first time one does.
 	specs      []rawSpec
+	extras     []specExtra
 	offsets    []uintptr
 	blockBytes uintptr
 	block      []uint64
 }
 
-// newColumns checks a plan and allocates its buffers.
-func newColumns(plan []Column, batchRows int) (*columns, error) {
-	if batchRows <= 0 {
-		return nil, fmt.Errorf("hypertabular: BatchRows must be positive, not %d", batchRows)
-	}
-	// One allocation for every column's values and verdicts, each array on an 8-byte
-	// boundary — the strictest alignment any of the Go types they are handed out as wants.
-	rows := uintptr(batchRows)
-	if rows > (math.MaxInt-7)/16 {
-		return nil, fmt.Errorf("hypertabular: BatchRows %d is too many", batchRows)
-	}
+// newColumns checks a plan and allocates its buffers, once the core has allowed their size. notes
+// says whether a batch carries a detail and an origin for each cell, and flags says the rest of
+// what the core counts: batchWidths, batchSheet.
+func newColumns(plan []Column, batchRows int, notes bool, flags uint32) (*columns, error) {
 	s := &columns{
 		plan:      append([]Column(nil), plan...),
 		columns:   make([]column, len(plan)),
 		batchRows: batchRows,
+		notes:     notes,
 		specs:     make([]rawSpec, len(plan)),
-		offsets:   make([]uintptr, 2*len(plan)),
+		extras:    make([]specExtra, len(plan)),
+		offsets:   make([]uintptr, 3*len(plan)),
 	}
 	widest := -1
-	var words uintptr
 	for index, planned := range plan {
-		spec, err := planned.spec()
+		spec, extra, err := planned.spec()
 		if err != nil {
 			return nil, fmt.Errorf("hypertabular: plan column %d: %w", index, err)
 		}
-		s.specs[index] = spec
+		s.specs[index], s.extras[index] = spec, extra
 		s.columns[index].plan = planned
 		widest = max(widest, planned.ordinal)
-		s.offsets[2*index] = words * 8
-		words += (rows*planned.door.valueSize() + 7) / 8
-		s.offsets[2*index+1] = words * 8
-		words += (rows*unsafe.Sizeof(CellVerdict{}) + 7) / 8
+	}
+	if notes {
+		flags |= batchNotes
+	}
+	if _, err := checkSizes(s.specs, batchRows, 1, flags); err != nil {
+		return nil, err
+	}
+	// One allocation for every column's values and verdicts, each array on an 8-byte
+	// boundary — the strictest alignment any of the Go types they are handed out as wants. The core
+	// has allowed the bytes, and where int is 32 bits (TinyGo's wasm) what it allows may still not
+	// be addressable.
+	rows := uint64(batchRows)
+	var words uint64
+	for index, planned := range plan {
+		s.offsets[3*index] = uintptr(words * 8)
+		words += (rows*uint64(planned.door.valueSize()) + 7) / 8
+		s.offsets[3*index+1] = uintptr(words * 8)
+		words += (rows*uint64(unsafe.Sizeof(CellVerdict{})) + 7) / 8
+		s.offsets[3*index+2] = uintptr(words * 8)
+		if notes {
+			words += (rows*uint64(unsafe.Sizeof(rawNote{})) + 7) / 8
+		}
 		if words > math.MaxInt/8 {
 			return nil, fmt.Errorf("hypertabular: a plan of %d columns at %d rows a batch is too large", len(plan), batchRows)
 		}
 	}
 	s.width = widest + 1
-	s.blockBytes = words * 8
+	s.blockBytes = uintptr(words * 8)
 	for index := range s.columns {
 		c := &s.columns[index]
 		switch c.plan.door {

@@ -39,6 +39,7 @@ Authors:
 Other contributors:
 \itemize{
   \item Skunk Werkx [copyright holder]
+  \item Unicode, Inc. (case folding data in the vendored core; see inst/AUTHORS) [copyright holder]
 }
 
 }

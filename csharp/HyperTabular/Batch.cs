@@ -7,6 +7,48 @@ using HyperCast.Interop;
 
 namespace HyperTabular;
 
+/// <summary>Where a cell's verdict came from: the door, or something that spared it being asked. The numbers are the core's codes.</summary>
+public enum Origin : ushort
+{
+	/// <summary>A door's verdict on the cell's text: every cell that cast, and every refusal.</summary>
+	Cell = 0,
+	/// <summary>A declared token: empty, and no door asked.</summary>
+	Token = 1,
+	/// <summary>A cell its row does not have, under <see cref="ShortRows.Pad"/> or past a sheet row's last cell: empty, and no door asked.</summary>
+	Padded = 2,
+	/// <summary>A workbook formula with no cached value: empty, and no door asked.</summary>
+	Uncached = 3
+}
+
+/// <summary>One entry of <see cref="Batch.Faults"/>: a cell that went wrong, or a row longer than the width.</summary>
+/// <param name="Row">The row, from zero, in the batch.</param>
+/// <param name="Line">Delimited text: the record's first physical line. A sheet: its absolute row. From one.</param>
+/// <param name="PlanColumn">The column of the plan; <see langword="null"/> for an entry about the row as a whole.</param>
+/// <param name="SourceColumn">The source column, from zero; a sheet's own, so <c>A</c> is 0 wherever a range starts. <see langword="null"/> for an entry about the row as a whole.</param>
+/// <param name="Reason">Why the verdict is what it is: malformed, out of range, or empty for a formula with no cached value. <see langword="null"/> for an entry about the row as a whole.</param>
+/// <param name="DetailCode">HyperCast's raw detail code, 0 for none; one this binding does not name is kept here.</param>
+/// <param name="Origin">Where the verdict came from. An entry about the row as a whole says <see cref="Origin.Cell"/>.</param>
+/// <param name="Offset">Byte offset of the offending span in the cell's decoded, unescaped text; 0 where there is none.</param>
+/// <param name="Length">Byte length of the offending span; 0 where there is none.</param>
+/// <param name="Expected">A long row's width by its header or first record; otherwise 0.</param>
+/// <param name="Found">How many cells a long row had; otherwise 0.</param>
+public readonly record struct Problem(
+	int Row,
+	int Line,
+	int? PlanColumn,
+	int? SourceColumn,
+	CastFailure? Reason,
+	uint DetailCode,
+	Origin Origin,
+	int Offset,
+	int Length,
+	int Expected,
+	int Found)
+{
+	/// <summary>What failed, named: <see cref="FaultDetail.None"/>, one of HyperCast's members, or <see cref="FaultDetail.Unknown"/>.</summary>
+	public FaultDetail Detail => Abi.DetailFrom(DetailCode);
+}
+
 /// <summary>
 /// The rows of one read, column-major: for each column of the plan, the values its door made
 /// and a verdict beside each. One type serves delimited text and workbooks alike; the two
@@ -24,11 +66,19 @@ public sealed unsafe class Batch
 {
 	readonly Columns _columns;
 	readonly bool _workbook;
+	/// <summary>What a plan's ordinal is short of the sheet's own column: a range's start.</summary>
+	readonly int _firstColumn;
 	int _rows;
+	/// <summary>Moves whenever the batch is over, so that a list asked of it never answers for the next.</summary>
+	ulong _generation;
+	/// <summary>The width a long row is held to, as the read last knew it.</summary>
+	uint _expected;
 	Native.RawSpan[] _cells = [];
 	int _perRow;
 	/// <summary>Where an unflagged span's bytes are: the input, or the shared strings.</summary>
 	byte* _base;
+	/// <summary>The reader or sheet, which holds what <see cref="_base"/> points into: a pointer keeps nothing alive, and a batch can outlive every other reference to them.</summary>
+	readonly object _owner;
 	/// <summary>Where a flagged span's bytes are.</summary>
 	byte[] _arena = [];
 	byte[] _scratch = [];
@@ -46,16 +96,20 @@ public sealed unsafe class Batch
 	[ThreadStatic]
 	internal static int CharsGrown;
 
-	internal Batch(Columns columns, bool workbook)
+	internal Batch(object owner, Columns columns, bool workbook, int firstColumn = 0)
 	{
+		_owner = owner;
 		_columns = columns;
 		_workbook = workbook;
+		_firstColumn = firstColumn;
 	}
 
 	/// <summary>Points the batch at what the core just wrote.</summary>
-	internal Batch Fill(int rows, Native.RawSpan[] cells, int perRow, byte* @base, byte[] arena)
+	internal Batch Fill(int rows, Native.RawSpan[] cells, int perRow, byte* @base, byte[] arena, uint expected = 0)
 	{
+		_generation++;
 		_rows = rows;
+		_expected = expected;
 		_cells = cells;
 		_perRow = perRow;
 		_base = @base;
@@ -66,7 +120,11 @@ public sealed unsafe class Batch
 	}
 
 	/// <summary>Ends the batch: the reader is about to reuse what it points into.</summary>
-	internal void Clear() => _rows = 0;
+	internal void Clear()
+	{
+		_generation++;
+		_rows = 0;
+	}
 
 	/// <summary>How many rows the batch holds. Never zero while the batch is current.</summary>
 	public int Rows => _rows;
@@ -89,19 +147,34 @@ public sealed unsafe class Batch
 	public ref struct RowEnumerator
 	{
 		readonly Batch _batch;
+		readonly ulong _generation;
 		int _index;
 
 		internal RowEnumerator(Batch batch)
 		{
 			_batch = batch;
+			_generation = batch._generation;
 			_index = -1;
 		}
 
 		/// <summary>The row the loop is on.</summary>
-		public readonly Row Current => new(_batch, _index);
+		/// <exception cref="InvalidOperationException">The reader has read on since the loop began.</exception>
+		public readonly Row Current
+		{
+			get
+			{
+				_batch.StillCurrent(_generation);
+				return new(_batch, _index);
+			}
+		}
 
 		/// <summary>Moves to the next row.</summary>
-		public bool MoveNext() => ++_index < _batch._rows;
+		/// <exception cref="InvalidOperationException">The reader has read on since the loop began.</exception>
+		public bool MoveNext()
+		{
+			_batch.StillCurrent(_generation);
+			return ++_index < _batch._rows;
+		}
 	}
 
 	/// <summary>The plan the batch was read through: column <c>i</c> of the batch is <c>Columns[i]</c>.</summary>
@@ -126,6 +199,111 @@ public sealed unsafe class Batch
 	/// span in the cell's text (<see cref="Raw"/>).
 	/// </summary>
 	public ReadOnlySpan<CellVerdict> Verdicts(int column) => _columns.Verdicts[column].AsSpan(0, _rows);
+
+	/// <summary>
+	/// The fault of the cell at (<paramref name="column"/>, <paramref name="row"/>), with what failed
+	/// on its <see cref="HyperCast.Fault.Detail"/>; <see langword="null"/> for a cell that cast. The
+	/// one way to a text column's: <see cref="CellVerdict.ToFault"/> has no room for the detail.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
+	public Fault? Fault(int column, int row)
+	{
+		CheckRow(row);
+		var verdict = _columns.Verdicts[column][row];
+		return verdict.IsOk ? null : Detailed(verdict, column, row);
+	}
+
+	/// <summary>A verdict that is not ok as HyperCast's fault, with the note's detail on it.</summary>
+	Fault Detailed(CellVerdict verdict, int column, int row) =>
+		verdict.ToFault() with { DetailCode = Note(column, row).Detail };
+
+	/// <summary>The cell's note: all zeros with notes off.</summary>
+	internal Native.RawCellNote Note(int column, int row) =>
+		_columns.Notes is { } notes ? notes[column][row] : default;
+
+	/// <summary>
+	/// Where the verdict of the cell at (<paramref name="column"/>, <paramref name="row"/>) came from.
+	/// With notes off (<see cref="Dialect.Notes"/>, <see cref="SheetOptions.Notes"/>) every cell says
+	/// <see cref="Origin.Cell"/>: a token's or a padded cell's verdict is still empty, and nothing was
+	/// kept of why.
+	/// </summary>
+	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
+	public Origin Origin(int column, int row)
+	{
+		CheckRow(row);
+		return (Origin)Note(column, row).Origin;
+	}
+
+	/// <summary>
+	/// What went wrong in this batch, in order by row and then by column, a row's own entry first:
+	/// cells at <see cref="CastFailure.Malformed"/> or <see cref="CastFailure.OutOfRange"/>, formulas
+	/// with no cached value (<see cref="Origin.Uncached"/>), and rows longer than the width under
+	/// <see cref="LongRows.Report"/>. Blanks, tokens, padding and <see cref="LongRows.Truncate"/> are
+	/// not listed. A row the empty-row filter dropped cannot be named. With notes off a refused cell has
+	/// no detail, and an uncached one is not listed.
+	/// </summary>
+	/// <returns>
+	/// The list, which belongs to this batch: going on with it after the next read throws
+	/// <see cref="InvalidOperationException"/>, and never answers for the next batch.
+	/// </returns>
+	public IEnumerable<Problem> Faults() => ListedFor(_generation);
+
+	IEnumerable<Problem> ListedFor(ulong generation)
+	{
+		const int Held = 64;
+		var held = new Native.RawProblem[Held];
+		ulong cursor = 0;
+		while (true)
+		{
+			StillCurrent(generation);
+			var written = NextFaults(ref cursor, held);
+			for (var index = 0; index < written; index++)
+			{
+				yield return ProblemOf(held[index]);
+				StillCurrent(generation);
+			}
+			if (written < Held)
+				yield break;
+		}
+	}
+
+	/// <summary>Moves whenever the batch is over: what a loop over a reader's rows holds to see that nothing read on under it.</summary>
+	internal ulong Generation => _generation;
+
+	internal void StillCurrent(ulong generation)
+	{
+		if (generation != _generation)
+			throw new InvalidOperationException("The batch this walks is over: the reader has read on.");
+	}
+
+	int NextFaults(ref ulong cursor, Native.RawProblem[] held)
+	{
+		var report = _columns.RowWidths is not null && !_workbook;
+		ulong at = cursor;
+		nuint written;
+		fixed (Native.RawProblem* into = held)
+		fixed (uint* widths = report ? _columns.RowWidths : null)
+		{
+			var code = Native.hypertabular_faults(
+				HyperTabular.Columns.Address(_columns.Buffers), (nuint)_columns.Plan.Length, (nuint)_rows, widths, _expected,
+				report ? (uint)LongRows.Report : (uint)LongRows.Reject, &at, into, (nuint)held.Length, &written);
+			if (code != Native.Ok)
+				throw new InvalidOperationException(Workbook.ContractViolation);
+		}
+		cursor = at;
+		return (int)written;
+	}
+
+	Problem ProblemOf(in Native.RawProblem raw)
+	{
+		var row = (int)raw.Row;
+		var line = Line(row);
+		if (raw.PlanColumn == Native.RawProblem.RowLevel)
+			return new(row, line, null, null, null, 0, HyperTabular.Origin.Cell, 0, 0, (int)raw.Expected, (int)raw.Found);
+		var column = (int)raw.PlanColumn;
+		return new(row, line, column, _columns.Plan[column].Ordinal + _firstColumn, Abi.ReasonFrom(raw.Reason), raw.Detail,
+			(Origin)raw.Origin, (int)raw.Offset, (int)raw.Len, (int)raw.Expected, (int)raw.Found);
+	}
 
 	/// <summary>
 	/// A whole column as the core wrote it, one value per row, nothing copied:
@@ -200,7 +378,7 @@ public sealed unsafe class Batch
 			throw new InvalidOperationException($"Column {column} is cast through {door}, which does not make a {typeof(T).Name}.");
 		var verdict = _columns.Verdicts[column][row];
 		if (!verdict.IsOk)
-			return new Verdict<T>(verdict.ToFault());
+			return new Verdict<T>(Detailed(verdict, column, row));
 		var values = _columns.Values[column];
 		if (typeof(T) == typeof(bool))
 			return As<bool, T>(values[row] != 0);
@@ -285,8 +463,8 @@ public sealed unsafe class Batch
 
 	/// <summary>
 	/// The cell of a <see cref="Door.Text"/> column as UTF-16, without making a string: its
-	/// bytes decoded (an invalid sequence replaced, as <see cref="GetString"/> replaces it) into
-	/// an arena the batch keeps. Empty for an empty cell. Valid until the next read, as
+	/// bytes decoded into an arena the batch keeps. Empty for an empty cell and for one whose bytes
+	/// aren't UTF-8, which <see cref="Verdicts"/> tells apart and <see cref="Raw"/> still reads. Valid until the next read, as
 	/// everything a batch gives out is: the arena is only ever appended to while the batch is
 	/// current — a span handed out earlier is never written over — and starts over with the
 	/// next batch, so after the first few batches it is large enough and nothing is allocated.
@@ -317,8 +495,7 @@ public sealed unsafe class Batch
 
 	/// <summary>
 	/// The cell of a <see cref="Door.Text"/> column decoded as UTF-16 into
-	/// <paramref name="destination"/>, an invalid sequence replaced as <see cref="GetString"/>
-	/// replaces it. An empty cell writes nothing.
+	/// <paramref name="destination"/>. An empty cell, and one whose bytes aren't UTF-8, writes nothing.
 	/// </summary>
 	/// <returns>
 	/// <see langword="false"/>, and <paramref name="charsWritten"/> zero, if

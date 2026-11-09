@@ -44,15 +44,16 @@ impl Header {
         (0..self.spans.len()).map(|ordinal| self.name(ordinal).unwrap_or_default())
     }
 
-    /// The first column with this name: what a plan's ordinal is looked up by. The match
-    /// is exact — byte for byte, case and spaces included — so a `&str` and a `&[u8]` find
-    /// the same column.
+    /// The first column with this name, or `None`. A name two columns share answers with the first
+    /// of them, and nothing says there was another: to refuse rather than choose, as a plan built
+    /// from names should, use [`Header::require`]. The match is exact, byte for byte, case and
+    /// spaces included, so a `&str` and a `&[u8]` find the same column.
     pub fn ordinal(&self, name: impl AsRef<[u8]>) -> Option<usize> {
         let name = name.as_ref();
         self.names().position(|candidate| candidate == name)
     }
 
-    /// [`Header::ordinal`], with a missing name an error that says which: what a plan built
+    /// The one column with this name, matched as [`Header::ordinal`] matches: what a plan built
     /// from names reads best with, a `?` on each column.
     ///
     /// ```
@@ -63,9 +64,27 @@ impl Header {
     /// reader.bind(&plan)?;
     /// # Ok::<(), hypertabular::Error>(())
     /// ```
+    ///
+    /// # Errors
+    /// [`Error::NoColumn`] for a name no column has, and [`Error::AmbiguousColumn`], with both
+    /// positions, for a name two columns have, since taking either would be a silent guess. A plan
+    /// can still say which by position.
     pub fn require(&self, name: impl AsRef<[u8]>) -> Result<usize, Error> {
         let name = name.as_ref();
-        self.ordinal(name)
-            .ok_or_else(|| Error::NoColumn(String::from_utf8_lossy(name).into_owned()))
+        let mut matches = self
+            .names()
+            .enumerate()
+            .filter(|(_, candidate)| *candidate == name)
+            .map(|(ordinal, _)| ordinal);
+        let lossy = || String::from_utf8_lossy(name).into_owned();
+        let first = matches.next().ok_or_else(|| Error::NoColumn(lossy()))?;
+        match matches.next() {
+            None => Ok(first),
+            Some(second) => Err(Error::AmbiguousColumn {
+                name: lossy(),
+                first,
+                second,
+            }),
+        }
     }
 }

@@ -3,6 +3,7 @@ package io.github.skunkwerkx.hypertabular;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -21,7 +22,8 @@ import java.util.function.Consumer;
  */
 public final class Sheet implements AutoCloseable {
     private final Workbook book;
-    private final SheetOptions options;
+    private final SheetInfo info;
+    private SheetOptions options;
     private final Arena arena;
     /** The plan's columns and the batch they are read into: {@code null} until a plan is bound. */
     private Columns columns;
@@ -42,13 +44,20 @@ public final class Sheet implements AutoCloseable {
     /** Starts a read of a sheet, through {@code plan}, or with the plan left to {@link #bind} when it is {@code null}. */
     Sheet(Workbook book, SheetInfo info, SheetOptions options, List<Column> plan) {
         this.book = book;
+        this.info = info;
         this.options = Objects.requireNonNull(options, "options");
-        Column[] checked = plan == null ? null : Columns.checked(plan, options.batchRows());
+        Column[] checked = plan == null ? null : Columns.checked(plan);
+        Columns.checkSizes(
+                MemorySegment.NULL,
+                0,
+                options.batchRows(),
+                1,
+                Abi.BATCH_SHEET | (options.notes() ? Abi.BATCH_NOTES : 0));
         this.arena = Arena.ofConfined();
         Workbook.Scratch made = null;
         try {
             if (checked != null) {
-                Columns bound = new Columns(checked, options.batchRows(), arena);
+                Columns bound = new Columns(checked, options.batchRows(), arena, options.notes(), false, true);
                 made = Workbook.stingy
                         ? new Workbook.Scratch(arena, 1, 1, 1, bound.width)
                         : new Workbook.Scratch(
@@ -69,22 +78,41 @@ public final class Sheet implements AutoCloseable {
                         : new Workbook.Scratch(arena, Abi.WINDOW_MIN, 4096, 64, 64);
             }
             scratch = made;
+            byte[] tokens = options.tokens().packed();
+            if (tokens.length > 0) {
+                scratch.tokens = Columns.held(tokens, arena);
+                scratch.tokensBytes = tokens.length;
+            }
             // A copy of the opened state, which the core allows, so that this sheet's read is its own.
             state = arena.allocate(book.state().byteSize(), 8);
             state.copyFrom(book.state());
 
             MemorySegment part = arena.allocate(Math.max(info.part().length, 1)).asSlice(0, info.part().length);
             MemorySegment.copy(info.part(), 0, part, ValueLayout.JAVA_BYTE, 0, info.part().length);
+            MemorySegment raw = arena.allocate(Abi.SHEET_OPTIONS_BYTES, 4);
+            raw.set(ValueLayout.JAVA_INT, 0, (int) Abi.SHEET_OPTIONS_BYTES);
+            raw.set(ValueLayout.JAVA_INT, Abi.SHEET_OPTIONS_HAS_HEADER, options.hasHeader() ? 1 : 0);
+            raw.set(ValueLayout.JAVA_INT, Abi.SHEET_OPTIONS_SKIP_EMPTY_ROWS, options.skipEmptyRows() ? 1 : 0);
+            raw.set(ValueLayout.JAVA_INT, Abi.SHEET_OPTIONS_SKIP, options.skip());
+            raw.set(ValueLayout.JAVA_INT, Abi.SHEET_OPTIONS_HEADER_ROW, options.headerRow());
+            raw.set(
+                    ValueLayout.JAVA_INT,
+                    Abi.SHEET_OPTIONS_FIRST_ROW,
+                    options.range().firstRow());
+            raw.set(
+                    ValueLayout.JAVA_INT,
+                    Abi.SHEET_OPTIONS_FIRST_COLUMN,
+                    options.range().firstColumn());
+            raw.set(
+                    ValueLayout.JAVA_INT,
+                    Abi.SHEET_OPTIONS_LAST_ROW,
+                    options.range().lastRow());
+            raw.set(
+                    ValueLayout.JAVA_INT,
+                    Abi.SHEET_OPTIONS_LAST_COLUMN,
+                    options.range().lastColumn());
             Workbook.settle(
-                    Native.sheet(
-                            state,
-                            book.container(),
-                            part,
-                            info.index(),
-                            options.hasHeader(),
-                            options.skipEmptyRows(),
-                            scratch.filled),
-                    scratch.filled);
+                    Native.sheetWith(state, book.container(), part, info.index(), raw, scratch.filled), scratch.filled);
             if (options.hasHeader()) {
                 header = readHeader();
             }
@@ -102,7 +130,7 @@ public final class Sheet implements AutoCloseable {
 
     private void attach(Columns bound) {
         perRow = bound.plan.length + 1;
-        batch = new Batch(bound, true);
+        batch = new Batch(bound, true, options.firstColumn());
         columns = bound;
     }
 
@@ -134,14 +162,18 @@ public final class Sheet implements AutoCloseable {
      *     without a plan
      */
     public void bind(List<Column> plan) {
+        bindPlan(plan, false);
+    }
+
+    private void bindPlan(List<Column> plan, boolean rowWidths) {
         if (closed) {
             throw new IllegalStateException("The sheet is closed.");
         }
         if (columns != null) {
             throw new IllegalStateException("The sheet already has a plan; a plan is bound once.");
         }
-        Column[] checked = Columns.checked(plan, options.batchRows());
-        Columns bound = new Columns(checked, options.batchRows(), arena);
+        Column[] checked = Columns.checked(plan);
+        Columns bound = new Columns(checked, options.batchRows(), arena, options.notes(), rowWidths, true);
         // Grown, never replaced: the cell table only to save the first fill a call (and not
         // for the tests' stingy pass, whose point is that it grows), the row's slots because
         // what they hold is a header row the sheet may yet repeat.
@@ -235,7 +267,7 @@ public final class Sheet implements AutoCloseable {
         if (rows == 0) {
             return null;
         }
-        return batch.fill(rows, scratch.cells.segment, perRow, book.strings(), 0, scratch.arena.segment);
+        return batch.fill(rows, scratch.cells.segment, perRow, book.strings(), 0, scratch.arena.segment, 0);
     }
 
     /**
@@ -256,6 +288,76 @@ public final class Sheet implements AutoCloseable {
                 action.accept(row);
             }
         }
+    }
+
+    /**
+     * Reads a sample of this sheet from its start, with {@link SuggestOptions#DEFAULT}.
+     *
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken
+     * @see #suggest(SuggestOptions)
+     */
+    public Suggestion suggest() {
+        return suggest(SuggestOptions.DEFAULT);
+    }
+
+    /**
+     * Reads a sample of this sheet through the text door and says what its columns look like, as
+     * {@link DelimitedReader#suggest(Path, Dialect, SuggestOptions)} does. It is a read of its own,
+     * from the sheet's start with the sheet's options, and this one's own read is left as it was.
+     * Its plan's ordinals count from the range's first column, as any plan's do.
+     *
+     * <p>A typed number is judged by its value and has no notation, whichever is declared: a column
+     * of them is a number under any format, and its plan reads every one, since a typed cell reads
+     * the same under them all. A text cell holding {@code 1.234} keeps its question, in a column of
+     * its own or beside typed numbers. A typed date, date-time, time or duration cell reads as its
+     * canonical text, which the suggester does not take as a date: such a column of a sheet is
+     * text, resolved, for a plan to change by hand.
+     *
+     * @param options how the sample is taken and read
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken: there is no knowing
+     *     what is past them, and a read would stop there too. A failure past them is not met, or
+     *     only says the source was truncated
+     * @throws IllegalStateException if the sheet or its workbook is closed
+     */
+    public Suggestion suggest(SuggestOptions options) {
+        Objects.requireNonNull(options, "options");
+        if (closed) {
+            throw new IllegalStateException("The sheet is closed.");
+        }
+        book.requireOpen();
+        int limit = options.rowsWithin(this.options.batchRows());
+        int width = -1;
+        if (!this.options.hasHeader()) {
+            try (Sheet first =
+                    new Sheet(book, info, this.options.withBatchRows(1).withNotes(false), null)) {
+                width = first.firstRowWidth();
+            }
+        }
+        // Notes on, for what the sample's second door says of a cell.
+        try (Sheet sheet = new Sheet(book, info, this.options.withBatchRows(1).withNotes(true), null)) {
+            int columns = width < 0 ? sheet.header.size() : width;
+            // One row more than the sample, so that a row past it costs no second batch to find, in
+            // as many batches as the core says that takes.
+            Sample sample = Sample.of(
+                    sheet::read,
+                    plan -> {
+                        sheet.options = sheet.options.withBatchRows(
+                                Columns.sampleRows(plan, limit + 1, Abi.BATCH_SHEET | Abi.BATCH_NOTES));
+                        sheet.bind(plan);
+                    },
+                    columns,
+                    limit,
+                    true);
+            return sample.judge(sheet.header, options);
+        }
+    }
+
+    /** How many cells the sheet's next row has: 0 for no row. */
+    private int firstRowWidth() {
+        bindPlan(List.of(Column.text(0)), true);
+        return read() == null ? 0 : columns.rowWidths.get(ValueLayout.JAVA_INT, 0);
     }
 
     /** Releases the sheet's native memory. Closing twice is harmless. */

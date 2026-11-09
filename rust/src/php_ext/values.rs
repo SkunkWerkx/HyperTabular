@@ -1,6 +1,6 @@
 //! `Dialect`, `Column`, `SheetInfo`, `SheetOptions` and `TabularException`: 1.0's classes with
 //! constructor-promoted properties, registered as plain PHP classes (`classes.rs`), with 1.0's
-//! constructors, factories and messages.
+//! constructors, factories and messages, and what the core has gained since.
 
 use std::cell::{Cell, RefCell};
 use std::mem::ManuallyDrop;
@@ -15,22 +15,18 @@ use ext_php_rs::types::Zval;
 use ext_php_rs::zend::{ClassEntry, ExecuteData, ce, run_handler};
 use ext_php_rs::zend_fastcall;
 
-use super::args::checked_args;
+use super::args::{BatchRows, checked_args};
 use super::classes::{
     Declaration, Plain, Type, assign, bool_zval, build, bytes_zval, entry, finish,
-    finish_registration, instantiate, int_zval, register as register_class, this,
+    finish_registration, instantiate, int_zval, list_zval, object_zval_ref,
+    register as register_class, this,
 };
-use super::enums::{Door, TabularFailure};
+use super::convert::token_strings;
+use super::enums::{Door, Encoding, LongRows, ShortRows, TabularFailure};
 use super::errors::{invalid_argument, pending, runtime_exception};
 use super::guard;
 use super::hypercast::{enum_value, invariant_format};
-
-/// `DelimitedReader::MAX_ROW_BYTES`: the row ceiling.
-pub(crate) const MAX_ROW_BYTES: usize = 1 << 30;
-/// `DelimitedReader::DEFAULT_BATCH_ROWS`.
-pub(crate) const DEFAULT_BATCH_ROWS: i64 = 4096;
-/// `Column::MAX_ORDINAL`, private in 1.0: below 2^20.
-const MAX_ORDINAL: i64 = (1 << 20) - 1;
+use crate::column::MAX_ORDINAL;
 
 const DIALECT: Declaration = Declaration {
     name: "HyperTabular\\Dialect",
@@ -39,6 +35,12 @@ const DIALECT: Declaration = Declaration {
         ("quoting", Type::Bool),
         ("hasHeader", Type::Bool),
         ("skipBlankLines", Type::Bool),
+        ("skip", Type::Int),
+        ("headerRow", Type::Int),
+        ("shortRows", Type::Class("HyperTabular\\ShortRows")),
+        ("longRows", Type::Class("HyperTabular\\LongRows")),
+        ("encoding", Type::Class("HyperTabular\\Encoding")),
+        ("tokens", Type::Array),
     ],
     constants: &[],
     readonly_class: true,
@@ -52,6 +54,9 @@ const COLUMN: Declaration = Declaration {
         ("door", Type::Class("HyperTabular\\Door")),
         ("format", Type::Class("HyperCast\\NumFormat")),
         ("declared", Type::Int),
+        ("tokens", Type::NullableArray),
+        ("dateOptions", Type::NullableClass("HyperCast\\DateOptions")),
+        ("months", Type::NullableClass("HyperCast\\MonthNames")),
     ],
     constants: &[],
     readonly_class: true,
@@ -77,6 +82,11 @@ const SHEET_OPTIONS: Declaration = Declaration {
         ("hasHeader", Type::Bool),
         ("skipEmptyRows", Type::Bool),
         ("batchRows", Type::Int),
+        ("skip", Type::Int),
+        ("headerRow", Type::Int),
+        ("range", Type::NullableClass("HyperTabular\\Range")),
+        ("tokens", Type::Array),
+        ("notes", Type::Bool),
     ],
     constants: &[],
     readonly_class: false,
@@ -287,7 +297,22 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
                     .not_required()
                     .arg(Arg::new("quoting", boolean).default("true"))
                     .arg(Arg::new("hasHeader", boolean).default("true"))
-                    .arg(Arg::new("skipBlankLines", boolean).default("true")),
+                    .arg(Arg::new("skipBlankLines", boolean).default("true"))
+                    .arg(Arg::new("skip", int).default("0"))
+                    .arg(Arg::new("headerRow", int).default("0"))
+                    .arg(
+                        Arg::new("shortRows", DataType::object("HyperTabular\\ShortRows"))
+                            .default("\\HyperTabular\\ShortRows::Reject"),
+                    )
+                    .arg(
+                        Arg::new("longRows", DataType::object("HyperTabular\\LongRows"))
+                            .default("\\HyperTabular\\LongRows::Reject"),
+                    )
+                    .arg(
+                        Arg::new("encoding", DataType::object("HyperTabular\\Encoding"))
+                            .default("\\HyperTabular\\Encoding::Utf8"),
+                    )
+                    .arg(Arg::new("tokens", DataType::Array).default("[]")),
                 MethodFlags::Public,
             ),
             (
@@ -313,9 +338,45 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
             .arg(Arg::new("door", DataType::object("HyperTabular\\Door")))
             .arg(Arg::new("format", DataType::object("HyperCast\\NumFormat")))
             .not_required()
-            .arg(Arg::new("declared", int).default("0")),
+            .arg(Arg::new("declared", int).default("0"))
+            .arg(
+                Arg::new("tokens", DataType::Array)
+                    .allow_null()
+                    .default("null"),
+            )
+            .arg(
+                Arg::new("dateOptions", DataType::object("HyperCast\\DateOptions"))
+                    .allow_null()
+                    .default("null"),
+            )
+            .arg(
+                Arg::new("months", DataType::object("HyperCast\\MonthNames"))
+                    .allow_null()
+                    .default("null"),
+            ),
         MethodFlags::Private,
     )];
+    methods.push((
+        FunctionBuilder::new("withTokens", column_with_tokens)
+            .arg(Arg::new("tokens", DataType::Array))
+            .returns(column, false, false),
+        MethodFlags::Public,
+    ));
+    methods.push((
+        FunctionBuilder::new("withDateOptions", column_with_date_options)
+            .arg(Arg::new(
+                "options",
+                DataType::object("HyperCast\\DateOptions"),
+            ))
+            .not_required()
+            .arg(
+                Arg::new("months", DataType::object("HyperCast\\MonthNames"))
+                    .allow_null()
+                    .default("null"),
+            )
+            .returns(column, false, false),
+        MethodFlags::Public,
+    ));
     for (index, (_, _, shape, doc)) in FACTORIES.iter().enumerate() {
         let mut function = factory_builder(index).arg(Arg::new("ordinal", int));
         function = match shape {
@@ -359,7 +420,16 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
                 .arg(
                     Arg::new("batchRows", int)
                         .default("\\HyperTabular\\DelimitedReader::DEFAULT_BATCH_ROWS"),
-                ),
+                )
+                .arg(Arg::new("skip", int).default("0"))
+                .arg(Arg::new("headerRow", int).default("0"))
+                .arg(
+                    Arg::new("range", DataType::object("HyperTabular\\Range"))
+                        .allow_null()
+                        .default("null"),
+                )
+                .arg(Arg::new("tokens", DataType::Array).default("[]"))
+                .arg(Arg::new("notes", boolean).default("true")),
             MethodFlags::Public,
         )],
         keep_sheet_options,
@@ -387,7 +457,7 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
 
 /// The promoted assignments of a constructor called from PHP, in declaration order, with the
 /// declared defaults for the arguments left out.
-fn construct(
+pub(crate) fn construct(
     ex: &mut ExecuteData,
     class: Plain,
     declaration: &Declaration,
@@ -411,7 +481,8 @@ fn construct(
 }
 
 fn dialect_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
-    let defaults = [bool_zval(true), bool_zval(true), bool_zval(true)];
+    let mut defaults = vec![bool_zval(true), bool_zval(true), bool_zval(true)];
+    defaults.extend(dialect_defaults()?);
     let args = construct(ex, Plain::Dialect, &DIALECT, &defaults)?;
     // One byte is all this layer can check without repeating the core's rule; which bytes the
     // scanner honours is the core's to say, when a reader is built.
@@ -421,7 +492,39 @@ fn dialect_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
             "The separator must be a single ASCII byte; got {length} bytes"
         )));
     }
+    check_line_count(&args[4], "skip")?;
+    check_line_count(&args[5], "headerRow")?;
+    token_strings(&args[9], "A dialect's tokens")?;
     Ok(Zval::new())
+}
+
+/// The defaults of a dialect's properties after its first four.
+fn dialect_defaults() -> PhpResult<[Zval; 6]> {
+    Ok([
+        int_zval(0),
+        int_zval(0),
+        ShortRows::Reject
+            .into_zval(false)
+            .map_err(|_| pending("ShortRows case"))?,
+        LongRows::Reject
+            .into_zval(false)
+            .map_err(|_| pending("LongRows case"))?,
+        Encoding::Utf8
+            .into_zval(false)
+            .map_err(|_| pending("Encoding case"))?,
+        list_zval(Vec::new())?,
+    ])
+}
+
+/// A count of lines or records to pass over, which the core holds in 32 bits.
+fn check_line_count(value: &Zval, what: &str) -> PhpResult<()> {
+    let value = value.long().unwrap_or_default();
+    if u32::try_from(value).is_err() {
+        return Err(invalid_argument(format!(
+            "{what} must not be negative and must fit 32 bits; got {value}"
+        )));
+    }
+    Ok(())
 }
 
 thread_local! {
@@ -440,15 +543,14 @@ const _: () = assert!(!std::mem::needs_drop::<[Option<ManuallyDrop<Zval>>; 3]>()
 
 /// A dialect of `separator`, quoted, with a header, blank lines skipped.
 fn plain_dialect(separator: u8) -> PhpResult<Zval> {
-    build(
-        Plain::Dialect,
-        vec![
-            bytes_zval(&[separator]),
-            bool_zval(true),
-            bool_zval(true),
-            bool_zval(true),
-        ],
-    )
+    let mut values = vec![
+        bytes_zval(&[separator]),
+        bool_zval(true),
+        bool_zval(true),
+        bool_zval(true),
+    ];
+    values.extend(dialect_defaults()?);
+    build(Plain::Dialect, values)
 }
 
 fn shared(ex: &mut ExecuteData, slot: usize) -> PhpResult<Zval> {
@@ -523,7 +625,7 @@ zend_fastcall! {
 
 /// 1.0's ordinal check.
 fn check_ordinal(ordinal: i64) -> PhpResult<()> {
-    if !(0..=MAX_ORDINAL).contains(&ordinal) {
+    if !(0..=MAX_ORDINAL as i64).contains(&ordinal) {
         return Err(invalid_argument(format!(
             "A column's ordinal must be below 2^20 (1,048,576); got {ordinal}"
         )));
@@ -532,9 +634,78 @@ fn check_ordinal(ordinal: i64) -> PhpResult<()> {
 }
 
 fn column_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
-    let args = construct(ex, Plain::Column, &COLUMN, &[int_zval(0)])?;
+    let defaults = [int_zval(0), Zval::new(), Zval::new(), Zval::new()];
+    let args = construct(ex, Plain::Column, &COLUMN, &defaults)?;
     check_ordinal(args[0].long().unwrap_or_default())?;
+    if !args[4].is_null() {
+        token_strings(&args[4], "A column's tokens")?;
+    }
     Ok(Zval::new())
+}
+
+/// A copy of the running `Column` with `tokens`, `dateOptions` and `months` as given, each `None`
+/// left as it is.
+fn column_changed(
+    ex: &mut ExecuteData,
+    tokens: Option<Zval>,
+    declared: Option<(Zval, Zval)>,
+) -> PhpResult<Zval> {
+    let this = object_zval_ref(this(ex)?);
+    let scope = entry(Plain::Column);
+    let field = |name| super::classes::read(scope, &this, name);
+    let (options, months) = match declared {
+        Some(both) => both,
+        None => (field("dateOptions")?, field("months")?),
+    };
+    build(
+        Plain::Column,
+        vec![
+            field("ordinal")?,
+            field("door")?,
+            field("format")?,
+            field("declared")?,
+            match tokens {
+                Some(tokens) => tokens,
+                None => field("tokens")?,
+            },
+            options,
+            months,
+        ],
+    )
+}
+
+fn column_tokens_call(ex: &mut ExecuteData) -> PhpResult<Zval> {
+    let Some(args) = checked_args(ex, 1, 1) else {
+        return Err(pending("argument check"));
+    };
+    let tokens = token_strings(&args[0], "A column's tokens")?;
+    let list = list_zval(
+        tokens
+            .iter()
+            .map(|token| bytes_zval(token.as_bytes()))
+            .collect(),
+    )?;
+    column_changed(ex, Some(list), None)
+}
+
+fn column_date_options_call(ex: &mut ExecuteData) -> PhpResult<Zval> {
+    let Some(args) = checked_args(ex, 1, 2) else {
+        return Err(pending("argument check"));
+    };
+    let months = args.get(1).map_or_else(Zval::new, Zval::shallow_clone);
+    column_changed(ex, None, Some((args[0].shallow_clone(), months)))
+}
+
+zend_fastcall! {
+    extern "C" fn column_with_tokens(ex: &mut ExecuteData, retval: &mut Zval) {
+        run_handler(AssertUnwindSafe(|| finish(guard(|| column_tokens_call(ex)), retval)));
+    }
+}
+
+zend_fastcall! {
+    extern "C" fn column_with_date_options(ex: &mut ExecuteData, retval: &mut Zval) {
+        run_handler(AssertUnwindSafe(|| finish(guard(|| column_date_options_call(ex)), retval)));
+    }
 }
 
 zend_fastcall! {
@@ -545,7 +716,12 @@ zend_fastcall! {
 
 /// A column of `door` reading `ordinal`, in `format` (the invariant notation when null), with
 /// `declared` beside the door.
-fn column(ordinal: i64, door: Door, format: Option<Zval>, declared: i64) -> PhpResult<Zval> {
+pub(crate) fn column(
+    ordinal: i64,
+    door: Door,
+    format: Option<Zval>,
+    declared: i64,
+) -> PhpResult<Zval> {
     check_ordinal(ordinal)?;
     let format = match format {
         Some(format) if !format.is_null() => format,
@@ -554,7 +730,15 @@ fn column(ordinal: i64, door: Door, format: Option<Zval>, declared: i64) -> PhpR
     let door = door.into_zval(false).map_err(|_| pending("Door case"))?;
     build(
         Plain::Column,
-        vec![int_zval(ordinal), door, format, int_zval(declared)],
+        vec![
+            int_zval(ordinal),
+            door,
+            format,
+            int_zval(declared),
+            Zval::new(),
+            Zval::new(),
+            Zval::new(),
+        ],
     )
 }
 
@@ -769,15 +953,24 @@ fn sheet_options_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
     let defaults = [
         bool_zval(true),
         bool_zval(true),
-        int_zval(DEFAULT_BATCH_ROWS),
+        int_zval(BatchRows::DEFAULT),
+        int_zval(0),
+        int_zval(0),
+        Zval::new(),
+        list_zval(Vec::new())?,
+        bool_zval(true),
     ];
     let args = construct(ex, Plain::SheetOptions, &SHEET_OPTIONS, &defaults)?;
+    // Zero, and every size past what the core allows, the core refuses at opening the sheet.
     let batch_rows = args[2].long().unwrap_or_default();
-    if batch_rows < 1 {
+    if batch_rows < 0 {
         return Err(invalid_argument(format!(
             "A batch must hold at least one row; got {batch_rows}"
         )));
     }
+    check_line_count(&args[3], "skip")?;
+    check_line_count(&args[4], "headerRow")?;
+    token_strings(&args[6], "A sheet's tokens")?;
     Ok(Zval::new())
 }
 
@@ -785,26 +978,6 @@ zend_fastcall! {
     extern "C" fn sheet_options_construct(ex: &mut ExecuteData, retval: &mut Zval) {
         run_handler(AssertUnwindSafe(|| finish(guard(|| sheet_options_new(ex)), retval)));
     }
-}
-
-/// A `SheetOptions`' properties: whether there is a header, whether empty rows are skipped,
-/// rows per batch.
-pub(crate) fn sheet_options(options: &Zval) -> PhpResult<(bool, bool, usize)> {
-    let scope = entry(Plain::SheetOptions);
-    let read = |name| super::classes::read(scope, options, name);
-    let has_header = read("hasHeader")?.bool().unwrap_or_default();
-    let skip_empty_rows = read("skipEmptyRows")?.bool().unwrap_or_default();
-    let batch_rows = read("batchRows")?.long().unwrap_or_default();
-    // A SheetOptions built around its constructor can hold what the constructor refuses.
-    let batch_rows = usize::try_from(batch_rows)
-        .ok()
-        .filter(|rows| *rows >= 1)
-        .ok_or_else(|| {
-            invalid_argument(format!(
-                "A batch must hold at least one row; got {batch_rows}"
-            ))
-        })?;
-    Ok((has_header, skip_empty_rows, batch_rows))
 }
 
 /// 1.0's message for each kind of structural failure.
@@ -824,7 +997,8 @@ fn message(
             "The input ended inside a quoted cell in record {record} (line {line}, byte {byte})."
         ),
         TabularFailure::RowTooLong => format!(
-            "Record {record} (line {line}, byte {byte}) exceeds the {MAX_ROW_BYTES}-byte row ceiling."
+            "Record {record} (line {line}, byte {byte}) exceeds the {}-byte row ceiling.",
+            crate::DelimitedReader::MAX_ROW_BYTES
         ),
         TabularFailure::NotAZip => "The workbook is not a zip file.".to_owned(),
         TabularFailure::Container => "The workbook's zip structure is broken.".to_owned(),
@@ -852,6 +1026,9 @@ fn message(
         }
         TabularFailure::Iwa => format!(
             "Part {record} of the Numbers document is not what the IWA packaging says (byte {byte}, detail {found})."
+        ),
+        TabularFailure::Encoding => format!(
+            "Record {record} (line {line}, byte {byte}) has text its encoding has no character for."
         ),
     }
 }
@@ -891,18 +1068,6 @@ zend_fastcall! {
     }
 }
 
-/// The `TabularException` for a failure the core reported.
-pub(crate) fn tabular_exception(failure: &crate::kernel::abi::Failure) -> PhpResult<Zval> {
-    tabular_exception_of(
-        TabularFailure::from_code(failure.code),
-        failure.record as i64,
-        i64::from(failure.line),
-        failure.byte as i64,
-        i64::from(failure.expected),
-        i64::from(failure.found),
-    )
-}
-
 /// A `TabularException` of `kind`, as `new TabularException(...)` makes one.
 pub(crate) fn tabular_exception_of(
     kind: TabularFailure,
@@ -934,6 +1099,9 @@ pub(crate) struct ColumnFields {
     pub(crate) door: i64,
     pub(crate) format: Zval,
     pub(crate) declared: i64,
+    pub(crate) tokens: Zval,
+    pub(crate) date_options: Zval,
+    pub(crate) months: Zval,
 }
 
 /// Reads a plan entry, which must be a `Column`; `None` for anything else.
@@ -952,26 +1120,14 @@ pub(crate) fn column_fields(column: &Zval) -> PhpResult<Option<ColumnFields>> {
         door,
         format,
         declared,
+        tokens: read("tokens")?,
+        date_options: read("dateOptions")?,
+        months: read("months")?,
     }))
-}
-
-/// A `Dialect`'s properties: separator, quoting, header, blank lines skipped.
-pub(crate) fn dialect_fields(dialect: &Zval) -> PhpResult<(Vec<u8>, bool, bool, bool)> {
-    let scope = entry(Plain::Dialect);
-    let read = |name| super::classes::read(scope, dialect, name);
-    let separator = read("separator")?
-        .zend_str()
-        .map(|s| s.as_bytes().to_vec())
-        .unwrap_or_default();
-    Ok((
-        separator,
-        read("quoting")?.bool().unwrap_or_default(),
-        read("hasHeader")?.bool().unwrap_or_default(),
-        read("skipBlankLines")?.bool().unwrap_or_default(),
-    ))
 }
 
 /// Registers every plain class. MINIT.
 pub(crate) fn register_all() -> ext_php_rs::error::Result<()> {
-    register()
+    register()?;
+    super::results::register()
 }

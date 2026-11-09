@@ -11,7 +11,6 @@ import (
 	"os"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,12 +22,12 @@ import (
 )
 
 // The fixed block and every region start where the module's own memory ends.
-func TestTheModuleIsItsOwnTwoPages(t *testing.T) {
-	if got := len(*core.New().Xmemory().Slice()); got != 2*pageSize {
-		t.Fatalf("a fresh module holds %d bytes, want two pages", got)
+func TestTheModuleIsItsOwnThreePages(t *testing.T) {
+	if got := len(*core.New().Xmemory().Slice()); got != 3*pageSize {
+		t.Fatalf("a fresh module holds %d bytes, want three pages", got)
 	}
 	n := newNative()
-	if n.fixed.off != 2*pageSize || len(n.in.mem()) != 3*pageSize {
+	if n.fixed.off != 3*pageSize || len(n.in.mem()) != 4*pageSize {
 		t.Fatalf("the fixed block at %d, in %d bytes", n.fixed.off, len(n.in.mem()))
 	}
 }
@@ -55,6 +54,9 @@ func TestEveryLayoutIsTheViewedType(t *testing.T) {
 	}
 	if want := fieldsOf(reflect.TypeFor[CellVerdict]()); !slices.Equal(fieldsVerdict, want) {
 		t.Errorf("verdict: layout %v, CellVerdict is %v", fieldsVerdict, want)
+	}
+	if want := fieldsOf(reflect.TypeFor[rawNote]()); !slices.Equal(fieldsNote, want) {
+		t.Errorf("note: layout %v, rawNote is %v", fieldsNote, want)
 	}
 }
 
@@ -93,6 +95,7 @@ func TestDecodingForABigEndianHost(t *testing.T) {
 	layouts := map[string][]uint8{
 		"verdict": fieldsVerdict, "span": fieldsSpan, "decimal": fieldsDecimal, "civil": fieldsCivil,
 		"seconds": fieldsSeconds, "duration": fieldsDuration, "date": fieldsDate, "uuid": fieldsUuid, "1": fields1, "2": fields2, "4": fields4, "8": fields8,
+		"note": fieldsNote,
 	}
 	for name, fields := range layouts {
 		var guest, want []byte
@@ -122,6 +125,23 @@ func TestDecodingForABigEndianHost(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s: decoded % x, want % x", name, got, want)
 		}
+	}
+
+	// What's read back out of the instance field by field, rather than viewed, whichever the host:
+	// each field its own number, in the guest's order, so that one read from the wrong place shows.
+	guest := []byte{
+		1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 5, 0,
+		6, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0,
+	}
+	want := rawProblem{row: 1, planColumn: 2, reason: 3, detail: 4, origin: 5, offset: 6, len: 7, expected: 8, found: 9}
+	if got := decodeProblem(guest); got != want {
+		t.Errorf("a problem: %+v, want %+v", got, want)
+	}
+	if got := decodeSuggestion(guest); got != (rawSuggestion{door: 1, param: 2, status: 3, matched: 0x50004, sampled: 6}) {
+		t.Errorf("a suggestion: %+v", got)
+	}
+	if got := decodeTranscoded(guest); got != (rawTranscoded{consumed: 2<<32 | 1, written: 0x5000400000003, failureAt: 7<<32 | 6, failed: 8}) {
+		t.Errorf("a transcode: %+v", got)
 	}
 }
 
@@ -288,16 +308,17 @@ func TestReadersOnGoroutinesShareNothing(t *testing.T) {
 	}
 }
 
-// Buffers the core's memory cannot hold are an error, made before anything that large is
-// allocated: WebAssembly addresses 4 GiB.
-func TestBuffersPastTheCoresMemoryAreAnError(t *testing.T) {
+// Buffers past the core's limit are its refusal, made before anything that large is allocated.
+// WebAssembly addresses 4 GiB too, so these are past what the core's memory holds if the check went.
+func TestBuffersPastTheCoresLimitAreAnError(t *testing.T) {
 	const rows = 1 << 26 // 16 bytes a value and 12 a verdict: 1.75 GiB a column
+	const refused = "past the limit of 4294967296"
 	plan := make([]Column, 8)
 	for index := range plan {
 		plan[index] = Exact(0, hypercast.Invariant)
 	}
 	_, err := NewDelimitedReaderBytes([]byte("1\n"), CSV, plan, BatchRows(rows))
-	if err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
+	if err == nil || !strings.Contains(err.Error(), refused) {
 		t.Errorf("a plan of 14 GiB: %v", err)
 	}
 
@@ -309,34 +330,17 @@ func TestBuffersPastTheCoresMemoryAreAnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cell table of a batch: 9 entries a row, 8 bytes each, 4.5 GiB.
 	options := DefaultSheetOptions
 	options.BatchRows = rows
-	sheet, err := book.Sheet(0, options, plan)
-	if err == nil {
-		_, err = sheet.Read()
+	if _, err := book.Sheet(0, options, plan); err == nil || !strings.Contains(err.Error(), refused) {
+		t.Errorf("a sheet of 20 GiB: %v", err)
 	}
-	if err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
-		t.Errorf("a cell table of 4.5 GiB: %v", err)
-	}
-
-	// The same table met by the first Read of a sheet bound after its header: the header's
-	// rows are not this call's, so no batch comes back beside the error.
 	unbound, err := book.SheetUnbound(0, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := unbound.Bind(plan); err != nil {
-		// Where int is 32 bits (TinyGo's wasm), the plan's buffers outgrow the address space
-		// before the core is asked, so binding refuses it; with 64 bits, binding takes it.
-		if strconv.IntSize == 64 || !strings.Contains(err.Error(), "is too large") {
-			t.Fatal(err)
-		}
-		return
-	}
-	batch, err := unbound.Read()
-	if batch != nil || err == nil || (strconv.IntSize == 64 && !strings.Contains(err.Error(), "4 GiB")) {
-		t.Errorf("a cell table of 4.5 GiB after a header: a batch %t, %v", batch != nil, err)
+	if err := unbound.Bind(plan); err == nil || !strings.Contains(err.Error(), refused) {
+		t.Errorf("a sheet of 20 GiB bound after its header: %v", err)
 	}
 }
 

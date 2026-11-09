@@ -11,7 +11,11 @@ sheet_reader(
   plan = NULL,
   has_header = TRUE,
   skip_empty_rows = TRUE,
-  batch_rows = 4096L
+  batch_rows = 4096,
+  skip = 0,
+  header_row = 0,
+  na = character(),
+  range = NULL
 )
 
 read_sheet(
@@ -20,7 +24,11 @@ read_sheet(
   plan = NULL,
   has_header = TRUE,
   skip_empty_rows = TRUE,
-  batch_rows = 4096L
+  batch_rows = 4096,
+  skip = 0,
+  header_row = 0,
+  na = character(),
+  range = NULL
 )
 }
 \arguments{
@@ -34,12 +42,25 @@ vector, which it opens.}
 columns; or \code{NULL}, to bind one later. For \code{read_sheet()}, \code{NULL} reads every header
 column through \code{\link[=col_text]{col_text()}}.}
 
-\item{has_header}{Whether the sheet's first row is a header, never delivered as a row.}
+\item{has_header}{Whether the sheet's first row read is a header, never delivered as a row.}
 
 \item{skip_empty_rows}{Whether a row with no cells is skipped (row-number gaps and empty
-rows alike).}
+rows alike). Such a row still counts toward \code{skip}, and doesn't toward \code{header_row}.}
 
 \item{batch_rows}{The most rows a batch holds.}
+
+\item{skip}{Rows of the sheet to pass over at the start of the range, empty ones included;
+their cells aren't judged.}
+
+\item{header_row}{Rows to read and discard after those, as the read delivers them.}
+
+\item{na}{The cells every column reads as missing, unless it declares its own: an exact
+match of a text cell's bytes is an \code{empty} verdict at origin \code{"token"}. \code{character(0)}
+declares none.}
+
+\item{range}{The cells to read, such as \code{"A5:F200"}, \code{"B3:D"} or \code{"C:F"}, as the core reads
+a range; \code{NULL} reads the whole sheet. No row past its last is read, so a failure in one
+isn't met.}
 }
 \value{
 \code{sheet_reader()} returns a \code{hypertabular_sheet_reader}; \code{read_sheet()} a
@@ -48,16 +69,21 @@ rows alike).}
 \description{
 \code{sheet_reader()} starts a forward-only read of one sheet of a \code{\link[=workbook]{workbook()}}, a batch at a
 time, through the same \code{\link[=read_batch]{read_batch()}} delimited text is read with. With a header declared,
-the sheet's first row is read as it opens (\code{\link[=header]{header()}}): its names are each cell said as
-text, and the plan, given here or later through \code{\link[=bind]{bind()}}, may name source columns by them.
+the sheet's first row read is a header (\code{\link[=header]{header()}}): its names are each cell said as text,
+and the plan, given here or later through \code{\link[=bind]{bind()}}, may name source columns by them.
 \code{read_sheet()} reads the whole sheet through a plan and returns it as one
-\code{hypertabular_table}.
+\code{hypertabular_table}. \link[=close.hypertabular_reader]{close()} lets go of a reader early.
 }
 \details{
 A typed cell is cast directly by its door (a stored \code{42} never passes through text to
 become an integer), and a text cell goes through the door as delimited text would. A sheet
 that is structurally broken ends in a \link{hypertabular_failure}, a value, after every intact
 row before it has been delivered: no read signals an R error for anything in its data.
+
+What is read is in a fixed order: the \code{range} selects rows and columns, \code{skip} passes over
+rows inside it, \code{header_row} discards rows after those, then comes the header, and
+\code{skip_empty_rows} holds throughout. A plan's position 1 is the range's first column, and
+\code{\link[=problems]{problems()}} says each cell's column of the sheet, \code{A} being 1, wherever the range starts.
 }
 \examples{
 path <- system.file("extdata", "basic.xlsx", package = "hypertabular")
@@ -65,6 +91,7 @@ reader <- sheet_reader(workbook(path), "Data")
 header(reader)
 bind(reader, list(col_text("name"), col_date("day")))
 read_batch(reader)$columns
+close(reader)
 }
 \seealso{
 Other reads:
@@ -73,6 +100,7 @@ Other reads:
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_batch}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=workbook]{workbook()}}
 }
 \concept{reads}

@@ -1,8 +1,15 @@
-import type { Broken, Batch as NativeBatch, Row, Success } from './binding'
+import type {
+  Broken,
+  Dialect as BindingDialect,
+  Batch as NativeBatch,
+  Row,
+  Success,
+} from './binding'
 export {
   nativeVersion,
   Column,
   Header,
+  Range,
   DelimitedReader,
   Workbook,
   Sheet,
@@ -23,6 +30,20 @@ export type {
   SheetOptions,
   DelimitedOptions,
   PackedNumFormat,
+  DeclaredDateOptions,
+  ShortRows,
+  LongRows,
+  Encoding,
+  Origin,
+  Detail,
+  Problem,
+  SuggestOptions,
+  Suggestion,
+  SuggestedColumn,
+  SuggestedFormat,
+  SuggestStatus,
+  Candidate,
+  CandidateKind,
 } from './binding'
 // A cell's verdict and its values are HyperCast's own types, from the peer dependency.
 export type {
@@ -39,21 +60,20 @@ export type {
 } from '@skunkwerkx/hypercast'
 
 /**
- * How delimited text is written: the separator (a tab, or printable ASCII other than `"`),
- * and whether `"` quotes, the first record is the header and blank lines are skipped, each
- * `true` when left out.
+ * How delimited text is written. Every field left out is the core's default: comma-
+ * separated, `"` quoting, a header, blank lines skipped, nothing skipped, short and long rows
+ * refused, UTF-8, no tokens.
  */
-export interface Dialect {
-  separator: string
-  quoting?: boolean
-  hasHeader?: boolean
-  skipBlankLines?: boolean
-}
-/** The three dialects by name: comma, tab and pipe, each quoted, with a header. */
+export interface Dialect extends BindingDialect {}
+type Named = Readonly<Pick<Required<Dialect>, 'separator' | 'quoting' | 'hasHeader' | 'skipBlankLines'>>
+/**
+ * The three dialects by name: comma, tab and pipe, each quoted, with a header, blank lines
+ * skipped.
+ */
 export declare const Dialect: {
-  readonly CSV: Readonly<Required<Dialect>>
-  readonly TSV: Readonly<Required<Dialect>>
-  readonly PSV: Readonly<Required<Dialect>>
+  readonly CSV: Named
+  readonly TSV: Named
+  readonly PSV: Named
 }
 
 declare module './binding' {
@@ -79,9 +99,15 @@ declare module './binding' {
 
 /** Whether the native addon or its WebAssembly fallback loaded. */
 export function isAvailable(): boolean
-export type HyperTabularErrorCode = 'ERR_HYPERTABULAR_UNAVAILABLE'
-/** The one error this package throws: no addon loaded, so no reader can answer. */
+export type HyperTabularErrorCode = 'ERR_HYPERTABULAR_UNAVAILABLE' | 'ERR_HYPERTABULAR_BUSY'
+/**
+ * The two errors this package throws: no addon loaded, so no reader can answer
+ * (`ERR_HYPERTABULAR_UNAVAILABLE`); and a reader's or sheet's getter read from inside one of
+ * its own calls (`ERR_HYPERTABULAR_BUSY`, `kind` `busy`), which has no outcome to answer in.
+ */
 export interface HyperTabularError extends Error {
   code: HyperTabularErrorCode
+  /** `busy` for `ERR_HYPERTABULAR_BUSY`. */
+  kind?: 'busy'
 }
 export function isHyperTabularError(value: unknown): value is HyperTabularError

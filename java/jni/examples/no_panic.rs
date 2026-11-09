@@ -61,6 +61,33 @@ fn main() {
             black_box(hypertabular_jni::native_hypertabular_workbook_fill(
                 env, class, a, a, a, a, a, a, a, a, a,
             ));
+            black_box(hypertabular_jni::native_hypertabular_delimited_init_with(
+                env, class, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_delimited_fill_with(
+                env, class, a, a, a, n, a, a, a, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_transcode(
+                env, class, n, a, a, n, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_faults(
+                env, class, a, a, a, a, n, n, a, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_suggest(
+                env, class, a, a, a, a, a, a, a, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_workbook_sheet_with(
+                env, class, a, a, a, a, a, n, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_workbook_fill_with(
+                env, class, a, a, a, a, a, a, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_range_parse(
+                env, class, a, a, a,
+            ));
+            black_box(hypertabular_jni::native_hypertabular_batch_check(
+                env, class, a, a, a, a, n, a,
+            ));
             black_box(hypertabular_jni::native_jni_natives(env, class));
             black_box(hypertabular_jni::JNI_OnLoad(
                 black_box(null_mut()),

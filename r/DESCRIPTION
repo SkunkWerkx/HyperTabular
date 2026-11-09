@@ -7,7 +7,13 @@ Authors@R: c(
            role = c("aut", "cre")),
     person("Skunk Werkx", role = "cph"),
     person("Unicode, Inc.", role = "cph",
-           comment = "case folding data in the vendored core; see inst/AUTHORS")
+           comment = "case folding data in the vendored core; see inst/AUTHORS"),
+    person("Hans", "Kratz", role = "cph",
+           comment = "the vendored simdutf8 crate; see inst/AUTHORS"),
+    person("The simd-json.rs developers", role = "cph",
+           comment = "the first Rust port of simdutf8's algorithm; see inst/AUTHORS"),
+    person("The simdjson authors", role = "cph",
+           comment = "the UTF-8 algorithm simdutf8 is based on; see inst/AUTHORS")
   )
 Description: Reads delimited text and 'XLSX', 'ODS' and 'Numbers' workbooks a batch at a
     time into typed columns, under a dialect, a plan of columns and the formats, field
@@ -23,11 +29,12 @@ URL: https://github.com/SkunkWerkx/HyperTabular
 BugReports: https://github.com/SkunkWerkx/HyperTabular/issues
 Depends: R (>= 4.2)
 Imports:
-    hypercast (>= 1.1.0)
+    hypercast (>= 1.1.0),
+    utils
 Suggests:
     testthat (>= 3.0.0),
     jsonlite
-SystemRequirements: Cargo (Rust's package manager), rustc
+SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.89)
 Config/testthat/edition: 3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

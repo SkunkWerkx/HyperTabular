@@ -1,11 +1,13 @@
 # Replays the two conformance corpus files at the repository root, the same files the Rust
-# core and every other binding replay, through the public API.
+# core and every other binding replay, through the public API, every key they hold read and a
+# key this replay doesn't know a failure.
 #
 # corpus/delimited.json: every case from a raw vector, from connections read through buffers
 # too small for a record, from a file and from an unopened connection, in batches of one row,
 # two rows and many; with the plan bound after the header, by position and by header name;
 # and with every buffer the core works in starting at one element. How the input is cut up
-# must not change the answer.
+# must not change the answer: not the rows, not problems(), not the failure. A case's suggest
+# is held to what suggest_plan() says of it, from memory and from a file.
 #
 # corpus/workbook.json and the packages it names under corpus/workbook/: every sheet of every
 # package read whole, through read_sheet() with the sheet opened by its position; and a batch
@@ -14,9 +16,9 @@
 # once, with every buffer starting at one element, so the grow-and-keep path runs mid-part
 # throughout. The two encrypted files are refused as they open.
 #
-# The corpus pins fault spans as byte offsets into the cell's text; this binding presents them
-# in the units substr() counts `raw` in, characters for UTF-8 text, so each pinned span is
-# re-expressed in characters before comparing.
+# The corpus pins fault spans as byte offsets into the cell's text, and rows and source columns
+# from 0; this binding presents spans in the units substr() counts `raw` in, characters for
+# UTF-8 text, and rows and columns from 1, so each pinned one is re-expressed before comparing.
 
 # A dependency skip, not a corpus skip: jsonlite is in Suggests, and CRAN's noSuggests flavour
 # runs the tests without it. With jsonlite present, a missing corpus still errors.
@@ -54,46 +56,186 @@ read_corpus <- function(name) {
                perl = TRUE)
   cases <- jsonlite::fromJSON(json, simplifyVector = FALSE)
   if (!length(cases)) stop("corpus file has no cases: ", path)
-  cases
+  exact(cases)
+}
+
+# A parsed corpus whose `$` matches a key exactly: a list's own `$` would read `skip` from a
+# dialect that has only `skip_blank_lines`, or `raw` from a cell that has only `raw_hex`.
+exact <- function(value) {
+  if (!is.list(value)) return(value)
+  value[] <- lapply(value, exact)
+  class(value) <- "corpus_object"
+  value
+}
+
+`$.corpus_object` <- function(x, name) .subset2(x, name, exact = TRUE)
+
+# Every key a replay here reads, by where it is: one that isn't here fails unknown_keys(), so a
+# key added to the corpus can't be passed over. `note` is the one no replay reads.
+known_keys <- list(
+  cell = c("expect", "value", "text", "seconds", "nanos", "year", "month", "day",
+           "nanos_of_day", "magnitude", "scale", "negative", "fault", "raw", "raw_hex", "detail",
+           "origin"),
+  problem = c("row", "line", "plan_column", "source_column", "reason", "fault", "detail",
+              "origin", "expected", "found"),
+  failure = c("kind", "record", "line", "byte", "expected", "found"),
+  plan = c("door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"),
+  format = c("decimal_sep", "group_sep", "flags", "currency"),
+  date = c("flags", "pivot", "months"),
+  delimited = c("name", "input", "input_hex", "dialect", "plan", "header", "rows", "problems",
+                "failure", "suggest"),
+  dialect = c("separator", "quoting", "has_header", "skip_blank_lines", "skip", "header_row",
+              "short_rows", "long_rows", "tokens", "encoding"),
+  suggest = c("columns", "truncated", "sample_rows", "format"),
+  suggested = c("door", "param", "status", "matched", "sampled"),
+  workbook = c("name", "file", "format", "epoch", "sheets", "sheet", "options", "plan", "header",
+               "numbers", "rows", "problems", "failure", "note", "suggest"),
+  sheet_options = c("has_header", "skip_empty_rows", "range", "skip", "header_row", "tokens"),
+  sheet = c("name", "hidden")
+)
+
+# Every key of a case no replay here reads, as a path.
+unknown_keys <- function(case, workbook) {
+  out <- character()
+  check <- function(value, path, known) {
+    if (is.list(value) && !is.null(names(value))) {
+      unknown <- setdiff(names(value), known)
+      if (length(unknown)) out <<- c(out, paste0(path, ".", unknown))
+    }
+  }
+  name <- case$name %||% "a case with no name"
+  check(case, name, if (workbook) known_keys$workbook else known_keys$delimited)
+  if (workbook) {
+    check(case$options, paste0(name, ".options"), known_keys$sheet_options)
+    for (s in case$sheets) check(s, paste0(name, ".sheets[]"), known_keys$sheet)
+  } else {
+    check(case$dialect, paste0(name, ".dialect"), known_keys$dialect)
+  }
+  for (column in case$plan) {
+    check(column, paste0(name, ".plan[]"), known_keys$plan)
+    check(column$format, paste0(name, ".plan[].format"), known_keys$format)
+    check(column$options, paste0(name, ".plan[].options"), known_keys$date)
+  }
+  for (row in case$rows) for (cell in row) check(cell, paste0(name, ".rows[][]"), known_keys$cell)
+  for (p in case$problems) check(p, paste0(name, ".problems[]"), known_keys$problem)
+  check(case$failure, paste0(name, ".failure"), known_keys$failure)
+  if (!is.null(case$suggest)) {
+    check(case$suggest, paste0(name, ".suggest"), known_keys$suggest)
+    check(case$suggest$format, paste0(name, ".suggest.format"), known_keys$format)
+    for (column in case$suggest$columns) {
+      check(column, paste0(name, ".suggest.columns[]"), known_keys$suggested)
+    }
+  }
+  out
+}
+
+# Every object in `value`, the first of each list only, as the path to it.
+key_places <- function(value, path = list()) {
+  if (is.list(value) && !is.null(names(value))) {
+    c(list(path), unlist(lapply(names(value), function(key) {
+      key_places(value[[key]], c(path, key))
+    }), recursive = FALSE))
+  } else if (is.list(value) && length(value)) {
+    key_places(value[[1]], c(path, 1L))
+  } else {
+    list()
+  }
+}
+
+# `value` with a key no replay reads added to the object at `place`.
+with_junk <- function(value, place) {
+  if (!length(place)) {
+    value[["junk"]] <- TRUE
+    return(value)
+  }
+  value[[place[[1]]]] <- with_junk(value[[place[[1]]]], place[-1])
+  value
+}
+
+# Nothing in the corpus is passed over, and the check notices a key added anywhere: a failure
+# message, or NULL.
+keys_problem <- function(cases, workbook) {
+  passed_over <- unlist(lapply(cases, unknown_keys, workbook = workbook))
+  if (length(passed_over)) return(paste(utils::head(passed_over, 5), collapse = "; "))
+  for (case in cases) {
+    for (place in key_places(case)) {
+      edited <- with_junk(case, place)
+      unknown <- unknown_keys(edited, workbook)
+      if (length(unknown) != 1L || !endsWith(unknown, ".junk")) {
+        return(paste("a key at", paste(place, collapse = "/"), "is not noticed:",
+                     paste(unknown, collapse = ", ")))
+      }
+    }
+  }
+  NULL
 }
 
 corpus_precisions <- c("seconds", "milliseconds", "microseconds", "nanoseconds")
 corpus_orders <- c("year_month_day", "month_day_year", "day_month_year")
 corpus_epochs <- c("y1900", "y1904")
+corpus_policies <- c("0" = "western", "512" = "indian")
 
 format_of <- function(spec) {
   if (is.null(spec)) {
     return(NULL)
   }
-  opt <- function(name) if (is.null(spec[[name]])) "" else spec[[name]]
-  hypercast::num_format(spec$decimal_sep, spec$group_sep, spec$flags, currency = opt("currency"),
-                        currency_decimal_sep = opt("currency_decimal_sep"),
-                        currency_group_sep = opt("currency_group_sep"),
-                        minus_sign = opt("minus_sign"), plus_sign = opt("plus_sign"),
-                        percent = opt("percent"), digit_zero = opt("digit_zero"))
+  policy <- corpus_policies[as.character(spec$flags - bitwAnd(spec$flags, 0xFF))]
+  if (is.na(policy)) stop("the corpus declares a grouping policy this replay does not know")
+  hypercast::num_format(spec$decimal_sep, spec$group_sep, bitwAnd(spec$flags, 0xFF),
+                        currency = spec$currency %||% "", grouping = unname(policy))
 }
 
+date_options_of <- function(options) {
+  if (is.null(options)) return(NULL)
+  hypercast::date_options(as.character(unlist(options$flags)), options$pivot %||% 0L)
+}
+
+months_of <- function(options) {
+  if (is.null(options$months)) return(NULL)
+  hypercast::month_names(stats::setNames(
+    vapply(options$months, function(m) as.integer(m[[1]]), 0L),
+    vapply(options$months, function(m) m[[2]], "")
+  ))
+}
+
+tokens_of <- function(entry) if (is.null(entry$tokens)) NULL else as.character(unlist(entry$tokens))
+
 # A corpus plan entry as a column; `by_name` reads the source by its header name instead of
-# its position where the header has that name once, at or before the position.
+# its position where the header has that name once.
 column_of <- function(entry, header = NULL, by_name = FALSE) {
   source <- entry$ordinal + 1L
   if (by_name && !is.null(header) && source <= length(header)) {
     name <- header[[source]]
     if (!is.na(name) && nzchar(name) && sum(header == name, na.rm = TRUE) == 1L) source <- name
   }
+  na <- tokens_of(entry)
+  options <- date_options_of(entry$options)
+  months <- months_of(entry$options)
   switch(entry$door,
-    unix = col_unix(source, corpus_precisions[[entry$precision]]),
-    excel_serial = col_excel_serial(source, corpus_epochs[[entry$epoch]]),
-    date_ordered = col_date(source, corpus_orders[[entry$order]]),
-    datetime = col_datetime(source, corpus_orders[[entry$order]]),
+    unix = col_unix(source, corpus_precisions[[entry$precision]], na = na),
+    excel_serial = col_excel_serial(source, corpus_epochs[[entry$epoch]], na = na),
+    date = col_date(source, options = options, months = months, na = na),
+    date_ordered = col_date(source, corpus_orders[[entry$order]], options = options,
+                            months = months, na = na),
+    datetime = col_datetime(source, corpus_orders[[entry$order]], options = options,
+                            months = months, na = na),
+    timestamp = col_timestamp(source, options = options, na = na),
     i8 = , i16 = , i32 = , i64 = , u8 = , u16 = , u32 = , u64 = , f32 = , f64 = ,
-    decimal = get(paste0("col_", entry$door))(source, format_of(entry$format)),
-    get(paste0("col_", entry$door))(source)
+    decimal = get(paste0("col_", entry$door))(source, format_of(entry$format), na = na),
+    get(paste0("col_", entry$door))(source, na = na)
   )
 }
 
 plan_of <- function(case, header = NULL, by_name = FALSE) {
   lapply(case$plan, column_of, header = header, by_name = by_name)
+}
+
+hex <- function(text) {
+  as.raw(strtoi(substring(text, seq(1, nchar(text), 2), seq(2, nchar(text), 2)), 16L))
+}
+
+input_of <- function(case) {
+  if (!is.null(case$input_hex)) hex(case$input_hex) else charToRaw(enc2utf8(case$input))
 }
 
 # The wall clock text a civil date-time comes out as, built from a cell's fields.
@@ -104,6 +246,18 @@ civil_text <- function(cell) {
                   secs %/% 3600, secs %/% 60 %% 60, secs %% 60)
   if (frac > 0) text <- paste0(text, ".", sub("0+$", "", sprintf("%09.0f", frac)))
   text
+}
+
+# The decimal's text from its parts: what the corpus's value says, built independently.
+decimal_text <- function(cell) {
+  digits <- cell$magnitude
+  scale <- cell$scale
+  if (scale > 0) {
+    digits <- paste0(strrep("0", max(scale + 1L - nchar(digits), 0L)), digits)
+    digits <- paste0(substr(digits, 1, nchar(digits) - scale), ".",
+                     substr(digits, nchar(digits) - scale + 1L, nchar(digits)))
+  }
+  paste0(if (isTRUE(cell$negative)) "-", digits)
 }
 
 as_f32 <- function(x) readBin(writeBin(as.numeric(x), raw(), size = 4L), "double", size = 4L)
@@ -119,7 +273,8 @@ expected_fields <- function(door, cell) {
     i8 = , i16 = , u8 = , u16 = list(value = as.integer(cell$value)),
     i32 = , u32 = , f64 = list(value = as.numeric(cell$value)),
     f32 = list(value = as_f32(cell$value)),
-    i64 = , u64 = , decimal = list(value = cell$value),
+    i64 = , u64 = list(value = cell$value),
+    decimal = list(value = decimal_text(cell)),
     uuid = list(value = sub("^(.{8})(.{4})(.{4})(.{4})(.{12})$", "\\1-\\2-\\3-\\4-\\5",
                             tolower(cell$value))),
     timestamp = , unix = , excel_serial = , duration = list(seconds = as.numeric(cell$seconds),
@@ -136,6 +291,23 @@ expected_fields <- function(door, cell) {
 # Characters in the first n bytes of x's UTF-8.
 chars_in <- function(bytes, n) sum(bitwAnd(as.integer(bytes[seq_len(n)]), 0xC0) != 0x80)
 
+# The bytes a faulted cell's raw holds, as the corpus says them.
+cell_bytes <- function(cell) {
+  if (!is.null(cell$raw_hex)) hex(cell$raw_hex) else charToRaw(enc2utf8(cell$raw))
+}
+
+# A byte span over a cell's text, in the units its raw counts: characters for UTF-8, bytes
+# for text that isn't.
+span_of <- function(cell, fault) {
+  bytes <- cell_bytes(cell)
+  if (!validUTF8(rawToChar(bytes))) {
+    return(as.integer(c(fault[[1]], fault[[2]])))
+  }
+  start <- fault[[1]]
+  first <- chars_in(bytes, start)
+  as.integer(c(first, chars_in(bytes, start + fault[[2]]) - first))
+}
+
 # Every way verdict `v` (a plan column of door `door`) disagrees with `cells`, the corpus's
 # cells for that column, one string per disagreement.
 column_mismatches <- function(v, door, cells, label) {
@@ -150,12 +322,19 @@ column_mismatches <- function(v, door, cells, label) {
   plain <- unclass(as.data.frame(v))
   for (i in seq_along(cells)) {
     cell <- cells[[i]]
+    origin <- cell$origin %||% "cell"
+    if (!identical(as.character(plain$origin[[i]]), origin)) {
+      out <- c(out, miss(i, "origin", plain$origin[[i]], origin))
+    }
     want_ok <- identical(cell$expect, "ok")
     if (!identical(plain$ok[[i]], want_ok)) {
       out <- c(out, miss(i, "ok", plain$ok[[i]], paste(want_ok, cell$expect, plain$raw[[i]])))
       next
     }
     if (want_ok) {
+      if (door == "decimal" && !identical(decimal_text(cell), cell$value)) {
+        out <- c(out, miss(i, "the corpus's decimal", decimal_text(cell), cell$value))
+      }
       for (field in names(want <- expected_fields(door, cell))) {
         got <- plain[[field]][[i]]
         if (!identical(unclass(got), want[[field]])) {
@@ -167,15 +346,19 @@ column_mismatches <- function(v, door, cells, label) {
     if (!identical(as.character(plain$reason[[i]]), cell$expect)) {
       out <- c(out, miss(i, "reason", plain$reason[[i]], cell$expect))
     }
+    detail <- cell$detail %||% NA_character_
+    if (!identical(as.character(plain$detail[[i]]), detail)) {
+      out <- c(out, miss(i, "detail", plain$detail[[i]], detail))
+    }
     span <- c(0L, 0L)
     if (!is.null(cell$fault)) {
-      if (!identical(plain$raw[[i]], cell$raw)) {
-        out <- c(out, miss(i, "raw", plain$raw[[i]], cell$raw))
+      raw <- plain$raw[[i]]
+      if (is.na(raw) || !identical(charToRaw(raw), cell_bytes(cell))) {
+        out <- c(out, miss(i, "raw", raw, cell$raw %||% cell$raw_hex))
       }
-      bytes <- charToRaw(enc2utf8(cell$raw))
-      start <- cell$fault[[1]]
-      span <- as.integer(c(chars_in(bytes, start),
-                           chars_in(bytes, start + cell$fault[[2]]) - chars_in(bytes, start)))
+      span <- span_of(cell, cell$fault)
+    } else if (cell$expect == "empty" && is.null(cell$origin) && !identical(plain$raw[[i]], "")) {
+      out <- c(out, miss(i, "raw", plain$raw[[i]], ""))
     }
     got <- c(plain$offset[[i]], plain$length[[i]])
     if (!identical(got, span)) out <- c(out, miss(i, "span", got, span))
@@ -205,6 +388,52 @@ table_mismatches <- function(t, case, label) {
   out
 }
 
+# problems() of the read's batches, one string per entry, in the corpus's terms re-expressed in
+# this binding's: rows and columns from 1, spans in substr() units.
+said_problems <- function(batches) {
+  unlist(lapply(batches, function(b) {
+    p <- problems(b)
+    if (!nrow(p)) return(character())
+    stopifnot(all(p$line == b$line[match(p$row, b$row)]))
+    plan_column <- match(p$column, names(b$columns))
+    ifelse(p$kind == "row",
+           sprintf("row %s, line %s: width %s, found %s", p$row, p$line, p$expected, p$found),
+           sprintf("row %s, line %s, column %s (source %s): %s %s %s, span %s+%s", p$row, p$line,
+                   plan_column, p$source_column, p$reason, p$detail, p$origin, p$offset,
+                   p$length))
+  }))
+}
+
+# The corpus counts a sheet's source column from its A, wherever the range starts, as this
+# binding does.
+wanted_problems <- function(case) {
+  vapply(case$problems, function(p) {
+    if (is.null(p$plan_column)) {
+      return(sprintf("row %s, line %s: width %s, found %s", p$row + 1, p$line, p$expected,
+                     p$found))
+    }
+    span <- if (is.null(p$fault)) {
+      c(0L, 0L)
+    } else {
+      span_of(case$rows[[p$row + 1]][[p$plan_column + 1]], p$fault)
+    }
+    sprintf("row %s, line %s, column %s (source %s): %s %s %s, span %s+%s", p$row + 1, p$line,
+            p$plan_column + 1, p$source_column + 1, p$reason, p$detail %||% NA,
+            p$origin %||% "cell", span[[1]], span[[2]])
+  }, "")
+}
+
+problem_mismatches <- function(batches, case, label) {
+  got <- said_problems(batches) %||% character()
+  want <- wanted_problems(case) %||% character()
+  if (identical(got, want)) {
+    character()
+  } else {
+    sprintf("%s: problems\n  %s\nwant\n  %s", label, paste(got, collapse = "\n  "),
+            paste(want, collapse = "\n  "))
+  }
+}
+
 failure_mismatches <- function(failure, case, label) {
   want <- case$failure
   if (is.null(want)) {
@@ -214,12 +443,11 @@ failure_mismatches <- function(failure, case, label) {
   if (is.null(failure)) {
     return(sprintf("%s: no failure, want %s", label, want$kind))
   }
-  got <- list(failure$kind, failure$record, failure$line, failure$byte)
-  wanted <- list(want$kind, as.numeric(want$record), as.numeric(want$line), as.numeric(want$byte))
-  if (!is.null(want$expected)) {
-    got <- c(got, failure$expected, failure$found)
-    wanted <- c(wanted, as.numeric(want$expected), as.numeric(want$found))
-  }
+  got <- list(failure$kind, failure$record, failure$line, failure$byte, failure$expected,
+              failure$found)
+  wanted <- list(want$kind, as.numeric(want$record), as.numeric(want$line),
+                 as.numeric(want$byte), as.numeric(want$expected %||% 0),
+                 as.numeric(want$found %||% 0))
   if (identical(got, wanted)) character() else sprintf("%s: failure %s, want %s", label,
                                                        paste(got, collapse = " "),
                                                        paste(wanted, collapse = " "))
@@ -230,13 +458,27 @@ failure_mismatches <- function(failure, case, label) {
 dialect_of <- function(case) {
   d <- case$dialect
   delimited_dialect(d$separator, quoting = d$quoting, has_header = d$has_header,
-                    skip_blank_lines = d$skip_blank_lines)
+                    skip_blank_lines = d$skip_blank_lines, skip = d$skip %||% 0,
+                    header_row = d$header_row %||% 0,
+                    fill = identical(d$short_rows, "pad"), long_rows = d$long_rows %||% "reject",
+                    na = as.character(unlist(d$tokens)), encoding = d$encoding %||% "utf-8")
+}
+
+# The batches of a read as one table, as read_delimited() would bind them.
+as_table <- function(batches, plan_size) {
+  t <- list(line = unlist(lapply(batches, `[[`, "line")),
+            columns = lapply(seq_len(plan_size), function(j) {
+              do.call(rbind, lapply(batches, function(b) b$columns[[j]]))
+            }))
+  if (is.null(t$line)) t$line <- numeric()
+  t
 }
 
 # Reads `case` through `open` (a function of the dialect returning a reader with no plan
 # bound), checks the header, binds the plan and reads every batch; returns the disagreements.
 replay <- function(case, label, open, batch_rows, by_name = FALSE) {
   reader <- open(dialect_of(case))
+  on.exit(close(reader), add = TRUE)
   out <- character()
   want_header <- if (is.null(case$header)) NULL else as.character(unlist(case$header))
   if (!identical(header(reader), want_header)) {
@@ -244,35 +486,41 @@ replay <- function(case, label, open, batch_rows, by_name = FALSE) {
                    paste(want_header, collapse = "|"))
   }
   bind(reader, plan_of(case, header(reader), by_name))
-  raws <- list()
+  batches <- list()
   while (!is.null(batch <- read_batch(reader))) {
     if (length(batch$line) < 1L || length(batch$line) > batch_rows) {
       out <- c(out, sprintf("%s: a batch of %d rows", label, length(batch$line)))
     }
-    raws[[length(raws) + 1L]] <- batch
+    batches[[length(batches) + 1L]] <- batch
   }
   # A structural failure is final: every later read is NULL, and the failure stays.
   first <- failure(reader)
   if (!is.null(read_batch(reader)) || !identical(failure(reader), first)) {
     out <- c(out, sprintf("%s: a read after the end changed something", label))
   }
-  t <- list(line = unlist(lapply(raws, `[[`, "line")),
-            columns = lapply(seq_along(case$plan), function(j) {
-              do.call(rbind, lapply(raws, function(b) b$columns[[j]]))
-            }))
-  if (is.null(t$line)) t$line <- numeric()
+  t <- as_table(batches, length(case$plan))
   if (length(case$rows)) {
     out <- c(out, table_mismatches(t, case, label))
   } else if (length(t$line)) {
     out <- c(out, sprintf("%s: %d rows, want none", label, length(t$line)))
   }
-  c(out, failure_mismatches(failure(reader), case, label))
+  c(out, problem_mismatches(batches, case, label), failure_mismatches(failure(reader), case, label))
 }
 
 delimited_cases <- read_corpus("delimited.json")
 
+test_that("the replay reads every key the corpus has, and notices one added anywhere", {
+  expect_null(keys_problem(delimited_cases, workbook = FALSE))
+  # The negative control: a key it doesn't know is named.
+  edited <- delimited_cases[[1]]
+  edited$plan[[1]]$options$junk <- 1
+  expect_identical(unknown_keys(edited, FALSE), paste0(edited$name, ".plan[].options.junk"))
+})
+
 test_that("the corpus has its cases, and reaches every door", {
-  expect_gte(length(delimited_cases), 30L)
+  expect_identical(length(delimited_cases), 123L)
+  expect_identical(sum(vapply(delimited_cases, function(case) !is.null(case$suggest), FALSE)),
+                   19L)
   doors <- unique(unlist(lapply(delimited_cases, function(case) {
     vapply(case$plan, `[[`, "", "door")
   })))
@@ -281,7 +529,7 @@ test_that("the corpus has its cases, and reaches every door", {
 
 for (case in delimited_cases) {
   test_that(case$name, {
-    input <- charToRaw(enc2utf8(case$input))
+    input <- input_of(case)
     path <- tempfile(fileext = ".csv")
     writeBin(input, path)
     on.exit(unlink(path), add = TRUE)
@@ -313,13 +561,116 @@ for (case in delimited_cases) {
       }, 3L))
       options(old)
     }
-    # The one-call read agrees with the batch-at-a-time one.
+    # The one-call read agrees with the batch-at-a-time one, problems() and all.
     t <- read_delimited(input, plan_of(case), dialect_of(case))
     if (length(case$rows)) out <- c(out, table_mismatches(t, case, "read_delimited"))
-    out <- c(out, failure_mismatches(t$failure, case, "read_delimited"))
+    out <- c(out, problem_mismatches(list(t), case, "read_delimited"),
+             failure_mismatches(t$failure, case, "read_delimited"))
     expect_identical(out, character())
   })
 }
+
+# What suggest_plan() reports, in the corpus's terms. `param` is the door's parameter, as every
+# binding gives it; an ambiguous column's candidates are folded back into the core's mask, which
+# the corpus records, as Go's corpus test does.
+suggestion_of <- function(s) {
+  if (is.null(s$report)) return(paste("failed:", format(s$failure)))
+  r <- s$report
+  mask <- vapply(seq_len(nrow(r)), function(k) {
+    if (r$status[[k]] != "ambiguous") return("-")
+    bits <- vapply(r$candidates[[k]], function(c) {
+      if (is.character(c)) 2^match(c, hypertabular:::orders)
+      else if (identical(c$packed, hypercast::num_format()$packed)) 2 else 4
+    }, 0)
+    as.character(sum(bits))
+  }, "")
+  sprintf("%s %s %s %s of %s, candidates %s", r$door, r$param, r$status, r$matched, r$sampled,
+          mask)
+}
+
+# The corpus's `param` is the core's raw number: an ambiguous date's mask of its orders, a
+# number's notation. The door's parameter is the mask's lowest order, and 0 for a number.
+wanted_suggestion <- function(columns) {
+  vapply(columns, function(c) {
+    dated <- c$door %in% c("date_ordered", "datetime")
+    numeric <- c$door %in% hypertabular:::numeric_doors
+    param <- c$param
+    if (dated && c$status == "ambiguous" && param != 0) param <- log2(bitwAnd(param, -param))
+    if (numeric) param <- 0
+    sprintf("%s %s %s %s of %s, candidates %s", c$door, param, c$status, c$matched, c$sampled,
+            if (c$status == "ambiguous") c$param else "-")
+  }, "")
+}
+
+# Each resolved number is planned in the format the corpus's param says, or the one declared;
+# every other column has none.
+notation_mismatches <- function(s, columns, declared, label) {
+  out <- character()
+  for (k in seq_along(columns)) {
+    report <- s$report[k, ]
+    planned <- report$format[[1]]
+    if (report$status == "resolved" && report$door %in% hypertabular:::numeric_doors) {
+      wanted <- declared %||% if (columns[[k]]$param == 4) hypercast::num_format(",", ".") else
+        hypercast::num_format()
+      packed <- s$plan[[k]]$format
+      if (!identical(planned$packed, wanted$packed) || !identical(packed, wanted$packed)) {
+        out <- c(out, sprintf("%s: column %d planned in another notation", label, k))
+      }
+    } else if (!is.null(planned)) {
+      out <- c(out, sprintf("%s: column %d has a notation", label, k))
+    }
+  }
+  out
+}
+
+test_that("the corpus says what to suggest", {
+  expect_gt(sum(vapply(delimited_cases, function(case) !is.null(case$suggest), FALSE)), 0L)
+})
+
+for (case in Filter(function(case) !is.null(case$suggest), delimited_cases)) {
+  test_that(paste("suggest:", case$name), {
+    expected <- case$suggest
+    input <- input_of(case)
+    dialect <- dialect_of(case)
+    declared <- format_of(expected$format)
+    sample <- expected$sample_rows %||% 1000
+    s <- suggest_plan(input, dialect, sample_rows = sample, format = declared)
+    expect_identical(suggestion_of(s), wanted_suggestion(expected$columns))
+    expect_identical(s$truncated, expected$truncated)
+    expect_identical(notation_mismatches(s, expected$columns, declared, case$name), character())
+    path <- tempfile(fileext = ".csv")
+    on.exit(unlink(path), add = TRUE)
+    writeBin(input, path)
+    expect_identical(suggest_plan(path, dialect, sample_rows = sample, format = declared), s)
+    # The printed plan is code that makes the plan.
+    printed <- utils::capture.output(print(s))
+    expect_identical(eval(parse(text = printed)), s$plan)
+    # The plan reads back refusing nothing it resolved, among the rows it sampled.
+    t <- read_delimited(input, s$plan, dialect)
+    p <- problems(t)
+    resolved <- s$report$name[s$report$status == "resolved" & s$report$door != "text"]
+    typed <- which(s$report$status == "resolved" & s$report$door != "text")
+    planned <- match(p$column, names(t$columns))
+    refused <- p[p$kind == "cell" & p$row <= s$rows & planned %in% typed, ]
+    expect_identical(nrow(refused), 0L, label = paste(case$name, paste(resolved, collapse = ",")))
+  })
+}
+
+test_that("a suggestion fails only where a read of the case fails", {
+  planned <- 0L
+  failed <- 0L
+  for (case in delimited_cases) {
+    s <- suggest_plan(input_of(case), dialect_of(case))
+    if (is.null(s$failure)) {
+      planned <- planned + 1L
+    } else {
+      failed <- failed + 1L
+      expect_false(is.null(case$failure), label = case$name)
+      expect_null(s$plan)
+    }
+  }
+  expect_true(planned > 80L && failed > 0L)
+})
 
 # The workbook corpus.
 
@@ -331,12 +682,20 @@ book_of <- function(file) {
   books[[file]]
 }
 
+# The sheet options a case declares, as sheet_reader()'s arguments.
+sheet_args <- function(options) {
+  list(has_header = options$has_header, skip_empty_rows = options$skip_empty_rows,
+       skip = options$skip %||% 0, header_row = options$header_row %||% 0,
+       na = as.character(unlist(options$tokens)), range = options$range)
+}
+
 # The disagreements of one read of `case`.
 replay_sheet <- function(case, label, stingy) {
   old <- options(hypertabular.stingy = stingy)
   on.exit(options(old), add = TRUE)
   path <- file.path(corpus_dir(), case$file)
   book <- if (stingy) workbook(path) else book_of(case$file)
+  if (stingy) on.exit(close(book), add = TRUE)
   if (is.null(case$sheets)) {
     # An encrypted file: refused as it opens, a value, not an error.
     if (!is.null(book$sheets) && nrow(book$sheets)) {
@@ -359,30 +718,25 @@ replay_sheet <- function(case, label, stingy) {
     out <- c(out, sprintf("%s: date system", label))
   }
   index <- case$sheet + 1L
-  options <- case$options
-  want_header <- if (options$has_header) as.character(unlist(case$header))
+  args <- sheet_args(case$options)
+  want_header <- if (case$options$has_header) as.character(unlist(case$header))
   if (!stingy) {
-    t <- read_sheet(book, index, plan_of(case), has_header = options$has_header,
-                    skip_empty_rows = options$skip_empty_rows)
+    t <- do.call(read_sheet, c(list(book, index, plan_of(case)), args))
     header <- t$header
+    batches <- list(t)
   } else {
     name <- want_sheets$name[[index]]
     which <- if (sum(want_sheets$name == name) == 1L) name else index
-    reader <- sheet_reader(book, which, has_header = options$has_header,
-                           skip_empty_rows = options$skip_empty_rows, batch_rows = 7L)
+    reader <- do.call(sheet_reader, c(list(book, which, batch_rows = 7L), args))
+    on.exit(close(reader), add = TRUE)
     header <- header(reader)
     bind(reader, plan_of(case, header, by_name = TRUE))
-    raws <- list()
+    batches <- list()
     while (!is.null(batch <- read_batch(reader))) {
       if (length(batch$line) > 7L) out <- c(out, sprintf("%s: a batch too long", label))
-      raws[[length(raws) + 1L]] <- unclass(batch)
+      batches[[length(batches) + 1L]] <- batch
     }
-    t <- hypertabular:::new_table(reader, list(), list(), character())
-    t$line <- unlist(lapply(raws, `[[`, "line"))
-    if (is.null(t$line)) t$line <- numeric()
-    t$columns <- lapply(seq_along(case$plan), function(j) {
-      do.call(rbind, lapply(raws, function(b) b$columns[[j]]))
-    })
+    t <- as_table(batches, length(case$plan))
     t$failure <- failure(reader)
   }
   if (!identical(header, want_header)) {
@@ -394,12 +748,22 @@ replay_sheet <- function(case, label, stingy) {
   } else if (length(t$line)) {
     out <- c(out, sprintf("%s: %d rows, want none", label, length(t$line)))
   }
-  c(out, failure_mismatches(t$failure, case, label))
+  sheets <- unique(vapply(batches, function(b) b$context$sheet %||% NA_character_, ""))
+  if (length(batches) && !identical(sheets, want_sheets$name[[index]])) {
+    out <- c(out, sprintf("%s: problems name sheet %s", label, paste(sheets, collapse = ",")))
+  }
+  c(out, problem_mismatches(batches, case, label),
+    failure_mismatches(t$failure, case, label))
 }
 
+test_that("the replay reads every key the workbook corpus has, and notices one added anywhere", {
+  expect_null(keys_problem(workbook_cases, workbook = TRUE))
+})
+
 test_that("the corpus has its cases, over every package, through every door", {
-  expect_gte(length(workbook_cases), 240L)
+  expect_identical(length(workbook_cases), 398L)
   files <- unique(vapply(workbook_cases, `[[`, "", "file"))
+  expect_identical(length(files), 41L)
   expect_true(all(file.exists(file.path(corpus_dir(), files))))
   doors <- unique(unlist(lapply(workbook_cases, function(case) {
     vapply(case$plan, `[[`, "", "door")
@@ -411,6 +775,18 @@ for (case in workbook_cases) {
   test_that(case$name, {
     out <- c(replay_sheet(case, paste(case$name, "(whole)"), FALSE),
              replay_sheet(case, paste(case$name, "(stingy, 7 rows a batch)"), TRUE))
+    if (!is.null(case$suggest)) {
+      expected <- case$suggest
+      declared <- format_of(expected$format)
+      s <- do.call(suggest_plan, c(list(book_of(case$file), sheet = case$sheet + 1L,
+                                        format = declared), sheet_args(case$options)))
+      if (!identical(suggestion_of(s), wanted_suggestion(expected$columns)) ||
+            !identical(s$truncated, expected$truncated)) {
+        out <- c(out, sprintf("%s: suggest says %s (truncated %s)", case$name,
+                              paste(suggestion_of(s), collapse = "; "), s$truncated))
+      }
+      out <- c(out, notation_mismatches(s, expected$columns, declared, case$name))
+    }
     expect_identical(out, character())
   })
 }
@@ -435,20 +811,20 @@ signalled <- function(expr) {
 # Every sheet of a workbook, every column read as text and as an f64, whole.
 read_every_sheet <- function(bytes) {
   book <- workbook(bytes)
+  on.exit(close(book), add = TRUE)
   for (i in seq_len(nrow(book$sheets))) {
     reader <- sheet_reader(book, i, has_header = FALSE, batch_rows = 3L)
     bind(reader, list(col_text(1), col_f64(2), col_date(3), col_text(30)))
     while (!is.null(read_batch(reader))) NULL
+    close(reader)
   }
 }
 
 test_that("no truncation of a delimited corpus input signals anything", {
   seen <- character()
-  for (case in read_corpus("delimited.json")) {
-    input <- charToRaw(enc2utf8(case$input))
-    d <- case$dialect
-    dialect <- delimited_dialect(d$separator, quoting = d$quoting, has_header = d$has_header,
-                                 skip_blank_lines = d$skip_blank_lines)
+  for (case in delimited_cases) {
+    input <- input_of(case)
+    dialect <- dialect_of(case)
     plan <- c(plan_of(case), list(col_text(9), col_timestamp(1)))
     for (n in 0:length(input)) {
       cut <- input[seq_len(n)]
@@ -462,6 +838,7 @@ test_that("no truncation of a delimited corpus input signals anything", {
           bind(reader, plan[!width | reach <= width])
           while (!is.null(read_batch(reader))) NULL
         }
+        close(reader)
       }))
     }
   }

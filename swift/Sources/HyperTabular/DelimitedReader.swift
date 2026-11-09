@@ -48,8 +48,9 @@ import HyperTabularCore
 /// — and reads the same way.
 ///
 /// A value that does not cast is that cell's verdict, and the read goes on. Input that is
-/// not rows of cells at all — a record of the wrong width, a quote never closed — is a
-/// ``TabularError``, thrown after every intact row before it has been delivered.
+/// not rows of cells at all — a record of the wrong width, a quote never closed, bytes with no
+/// character in a declared ``TextEncoding`` — is a ``TabularError``, thrown after every intact row
+/// before it has been delivered.
 ///
 /// A caller bug — a column read through an accessor that is not its door's, a row outside
 /// the batch, a separator the core cannot honour — is a precondition failure, never an
@@ -71,10 +72,19 @@ public final class DelimitedReader {
     /// Where streamed input comes from: called with room to write into, it writes as many
     /// bytes as it has (at least one, unless the input is over) and returns how many — `0`
     /// once the input is exhausted. Whatever it throws comes out of the reader unchanged.
+    ///
+    /// It runs in the middle of a read, and a ``read()``, ``bind(_:)`` or ``forEachRow(_:)`` it
+    /// calls on the same reader throws ``PlanError/busy``; the read it is in goes on unharmed.
     public typealias Source = (UnsafeMutableRawBufferPointer) throws -> Int
 
     private static let contractViolation =
         "libhypertabular reported a contract violation — a binding bug, please report it"
+
+    /// For the tests: the size the read buffer stops growing at, in place of ``maxRowBytes``, so a
+    /// row past the ceiling takes no gigabyte to prove. `0` is the real one.
+    nonisolated(unsafe) static var rowCeiling = 0
+
+    private static var ceiling: Int { rowCeiling > 0 ? rowCeiling : maxRowBytes }
 
     /// The most input one native call may be shown: the core's spans are 31 bits.
     private static let callLimit = Int(Int32.max)
@@ -90,6 +100,13 @@ public final class DelimitedReader {
                 && MemoryLayout<CellVerdict>.stride == HyperTabularCellVerdict_SIZE
                 && MemoryLayout<HyperTabularSpan>.stride == HyperTabularSpan_SIZE
                 && MemoryLayout<HyperTabularColumnSpec>.stride == HyperTabularColumnSpec_SIZE
+                && MemoryLayout<HyperTabularRawDelimitedOptions>.size == HyperTabularRawDelimitedOptions_SIZE
+                && MemoryLayout<HyperTabularRawSheetOptions>.size == HyperTabularRawSheetOptions_SIZE
+                && MemoryLayout<HyperTabularCellNote>.stride == 4
+                && MemoryLayout<HyperTabularRawProblem>.stride == 32
+                && MemoryLayout<HyperTabularRawSuggestion>.stride == 20
+                && MemoryLayout<HyperTabularRawTranscoded>.size == 32
+                && MemoryLayout<HyperTabularRawRange>.size == 16
                 && MemoryLayout<HyperTabularRawNumFormat>.size == HyperTabularRawNumFormat_SIZE
                 && MemoryLayout<HyperTabularDelimitedState>.size == HyperTabularDelimitedState_SIZE
                 && MemoryLayout<HyperTabularFilled>.size == HyperTabularFilled_SIZE
@@ -108,7 +125,7 @@ public final class DelimitedReader {
     /// The dialect the text is read in.
     public let dialect: Dialect
     /// Rows per batch: what the column buffers are sized by when a plan is bound.
-    private let batchRows: Int
+    private var batchRows: Int
     // The plan and the batch it is read into, once one is bound.
     private var columnSet: Columns?
     private var batch: Batch?
@@ -136,8 +153,16 @@ public final class DelimitedReader {
     private var eof: Bool
     /// The most of `input` the core is shown at once.
     private var windowLimit: Int
+    /// The step ahead of the fill, for a dialect that declares an encoding: what is read lands
+    /// there, and what it decodes to lands in `input`.
+    private let decoder: Decoder?
+    /// The dialect's tokens as the core reads them, at an address that is never null.
+    private let tokens: UnsafeMutableBufferPointer<UInt8>
 
     private var failure: TabularError?
+    /// Whether a read is in progress: the source runs inside one, and a read or bind it called
+    /// on this reader would move or free the buffer it was handed.
+    private var reading = false
 
     /// The header's names, when the dialect declares one — empty for an input with no
     /// record — and `nil` when it declares none. Read when the reader is opened, before any
@@ -146,7 +171,7 @@ public final class DelimitedReader {
 
     // MARK: - opening
 
-    /// Reads UTF-8 delimited text already in memory: an array, a `Data`, a string's `utf8`.
+    /// Reads delimited text already in memory: an array, a `Data`, a string's `utf8`.
     /// The bytes are copied once, into the reader's own buffer, so the reader does not
     /// depend on the collection outliving it; ``init(bytesNoCopy:dialect:plan:batchRows:)``
     /// reads in place instead.
@@ -181,16 +206,27 @@ public final class DelimitedReader {
     convenience init<Bytes: Collection>(
         bytes: Bytes, dialect: Dialect, plan: [Column]?, batchRows: Int, windowBytes: Int
     ) throws where Bytes.Element == UInt8 {
+        _ = try Self.checkSizes(dialect, batchRows: batchRows, bufferBytes: 1)
         let copy = UnsafeMutableRawBufferPointer.allocate(byteCount: bytes.count, alignment: 1)
         copy.copyBytes(from: bytes)
+        guard dialect.encoding != .utf8 else {
+            self.init(
+                dialect: dialect, batchRows: batchRows, input: copy, ownsInput: true, filled: copy.count,
+                source: nil, pump: nil, windowLimit: windowBytes, decoder: nil)
+            try open(plan)
+            return
+        }
+        // The memory is the decoder's, and what it decodes to lands in a buffer.
         self.init(
-            dialect: dialect, batchRows: batchRows, input: copy, ownsInput: true, filled: copy.count,
-            source: nil, pump: nil, windowLimit: windowBytes)
+            dialect: dialect, batchRows: batchRows, input: Self.streamBuffer(Self.defaultBufferBytes), ownsInput: true,
+            filled: 0, source: nil, pump: nil, windowLimit: Self.callLimit,
+            decoder: Decoder(dialect.encoding, holding: copy))
         try open(plan)
     }
 
-    /// Reads UTF-8 delimited text already in memory, in place — nothing is copied, and a
-    /// text cell is a view of the caller's own bytes.
+    /// Reads delimited text already in memory, in place — nothing is copied, and a text cell
+    /// is a view of the caller's own bytes. Under a declared ``TextEncoding`` other than
+    /// ``TextEncoding/utf8`` a cell is a view of what they decoded to, in the reader's own buffer.
     ///
     /// The caller keeps `bytes` alive and unchanged for as long as the reader is used.
     ///
@@ -222,14 +258,24 @@ public final class DelimitedReader {
     private convenience init(
         bytesNoCopy bytes: UnsafeRawBufferPointer, dialect: Dialect, plan: [Column]?, batchRows: Int
     ) throws {
-        // Never written through: in memory the core only reads the input.
+        _ = try Self.checkSizes(dialect, batchRows: batchRows, bufferBytes: 1)
+        guard dialect.encoding != .utf8 else {
+            // Never written through: in memory the core only reads the input.
+            self.init(
+                dialect: dialect, batchRows: batchRows, input: UnsafeMutableRawBufferPointer(mutating: bytes),
+                ownsInput: false, filled: bytes.count, source: nil, pump: nil, windowLimit: Self.callLimit,
+                decoder: nil)
+            try open(plan)
+            return
+        }
         self.init(
-            dialect: dialect, batchRows: batchRows, input: UnsafeMutableRawBufferPointer(mutating: bytes),
-            ownsInput: false, filled: bytes.count, source: nil, pump: nil, windowLimit: Self.callLimit)
+            dialect: dialect, batchRows: batchRows, input: Self.streamBuffer(Self.defaultBufferBytes), ownsInput: true,
+            filled: 0, source: nil, pump: nil, windowLimit: Self.callLimit,
+            decoder: Decoder(dialect.encoding, over: bytes))
         try open(plan)
     }
 
-    /// Reads UTF-8 delimited text from a stream of any kind — a socket, a decompressor, a
+    /// Reads delimited text from a stream of any kind — a socket, a decompressor, a
     /// file the caller opened — through a closure that fills the reader's own buffer, so
     /// nothing is copied on the way in.
     ///
@@ -238,7 +284,8 @@ public final class DelimitedReader {
     ///   - dialect: The declared dialect.
     ///   - plan: The output columns, in output order.
     ///   - batchRows: Rows per batch.
-    ///   - bufferBytes: The initial read buffer; it doubles when a record does not fit.
+    ///   - bufferBytes: The initial read buffer; it doubles when a record does not fit. Under a
+    ///     declared encoding it is also the size of the buffer the original bytes are read into.
     /// - Throws: ``TabularError`` when the header record is structurally broken, and
     ///   whatever `source` throws.
     public convenience init(
@@ -267,13 +314,15 @@ public final class DelimitedReader {
     private convenience init(
         reading source: @escaping Source, dialect: Dialect, plan: [Column]?, batchRows: Int, bufferBytes: Int
     ) throws {
+        let start = try Self.checkSizes(dialect, batchRows: batchRows, bufferBytes: bufferBytes)
         self.init(
-            dialect: dialect, batchRows: batchRows, input: Self.streamBuffer(bufferBytes), ownsInput: true,
-            filled: 0, source: source, pump: nil, windowLimit: Self.callLimit)
+            dialect: dialect, batchRows: batchRows, input: Self.streamBuffer(start), ownsInput: true,
+            filled: 0, source: source, pump: nil, windowLimit: Self.callLimit,
+            decoder: Decoder(dialect.encoding, size: start))
         try open(plan)
     }
 
-    /// Opens a file of UTF-8 delimited text and reads it through a buffer — the file is
+    /// Opens a file of delimited text and reads it through a buffer — the file is
     /// never in memory whole. It is closed when the reader is released.
     ///
     /// - Parameters:
@@ -289,6 +338,9 @@ public final class DelimitedReader {
         batchRows: Int = DelimitedReader.defaultBatchRows,
         bufferBytes: Int = DelimitedReader.defaultBufferBytes
     ) throws {
+        // The core's answer on these sizes, ahead of touching the file.
+        _ = try DelimitedReader.checkSizes(
+            dialect, plan: Columns.sizeSpecs(plan), batchRows: batchRows, bufferBytes: bufferBytes)
         try self.init(
             reading: try Self.file(path), dialect: dialect, plan: Optional(plan), batchRows: batchRows,
             bufferBytes: bufferBytes)
@@ -305,11 +357,13 @@ public final class DelimitedReader {
         batchRows: Int = DelimitedReader.defaultBatchRows,
         bufferBytes: Int = DelimitedReader.defaultBufferBytes
     ) throws {
+        // The core's answer on these sizes, ahead of touching the file.
+        _ = try DelimitedReader.checkSizes(dialect, plan: [], batchRows: batchRows, bufferBytes: bufferBytes)
         try self.init(
             reading: try Self.file(path), dialect: dialect, plan: nil, batchRows: batchRows, bufferBytes: bufferBytes)
     }
 
-    /// Reads UTF-8 delimited text from an asynchronous sequence of bytes — `URL.resourceBytes`,
+    /// Reads delimited text from an asynchronous sequence of bytes — `URL.resourceBytes`,
     /// `FileHandle.bytes`, a network body — into the reader's own buffer as the bytes arrive.
     /// The header is awaited here; the plan built from it is bound with ``bind(_:)``, and
     /// every batch is read with ``readAsync()``.
@@ -330,7 +384,7 @@ public final class DelimitedReader {
         try await self.init(bytes: bytes, dialect: dialect, plan: nil, batchRows: batchRows, bufferBytes: bufferBytes)
     }
 
-    /// Reads UTF-8 delimited text from an asynchronous sequence of bytes, as the plan-less
+    /// Reads delimited text from an asynchronous sequence of bytes, as the plan-less
     /// initializer of the same shape does, through `plan`.
     ///
     /// - Throws: `CancellationError` when the task is cancelled while the header is awaited,
@@ -347,10 +401,12 @@ public final class DelimitedReader {
     private convenience init<Bytes: AsyncSequence>(
         bytes: sending Bytes, dialect: Dialect, plan: [Column]?, batchRows: Int, bufferBytes: Int
     ) async throws where Bytes.Element == UInt8 {
-        let input = Self.streamBuffer(bufferBytes)
+        let start = try Self.checkSizes(dialect, batchRows: batchRows, bufferBytes: bufferBytes)
+        let input = Self.streamBuffer(start)
         self.init(
             dialect: dialect, batchRows: batchRows, input: input, ownsInput: true, filled: 0, source: nil,
-            pump: Pump(bytes, ahead: input.count), windowLimit: Self.callLimit)
+            pump: Pump(bytes, ahead: input.count), windowLimit: Self.callLimit,
+            decoder: Decoder(dialect.encoding, size: start))
         if let plan {
             try bind(plan)
         }
@@ -365,9 +421,8 @@ public final class DelimitedReader {
 
     private init(
         dialect: Dialect, batchRows: Int, input: UnsafeMutableRawBufferPointer, ownsInput: Bool, filled: Int,
-        source: Source?, pump: Pump?, windowLimit: Int
+        source: Source?, pump: Pump?, windowLimit: Int, decoder: Decoder?
     ) {
-        precondition(batchRows > 0, "batchRows must be positive; got \(batchRows)")
         precondition(windowLimit > 0, "windowBytes must be positive; got \(windowLimit)")
         precondition(Self.layoutChecked)
         precondition(
@@ -381,16 +436,24 @@ public final class DelimitedReader {
         self.input = input
         self.ownsInput = ownsInput
         self.end = filled
-        self.eof = source == nil && pump == nil
+        self.eof = source == nil && pump == nil && decoder == nil
+        self.decoder = decoder
         self.windowLimit = min(windowLimit, Self.callLimit)
 
         state = .allocate(capacity: 1)
-        var raw = HyperTabularRawDialect(
-            separator: UInt8(dialect.separator.value), quoting: dialect.quoting ? 1 : 0,
-            skip_blank_lines: dialect.skipBlankLines ? 1 : 0, engine: 0)
+        var raw = HyperTabularRawDelimitedOptions()
+        raw.size = UInt32(HyperTabularRawDelimitedOptions_SIZE)
+        raw.separator = UInt8(truncatingIfNeeded: dialect.separator.value)
+        raw.quoting = dialect.quoting ? 1 : 0
+        raw.skip_blank_lines = dialect.skipBlankLines ? 1 : 0
+        raw.skip = dialect.skip
+        raw.header_row = dialect.headerRow
+        raw.short_rows = dialect.shortRows.rawValue
+        raw.long_rows = dialect.longRows.rawValue
         precondition(
-            hypertabular_delimited_init(state, &raw) == HYPERTABULAR_OK,
+            hypertabular_delimited_init_with(state, &raw) == HYPERTABULAR_OK,
             "Separator '\(dialect.separator)' is not tab or printable ASCII other than '\"'")
+        tokens = Columns.hold(packedTokens(dialect.tokens))
 
         cells = .allocate(capacity: 0)
         arena = .allocate(capacity: 4096)
@@ -399,15 +462,35 @@ public final class DelimitedReader {
     deinit {
         pump?.stop()
         state.deallocate()
-        cells.deallocate()
-        arena.deallocate()
-        if ownsInput { input.deallocate() }
+        tokens.deallocate()
+        // The batch in hand points into the rest, so they go when it does: if nothing else holds it,
+        // straight after this.
+        let (cells, arena, input, ownsInput) = (cells, arena, input, ownsInput)
+        let free = {
+            cells.deallocate()
+            arena.deallocate()
+            if ownsInput { input.deallocate() }
+        }
+        if let batch {
+            batch.outlive(free)
+        } else {
+            free()
+        }
     }
 
     /// The read buffer a streamed source starts with.
-    private static func streamBuffer(_ bufferBytes: Int) -> UnsafeMutableRawBufferPointer {
-        precondition(bufferBytes > 0, "bufferBytes must be positive; got \(bufferBytes)")
-        return .allocate(byteCount: min(bufferBytes, Self.maxRowBytes), alignment: 1)
+    private static func streamBuffer(_ bytes: Int) -> UnsafeMutableRawBufferPointer {
+        .allocate(byteCount: bytes, alignment: 1)
+    }
+
+    /// The core's answer on a reader's sizes, with no plan yet: what it holds whatever the plan.
+    /// ``bind(_:)`` asks again with one.
+    private static func checkSizes(
+        _ dialect: Dialect, plan: [HyperTabularColumnSpecWith] = [], batchRows: Int, bufferBytes: Int
+    ) throws -> Int {
+        try Columns.checkSizes(
+            specs: plan, batchRows: batchRows, bufferBytes: bufferBytes, notes: dialect.notes,
+            widths: dialect.longRows == .report, sheet: false)
     }
 
     /// A source that reads the file at `path`, which it keeps open for as long as it is held.
@@ -484,6 +567,100 @@ public final class DelimitedReader {
         max(1, min(batchRows, cellBudget / max(perRow, 1)))
     }
 
+    // MARK: - a suggestion
+
+    /// Reads a sample of the file at `path` through the text door and says what its columns look
+    /// like: a plan to look at, change and hand to a read, and a report. Nothing is sniffed in a
+    /// read, and nothing here reaches one: this is its own read of the file, opened and closed here.
+    /// There is no form of this for a stream, which would lose the rows it sampled.
+    ///
+    /// Declaring the locale is the recommended route: a number format and a date order are the
+    /// plan's to say, and with them nothing needs inferring. A suggestion is a starting point for a
+    /// plan to inspect.
+    ///
+    /// The width is the header's, or the first record's, and a plan has to name the columns before
+    /// that record can be read. So with no header the file is opened twice, once to read the first
+    /// record: a path that can only be read once is not for this. The dialect is what the sample is
+    /// read with, its tokens included, and a cell it says is empty is blank to the suggestion.
+    ///
+    /// What it says can surprise, so read the report before the plan:
+    ///
+    /// - A column of `0` and `1` is ``Door/bool``, the first door asked, and `F` or `No` read false.
+    /// - `1.234` alone is ambiguous, 1.234 or 1234, and reads as text until a format is declared or
+    ///   a value settles it, which takes in a column of prices at three decimals. Beside `2.5` it is
+    ///   a decimal, and beside `2,5` it is 1234.
+    /// - `2,5`, `0,125`, `1.234,5` and `1.234.567` read only with `,` as the decimal, so they are
+    ///   resolved in that notation, and ``SuggestedColumn/format`` names it. `2,5` beside `2.5` is
+    ///   unresolved.
+    /// - `1,23,456`, Indian grouping, reads under neither notation with none declared, because
+    ///   nothing says its culture: alone it is text, resolved, and beside `5` unresolved. Declaring
+    ///   `NumFormat.invariant.withGrouping(.indian)` for the column makes it a number.
+    /// - `007` and an integer past `Int64` are text, with no note saying why, so as not to lose the
+    ///   zeros or the digits.
+    /// - A sheet's date column is text: ``Sheet/suggest(_:)`` says why.
+    ///
+    /// - Parameters:
+    ///   - path: The file.
+    ///   - dialect: The declared dialect.
+    ///   - options: How the sample is taken and read.
+    /// - Throws: ``PlanError/refused(column:)`` for a format the options declare that no door
+    ///   accepts: first, before the file is opened, though another replaces it or the sample never
+    ///   reaches its ordinal. ``TabularError`` for a failure among the sampled rows: there is no
+    ///   knowing what is past it, and a read would stop there too. A failure past them is not met,
+    ///   or only says the source was truncated. Foundation's error when the file cannot be opened.
+    public static func suggest(
+        contentsOfFile path: String, dialect: Dialect, options: SuggestOptions = SuggestOptions()
+    ) throws -> Suggestion {
+        try suggest(dialect, options) { dialect, batchRows in
+            try DelimitedReader(contentsOfFile: path, dialect: dialect, batchRows: batchRows)
+        }
+    }
+
+    /// ``suggest(contentsOfFile:dialect:options:)`` over text in memory.
+    ///
+    /// - Throws: ``PlanError/refused(column:)`` for a format the options declare that no door
+    ///   accepts, first, before anything is read, and ``TabularError`` for a failure among the
+    ///   sampled rows.
+    public static func suggest<Bytes: Collection>(
+        bytes: Bytes, dialect: Dialect, options: SuggestOptions = SuggestOptions()
+    ) throws -> Suggestion where Bytes.Element == UInt8 {
+        try suggest(dialect, options) { dialect, batchRows in
+            try DelimitedReader(bytes: bytes, dialect: dialect, batchRows: batchRows)
+        }
+    }
+
+    private static func suggest(
+        _ dialect: Dialect, _ options: SuggestOptions, open: (Dialect, Int) throws -> DelimitedReader
+    ) throws -> Suggestion {
+        try options.checkFormats()
+        let limit = options.rows(within: defaultBatchRows)
+        var unnoted = dialect
+        unnoted.notes = false
+        var width = -1
+        if !dialect.hasHeader {
+            // A headerless source's width is its first record's, which a read says through a plan
+            // of one column.
+            let first = try open(unnoted, 1)
+            try first.bind([.text(0)])
+            _ = try first.read()
+            width = first.columnCount ?? 0
+        }
+        let reader = try open(unnoted, 1)
+        if width < 0 {
+            width = reader.header?.count ?? 0
+        }
+        // One row more than the sample, so that a row past it costs no second batch to find, in as many
+        // batches as the core says that takes.
+        let sample = try Sample.of(
+            width: width, limit: limit, sheet: false,
+            bind: { plan in
+                reader.batchRows = try Columns.sampleRows(
+                    plan, wanted: limit + 1, notes: false, widths: dialect.longRows == .report, sheet: false)
+                try reader.bind(plan)
+            }, read: { try reader.read() })
+        return try sample.judge(header: reader.header, options: options)
+    }
+
     // MARK: - the plan and the position
 
     /// Declares the plan a reader opened without one reads through — once, before the first
@@ -492,13 +669,20 @@ public final class DelimitedReader {
     ///
     /// - Throws: ``PlanError/alreadyBound`` when the reader has a plan, whether it was opened
     ///   with one or bound one already; the reader goes on with the plan it has.
+    ///   ``PlanError/busy`` from inside one of the reader's own reads.
     ///   ``PlanError/outOfReach(column:)`` when a column's ordinal is 2²⁰ or more, or at or
-    ///   past the columns a header read already gives every record; the reader stays unbound.
+    ///   past the columns a header read already gives every record;
+    ///   ``PlanError/refused(column:)`` when the core will not read a column as declared. The
+    ///   reader stays unbound.
     public func bind(_ plan: [Column]) throws {
+        guard !reading else {
+            throw PlanError.busy
+        }
         guard columnSet == nil else {
             throw PlanError.alreadyBound
         }
-        let columns = try Columns(plan: plan, batchRows: batchRows)
+        let columns = try Columns(
+            plan: plan, batchRows: batchRows, notes: dialect.notes, rowWidths: dialect.longRows == .report)
         if let width = columnCount {
             try Self.refusePast(width, plan)
         }
@@ -508,7 +692,7 @@ public final class DelimitedReader {
         cells.deallocate()
         cells = .allocate(capacity: perRow * rows)
         columnSet = columns
-        batch = Batch(columns, workbook: false)
+        batch = Batch(columns, workbook: false, reportsLongRows: dialect.longRows == .report)
     }
 
     /// Whether a plan has been bound: always, for a reader opened with one.
@@ -541,10 +725,11 @@ public final class DelimitedReader {
     }
 
     /// Readies the read buffer for more of a stream: the unfinished record goes to the front
-    /// of it, and it doubles when that record fills it. Returns the room behind the record —
-    /// or, for memory, widens the window the core is shown and returns `nil`.
+    /// of it, and it doubles when that record fills it. Returns the room behind the record — or,
+    /// for memory, widens the window the core is shown and returns `nil`, as it does under an
+    /// encoding once the decoder is holding a failure and the fill has one more look to take.
     private func room() throws -> UnsafeMutableRawBufferPointer? {
-        guard source != nil || pump != nil else {
+        guard source != nil || pump != nil || decoder != nil else {
             guard windowLimit < Self.callLimit else { throw rowTooLong() }
             windowLimit = windowLimit > Self.callLimit / 2 ? Self.callLimit : windowLimit * 2
             return nil
@@ -557,16 +742,35 @@ public final class DelimitedReader {
             start = 0
             end = pending
         }
-        if end == input.count {
-            // One record fills the buffer: it needs a bigger one.
-            guard input.count < Self.maxRowBytes else { throw rowTooLong() }
-            let larger = UnsafeMutableRawBufferPointer.allocate(
-                byteCount: min(input.count * 2, Self.maxRowBytes), alignment: 1)
-            larger.copyMemory(from: UnsafeRawBufferPointer(rebasing: input[..<end]))
-            input.deallocate()
-            input = larger
+        if let decoder, decoder.failed {
+            // A \r the fill is holding ends a row whatever comes next, and only waits to see if a
+            // \n is part of it; nothing is coming, and this says so. In a quote it ends nothing,
+            // and the record is as cut as it was.
+            guard end > 0, input[end - 1] == 0x0D else {
+                let error = TabularError(
+                    kind: .encoding, record: records, line: Int(clamping: state.pointee.line),
+                    byte: Int64(clamping: decoder.failedAt))
+                failure = error
+                throw error
+            }
+            if end == input.count { try growInput() }
+            input[end] = 0x0A
+            end += 1
+            return nil
         }
+        // One record fills the buffer: it needs a bigger one.
+        if end == input.count { try growInput() }
         return UnsafeMutableRawBufferPointer(rebasing: input[end...])
+    }
+
+    /// Doubles the read buffer, up to the row ceiling.
+    private func growInput() throws {
+        guard input.count < Self.ceiling else { throw rowTooLong() }
+        let larger = UnsafeMutableRawBufferPointer.allocate(
+            byteCount: min(input.count * 2, Self.maxRowBytes), alignment: 1)
+        larger.copyMemory(from: UnsafeRawBufferPointer(rebasing: input[..<end]))
+        input.deallocate()
+        input = larger
     }
 
     /// Gives the core more to look at behind the record it could not finish: for a stream,
@@ -574,15 +778,29 @@ public final class DelimitedReader {
     private func refill() throws {
         precondition(
             pump == nil, "A reader of an asynchronous sequence is read with readAsync(), not read()")
-        guard let room = try room(), let source else { return }
-        let read = try source(room)
-        precondition(
-            read >= 0 && read <= room.count,
-            "A source returns how many bytes it wrote; got \(read) for room for \(room.count)")
+        guard let room = try room() else { return }
+        if let decoder {
+            while try !decode() {
+                guard let source else { return }
+                let into = decoder.room
+                decoder.landed(try checked(source(into), into))
+            }
+            return
+        }
+        guard let source else { return }
+        let read = try checked(source(room), room)
         if read == 0 {
             eof = true
         }
         end += read
+    }
+
+    /// What a source returned, held to what it was given.
+    private func checked(_ read: Int, _ room: UnsafeMutableRawBufferPointer) -> Int {
+        precondition(
+            read >= 0 && read <= room.count,
+            "A source returns how many bytes it wrote; got \(read) for room for \(room.count)")
+        return read
     }
 
     /// ``refill()`` for any reader. A reader of an asynchronous sequence takes everything
@@ -598,11 +816,56 @@ public final class DelimitedReader {
             return
         }
         guard let room = try room() else { return }
+        if let decoder {
+            while try !decode() {
+                decoder.landed(try await pump.take(into: decoder.room))
+            }
+            return
+        }
         let read = try await pump.take(into: room)
         if read == 0 {
             eof = true
         }
         end += read
+    }
+
+    /// Decodes what the decoder holds behind what the read buffer holds, with whatever that wants
+    /// first: `true` once the fill has something new to look at (text, the end, or a failure to
+    /// raise when it next asks), `false` when the source has to bring more first.
+    private func decode() throws -> Bool {
+        guard let decoder else { return true }
+        while true {
+            let room = input.count - end
+            var done = HyperTabularRawTranscoded()
+            let code = hypertabular_transcode(
+                decoder.encoding, decoder.pending, UInt(decoder.end - decoder.at), decoder.eof ? 1 : 0,
+                input.baseAddress.map { ($0 + end).assumingMemoryBound(to: UInt8.self) }, UInt(room), &done)
+            guard code == HYPERTABULAR_OK else {
+                preconditionFailure(Self.contractViolation)
+            }
+            if done.failed != 0 {
+                decoder.failed = true
+                decoder.failedAt = decoder.offset + done.failure_at
+            }
+            decoder.at += Int(done.consumed)
+            decoder.offset += done.consumed
+            if done.written > 0 {
+                end += Int(done.written)
+                return true
+            }
+            // The next refill raises it, once the fill has had one more look.
+            if decoder.failed { return true }
+            if decoder.at < decoder.end && room < Decoder.maxCharacter {
+                try growInput()
+                continue
+            }
+            if decoder.eof {
+                eof = true
+                return true
+            }
+            decoder.compact()
+            return false
+        }
     }
 
     private func rowTooLong() -> TabularError {
@@ -685,6 +948,15 @@ public final class DelimitedReader {
         case input
     }
 
+    /// Marks a read in progress, or refuses one inside another: what every read does before
+    /// anything else. The read clears the mark however it ends, a throw from the source included.
+    private func enter() throws {
+        guard !reading else {
+            throw PlanError.busy
+        }
+        reading = true
+    }
+
     /// What every read does first: ends the batch in hand, and says what there is to read
     /// through — a failure is thrown again, and a reader with no plan cannot be read yet.
     private func begin() throws -> (Columns, Batch) {
@@ -708,16 +980,18 @@ public final class DelimitedReader {
         var filled = HyperTabularFilled()
         while true {
             let (base, length, last) = nextWindow()
-            // The cells and the arena travel in a buffers block, the workbook calls' own, of
-            // which the fill reads those two alone: Mono's interpreter passes no more than
-            // twelve integer arguments to a native function, and the C ABI is the same for
-            // every binding.
-            var buffers = HyperTabularBuffers()
+            // The buffers travel in a block: Mono's interpreter passes no more than twelve integer
+            // arguments to a native function, and the C ABI is the same for every binding.
+            var buffers = HyperTabularBuffersWith()
+            buffers.size = buffersSize
             buffers.cells = cells.baseAddress
             buffers.cells_cap = UInt(cells.count)
             buffers.arena = arena.baseAddress
             buffers.arena_cap = UInt(arena.count)
-            let code = hypertabular_delimited_fill(
+            buffers.tokens = UnsafePointer(tokens.baseAddress)
+            buffers.tokens_len = UInt(dialect.tokens.isEmpty ? 0 : tokens.count)
+            buffers.row_widths = columnSet.rowWidths
+            let code = hypertabular_delimited_fill_with(
                 state, base, UInt(length), last ? 1 : 0, columnSet.specs, columnSet.buffers,
                 UInt(columnSet.plan.count), UInt(columnSet.batchRows), &buffers, &filled)
             switch code {
@@ -762,14 +1036,19 @@ public final class DelimitedReader {
     ///
     /// - Throws: ``TabularError`` when the input is structurally broken — after every
     ///   intact row before the break has been delivered, and again on every later call —
-    ///   ``PlanError/unbound`` while the reader has no plan, and whatever a streamed source
+    ///   ``PlanError/unbound`` while the reader has no plan, ``PlanError/busy`` from inside one
+    ///   of the reader's own reads — called by its source — and whatever a streamed source
     ///   throws.
     public func read() throws -> Batch? {
+        try enter()
+        defer { reading = false }
         let (columnSet, batch) = try begin()
         while true {
             switch try fillStep(columnSet) {
             case .rows(let rows, let base):
-                return batch.fill(rows: rows, cells: cells, perRow: perRow, base: base, arena: arena)
+                return batch.fill(
+                    rows: rows, cells: cells, perRow: perRow, base: base, arena: arena, expected: state.pointee.expected
+                )
             case .end:
                 return nil
             case .input:
@@ -796,12 +1075,16 @@ public final class DelimitedReader {
     /// - Throws: `CancellationError` when the task is cancelled, and whatever ``read()``
     ///   throws.
     public func readAsync() async throws -> Batch? {
+        try enter()
+        defer { reading = false }
         try Task.checkCancellation()
         let (columnSet, batch) = try begin()
         while true {
             switch try fillStep(columnSet) {
             case .rows(let rows, let base):
-                return batch.fill(rows: rows, cells: cells, perRow: perRow, base: base, arena: arena)
+                return batch.fill(
+                    rows: rows, cells: cells, perRow: perRow, base: base, arena: arena, expected: state.pointee.expected
+                )
             case .end:
                 return nil
             case .input:
@@ -821,6 +1104,87 @@ public final class DelimitedReader {
                 try body(row)
             }
         }
+    }
+}
+
+/// The step ahead of the fill, for a dialect that declares an encoding: the original bytes, which
+/// go through the core's transcoder into the reader's buffer, where the fill reads them as it would
+/// have read UTF-8.
+private final class Decoder {
+    /// The most bytes of UTF-8 one character takes: with this much room, a transcode that writes
+    /// nothing and does not fail wants more input.
+    static let maxCharacter = 4
+
+    let encoding: UInt32
+    /// The original bytes, `at` to `end` of them not yet decoded. A stream's reads land here: fixed
+    /// in size, since what is left when more is wanted is less than a character.
+    private let raw: UnsafeMutableRawBufferPointer
+    private let owned: Bool
+    var at = 0
+    var end = 0
+    /// Whether the source has ended.
+    var eof = false
+    /// The original bytes decoded so far: added to a call's `failure_at`, this is the input's offset.
+    var offset: UInt64 = 0
+    /// A unit has no character, at `failedAt` in the original input: raised only when the fill has
+    /// had all that was decoded ahead of it, and wants more.
+    var failed = false
+    var failedAt: UInt64 = 0
+
+    /// A decoder of a stream, or `nil` for UTF-8, which has none.
+    convenience init?(_ encoding: TextEncoding, size: Int) {
+        guard encoding != .utf8 else { return nil }
+        self.init(
+            encoding,
+            raw: .allocate(byteCount: min(max(size, Self.maxCharacter), DelimitedReader.maxRowBytes), alignment: 1),
+            owned: true, filled: 0, eof: false)
+    }
+
+    /// A decoder of memory it takes over, all there already.
+    convenience init(_ encoding: TextEncoding, holding bytes: UnsafeMutableRawBufferPointer) {
+        self.init(encoding, raw: bytes, owned: true, filled: bytes.count, eof: true)
+    }
+
+    /// A decoder of memory the caller holds, all there already, and never written through.
+    convenience init(_ encoding: TextEncoding, over bytes: UnsafeRawBufferPointer) {
+        self.init(
+            encoding, raw: UnsafeMutableRawBufferPointer(mutating: bytes), owned: false, filled: bytes.count, eof: true)
+    }
+
+    private init(_ encoding: TextEncoding, raw: UnsafeMutableRawBufferPointer, owned: Bool, filled: Int, eof: Bool) {
+        self.encoding = encoding.rawValue
+        self.raw = raw
+        self.owned = owned
+        end = filled
+        self.eof = eof
+    }
+
+    deinit {
+        if owned { raw.deallocate() }
+    }
+
+    /// What is left to decode.
+    var pending: UnsafePointer<UInt8>? {
+        raw.baseAddress.map { UnsafePointer(($0 + at).assumingMemoryBound(to: UInt8.self)) }
+    }
+
+    /// The room behind what is left, for a read of the stream.
+    var room: UnsafeMutableRawBufferPointer {
+        UnsafeMutableRawBufferPointer(rebasing: raw[end...])
+    }
+
+    /// Puts what is left undecoded at the front.
+    func compact() {
+        guard at > 0, let base = raw.baseAddress else { return }
+        base.copyMemory(from: base + at, byteCount: end - at)
+        end -= at
+        at = 0
+    }
+
+    /// Counts what a read of the stream brought in.
+    func landed(_ read: Int) {
+        if read == 0 { eof = true }
+        end += read
     }
 }
 

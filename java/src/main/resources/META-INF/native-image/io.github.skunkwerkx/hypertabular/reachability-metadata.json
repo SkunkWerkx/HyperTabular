@@ -19,7 +19,16 @@
       { "returnType": "jint",
         "parameterTypes": ["void*", "void*", "jlong", "void*", "jlong", "jint", "jint", "jint", "void*"] },
       { "returnType": "jint",
-        "parameterTypes": ["void*", "void*", "jlong", "void*", "void*", "jlong", "jlong", "void*", "void*"] }
+        "parameterTypes": ["void*", "void*", "jlong", "void*", "void*", "jlong", "jlong", "void*", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["jint", "void*", "jlong", "jint", "void*", "jlong", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["void*", "jlong", "jlong", "void*", "jint", "jint", "void*", "void*", "jlong", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["void*", "jlong", "void*", "jlong", "void*", "void*", "jlong", "jlong", "void*", "void*"] },
+      { "returnType": "jint",
+        "parameterTypes": ["void*", "void*", "jlong", "void*", "jlong", "jint", "void*", "void*"] },
+      { "returnType": "jint", "parameterTypes": ["void*", "jlong", "void*"] }
     ]
   }
 }

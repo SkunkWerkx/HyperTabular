@@ -27,6 +27,7 @@
         "ordinal": 2
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -81,6 +82,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -132,6 +134,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -180,9 +183,11 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
@@ -190,11 +195,13 @@
           "text": "x"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         }
       ],
       [
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
@@ -202,6 +209,7 @@
           "text": "y"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         }
       ]
@@ -225,6 +233,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -257,6 +266,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -294,6 +304,7 @@
         "ordinal": 2
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -330,6 +341,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -386,6 +398,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -425,6 +438,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -434,6 +448,7 @@
       ],
       [
         {
+          "detail": "blank",
           "expect": "empty"
         }
       ],
@@ -468,6 +483,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -501,6 +517,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -543,6 +560,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": []
   },
   {
@@ -564,6 +582,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": []
   },
   {
@@ -582,6 +601,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": []
   },
   {
@@ -612,6 +632,7 @@
         "ordinal": 9
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -627,7 +648,8 @@
           "text": "4"
         },
         {
-          "expect": "empty"
+          "expect": "empty",
+          "origin": "padded"
         }
       ]
     ]
@@ -659,6 +681,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -708,9 +731,72 @@
         "ordinal": 0
       }
     ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "too_large",
+        "fault": [
+          0,
+          3
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "out_of_range",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "detail": "not_recognized",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 2
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 2,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "negative_not_allowed",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 3,
+        "plan_column": 3,
+        "reason": "out_of_range",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
     "rows": [
       [
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             2,
@@ -719,6 +805,7 @@
           "raw": "12x4"
         },
         {
+          "detail": "too_large",
           "expect": "out_of_range",
           "fault": [
             0,
@@ -727,6 +814,7 @@
           "raw": "256"
         },
         {
+          "detail": "not_recognized",
           "expect": "malformed",
           "fault": [
             0,
@@ -735,6 +823,7 @@
           "raw": "x"
         },
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             2,
@@ -757,6 +846,7 @@
           "value": false
         },
         {
+          "detail": "negative_not_allowed",
           "expect": "out_of_range",
           "fault": [
             1,
@@ -789,9 +879,24 @@
         "ordinal": 0
       }
     ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          1,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
     "rows": [
       [
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             1,
@@ -839,6 +944,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -875,6 +981,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -911,6 +1018,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1058,6 +1166,7 @@
         "ordinal": 27
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1331,90 +1440,119 @@
         "ordinal": 27
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         },
         {
+          "detail": "blank",
           "expect": "empty"
         }
       ]
@@ -1456,6 +1594,44 @@
         "ordinal": 0
       }
     ],
+    "problems": [
+      {
+        "detail": "group_in_fraction",
+        "fault": [
+          5,
+          1
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "group_in_fraction",
+        "fault": [
+          5,
+          1
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "group_in_fraction",
+        "fault": [
+          5,
+          1
+        ],
+        "line": 4,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
     "rows": [
       [
         {
@@ -1463,6 +1639,7 @@
           "value": 1234.5
         },
         {
+          "detail": "group_in_fraction",
           "expect": "malformed",
           "fault": [
             5,
@@ -1497,6 +1674,7 @@
       ],
       [
         {
+          "detail": "group_in_fraction",
           "expect": "malformed",
           "fault": [
             5,
@@ -1509,6 +1687,7 @@
           "value": 1234.5
         },
         {
+          "detail": "group_in_fraction",
           "expect": "malformed",
           "fault": [
             5,
@@ -1547,6 +1726,32 @@
         "ordinal": 0
       }
     ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          1,
+          1
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
     "rows": [
       [
         {
@@ -1557,6 +1762,7 @@
           "value": "1234.5"
         },
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             0,
@@ -1574,6 +1780,7 @@
           "value": "-5"
         },
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             1,
@@ -1627,6 +1834,20 @@
         "ordinal": 1
       }
     ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      }
+    ],
     "rows": [
       [
         {
@@ -1634,6 +1855,7 @@
           "text": "日本語 é 🙂"
         },
         {
+          "detail": "unexpected_character",
           "expect": "malformed",
           "fault": [
             0,
@@ -1675,6 +1897,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1711,6 +1934,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": []
   },
   {
@@ -1740,6 +1964,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1773,6 +1998,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1809,6 +2035,7 @@
         "ordinal": 0
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1849,6 +2076,7 @@
         "ordinal": 1
       }
     ],
+    "problems": [],
     "rows": [
       [
         {
@@ -1861,5 +2089,6584 @@
         }
       ]
     ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "\"x\"y\"z\"\n",
+    "name": "stray quotes after the close keep the quoted cell whole",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "x\"y\"z"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "\"x\"y\"z,w\"\n",
+    "name": "a stray quote after the close can't hide a separator",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "x\"y\"z"
+        },
+        {
+          "expect": "ok",
+          "text": "w\""
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "\"x\"y\"\"z\"\n",
+    "name": "a doubled quote after the close is unescaped like any other",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "x\"y\"z"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "12\" pipe,1\n3,4\n6\" pipe,2\n",
+    "name": "a quote that isn't a cell's first byte can't merge records",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "12\" pipe"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "3"
+        },
+        {
+          "expect": "ok",
+          "text": "4"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "6\" pipe"
+        },
+        {
+          "expect": "ok",
+          "text": "2"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 15,
+      "expected": 2,
+      "found": 1,
+      "kind": "column_count",
+      "line": 3,
+      "record": 2
+    },
+    "header": null,
+    "input": "12\" pipe,1\n3,4\n6\" pipe\n",
+    "name": "a record after a stray quote is still a record, wrong width and all",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "12\" pipe"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "3"
+        },
+        {
+          "expect": "ok",
+          "text": "4"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "12\" pipe,1\n",
+    "name": "one stray quote at the end of the input is not an open quote",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "12\" pipe"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "\"x\"y,\"a,b\nc\"\n",
+    "name": "a quote at a cell's first byte still opens after a stray one",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "x\"y"
+        },
+        {
+          "expect": "ok",
+          "text": "a,b\nc"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 3,
+      "kind": "unclosed_quote",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input": "a\"\n\"b\n",
+    "name": "a stray quote then a quote at a cell's first byte, never closed",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "a\""
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "e974e92c780a636166c3a92c790a",
+    "name": "text that isn't UTF-8 is malformed, and the rows go on",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "e974e9"
+        },
+        {
+          "expect": "ok",
+          "text": "x"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "café"
+        },
+        {
+          "expect": "ok",
+          "text": "y"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "6162c32ce2820a",
+    "name": "a sequence cut off by its cell's end or its line's",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 1,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            2,
+            1
+          ],
+          "raw_hex": "6162c3"
+        },
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            2
+          ],
+          "raw_hex": "e282"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "616263f09f98",
+    "name": "a sequence cut off by the end of the input",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          3,
+          3
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            3,
+            3
+          ],
+          "raw_hex": "616263f09f98"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "eda0800ac0800af49080800a",
+    "name": "an encoded surrogate, an overlong form and a code point past U+10FFFF",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "eda080"
+        }
+      ],
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "c080"
+        }
+      ],
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "f4908080"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "22612222ff220a",
+    "name": "the span of invalid text counts in the unescaped cell",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            2,
+            1
+          ],
+          "raw_hex": "6122ff"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "ff2c31ff0a",
+    "name": "the same bytes through the numeric and date doors",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "date",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 1,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "ff"
+        },
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            2
+          ],
+          "raw_hex": "31ff"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "6f6b2cff0a",
+    "name": "a cell no plan column reads isn't judged",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "ok"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "é,€,😀\n",
+    "name": "two, three and four bytes are text",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "é"
+        },
+        {
+          "expect": "ok",
+          "text": "€"
+        },
+        {
+          "expect": "ok",
+          "text": "😀"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "a\u0000b\n",
+    "name": "an embedded NUL is text",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "a\u0000b"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 0,
+      "kind": "encoding",
+      "line": 1,
+      "record": 0
+    },
+    "header": null,
+    "input_hex": "e92c620a312c320a",
+    "name": "a header name that isn't UTF-8 ends the input",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 0,
+      "kind": "encoding",
+      "line": 1,
+      "record": 0
+    },
+    "header": null,
+    "input_hex": "612c22782222ff220a312c320a",
+    "name": "the header's name is judged unescaped",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 4,
+      "kind": "encoding",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input_hex": "efbbbf0ae90a",
+    "name": "a failing header's position counts the mark and the blank lines",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "t\"itle\na,b\n1,2\n",
+    "name": "skip counts physical lines",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "text": "2"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip": 3,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "c",
+      "d"
+    ],
+    "input": "\"a\n\r\nb\"\rc,d\n1,2\n",
+    "name": "skip counts a line break in quotes",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip": 9,
+      "skip_blank_lines": true
+    },
+    "header": [],
+    "input": "a,b\n1,2\n",
+    "name": "skip past the end reads nothing",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip": 9,
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "a,b\n1,2",
+    "name": "skip past the end reads nothing, with no header",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a"
+    ],
+    "input": "﻿title\na\n1\n",
+    "name": "a byte-order mark does not count as a line",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "x,y\na,b\n1,2\n",
+    "name": "header_row discards records",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "t\"\n\n\"x\ny\",z,w\n\na,b\n1,2\n",
+    "name": "header_row counts records, after what is skipped, and not blank lines it skips",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "x,y,z\n1,2\n",
+    "name": "header_row with no header discards the same",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 9,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [],
+    "input": "a,b\n1,2\n",
+    "name": "header_row past the end reads nothing",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 16,
+      "expected": 2,
+      "found": 1,
+      "kind": "column_count",
+      "line": 5,
+      "record": 3
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "title\nx\na,b\n1,2\n3\n",
+    "name": "a failure's position counts what was discarded, not what was skipped",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "pad",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "1,2\n3\n,\n",
+    "name": "short rows are padded",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "value": 2
+        },
+        {
+          "expect": "ok",
+          "text": "2"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 3
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "detail": "blank",
+          "expect": "empty"
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "reject",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 4,
+      "expected": 2,
+      "found": 1,
+      "kind": "column_count",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input": "1,2\n3\n",
+    "name": "short rows are refused by default",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "long_rows": "reject",
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 2,
+      "expected": 1,
+      "found": 2,
+      "kind": "column_count",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input": "1\n2,3\n",
+    "name": "long rows are refused by default",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "long_rows": "report",
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "1\n2,3\n",
+    "name": "long rows are reported",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "expected": 1,
+        "found": 2,
+        "line": 2,
+        "row": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 1,
+      "long_rows": "report",
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "pad",
+      "skip": 1,
+      "skip_blank_lines": true,
+      "tokens": [
+        "NA"
+      ]
+    },
+    "header": [
+      "id",
+      "n",
+      "note"
+    ],
+    "input": "title\nskipped,record\nid,n,note\n1,NA,\"two\nlines\"\nx,300,y\n7\n8,9,z,extra\n12a,1,ok,more,cells\n",
+    "name": "what went wrong is listed, and nothing else",
+    "plan": [
+      {
+        "door": "u8",
+        "ordinal": 1
+      },
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      }
+    ],
+    "problems": [
+      {
+        "detail": "too_large",
+        "fault": [
+          0,
+          3
+        ],
+        "line": 6,
+        "plan_column": 0,
+        "reason": "out_of_range",
+        "row": 1,
+        "source_column": 1
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 6,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "expected": 3,
+        "found": 4,
+        "line": 8,
+        "row": 3
+      },
+      {
+        "expected": 3,
+        "found": 5,
+        "line": 9,
+        "row": 4
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 9,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 4,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "text": "two\nlines"
+        }
+      ],
+      [
+        {
+          "detail": "too_large",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            3
+          ],
+          "raw": "300"
+        },
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "x"
+        },
+        {
+          "expect": "ok",
+          "text": "y"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "padded"
+        },
+        {
+          "expect": "ok",
+          "value": 7
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 9
+        },
+        {
+          "expect": "ok",
+          "value": 8
+        },
+        {
+          "expect": "ok",
+          "text": "z"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            2,
+            1
+          ],
+          "raw": "12a"
+        },
+        {
+          "expect": "ok",
+          "text": "ok"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "long_rows": "truncate",
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "310a322c22ff2222220a",
+    "name": "long rows are cut, and what is cut is nothing",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "NA"
+      ]
+    },
+    "header": [
+      "a",
+      "b",
+      "c"
+    ],
+    "input": "a,b,c\nNA,NA,NA\n-,-,-\n",
+    "name": "tokens replace and inherit",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1,
+        "tokens": []
+      },
+      {
+        "door": "text",
+        "ordinal": 2,
+        "tokens": [
+          "-"
+        ]
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "expect": "ok",
+          "text": "NA"
+        },
+        {
+          "expect": "ok",
+          "text": "NA"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "-"
+        },
+        {
+          "expect": "ok",
+          "text": "-"
+        },
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "NA"
+      ]
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\nNA\n7\nx\n",
+    "name": "a token comes before any door",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 7
+        }
+      ],
+      [
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "x"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "N/A",
+        "na"
+      ]
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\nN/A\nna\n na\nNA\n",
+    "name": "a token is exact bytes",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": " na"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "NA"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "pad",
+      "skip_blank_lines": true,
+      "tokens": [
+        ""
+      ]
+    },
+    "header": null,
+    "input": "a,\nb\n ,c\n",
+    "name": "tokens meet blanks and padding",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "a"
+        },
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "b"
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": " "
+        },
+        {
+          "expect": "ok",
+          "text": "c"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": false,
+      "tokens": [
+        "NA",
+        "",
+        "N\"A"
+      ]
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n\"NA\"\nNA\n\"N\"\"A\"\nN\"A\n\"\"\n\n",
+    "name": "a quoted token is text",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "NA"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "N\"A"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ],
+      [
+        {
+          "detail": "blank",
+          "expect": "empty"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": false,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "\"NA\""
+      ]
+    },
+    "header": null,
+    "input": "\"NA\"\n",
+    "name": "with quoting off, a quote is part of a token",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "x"
+      ]
+    },
+    "header": null,
+    "input_hex": "ff0a780a",
+    "name": "a token is matched on bytes no door would take",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 1,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "ff"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a"
+    ],
+    "input_hex": "ff0afe2cfd0a610a310a",
+    "name": "bad bytes in what is passed over are nothing",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n12a\n1 2\n99999999999\n\"\"\n",
+    "name": "a verdict says what failed",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          1,
+          1
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "detail": "too_large",
+        "fault": [
+          0,
+          11
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "out_of_range",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            2,
+            1
+          ],
+          "raw": "12a"
+        }
+      ],
+      [
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            1,
+            1
+          ],
+          "raw": "1 2"
+        }
+      ],
+      [
+        {
+          "detail": "too_large",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            11
+          ],
+          "raw": "99999999999"
+        }
+      ],
+      [
+        {
+          "detail": "blank",
+          "expect": "empty"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "d"
+    ],
+    "input": "d\n20260107\n2026-01-07\n",
+    "name": "date options reach the door",
+    "plan": [
+      {
+        "door": "date",
+        "options": {
+          "flags": [
+            "compact_date"
+          ]
+        },
+        "ordinal": 0
+      },
+      {
+        "door": "date",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "wrong_length",
+        "fault": [
+          0,
+          8
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "day": 7,
+          "expect": "ok",
+          "month": 1,
+          "year": 2026
+        },
+        {
+          "detail": "wrong_length",
+          "expect": "malformed",
+          "fault": [
+            0,
+            8
+          ],
+          "raw": "20260107"
+        }
+      ],
+      [
+        {
+          "day": 7,
+          "expect": "ok",
+          "month": 1,
+          "year": 2026
+        },
+        {
+          "day": 7,
+          "expect": "ok",
+          "month": 1,
+          "year": 2026
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "d"
+    ],
+    "input": "d\n07-Jan-26\n07-Foo-26\n",
+    "name": "a pivot and month names reach the door",
+    "plan": [
+      {
+        "door": "date_ordered",
+        "options": {
+          "flags": [],
+          "months": [
+            [
+              1,
+              "Jan"
+            ],
+            [
+              2,
+              "Feb"
+            ],
+            [
+              3,
+              "Mar"
+            ],
+            [
+              4,
+              "Apr"
+            ],
+            [
+              5,
+              "May"
+            ],
+            [
+              6,
+              "Jun"
+            ],
+            [
+              7,
+              "Jul"
+            ],
+            [
+              8,
+              "Aug"
+            ],
+            [
+              9,
+              "Sep"
+            ],
+            [
+              10,
+              "Oct"
+            ],
+            [
+              11,
+              "Nov"
+            ],
+            [
+              12,
+              "Dec"
+            ]
+          ],
+          "pivot": 2029
+        },
+        "order": 3,
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "not_recognized",
+        "fault": [
+          3,
+          3
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "day": 7,
+          "expect": "ok",
+          "month": 1,
+          "year": 2026
+        }
+      ],
+      [
+        {
+          "detail": "not_recognized",
+          "expect": "malformed",
+          "fault": [
+            3,
+            3
+          ],
+          "raw": "07-Foo-26"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n\"12,34\"\n\"1,234\"\n",
+    "name": "Western grouping refuses a last group that isn't three digits",
+    "plan": [
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 95,
+          "group_sep": ","
+        },
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n\"1,23,456\"\n\"1,234\"\n",
+    "name": "Western grouping refuses an Indian group",
+    "plan": [
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 95,
+          "group_sep": ","
+        },
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          3
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            3
+          ],
+          "raw": "1,23,456"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n\"1,23,456\"\n\"1,234\"\n",
+    "name": "no format is Western grouping",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          3
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            3
+          ],
+          "raw": "1,23,456"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input": "n\n\"1,23,456\"\n\"1,234\"\n",
+    "name": "Indian grouping reads an Indian group",
+    "plan": [
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 123456
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "indian",
+      "western"
+    ],
+    "input": "indian,western\n\"1,23,456\",\"1,23,456\"\n\"1,234,567\",\"1,234,567\"\n",
+    "name": "an Indian column beside a Western one",
+    "plan": [
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 95,
+          "group_sep": ","
+        },
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          3
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          4
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 123456
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            3
+          ],
+          "raw": "1,23,456"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            4
+          ],
+          "raw": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "value": 1234567
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "none",
+      "indian"
+    ],
+    "input": "none,indian\n\"1,234,567\",\"12,34,567\"\n\"12,34,567\",\"1,234,567\"\n",
+    "name": "no format beside an Indian column",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          4
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1234567
+        },
+        {
+          "expect": "ok",
+          "value": 1234567
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34,567"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            4
+          ],
+          "raw": "1,234,567"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "w",
+      "i"
+    ],
+    "input": "w,i\n\"1,000\",\"1,000\"\n\"1,234\",\"1,234\"\n0125,0125\n1234567,1234567\n",
+    "name": "both groupings read these shapes",
+    "plan": [
+      {
+        "door": "i64",
+        "ordinal": 0
+      },
+      {
+        "door": "i64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1000
+        },
+        {
+          "expect": "ok",
+          "value": 1000
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        },
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 125
+        },
+        {
+          "expect": "ok",
+          "value": 125
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234567
+        },
+        {
+          "expect": "ok",
+          "value": 1234567
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "w",
+      "i",
+      "f",
+      "d"
+    ],
+    "input": "w,i,f,d\n\"0,125\",\"0,125\",\"0,125\",\"0,125\"\n\"0,000\",\"0,000\",\"0,000\",\"0,000\"\n\"12,34\",\"12,34\",\"12,34\",\"12,34\"\n\"1,2\",\"1,2\",\"1,2\",\"1,2\"\n\"1234,567\",\"1234,567\",\"1234,567\",\"1234,567\"\n\"1,2,345\",\"1,2,345\",\"1,2,345\",\"1,2,345\"\n\"1,2345,678\",\"1,2345,678\",\"1,2345,678\",\"1,2345,678\"\n\"1234,567,890\",\"1234,567,890\",\"1234,567,890\",\"1234,567,890\"\n",
+    "name": "neither grouping reads these shapes",
+    "plan": [
+      {
+        "door": "i64",
+        "ordinal": 0
+      },
+      {
+        "door": "i64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 1
+      },
+      {
+        "door": "f64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 2
+      },
+      {
+        "door": "decimal",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 3
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 4,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 4,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          2,
+          3
+        ],
+        "line": 4,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 5,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 3,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 5,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 3,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 5,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 3,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 5,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 3,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 6,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 4,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 6,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 4,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 6,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 4,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 6,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 4,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 7,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 5,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 7,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 5,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 7,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 5,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 7,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 5,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          5
+        ],
+        "line": 8,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 6,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          5
+        ],
+        "line": 8,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 6,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          5
+        ],
+        "line": 8,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 6,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          5
+        ],
+        "line": 8,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 6,
+        "source_column": 3
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 9,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 7,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 9,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 7,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 9,
+        "plan_column": 2,
+        "reason": "malformed",
+        "row": 7,
+        "source_column": 2
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 9,
+        "plan_column": 3,
+        "reason": "malformed",
+        "row": 7,
+        "source_column": 3
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,125"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,125"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,125"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,125"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,000"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,000"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,000"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "0,000"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            2,
+            3
+          ],
+          "raw": "12,34"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2,345"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2,345"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2,345"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1,2,345"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            5
+          ],
+          "raw": "1,2345,678"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            5
+          ],
+          "raw": "1,2345,678"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            5
+          ],
+          "raw": "1,2345,678"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            5
+          ],
+          "raw": "1,2345,678"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567,890"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567,890"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567,890"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234,567,890"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "w",
+      "i"
+    ],
+    "input": "w,i\n\"1,234,56,789\",\"1,234,56,789\"\n\"123,456\",\"123,456\"\n\"1,23,45,678\",\"1,23,45,678\"\n",
+    "name": "one policy reads each of these shapes",
+    "plan": [
+      {
+        "door": "i64",
+        "ordinal": 0
+      },
+      {
+        "door": "i64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": ","
+        },
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          5,
+          3
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          4
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          3
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          3
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            5,
+            3
+          ],
+          "raw": "1,234,56,789"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            4
+          ],
+          "raw": "1,234,56,789"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 123456
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            3
+          ],
+          "raw": "123,456"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            3
+          ],
+          "raw": "1,23,45,678"
+        },
+        {
+          "expect": "ok",
+          "value": 12345678
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "w",
+      "i"
+    ],
+    "input": "w,i\n1 2 345,1 2 345\n1234 567,1234 567\n1 234,1 234\n",
+    "name": "space groups: neither reads a misplaced one",
+    "plan": [
+      {
+        "door": "i64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 95,
+          "group_sep": " "
+        },
+        "ordinal": 0
+      },
+      {
+        "door": "i64",
+        "format": {
+          "decimal_sep": ".",
+          "flags": 607,
+          "group_sep": " "
+        },
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          1,
+          2
+        ],
+        "line": 2,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "detail": "group_size",
+        "fault": [
+          0,
+          4
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1 2 345"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            1,
+            2
+          ],
+          "raw": "1 2 345"
+        }
+      ],
+      [
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234 567"
+        },
+        {
+          "detail": "group_size",
+          "expect": "malformed",
+          "fault": [
+            0,
+            4
+          ],
+          "raw": "1234 567"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 1234
+        },
+        {
+          "expect": "ok",
+          "value": 1234
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "windows-1252",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "hé",
+      "n"
+    ],
+    "input_hex": "68e92c6e0a802c810aff2c9f0a",
+    "name": "windows-1252 decodes ahead of the read",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "€"
+        },
+        {
+          "expect": "ok",
+          "text": ""
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "ÿ"
+        },
+        {
+          "expect": "ok",
+          "text": "Ÿ"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "latin-1",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "e92c800a",
+    "name": "latin-1 is every byte's own code point",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "é"
+        },
+        {
+          "expect": "ok",
+          "text": ""
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input_hex": "fffe61002c0062000a0031002c00ac203dd800de0a00",
+    "name": "utf-16le with a mark",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "text": "€😀"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "31000d000a0032000d003300",
+    "name": "utf-16le without a mark",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 3
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "fffefffe61000a006200fffe0a00",
+    "name": "one mark goes and a second is text",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "﻿a"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "b﻿"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "windows-1252",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input_hex": "efbbbf610a",
+    "name": "those three bytes in windows-1252 are not a mark",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "ï»¿a"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "windows-1252",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n"
+    ],
+    "input_hex": "6e0a2280222231220a",
+    "name": "a fault's span is the decoded text's",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          3
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            0,
+            3
+          ],
+          "raw": "€\"1"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": true,
+      "header_row": 1,
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "pad",
+      "skip": 1,
+      "skip_blank_lines": true
+    },
+    "header": [
+      "é",
+      "b"
+    ],
+    "input_hex": "74002200690074006c0065000a0078000a00e9002c0062000a0031002c00e9000a0032000a0033002c000a00",
+    "name": "what is passed over and cut is decoded text",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "text": "é"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 2
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "value": 3
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 16,
+      "kind": "encoding",
+      "line": 4,
+      "record": 3
+    },
+    "header": [
+      "a"
+    ],
+    "input_hex": "fffe61000a0031000a003dd800de0a0000dc",
+    "name": "a lone low surrogate ends the input after its rows",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "😀"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 4,
+      "kind": "encoding",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input_hex": "31000a0000d832000a00",
+    "name": "a high surrogate with no low ends the input",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 4,
+      "kind": "encoding",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input_hex": "31000a0032",
+    "name": "a final half unit ends the input",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 20,
+      "kind": "encoding",
+      "line": 3,
+      "record": 2
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input_hex": "61002c0062000a0031002c0032000a0033002c0000dc",
+    "name": "a record the failure cuts is not delivered",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        },
+        {
+          "expect": "ok",
+          "value": 2
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 4,
+      "kind": "encoding",
+      "line": 2,
+      "record": 1
+    },
+    "header": null,
+    "input_hex": "31000d0000dc",
+    "name": "a row a lone CR ended is delivered before the failure",
+    "plan": [
+      {
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "value": 1
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "encoding": "utf-16le",
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "failure": {
+      "byte": 6,
+      "kind": "encoding",
+      "line": 1,
+      "record": 0
+    },
+    "header": null,
+    "input_hex": "fffe61002c0000d8",
+    "name": "a failure in the header says the file's offset",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": []
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "flag",
+      "small",
+      "big",
+      "real",
+      "day",
+      "instant",
+      "key",
+      "name"
+    ],
+    "input": "flag,small,big,real,day,instant,key,name\ntrue,1,5000000000,2.5,2026-01-07,2026-01-07T00:00:00Z,6ba7b810-9dad-11d1-80b4-00c04fd430c8,abc\nfalse,2,-5000000000,-1,2026-01-08,2026-01-08T12:30:00+01:00,6BA7B811-9DAD-11D1-80B4-00C04FD430C8,def\n",
+    "name": "suggest: each door takes its own column",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      },
+      {
+        "door": "text",
+        "ordinal": 5
+      },
+      {
+        "door": "text",
+        "ordinal": 6
+      },
+      {
+        "door": "text",
+        "ordinal": 7
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "true"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        },
+        {
+          "expect": "ok",
+          "text": "5000000000"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "2026-01-07"
+        },
+        {
+          "expect": "ok",
+          "text": "2026-01-07T00:00:00Z"
+        },
+        {
+          "expect": "ok",
+          "text": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        },
+        {
+          "expect": "ok",
+          "text": "abc"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "false"
+        },
+        {
+          "expect": "ok",
+          "text": "2"
+        },
+        {
+          "expect": "ok",
+          "text": "-5000000000"
+        },
+        {
+          "expect": "ok",
+          "text": "-1"
+        },
+        {
+          "expect": "ok",
+          "text": "2026-01-08"
+        },
+        {
+          "expect": "ok",
+          "text": "2026-01-08T12:30:00+01:00"
+        },
+        {
+          "expect": "ok",
+          "text": "6BA7B811-9DAD-11D1-80B4-00C04FD430C8"
+        },
+        {
+          "expect": "ok",
+          "text": "def"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "bool",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "date",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "timestamp",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "uuid",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "ones",
+      "words",
+      "past",
+      "mixed",
+      "wide"
+    ],
+    "input": "ones,words,past,mixed,wide\n0,TRUE,0,1,1\n1,no,2,2.5,5000000000\n",
+    "name": "suggest: the first door that takes every cell wins",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "0"
+        },
+        {
+          "expect": "ok",
+          "text": "TRUE"
+        },
+        {
+          "expect": "ok",
+          "text": "0"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        },
+        {
+          "expect": "ok",
+          "text": "1"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "1"
+        },
+        {
+          "expect": "ok",
+          "text": "no"
+        },
+        {
+          "expect": "ok",
+          "text": "2"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "5000000000"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "bool",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "bool",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h"
+    ],
+    "input": "a,b,c,d,e,f,g,h\n\"1,234\",01/02/2026,\"2,5\",13/02/2026,02/13/2026,2026/01/02,\"1,234,567\",\"1,234\"\n\"5,678\",03/04/2026,\"3,5\",01/02/2026,01/02/2026,2026/02/03,5,2.5\n",
+    "name": "suggest: a comma or a date order the sample can't settle",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      },
+      {
+        "door": "text",
+        "ordinal": 5
+      },
+      {
+        "door": "text",
+        "ordinal": 6
+      },
+      {
+        "door": "text",
+        "ordinal": 7
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "01/02/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5"
+        },
+        {
+          "expect": "ok",
+          "text": "13/02/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "02/13/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "2026/01/02"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "5,678"
+        },
+        {
+          "expect": "ok",
+          "text": "03/04/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "3,5"
+        },
+        {
+          "expect": "ok",
+          "text": "01/02/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "01/02/2026"
+        },
+        {
+          "expect": "ok",
+          "text": "2026/02/03"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 6,
+          "sampled": 2,
+          "status": "ambiguous"
+        },
+        {
+          "door": "date_ordered",
+          "matched": 2,
+          "param": 12,
+          "sampled": 2,
+          "status": "ambiguous"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "date_ordered",
+          "matched": 2,
+          "param": 3,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "date_ordered",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "date_ordered",
+          "matched": 2,
+          "param": 1,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+      "m",
+      "n",
+      "o",
+      "p",
+      "q",
+      "r"
+    ],
+    "input": "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r\n\"1,234,567\",1.234.567,\"1,234.5\",\"1.234,5\",\"2,5\",2.5,\"2,50\",2.50,\"2,5000\",2.5000,\"1,234\",1.234,\"0,125\",0.125,\"1234,567\",1234.567,5,\"1,2345\"\n",
+    "name": "suggest: the delimiter rule, each shape alone",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      },
+      {
+        "door": "text",
+        "ordinal": 5
+      },
+      {
+        "door": "text",
+        "ordinal": 6
+      },
+      {
+        "door": "text",
+        "ordinal": 7
+      },
+      {
+        "door": "text",
+        "ordinal": 8
+      },
+      {
+        "door": "text",
+        "ordinal": 9
+      },
+      {
+        "door": "text",
+        "ordinal": 10
+      },
+      {
+        "door": "text",
+        "ordinal": 11
+      },
+      {
+        "door": "text",
+        "ordinal": 12
+      },
+      {
+        "door": "text",
+        "ordinal": 13
+      },
+      {
+        "door": "text",
+        "ordinal": 14
+      },
+      {
+        "door": "text",
+        "ordinal": 15
+      },
+      {
+        "door": "text",
+        "ordinal": 16
+      },
+      {
+        "door": "text",
+        "ordinal": 17
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234.567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234.5"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234,5"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "2,50"
+        },
+        {
+          "expect": "ok",
+          "text": "2.50"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5000"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5000"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "0,125"
+        },
+        {
+          "expect": "ok",
+          "text": "0.125"
+        },
+        {
+          "expect": "ok",
+          "text": "1234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1234.567"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        },
+        {
+          "expect": "ok",
+          "text": "1,2345"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 2,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 2,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 6,
+          "sampled": 1,
+          "status": "ambiguous"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 6,
+          "sampled": 1,
+          "status": "ambiguous"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 4,
+          "sampled": 1,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+      "m",
+      "n",
+      "o",
+      "p",
+      "q"
+    ],
+    "input": "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q\n\"1,234\",\"1,234\",1.234,1.234,\"2,5\",\"1,234\",\"1,234\",1.234,1.234,\"1,234\",\"1,234\",1.234,\"1,234,567\",\"1,234,567\",1.234.567,\"1.234,5\",5\n\"2,5\",2.5,2.5,\"2,5\",2.5,1.234,5,5,0.125,\"0,125\",0.125,\"0,125\",1.234.567,\"1,234\",1.234,\"1,234.5\",7\n",
+    "name": "suggest: the delimiter rule, cells that settle or conflict",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      },
+      {
+        "door": "text",
+        "ordinal": 5
+      },
+      {
+        "door": "text",
+        "ordinal": 6
+      },
+      {
+        "door": "text",
+        "ordinal": 7
+      },
+      {
+        "door": "text",
+        "ordinal": 8
+      },
+      {
+        "door": "text",
+        "ordinal": 9
+      },
+      {
+        "door": "text",
+        "ordinal": 10
+      },
+      {
+        "door": "text",
+        "ordinal": 11
+      },
+      {
+        "door": "text",
+        "ordinal": 12
+      },
+      {
+        "door": "text",
+        "ordinal": 13
+      },
+      {
+        "door": "text",
+        "ordinal": 14
+      },
+      {
+        "door": "text",
+        "ordinal": 15
+      },
+      {
+        "door": "text",
+        "ordinal": 16
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234.567"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234,5"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "2,5"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        },
+        {
+          "expect": "ok",
+          "text": "0.125"
+        },
+        {
+          "expect": "ok",
+          "text": "0,125"
+        },
+        {
+          "expect": "ok",
+          "text": "0.125"
+        },
+        {
+          "expect": "ok",
+          "text": "0,125"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234.567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234.5"
+        },
+        {
+          "expect": "ok",
+          "text": "7"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 6,
+          "sampled": 2,
+          "status": "ambiguous"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 6,
+          "sampled": 2,
+          "status": "ambiguous"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 6,
+          "sampled": 2,
+          "status": "ambiguous"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 2,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 4,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "dots",
+      "commas"
+    ],
+    "input": "dots,commas\n1.234,\"1,234\"\n12.345,\"12,345\"\n123.456,\"123,456\"\n-1.234,\"-1,234\"\n",
+    "name": "suggest: three digits after a lone separator, with the first group's every width",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "12.345"
+        },
+        {
+          "expect": "ok",
+          "text": "12,345"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "123.456"
+        },
+        {
+          "expect": "ok",
+          "text": "123,456"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "-1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "-1,234"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "f64",
+          "matched": 4,
+          "param": 6,
+          "sampled": 4,
+          "status": "ambiguous"
+        },
+        {
+          "door": "i32",
+          "matched": 4,
+          "param": 6,
+          "sampled": 4,
+          "status": "ambiguous"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c",
+      "d"
+    ],
+    "input": "a,b,c,d\n\"0,125\",0.125,1.234,\"1,234\"\n",
+    "name": "suggest: a declared format asks nothing, Western",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "0,125"
+        },
+        {
+          "expect": "ok",
+          "text": "0.125"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        }
+      ],
+      "format": {
+        "decimal_sep": ".",
+        "flags": 95,
+        "group_sep": ","
+      },
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c",
+      "d"
+    ],
+    "input": "a,b,c,d\n\"0,125\",0.125,1.234,\"2,5\"\n",
+    "name": "suggest: a declared format asks nothing, a comma decimal",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "0,125"
+        },
+        {
+          "expect": "ok",
+          "text": "0.125"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        },
+        {
+          "expect": "ok",
+          "text": "2,5"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        }
+      ],
+      "format": {
+        "decimal_sep": ",",
+        "flags": 95,
+        "group_sep": "."
+      },
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "failed",
+      "words",
+      "blank",
+      "spaces"
+    ],
+    "input": "failed,words,blank,spaces\n1,abc,,\"  \"\nabc,,,7\n",
+    "name": "suggest: a column with a cell no door takes, and blanks",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1"
+        },
+        {
+          "expect": "ok",
+          "text": "abc"
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        },
+        {
+          "expect": "ok",
+          "text": "  "
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "abc"
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        },
+        {
+          "detail": "blank",
+          "expect": "empty"
+        },
+        {
+          "expect": "ok",
+          "text": "7"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 0,
+          "param": 0,
+          "sampled": 0,
+          "status": "unresolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "padded",
+      "zip",
+      "huge",
+      "float",
+      "signs",
+      "nan"
+    ],
+    "input": "padded,zip,huge,float,signs,nan\n007,07030,99999999999999999999,1e30,-0,NaN\n0012,10001,99999999999999999999,1.5e300,+1,2.5\n",
+    "name": "suggest: a value the number would lose something of",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      },
+      {
+        "door": "text",
+        "ordinal": 3
+      },
+      {
+        "door": "text",
+        "ordinal": 4
+      },
+      {
+        "door": "text",
+        "ordinal": 5
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "007"
+        },
+        {
+          "expect": "ok",
+          "text": "07030"
+        },
+        {
+          "expect": "ok",
+          "text": "99999999999999999999"
+        },
+        {
+          "expect": "ok",
+          "text": "1e30"
+        },
+        {
+          "expect": "ok",
+          "text": "-0"
+        },
+        {
+          "expect": "ok",
+          "text": "NaN"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "0012"
+        },
+        {
+          "expect": "ok",
+          "text": "10001"
+        },
+        {
+          "expect": "ok",
+          "text": "99999999999999999999"
+        },
+        {
+          "expect": "ok",
+          "text": "1.5e300"
+        },
+        {
+          "expect": "ok",
+          "text": "+1"
+        },
+        {
+          "expect": "ok",
+          "text": "2.5"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "f64",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "a,b\n\"1,234\",\"12,34\"\n\"5,678\",\"56,78\"\n",
+    "name": "suggest: a declared format settles it, Western grouping",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "12,34"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "5,678"
+        },
+        {
+          "expect": "ok",
+          "text": "56,78"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "format": {
+        "decimal_sep": ".",
+        "flags": 95,
+        "group_sep": ","
+      },
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "a,b\n\"1,23,456\",\"1,23,456\"\n\"12,34,567\",5\n",
+    "name": "suggest: an Indian column with nothing declared",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,23,456"
+        },
+        {
+          "expect": "ok",
+          "text": "1,23,456"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "12,34,567"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b",
+      "c"
+    ],
+    "input": "a,b,c\n\"1,23,456\",\"1,234,567\",\"1,23,456\"\n\"12,34,567\",\"1,234,567\",5\n",
+    "name": "suggest: a declared format settles it, Indian grouping",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,23,456"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,23,456"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "12,34,567"
+        },
+        {
+          "expect": "ok",
+          "text": "1,234,567"
+        },
+        {
+          "expect": "ok",
+          "text": "5"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "format": {
+        "decimal_sep": ".",
+        "flags": 607,
+        "group_sep": ","
+      },
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "a,b\n\"1,234\",1.234\n",
+    "name": "suggest: a declared format settles it, a comma decimal",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "1,234"
+        },
+        {
+          "expect": "ok",
+          "text": "1.234"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "f64",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        }
+      ],
+      "format": {
+        "decimal_sep": ",",
+        "flags": 95,
+        "group_sep": "."
+      },
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a"
+    ],
+    "input": "a\n2\n3\nabc\n",
+    "name": "suggest: a sample stops at its rows, and says there are more",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "2"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "3"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "abc"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "sample_rows": 2,
+      "truncated": true
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a"
+    ],
+    "input": "a\n2\n3\n",
+    "name": "suggest: a sample of exactly the source's rows isn't cut short",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "2"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "3"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "sample_rows": 2,
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true,
+      "tokens": [
+        "NA"
+      ]
+    },
+    "header": [
+      "only",
+      "some",
+      "quoted"
+    ],
+    "input": "only,some,quoted\nNA,NA,\"NA\"\nNA,7,\"NA\"\n",
+    "name": "suggest: a token is a blank, and a quoted one isn't a token",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "door": "text",
+        "ordinal": 2
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "expect": "ok",
+          "text": "NA"
+        }
+      ],
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "expect": "ok",
+          "text": "7"
+        },
+        {
+          "expect": "ok",
+          "text": "NA"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 0,
+          "param": 0,
+          "sampled": 0,
+          "status": "unresolved"
+        },
+        {
+          "door": "i32",
+          "matched": 1,
+          "param": 0,
+          "sampled": 1,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input_hex": "612c620ae974e92c370a6162632cff0a",
+    "name": "suggest: a cell that isn't text leaves its column unresolved",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 2,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 1,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "e974e9"
+        },
+        {
+          "expect": "ok",
+          "text": "7"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "abc"
+        },
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "ff"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "text",
+          "matched": 0,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        },
+        {
+          "door": "text",
+          "matched": 1,
+          "param": 0,
+          "sampled": 2,
+          "status": "unresolved"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "dialect": {
+      "has_header": false,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": null,
+    "input": "7,ab\n8,cd\n",
+    "name": "suggest: with no header, the first record's width",
+    "plan": [
+      {
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "ok",
+          "text": "7"
+        },
+        {
+          "expect": "ok",
+          "text": "ab"
+        }
+      ],
+      [
+        {
+          "expect": "ok",
+          "text": "8"
+        },
+        {
+          "expect": "ok",
+          "text": "cd"
+        }
+      ]
+    ],
+    "suggest": {
+      "columns": [
+        {
+          "door": "i32",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        },
+        {
+          "door": "text",
+          "matched": 2,
+          "param": 0,
+          "sampled": 2,
+          "status": "resolved"
+        }
+      ],
+      "truncated": false
+    }
   }
 ]

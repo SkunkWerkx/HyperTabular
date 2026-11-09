@@ -10,9 +10,26 @@ row's cells through the case's plan, and the structural failure if there is one.
 binding replays it in `rust/tests/corpus_delimited.rs`.
 
 It is written by `cargo run --example corpus` (in `rust/`), from cases that state two
-things by hand: the input, and the text that must reach each cell. What each plan column
-makes of that text is not this layer's to decide — HyperCast is the judge — so a cell's
+things by hand: the input, and the text that must reach each cell, tokens marked. What each plan
+column makes of that text is not this layer's to decide — HyperCast is the judge — so a cell's
 verdict is whatever HyperCast's own door says of the hand-written text, asked directly.
+
+`delimited.json` is 123 cases. `Western grouping refuses an Indian group`, `no format is Western
+grouping` and `Indian grouping reads an Indian group` read the same bytes under flags `95`, no format and
+flags `607`, so a binding that loses a format's grouping fails one of them, and so does one that takes no
+format for anything else. `an Indian column beside a Western one` is one read of two policies, each
+refusing what the other reads, and `no format beside an Indian column` the same with one left undeclared.
+`both groupings read these shapes`, `neither grouping reads these shapes`, `one policy reads each of these
+shapes` and `space groups: neither reads a misplaced one` pin the rest, `1,2,345` among them: no policy
+reads a shape into a wrong value. Separator detection isn't a policy: a format that declares it infers
+`,` and `.` from each cell and reads `12,34` as 12.34, which no vector here declares. A plan a binding refuses isn't a case: a format holding the retired bit
+`256` (flags `351`, `863`) is refused by each binding's own tests, when it's bound.
+
+A plan entry with no `format` means flags `95`: `.` decimal, `,` groups, every lenience, Western grouping.
+That's `NumFormat::INVARIANT` in Rust and every binding's own `invariant`, what the C ABI's all-zero format
+reads, and what a column given no format reads in a binding that has one. Flags `607` are Indian, declared.
+Grouping's shapes and flags are in HyperCast's
+[docs/grouping.md](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md).
 
 A case:
 
@@ -29,31 +46,87 @@ A case:
 }
 ```
 
-- `input` is UTF-8 text; a byte-order mark is written `\uFEFF`.
+- `input` is UTF-8 text; a byte-order mark is written `\uFEFF`. An input that isn't UTF-8
+  has `input_hex` in its place, two lowercase hex digits a byte.
 - A plan entry names its door as HyperCast's corpus names its types, with what the door
   declares beside it (`precision` for `unix`, `order` for `date_ordered` and `datetime`,
   `epoch` for `excel_serial`, numbered as HyperCast numbers them) and a `format` in
   HyperCast's shape where the numeric notation is not the invariant one.
+- A dialect may add what a read passes over and how it takes a record of the wrong width, each
+  absent when it is the default: `skip`, physical lines after a byte-order mark; `header_row`,
+  records discarded after those; `short_rows`, `reject` or `pad`; `long_rows`, `reject`, `report`
+  or `truncate`; `tokens`, a list of strings that stand for no value; and `encoding`,
+  `windows-1252`, `latin-1` or `utf-16le`, whose input is always `input_hex`, the original bytes,
+  and whose header, cells and spans are all the decoded text.
+- A plan entry may add `tokens`, which replace the dialect's (an empty list means none), and
+  `options` for the date doors, in HyperCast's corpus shape: `flags` by name (`compact_date`,
+  `space_separator`, `hour_offset`), `pivot`, and `months`, a list of `[month, name]`.
 - `header` is `null` when the dialect declares none, and `[]` for an input with no record.
 - A cell is a verdict in HyperCast's corpus shape — `{"expect": "ok", …the value…}`, with
   `text` for the text door — or `{"expect": "empty"}`, or a fault with its span and `raw`,
-  the cell's own text, which a binding has to be able to give back.
+  the cell's own text, which a binding has to be able to give back. A cell whose bytes
+  aren't UTF-8 has `raw_hex` in place of `raw`, in `input_hex`'s digits. A cell the door refused
+  adds `detail`, HyperCast's name for what failed. A cell no door was asked about adds `origin`,
+  and has no `detail`: `token` for a declared token, `padded` for a cell its row doesn't have
+  (and, in `workbook.json`, `uncached` for a formula with no result); absent, the verdict is the
+  door's.
+- `problems` is what the rows' faults list says, by row and then by column, and `[]` when it says
+  nothing: a cell a door refused or a formula with no cached result as
+  `{"row", "line", "plan_column", "source_column", "reason"}`, with the cell's own `fault`, `detail`
+  and `origin` where it has them; and a long row under `report` as
+  `{"row", "line", "expected", "found"}`, ahead of the row's cells. `row` indexes `rows`, so it counts
+  across the read, whatever the batch size. It follows from `rows` and from the lines and widths the
+  writer has by hand, not from any reader's list.
+- `suggest`, on the cases it's written for, is what `hypertabular_suggest` says of the input, worked
+  out by hand from the rule in `docs/design.md`: `columns`, each `{"door", "param", "status",
+  "matched", "sampled"}` in plan order; `truncated`, whether rows lie past the sample; and, when the
+  case asks for them, `sample_rows` (otherwise 1,000) and `format`, declared for every column. `door`
+  names a door as a plan entry does, `param` is the number `RawSuggestion` holds (on a resolved numeric
+  column, `2` where a `,` proved that notation and `4` where only the comma decimal reads it), and `status` is
+  `resolved`, `ambiguous` or `unresolved`. A case's plan is every cell's text, which is what a sample
+  is. The `sample_rows` rows of `rows`, each cell's `text` or `raw_hex` or else a blank, are the sample
+  to pass the export, and a case that passes them through a binding's own suggestion has to land on
+  the same answer. On a workbook case the sample is the sheet's, so its suggestion is asked through a
+  binding's own sheet, and the plan it gives has to read back refusing nothing.
 - `failure`, when present, ends the input after the rows listed; its positions count the
-  header, skipped blank lines and a byte-order mark.
+  header, skipped blank lines and a byte-order mark. Under a declared `encoding`, `record` and
+  `line` read the same, an `encoding` failure's `byte` is its unit's offset in the original input,
+  and any other failure's `byte` counts the decoded text.
 
 How the input is cut into chunks is the binding's business and must not change the answer;
 a binding should replay each case more than one way.
 
+A replay fails on a key it doesn't know, at any level, so that a key added here can't be passed
+over: every binding's replay does, Rust's in `every_corpus_key_is_read`, so a new key is a change to
+each of them. Both files hold to this, and the one key in either that no replay reads is a workbook
+case's `note`, a sentence for whoever reads the file.
+
 ## `workbook.json` and `workbook/` — the contract for workbooks
 
-`workbook/` holds twelve small packages, and beside them the fifteen files real
-applications wrote (the table at the bottom lists them). The twelve: five fixtures
+`workbook/` holds twenty-six small packages, and beside them the fifteen files real
+applications wrote (the table at the bottom lists them). The twenty-six: five fixtures
 (`basic.xlsx`, `basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and
-`basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and seven
+`basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and fifteen
 generated ones — two XLSX, two ODS and two Numbers, one of each deflated and one stored,
-the XLSX pair one in each date system, and `broken.xlsx`, whose sheet names a shared
-string that is not there. Between them the generated packages hold every kind of cell
-each format has: shared, inline and rich strings, numbers under date, time and elapsed
+the XLSX pair one in each date system; `broken.xlsx`, whose sheet names a shared
+string that is not there; and `ranges.xlsx`, `ranges.ods` and `ranges.numbers`, one table in each
+format, with a title above it, stray cells beside it, a footer below it and every shape a range can
+cut; and `uncached.xlsx` and `uncached.ods`, every spelling of a formula with no result beside what
+only looks like one. Those two are assembled by hand, in `tests/support/packages.rs`, not written by
+an application: openpyxl spells two of the XLSX forms and Numbers' export a third, as the comments
+there say, and LibreOffice 25.2, handed the ODS forms, wrote a result for every one, so of them its
+writer spells only `<text:p/>`, its `=""`. Like the other generated packages they are minimal, so no
+application opens them as they stand. No Numbers package has these forms, since none has been found
+in a file Numbers wrote: `docs/workbook.md`, "Cells", says what was checked. And `dates.xlsx`,
+`dates.ods` and `dates.numbers`, one table in each format, of text cells only a declared field order
+can read (`01/02/2026`, `13/02/2026`, `02/13/2026`, each also with a time) or declared month names
+(`7-Okt-2026`), above a stored date, which has no order to declare. And `suggest.xlsx`, `suggest.ods`
+and `suggest.numbers`, one table in each format, in which number cells and text cells holding the same
+digits sit in columns of their own and side by side, for what a suggester has to tell apart. And
+`grouping.xlsx`, `grouping.ods` and `grouping.numbers`, one table in each format, of text cells in Indian and
+Western grouping above a typed number, for a column's policy to reach a text cell and leave a typed one alone.
+Between them the
+generated packages hold every kind of cell each format has: shared, inline and rich strings, numbers under date, time and elapsed
 formats, booleans, errors, ISO dates, CDATA, prefixed elements, sparse rows, empty rows in
 both spellings, gaps in the row numbers, ODS's repeated rows and columns, nested tables,
 annotations and paragraphs, and Numbers' decimals, currencies, rich text, dates and times
@@ -61,8 +134,10 @@ of day, durations, error and merged cells, in layouts Numbers itself never write
 chunks of a few bytes, tiles of seven rows, wide cell offsets, a segmented string list,
 rows left out of their tile.
 
-`workbook.json` is 246 cases over those 27 packages — every sheet of every package, read
-several ways, and the two encrypted files refused — 1,018 rows and 49,394 cells. A case:
+`workbook.json` is 398 cases over those 41 packages — every sheet of every package, read
+several ways, the two encrypted files refused, and `ranges.*`, `uncached.*`, `dates.*`, `suggest.*` and
+`grouping.*` read by hand-listed cases besides — 2,010 rows and 66,351 cells. What the `dates.*`, `suggest.*`
+and `grouping.*` cases read is held to tables worked out by hand in `rust/tests/corpus_workbook.rs`. A case:
 
 ```json
 {
@@ -92,7 +167,18 @@ several ways, and the two encrypted files refused — 1,018 rows and 49,394 cell
   fixtures, eighteen for the real writers' files, four for the generated packages, with
   what a door declares varied by column); with the other three the options are the point,
   and the plan is the text door over every column.
+- `options` may add what `delimited.json`'s dialect has, each absent when it's the default: `skip`,
+  `header_row`, `tokens`, and `range`, written like `B4:E12` for a binding to parse through
+  `hypertabular_range_parse`. A plan entry's `ordinal` then counts from the range's first column,
+  and `numbers` stay the sheet's own. The `ranges.*` cases that set any are the place to find them.
+- A cell's `detail` and `origin` are as in `delimited.json`, the typed twins' details included.
+  Tokens match text cells alone, `padded` means an ordinal past the last cell the row holds, and
+  `uncached` a formula with no cached result, which has no `detail` either.
 - `numbers` is each row's number in the sheet, parallel to `rows`.
+- `problems` is as in `delimited.json`, without long rows, which a sheet has no policy for. Its
+  `line` is the row's number, and its `source_column` is the sheet's own, `A` being `0`, wherever a
+  range starts. The writer works it out from `rows` and `numbers`, so the core's list has to agree
+  with the core's cells. A row the empty-row filter leaves out isn't in `rows`, so isn't in here.
 - A typed cell that fails its door has the cell said as text for its `raw` and a fault
   that spans all of it; a typed cell through the text door is that same text.
 - `failure`, when present (the one shown is `broken.xlsx`'s; the only others are the two

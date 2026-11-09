@@ -78,8 +78,10 @@ public final class TabularException extends RuntimeException {
 
     /**
      * Delimited text: the absolute byte offset of the offending record's start — a
-     * byte-order mark and everything before the record counted. A workbook: how far into the
-     * part's inflated bytes the read had got.
+     * byte-order mark and everything before the record counted — in the decoded text if an
+     * encoding was declared, except that an {@link TabularFailure#ENCODING} failure under a
+     * declared encoding gives the unit's offset in the original input. A workbook: how far into
+     * the part's inflated bytes the read had got.
      *
      * @return the byte offset
      */
@@ -138,6 +140,9 @@ public final class TabularException extends RuntimeException {
             case IWA ->
                 "Part " + record + " of the Numbers document is not what the IWA packaging says (byte " + byteOffset
                         + ", detail " + found + ").";
+            case ENCODING ->
+                "Record " + record + " (line " + line + ") holds text with no character in its encoding, at byte "
+                        + byteOffset + ".";
         };
     }
 }

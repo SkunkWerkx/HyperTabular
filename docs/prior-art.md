@@ -41,8 +41,9 @@ The model for a span-first, allocation-free reader surface. What was read:
 - **Numbers (README, "Comparison Benchmarks", 0.13.0/.NET 9).** Rows-only 21.3 GB/s on a
   9950X (MB/s counts UTF-16 chars as 2 bytes); EPYC 7763: Row 8.1 GB/s, Cols 5.9 GB/s,
   always-quoted Row 2.9 GB/s; floats 25 000 × 40: 33.8 ms single-thread.
-- **Taken:** the parity-only quote model, per-cell quote count as the unescape decision,
-  the packed col-end layout, the partial-row slide, the tiered mask fast paths.
+- **Taken:** per-cell quote count as the unescape decision, and parity inside a quoted cell
+  (a quote opens one only as the cell's first byte, which is where this crate parts from
+  Sep's parity-only model); the packed col-end layout, the partial-row slide, the tiered mask fast paths.
 - **Not taken:** UTF-16 and the narrowing step (our input is bytes); ArrayPool rentals.
 
 ### liquidaty/zsv (C) — `src/zsv_scan_delim_fast.c`, `src/zsv_scan_delim.c`, `src/zsv_internal.c`
@@ -57,8 +58,8 @@ The model for a span-first, allocation-free reader surface. What was read:
   **deferred to the next `zsv_parse_more`** so delivered rows stay valid.
 - Numbers (`app/benchmark/results/…2026-03-26`, Xeon 8488C, 500 k × 20): fast 5.44 GB/s
   unquoted / 4.56 GB/s quoted; compat 2.04 / 1.03 GB/s, single thread.
-- **Taken:** the clmul prefix-XOR with a carried parity bit, zero-copy cell + flag, the
-  deferred slide.
+- **Taken:** the clmul prefix-XOR with a parity bit carried by an open cell, zero-copy cell +
+  flag, the deferred slide.
 
 ### pola-rs/polars — `crates/polars-io/src/csv/read/{parser,splitfields,read_impl}.rs`, `polars-utils/src/clmul.rs`
 
@@ -70,7 +71,8 @@ The model for a span-first, allocation-free reader surface. What was read:
   field-counting three consecutive lines.
 - Fields are delivered with quotes included plus a `needs_escaping` flag; unescaping is
   deferred to the typed builder; floats via `fast_float2`, ints via `atoi_simd`.
-- **Taken:** the dispatch template; the two-state chunk idea is parked for a later round.
+- **Taken:** the dispatch template. The two-state chunk idea is parked for a later round, and
+  needs more than parity here: a quote only opens at a cell's first byte.
 
 ### DuckDB — `src/execution/operator/csv_scanner/`
 

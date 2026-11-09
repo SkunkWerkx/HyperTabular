@@ -365,6 +365,9 @@ fun Test.suite(backend: String, feature: Int) {
     // library makes; its findings print natively, past Gradle's listeners, so CheckJniTest
     // reads them from a child JVM of its own.
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xcheck:jni")
+    // On JDK 21 a native segment counts against this limit, which is the heap size unless it's
+    // said, and the ceiling test holds a 1 GiB buffer beside the 512 MiB it grew from.
+    jvmArgs("-XX:MaxDirectMemorySize=3g")
     // This binding's own version, so the suite can pin Tabular.nativeVersion() to it: the core
     // and the jar move together (prepare-release.yml bumps both), and the probe exists to
     // prove exactly that.
@@ -409,13 +412,16 @@ val checkSuiteParity = tasks.register("checkSuiteParity") {
         }
         val (onTest, skippedTest) = read("test")
         val (onFloor, skippedFloor) = read("testFloor")
-        check(skippedTest.isEmpty() && skippedFloor.isEmpty()) {
+        // The one test that may skip, and it says so: it asks for more memory than a small host has.
+        val mayskip = "io.github.skunkwerkx.hypertabular.OptionsTest#aRecordIsReadUpToTheRealCeilingAndNoFurther()"
+        check((skippedTest + skippedFloor).all { it == mayskip }) {
             "skipped tests: test=$skippedTest testFloor=$skippedFloor"
         }
         check(onTest == onFloor) {
             "the suites differ: only in test=${onTest - onFloor}, only in testFloor=${onFloor - onTest}"
         }
-        logger.lifecycle("suite parity: ${onTest.size} tests on each JDK, none skipped")
+        val skips = skippedTest.size + skippedFloor.size
+        logger.lifecycle("suite parity: ${onTest.size} tests on each JDK, $skips skipped")
     }
 }
 

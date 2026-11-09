@@ -2,7 +2,7 @@ failure_kinds <- c(
   "1" = "unclosed_quote", "2" = "column_count", "3" = "row_too_long", "16" = "not_a_zip",
   "17" = "container", "18" = "encrypted", "19" = "method", "20" = "missing_part", "21" = "xml",
   "22" = "deflate", "23" = "not_a_workbook", "24" = "shared_string", "25" = "too_large",
-  "26" = "iwa"
+  "26" = "iwa", "27" = "encoding"
 )
 
 # The C shim's failure (code, line, record, byte, expected, found) as R gets it.
@@ -26,15 +26,16 @@ new_failure <- function(v) {
 #' it with it, as their `failure`; [workbook()] returns a workbook that could not be opened
 #' with its `failure` set. A cell that does not cast is never a failure: it is a verdict.
 #'
-#' `kind` is one of `"unclosed_quote"`, `"column_count"`, `"row_too_long"` (delimited
-#' text), `"not_a_zip"`, `"container"`, `"encrypted"`, `"method"`, `"missing_part"`,
-#' `"xml"`, `"deflate"`, `"not_a_workbook"`, `"shared_string"`, `"too_large"` and `"iwa"`
-#' (workbooks). For delimited text `record` is the zero-based index of the offending record
-#' (the header and skipped blank lines counted), `line` the 1-based line it starts on and
-#' `byte` its byte offset; for `"column_count"`, `expected` is the cells of the first record
-#' and `found` this one's. For a workbook `record` is the part being read (`6` a worksheet,
-#' `10` a Numbers part), `line` the sheet row and `byte` the offset in the part's inflated
-#' bytes.
+#' `kind` is one of `"unclosed_quote"`, `"column_count"`, `"row_too_long"` and `"encoding"`
+#' (delimited text: a unit its declared encoding has no character for), and `"not_a_zip"`,
+#' `"container"`, `"encrypted"`, `"method"`, `"missing_part"`, `"xml"`, `"deflate"`,
+#' `"not_a_workbook"`, `"shared_string"`, `"too_large"` and `"iwa"` (workbooks). For
+#' delimited text `record` is the zero-based index of the offending record (the header and
+#' skipped blank lines counted), `line` the 1-based line it starts on and `byte` its byte
+#' offset in the decoded text (for `"encoding"` alone, the unit's offset in the original
+#' input); for `"column_count"`, `expected` is the width every record is held to and `found`
+#' this one's. For a workbook `record` is the part being read (`6` a worksheet, `10` a Numbers
+#' part), `line` the sheet row and `byte` the offset in the part's inflated bytes.
 #'
 #' @param x A reader (from [delimited_reader()] or [sheet_reader()]), or a
 #'   `hypertabular_failure`.
@@ -65,6 +66,9 @@ format.hypertabular_failure <- function(x, ...) {
                            fmt(x$found), fmt(x$expected)),
     unclosed_quote = sprintf("The input ended inside a quoted cell in record %s.", at),
     row_too_long = sprintf("Record %s exceeds the 1073741824-byte row ceiling.", at),
+    encoding = sprintf(paste("Record %s (line %s) holds a unit its declared encoding has no",
+                             "character for, at byte %s of the input."), fmt(x$record),
+                       fmt(x$line), fmt(x$byte)),
     not_a_zip = "The workbook is not a zip file.",
     encrypted = "The workbook is encrypted.",
     method = sprintf(paste("Part %s of the workbook is compressed by method %s, neither",

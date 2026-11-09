@@ -1,14 +1,17 @@
 // Proves the binding under Native AOT for real: this program publishes with PublishAot and
-// crosses every native entry point the binding declares — the version probe, the delimited
-// header and fill through every door, the unescape behind a raw read, and a workbook opened,
-// listed, loaded and read — against the real native library. Exit code 0 only if every
-// cell lands as expected.
+// crosses every native entry point a read takes — the version probe, the delimited header and
+// size-tagged fill through every door, the unescape behind a raw read, the transcoder behind a
+// declared encoding, the faults list, the suggester, the range parser, and a workbook opened,
+// listed, loaded and read — against the real native library. Exit code 0 only if every cell lands
+// as expected. The 1.0 fills and sheet call, which no read takes, are held by
+// HyperTabular.Tests/NativeTests.cs.
 //
 // The body lives here rather than in Program.cs so the apps that run it can call it: Program.cs
 // is the console entry point, and HyperTabular.AppleSmokeTest and
 // HyperTabular.AndroidSmokeTest compile this file too. An Android app is compiled as a
 // library, where top-level statements are an error (CS8805).
 
+using System.Linq;
 using System.Text;
 using HyperCast;
 
@@ -130,6 +133,64 @@ internal static class SmokeTest
 			Expect("structure", e is { Failure: TabularFailure.ColumnCount, Record: 2, Line: 3, Byte: 8, Expected: 2, Found: 1 });
 		}
 
+		// What a read declares beyond its dialect: a column's own number format, an Indian one beside
+		// a Western one, a token, a short row padded, a long row reported, and what the batch lists.
+		var declared = Dialect.Csv with { ShortRows = ShortRows.Pad, LongRows = LongRows.Report, Tokens = new Tokens("NA") };
+		using (var reader = new DelimitedReader(
+			"indian,western\n\"1,23,456\",\"1,23,456\"\nNA,7,8\n9\n"u8.ToArray().AsMemory(), declared,
+			[Column.Int32(0, NumFormat.Invariant with { Grouping = NumGrouping.Indian }), Column.Int32(1)]))
+		{
+			var batch = reader.Read();
+			Expect("options rows", batch is { Rows: 3 });
+			if (batch is not null)
+			{
+				Check("indian", batch.Get<int>(0, 0), 123456);
+				Expect("western refuses", batch.Fault(1, 0) is { Reason: CastFailure.Malformed, Detail: FaultDetail.GroupSize });
+				Expect("token", batch.Origin(0, 1) == Origin.Token);
+				Expect("padded", batch.Origin(1, 2) == Origin.Padded);
+				var listed = batch.Faults().ToList();
+				// A token and a padded cell were declared, so only the two below are listed.
+				Expect($"faults ({listed.Count})", listed.Count == 2
+					&& listed[0] is { Row: 0, PlanColumn: 1, Detail: FaultDetail.GroupSize }
+					&& listed[1] is { Row: 1, PlanColumn: null, Expected: 2, Found: 3 });
+			}
+		}
+
+		// A declared encoding: transcoded to UTF-8 ahead of the fill, through a stream and from memory.
+		var latin = new byte[] { (byte)'a', (byte)'\n', 0xE9, (byte)'\n' };
+		var encoded = Dialect.Csv with { Encoding = TextEncoding.Latin1 };
+		using (var reader = new DelimitedReader(new MemoryStream(latin), encoded, [Column.Text(0)], bufferBytes: 1))
+			Expect("latin-1 from a stream", reader.Read()?.GetString(0, 0) == "\u00E9");
+		using (var reader = new DelimitedReader(latin.AsMemory(), encoded, [Column.Text(0)]))
+			Expect("latin-1 from memory", reader.Read()?.GetString(0, 0) == "\u00E9");
+
+		// Date options through the fill, and two columns of one name refused where a name is asked for.
+		using (var reader = new DelimitedReader("d,d\n20260107,x\n"u8.ToArray().AsMemory(), Dialect.Csv))
+		{
+			try
+			{
+				reader.Header!.Ordinal("d");
+				Expect("duplicate column", false);
+			}
+			catch (DuplicateColumnException e)
+			{
+				Expect("duplicate column", e is { Name: "d", First: 0, Second: 1 });
+			}
+			reader.Bind([Column.Date(0).WithDateOptions(new DateOptions(DateShapes.CompactDate, 0))]);
+			Check("date options", reader.Read()!.Get<DateOnly>(0, 0), new DateOnly(2026, 1, 7));
+		}
+
+		// The suggester: a sample judged, and the plan it made read back.
+		var sampled = "n,when\n\"1,234\",2026-01-07\n5.5,2026-01-08\n"u8.ToArray().AsMemory();
+		var suggestion = DelimitedReader.Suggest(sampled, Dialect.Csv);
+		Expect("suggest", suggestion is { Truncated: false, Plan.Count: 2 }
+			&& suggestion.Report[0] is { Name: "n", Door: Door.Double, Status: SuggestStatus.Resolved }
+			&& suggestion.Report[1].Door == Door.Date);
+		using (var reader = new DelimitedReader(sampled, Dialect.Csv, [.. suggestion.Plan]))
+			Check("suggested plan", reader.Read()!.Get<double>(0, 0), 1234d);
+		Expect("range", SheetRange.Parse("B4:E12") is { FirstRow: 4, FirstColumn: 2, LastRow: 12, LastColumn: 5 });
+		Expect("not a range", !SheetRange.TryParse("F200:A5", out _));
+
 		// A workbook: opened, its sheets listed, its strings and styles loaded, a sheet positioned on,
 		// its header read and its rows filled — every workbook entry point, through the same batch.
 		// Read straight from the embedded resource's stream, which the workbook disposes once read.
@@ -143,6 +204,11 @@ internal static class SmokeTest
 			while (sheet.Read() is { } batch)
 				rows += batch.Rows;
 			Expect($"sheet rows ({rows})", rows > 0);
+			var suggested = book.Sheet(0, SheetOptions.Default).Suggest();
+			Expect("sheet suggest", suggested.Report.Any(report => report.Name == "id" && report.Status == SuggestStatus.Resolved));
+			var options = SheetOptions.Default with { Range = new SheetRange(1, 1, 3, 2), Notes = false };
+			var cut = book.Sheet(0, options, [Column.Text(0), Column.Text(1)]);
+			Expect("sheet range", cut.Read() is { Rows: 2 } && cut.Header is { Count: 2 });
 			Expect("not a workbook", Throws(() => new Workbook("not a zip"u8.ToArray()), TabularFailure.NotAZip));
 		}
 

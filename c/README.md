@@ -52,7 +52,7 @@ for the same platform beside it (HyperCast 1.1.0 or later), for `hypercast.hpp`;
 CMake, with the unpacked directory on `CMAKE_PREFIX_PATH`:
 
 ```cmake
-find_package(hypertabular 1.0 REQUIRED)
+find_package(hypertabular 1.1 REQUIRED)
 target_link_libraries(app PRIVATE hypertabular::hypertabular)          # shared
 target_link_libraries(app PRIVATE hypertabular::hypertabular_static)   # or static
 ```
@@ -168,6 +168,45 @@ is a `_SIZE` constant to check against. `hypertabular_version()` is the one way 
 version at run time. A minor release may add functions; only a major release changes or
 removes one.
 
+The calls above are the 1.0 ones, with the layouts they always had. What they answer follows
+HyperCast's doors, and a few answers have moved since 1.0: `1,23,456`, `12,34` and `0,125` are malformed
+where 1.0 read 123456, 1234 and 125 (`CHANGELOG.md`). They read the low 8 bits of a format's flags, so
+they read every format as Western, and neither refuses a stale policy nor reads a declared one. A messier
+file goes through the size-tagged ones, each struct naming its own size first. A delimited state is
+`HyperTabularDelimitedState_SIZE` bytes, 80, what `hypertabular_delimited_state_size()` reports and
+`_init_with` needs; 1.0 said 64, and a block only `hypertabular_delimited_init` writes may still be 64
+bytes, so a 1.0 program that requires the reported size to equal its 64 now fails that check. The
+new calls:
+
+- `hypertabular_batch_check` says how much a batch may ask for, ahead of allocating it: it takes the
+  plan's specs, `batch_rows`, `buffer_bytes` and flags (`HyperTabularRawBatchCheck_NOTES`, `_WIDTHS`,
+  `_SHEET`), and fills a `HyperTabularRawBatchCheck` with the bytes needed, the limit (4 GiB), the size to
+  start the input buffer at and, with `HYPERTABULAR_ERR_BATCH`, the reason (`_REFUSED_...`). `width` is the
+  row's columns, the furthest it reaches or, on a sheet with more plan columns than that, the plan's; `sample_rows` is the most rows up to `batch_rows` that fit a sampler's budget (64 MiB, at
+  least one row, and 0 when one row alone is past the limit, `_REFUSED_ROW_TOO_WIDE`). It allocates
+  nothing, and any size can be asked about.
+- `hypertabular_delimited_init_with` takes a `HyperTabularRawDelimitedOptions`: lines to pass over
+  (`skip`), records to discard (`header_row`), and what a short or a long row does.
+- `hypertabular_delimited_fill_with` and `hypertabular_workbook_fill_with` take
+  `HyperTabularColumnSpecWith` (a column's tokens, date options and month names),
+  `HyperTabularColumnBufferWith` (with a `HyperTabularCellNote` per row, saying what failed and
+  where a verdict came from) and `HyperTabularBuffersWith` (tokens for every column, and each row's
+  width). They judge a numeric format's flags in full, a column at a time. Flags `95`
+  (`HyperTabularNumFormat_ALL`, Western) read `1,234,567` and refuse `1,23,456`, flags `607` (with
+  `HyperTabularNumFormat_GROUPING_INDIAN`) do the reverse, and an all-zero format is Western. Flags holding
+  the retired grouping bit `256`, as `351` and `863` do, are `HYPERTABULAR_ERR_CONTRACT` before any cell,
+  size or no size. `hypertabular_suggest` refuses them too.
+- `hypertabular_workbook_sheet_with` takes a `HyperTabularRawSheetOptions`, with the rows to pass
+  over and discard and a range, which `hypertabular_range_parse` reads from `A5:F200`.
+- `hypertabular_faults` lists what went wrong in the rows a fill just wrote, from a cursor.
+- `hypertabular_transcode` turns Windows-1252, Latin-1 or UTF-16LE into the UTF-8 the delimited
+  calls read, on the caller's buffers.
+- `hypertabular_suggest` says what a sample's columns look like. Nothing reads its answer but the
+  caller, who passes a byte a cell for a sheet's typed cells: a `Uuid` door beside the `Text` door, with
+  notes, says which, as `Malformed` with a detail of `0`. Delimited text passes null.
+
+`c/smoke/main.c` calls each of them.
+
 ## C++
 
 `hypertabular.hpp` is header-only and needs C++17. It includes HyperCast's `hypercast.hpp`
@@ -175,10 +214,12 @@ removes one.
 `Uuid`, `Timestamp`, `Date`, `CivilDateTime` and `Duration`, and a column's notation is a
 `hypercast::NumFormat`, so a program that also casts through HyperCast's doors directly has
 one set of types. So a C++ program finds both archives, and links HyperCast's library too
-when it calls HyperCast's doors itself or `NumFormat::declare`, which asks HyperCast's core:
+when it calls HyperCast's doors itself, `NumFormat::declare`, `DateOptions::declare` or
+`MonthNames::declare`, which ask HyperCast's core, or `suggest`, which declares a comma-decimal
+candidate that way:
 
 ```cmake
-find_package(hypertabular 1.0 REQUIRED)
+find_package(hypertabular 1.1 REQUIRED)
 find_package(hypercast 1.1 REQUIRED)
 target_link_libraries(app PRIVATE hypertabular::hypertabular_static hypercast::hypercast_static)
 target_compile_features(app PRIVATE cxx_std_17)
@@ -190,7 +231,16 @@ or, with both `lib/pkgconfig` directories on `PKG_CONFIG_PATH`,
 Every function is `noexcept`, and it builds with exceptions off (`-fno-exceptions`, or
 `/EHs-c-` with `_HAS_EXCEPTIONS=0`). Unlike HyperCast's doors it owns memory, as every
 HyperTabular binding does: its buffers are standard containers, and running out of memory ends
-the program. CI builds it with GCC on Linux, Apple Clang on macOS, iOS and Mac Catalyst, and
+the program, and a source function or a `for_each_row` callback that throws ends it too, by
+`std::terminate`: no `catch` of the caller's is reached. A `Sheet` holds its `Workbook`'s address, so
+the workbook outlives it and isn't moved while it's in use.
+
+A source function runs in the middle of its reader's `read()`, and a `for_each_row` callback in the
+middle of its reader's or sheet's walk. A `read()` or `bind()` from there on that same reader or
+sheet is `ErrorKind::busy` (`the reader is in the middle of a read; nothing that read calls can call
+back into it`, `detail()` saying `reader` or `sheet`), and the read it was called from goes on
+unharmed. Destroying or moving the reader or sheet from there ends the program with
+`std::abort()`, since nothing is left to answer. Other readers and sheets are there to use. CI builds it with GCC on Linux, Apple Clang on macOS, iOS and Mac Catalyst, and
 MSVC on Windows, as C++17, C++20 and C++23, with exceptions on and off.
 
 ```cpp
@@ -207,7 +257,8 @@ int main() {
   }
   ht::DelimitedReader &reader = opened.value();
   const ht::Header &header = *reader.header();
-  if (!reader.bind({ht::Column::i32(*header.ordinal("id")), ht::Column::text(1)}).ok()) {
+  const auto id = header.require("id"); // refuses a name two columns share
+  if (!id.ok() || !reader.bind({ht::Column::i32(id.value()), ht::Column::text(1)}).ok()) {
     return 1;
   }
   const auto read = reader.for_each_row([](const ht::Row &row) noexcept {
@@ -234,22 +285,158 @@ A structural error is a `hypertabular::Result<T>`, shaped as a `Verdict` is: `ok
 (checked: the wrong one ends the program with `std::abort()`, since a reader has no value to
 make up), `match(on_value, on_error)`, and under C++23 with `<expected>` a conversion to
 `std::expected<T, hypertabular::Error>`. A `hypertabular::Error` has a `kind()` (`io`,
-`separator`, `plan`, `no_sheet`, `no_column`, `unbound`, `already_bound`, `structure`), what
-it is about (`failure()`, with its `FailureKind`, record, line, byte, expected and found;
-`column()`; `separator()`; `detail()`), and `message()`, worded as every binding words it.
+`separator`, `plan`, `no_sheet`, `no_column`, `ambiguous_column`, `range`, `unbound`,
+`already_bound`, `structure`), what it is about (`failure()`, with its `FailureKind`, record,
+line, byte, expected and found; `column()`; `separator()`; `detail()`; `first()` and `second()`,
+the two columns a name is shared by), and `message()`, worded as every binding words it.
+
+A `Header` looks a name up two ways. `require` is strict: `no_column` for a name it hasn't, and
+`ambiguous_column`, naming both positions, for one two columns share, because a plan built from
+names mustn't silently read the wrong column. `ordinal` is optional, a `std::optional`, and keeps
+the first match. A plan by position reads either column.
 
 `DelimitedReader` opens over bytes in memory (`from_bytes`, read in place), a file (`open`)
 or a source function (`from_source`), with a `Dialect` (`csv()`, `tsv()`, `psv()`, or any
-separator, quoting, header and blank-line choice) and optionally a `DelimitedOptions` (rows a
-batch, starting buffer). `Workbook` opens bytes in place (`from_bytes`), bytes it keeps
-(`from_vector`) or a file (`open`), lists its `sheets()`, and opens a `Sheet` by index or name
-with `SheetOptions`. Either is given its plan, a list of `Column`s (`Column::i64(ordinal)`,
+separator, quoting, header and blank-line choice, and `with_skip`, `with_header_row`,
+`with_short_rows`, `with_long_rows`, `with_encoding` and `with_tokens`) and optionally a
+`DelimitedOptions` (rows a batch, starting buffer, `with_notes`; a 0 for either size, or a batch past
+the core's 4 GiB limit, is `ErrorKind::zero_batch_rows`, `zero_buffer_bytes` or `batch_too_large`, which
+says `needed()` and `limit()`, before anything is allocated; a `std::vector` writes what it's asked for, so a
+batch near the limit holds that memory from the moment it's bound; `suggest` is never refused for the size
+of its own batches, and a row that alone is past the limit is `ErrorKind::row_too_wide`, which says `width()`). `Workbook` opens bytes in place
+(`from_bytes`), bytes it keeps (`from_vector`) or a file (`open`), lists its `sheets()`, and opens a
+`Sheet` by index or name with `SheetOptions` (`with_skip`, `with_header_row`, `with_range`,
+`with_tokens`, `with_notes` and the rest). A `Range` comes from `Range::parse("A5:F200")`, or
+`Range::of(first_row, first_column, last_row, last_column)` with 0 for no limit on a side. Either is
+given its plan, a list of `Column`s (`Column::i64(ordinal)`,
 `Column::decimal(ordinal).format(numformat)`, `Column::date_ordered(ordinal, DateOrder)`, one
-per door), when it opens or with `bind` after its header is read. `read()` hands back a
-`Result<std::optional<Batch>>`, the batch empty at the end; a `Batch` is a view of the reader's
-buffers, valid until the next `read()`, with `get<T>(column, row)`, `text(column, row)` (a
-`Verdict<std::string_view>`), `fault`, `raw` (the cell's text, whatever its verdict), `line`
-and its `Row`s. `for_each_row` does the loop. Reading a column as a type its door does not
-make, or an index outside the batch, is a caller bug that ends the program with
-`std::abort()`. `native_version()` is the linked library's version, and `is_available()` is
-always true: the core is linked in.
+per door, each with `.tokens(...)` and `.date_options(options, months)` if it needs them), when it
+opens or with `bind` after its header is read. A `Column`, a `Dialect` and `SheetOptions` can own
+lists, so they aren't `constexpr`. `read()` hands back a `Result<std::optional<Batch>>`, the batch
+empty at the end; a `Batch` is a view of the reader's buffers, valid until the next `read()` and no longer than the
+reader or sheet that read it, with
+`get<T>(column, row)`, `text(column, row)` (a `Verdict<std::string_view>`), `fault`, `raw` (the
+cell's text, whatever its verdict), `line`, `detail` (HyperCast's name for what failed), `origin`
+(`Origin::cell`, `token`, `padded` or `uncached`), `faults()` and its `Row`s. `for_each_row` does the
+loop. Reading a column as a type its door does not make, an index outside the batch, or walking
+the batch's rows or `faults()` past the next `read()` is a caller bug that ends the program with
+`std::abort()`.
+`native_version()` is the linked library's version,
+and `is_available()` is always true: the core is linked in.
+
+```cpp
+#include <cstdio>
+#include "hypertabular.hpp"
+
+namespace ht = hypertabular;
+
+int main() {
+  const ht::Dialect messy = ht::Dialect::csv()
+                                .with_skip(1)                         // a title line
+                                .with_short_rows(ht::ShortRows::pad)  // a short row's cells are Empty
+                                .with_long_rows(ht::LongRows::report) // a long row is cut, and listed
+                                .with_tokens({"N/A"});                // stands for no value
+  auto reader = ht::DelimitedReader::from_bytes("Sales\nid,qty\n1,N/A\n2,x\n3\n4,5,6\n", messy,
+                                                {ht::Column::i32(0), ht::Column::i32(1)});
+  if (!reader.ok()) {
+    return 1;
+  }
+  auto read = reader.value().read();
+  if (!read.ok() || !read.value()) {
+    return 1;
+  }
+  const ht::Batch &batch = *read.value();
+  std::printf("%s, %s\n", ht::name(batch.origin(1, 0)).c_str(), ht::name(batch.origin(1, 2)).c_str());
+  for (const ht::Problem &problem : batch.faults()) {
+    if (problem.plan_column) {
+      std::printf("line %u, column %zu: %s\n", problem.line, *problem.source_column,
+                  hypercast::name(problem.detail).c_str());
+    } else {
+      std::printf("line %u: %u cells where the first has %u\n", problem.line, problem.found,
+                  problem.expected);
+    }
+  }
+
+  // Asking what a file's columns look like. Nothing here reaches a read.
+  auto found = ht::DelimitedReader::suggest_bytes("id,day\n1,01/02/2024\n2,03/04/2024\n",
+                                                  ht::Dialect::csv());
+  if (!found.ok()) {
+    return 1;
+  }
+  for (const ht::SuggestedColumn &column : found.value().report) {
+    std::printf("%s: %s, %zu candidates\n", column.name->c_str(),
+                std::string(ht::name(column.status)).c_str(), column.candidates.size());
+  }
+  return 0;
+}
+```
+
+prints
+
+```
+token, padded
+line 4, column 1: unexpected_character
+line 6: 3 cells where the first has 2
+id: resolved, 0 candidates
+day: ambiguous, 2 candidates
+```
+
+A `batch.faults()` range holds a read's cells at `malformed` or `out_of_range`, formulas with no
+cached value and rows `LongRows::report` declared, each a `Problem`: `row`, `line`, `plan_column`,
+`source_column` (the source's, a sheet's own whatever its range), `reason`, `detail`, `origin`,
+`offset` and `length`, or `expected` and `found` for a row. It's a view too: a walk past the next
+`read()` ends the program with `std::abort()`, a caller's bug like an index outside the batch, since
+stopping there would read as the end of the list. Finish the walk first. With notes off it has no `detail` and no uncached formula, and `detail()` and `origin()`
+say nothing.
+
+**To keep every row of a sheet, set `SheetOptions::skip_empty_rows` to `false`.** By default a row
+whose only cells are formulas with no cached value is filtered out as empty, with nothing to say so;
+off, those rows are delivered, their cells at `Origin::uncached`. In C it's the `skip_empty_rows`
+argument of `hypertabular_workbook_sheet` and `hypertabular_workbook_sheet_with`'s options.
+
+A column given no format reads `NumFormat::invariant()`, as a plan with no format does in every binding,
+whose grouping is Western: `1,234,567` is 1234567 and `1,23,456` is malformed. If a column of Indian
+numbers comes back refused, declare it, one column at a time, so an Indian column reads beside a Western
+one in the same read:
+
+```cpp
+const auto indian = hypercast::NumFormat::invariant().with_grouping(hypercast::Grouping::indian);
+auto reader = hypertabular::DelimitedReader::from_bytes(
+    bytes, hypertabular::Dialect::csv(),
+    {hypertabular::Column::i32(0).format(indian), // 1,23,456 is 123456, and 1,234,567 is malformed
+     hypertabular::Column::i32(1)});              // 1,234,567 is 1234567, and 1,23,456 is malformed
+```
+
+A plan can be judged before any input: on a state of its own from `hypertabular_delimited_init_with`,
+`hypertabular_delimited_fill_with` with no input, `max_rows` 0 and a buffer for each column writes nothing,
+and returns `HYPERTABULAR_ERR_CONTRACT` for a column it refuses, a stale format among them. A workbook's plan
+is asked the same way. That is how the C++ header refuses a plan when it's bound. The exports that open a
+source take no plan, so in C this is the earliest a format can be refused; otherwise the first fill is.
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `NumFormat::detect()` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `f64` reads `1,2345` as 1.2345, `12,34`
+as 12.34 and `0,125` as 0.125. A format holding the retired
+grouping bit `256`, which `NumFormat::declare` and `with_grouping` can't make, is `ErrorKind::plan` when
+the plan is bound, before any cell, and in a suggest's options before it opens anything. C++ has no locale bridge, so nothing reads a locale's name.
+HyperCast's [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and the locales neither policy matches.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied.
+`DelimitedReader::suggest(path, dialect)`, `suggest_bytes(bytes, dialect)` and `Sheet::suggest()`
+sample up to `SuggestOptions::sample_rows` rows and return a `Suggestion`: a `plan` to change or to
+hand to a read, a `report` saying what each column is and why (its `status`, and `candidates` to
+choose between, a `DateOrder` or a `NumFormat`), and whether the source was `truncated` past the
+sample. An ambiguous or unresolved column plans as text until the caller declares it. With no format
+declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read only with
+`,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the plan is in
+whichever is left. `1,234` and `1.234` read both ways, so they come back ambiguous until a format is
+declared or another cell settles them, which takes in a column of prices at three decimals;
+`SuggestOptions::with_date_order` does the same for `01/02/2026`. `2,5` beside `2.5` is unresolved, and
+`1,23,456`, Indian grouping, is text until the column declares Indian grouping, because nothing says its
+culture. A sheet's number
+cell has no notation, so a column of them is a number under any format, where text holding the same
+digits asks. With nothing to choose between, a resolved number plans in
+`NumFormat::invariant()`, or the format `SuggestOptions` declares for it. Some answers can surprise:
+`0` and `1` are booleans, and `007` stays text. A sheet's date column suggests text,
+since a typed cell reads as its canonical text. A headerless file is opened twice, so a path that
+can be read once, as a FIFO's, is not for this.

@@ -21,7 +21,9 @@
 //! nothing half-done and goes on from the same token when called again.
 
 use super::book::is_table;
-use super::cell::{self, Cell, Stores, cast, error_code, parse_f64, render, wall_from_iso};
+use super::cell::{
+    self, Cell, Stores, cast, cast_with, error_code, parse_f64, render, wall_from_iso,
+};
 use super::iwa::{self, Package};
 use super::numbers;
 use super::part::{Part, Reader, Stop};
@@ -33,12 +35,15 @@ use super::{
     refuse, room, styles,
 };
 use crate::kernel::abi::{
-    ColumnBuffer, ColumnSpec, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE, Failure, Filled, OK, Slot,
-    Span,
+    ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, ERR_CELLS, ERR_CONTRACT,
+    ERR_STRUCTURE, Failure, Filled, OK, RawRange, RawSheetOptions, Slot, Span,
+};
+use crate::kernel::delimited::fill::{
+    resolved_date, resolved_format, resolved_tokens, tokens_are_whole,
 };
 use crate::kernel::door::Door;
 use crate::kernel::inflate::Inflate;
-use hypercast::ExcelEpoch;
+use hypercast::{ExcelEpoch, NumFormat, Reason};
 
 /// The widest sheet any of the formats allows; an ODS repeat count is believed no further.
 const MAX_COLUMNS: u64 = 16_384;
@@ -157,6 +162,58 @@ pub(crate) struct Sheet {
     pub(super) n_at: u64,
     pub(super) n_offset: u64,
     pub(super) n_pos: u64,
+    // What's still to pass over, and the range: 1-based, `0` for no limit, as declared.
+    skip_left: u32,
+    discard_left: u32,
+    first_row: u32,
+    first_column: u32,
+    last_row: u32,
+    last_column: u32,
+    /// The row's width: one past the last column inside the range holding a cell.
+    width: u64,
+    /// The cell being read: it has a formula, and what's in it counts as that formula's result.
+    formula: u32,
+    cached: u32,
+    /// The row holds a formula with no result, inside the range.
+    uncached: u32,
+}
+
+impl Sheet {
+    /// The rows of the range: the first, and the first past it.
+    fn rows_in_range(&self) -> (u64, u64) {
+        let past = match self.last_row {
+            0 => u64::MAX,
+            last => u64::from(last) + 1,
+        };
+        (u64::from(self.first_row), past)
+    }
+
+    /// `count` columns from zero-based `col`, cut to the range and counted from its first column;
+    /// `None` when none of them is in it.
+    #[inline]
+    fn in_columns(&self, col: u64, count: u64) -> Option<(u64, u64)> {
+        let first = u64::from(self.first_column.saturating_sub(1));
+        let past = match self.last_column {
+            0 => u64::MAX,
+            last => u64::from(last),
+        };
+        let from = col.max(first);
+        let end = col.saturating_add(count).min(past);
+        (from < end).then(|| (from - first, end - from))
+    }
+}
+
+/// What a row reader is to do with a row whose number, gap and repeat it has just worked out.
+pub(super) enum Opening {
+    /// Read its cells.
+    Read,
+    /// Step past them unread: everything it stands for is before the range or being skipped.
+    PassOver,
+    /// Step past them unread, and that's the last of the range.
+    Finished,
+    /// Deliver it as it is, with no cells: it lies past the range, and only the gap before it
+    /// may not.
+    PastEnd,
 }
 
 /// What to do with the token just handled.
@@ -201,6 +258,17 @@ impl Source<'_> {
     }
 }
 
+/// What a cell's asking for `needed` bytes of an arena of `len` means: more room, or text no span
+/// can address.
+#[inline]
+fn for_room(needed: u64, len: usize, part: &Part) -> Stop {
+    if needed > u64::from(u32::MAX) {
+        Stop::Fail(part.failure(Failure::TOO_LARGE, 0))
+    } else {
+        Stop::Arena(needed.max(len as u64 * 2))
+    }
+}
+
 fn broken(part: &Part, inside: u32) -> Stop {
     Stop::Fail(part.failure(Failure::XML, inside))
 }
@@ -216,7 +284,39 @@ impl Run<'_> {
         self.sheet.occupied = 0;
         self.sheet.beyond = 0;
         self.sheet.names = 0;
+        self.sheet.width = 0;
+        self.sheet.uncached = 0;
         self.sheet.row_start = self.sheet.used;
+    }
+
+    /// Says what's to be done with the row whose number, gap and repeat were just worked out, and
+    /// counts what's passed over toward `skip`. Asks nothing of its cells, so the rows it passes
+    /// over aren't judged, as the lines a delimited `skip` passes over aren't.
+    pub(super) fn opening(&mut self) -> Opening {
+        let sheet = &mut *self.sheet;
+        let (first, past) = sheet.rows_in_range();
+        let number = u64::from(sheet.number);
+        if number >= past {
+            return Opening::PastEnd;
+        }
+        let end = number + u64::from(sheet.repeat);
+        let held = end
+            .min(past)
+            .saturating_sub((number - u64::from(sheet.gap)).max(first));
+        if held > u64::from(sheet.skip_left) {
+            return Opening::Read;
+        }
+        sheet.skip_left -= held as u32;
+        if end >= past {
+            Opening::Finished
+        } else {
+            Opening::PassOver
+        }
+    }
+
+    /// Whether any of `count` columns from `col` is in the range.
+    pub(super) fn wants(&self, col: u64, count: u64) -> bool {
+        self.sheet.in_columns(col, count).is_some()
     }
 
     /// Puts `slot` in `count` columns from `col`: in the row's slots as far as the caller
@@ -228,8 +328,19 @@ impl Run<'_> {
         slot: Slot,
         part: &Part,
     ) -> Result<(), Stop> {
+        // Everything below is in the range's terms, the names' places and the row's slots alike.
+        let Some((col, count)) = self.sheet.in_columns(col, count) else {
+            return Ok(());
+        };
         let end = col.saturating_add(count);
         let empty = slot.is_empty();
+        let uncached = slot.is_uncached();
+        if !empty || uncached {
+            self.sheet.width = self.sheet.width.max(end);
+        }
+        if uncached {
+            self.sheet.uncached = 1;
+        }
         if let Some(names) = self.names.as_deref_mut() {
             let held = self.sheet.names;
             if empty {
@@ -279,7 +390,7 @@ impl Run<'_> {
         for at in col..end.min(slots) {
             let extent = self.sheet.extent;
             if at >= extent {
-                if empty {
+                if empty && !uncached {
                     break;
                 }
                 for gap in self.row.iter_mut().take(at as usize).skip(extent as usize) {
@@ -495,6 +606,13 @@ impl Run<'_> {
                     sheet.next_number = number.wrapping_add(1);
                     sheet.next_col = 0;
                     self.clear_row();
+                    match self.opening() {
+                        Opening::Read => {}
+                        Opening::PastEnd => return Ok(Step::Row),
+                        Opening::Finished => return Ok(Step::End),
+                        Opening::PassOver if token.kind == Kind::Start => return Ok(Step::Skip),
+                        Opening::PassOver => return Ok(Step::Take),
+                    }
                     if token.kind == Kind::Empty {
                         return Ok(Step::Row);
                     }
@@ -509,7 +627,13 @@ impl Run<'_> {
             X_CELLS => match token.kind {
                 Kind::Start if local == b"c" => {
                     self.cell_attrs(&Tag::of(buf, token));
+                    // Outside the range: not read, so a bad one doesn't matter.
+                    if !self.wants(self.sheet.col, 1) {
+                        return Ok(Step::Skip);
+                    }
                     self.sheet.pending = Slot::EMPTY;
+                    self.sheet.formula = 0;
+                    self.sheet.cached = 0;
                     self.sheet.mode = X_BODY;
                 }
                 Kind::Empty if local == b"c" => {
@@ -534,9 +658,27 @@ impl Run<'_> {
                     self.sheet.depth = 1;
                     self.sheet.mode = if local == b"v" { X_VALUE } else { X_RICH };
                 }
-                Kind::Start => return Ok(Step::Skip),
+                Kind::Start => {
+                    if local == b"f" {
+                        self.sheet.formula = 1;
+                    }
+                    return Ok(Step::Skip);
+                }
+                Kind::Empty if local == b"f" => self.sheet.formula = 1,
+                // An empty string, if the cell says it's a string, and nothing takes back a value
+                // already read: the slot still holds it.
+                Kind::Empty if local == b"v" => {
+                    self.sheet.cached |= u32::from(self.sheet.cell_type == T_STRING);
+                }
+                Kind::Empty if local == b"is" => self.sheet.cached = 1,
                 Kind::End if local == b"c" => {
-                    self.place(self.sheet.col, 1, self.sheet.pending, part)?;
+                    let pending = self.sheet.pending;
+                    let slot = if self.sheet.formula != 0 && self.sheet.cached == 0 {
+                        pending.with_no_result()
+                    } else {
+                        pending
+                    };
+                    self.place(self.sheet.col, 1, slot, part)?;
                     self.sheet.mode = X_CELLS;
                 }
                 Kind::Eof => return Err(broken(part, IN_CELL)),
@@ -554,8 +696,14 @@ impl Run<'_> {
                 Kind::End if self.sheet.depth > 1 => self.sheet.depth -= 1,
                 Kind::End => {
                     self.sheet.pending = if self.sheet.mode == X_VALUE {
+                        // Nothing there is a string's value, and no other type's.
+                        let (value, _) = self.gathered();
+                        self.sheet.cached = u32::from(
+                            self.sheet.cell_type == T_STRING || !value.trim_ascii().is_empty(),
+                        );
                         self.value(part)?
                     } else {
+                        self.sheet.cached = 1;
                         let (slot, used) = self.kept(0, self.sheet.val_len);
                         self.sheet.used = used;
                         slot
@@ -586,6 +734,11 @@ impl Run<'_> {
             found.see(name, value);
         }
         let repeat = found.repeated.and_then(parse_u32).unwrap_or(1).max(1);
+        self.sheet.cell_repeat = u64::from(repeat);
+        // Outside the range, nothing of it is kept, so its value doesn't ask for room.
+        if !self.wants(self.sheet.col, self.sheet.cell_repeat) {
+            return Ok(());
+        }
         let declared = found.office_type.or(found.any_type);
         // LibreOffice marks an error cell `office:value-type="string"` *and*
         // `calcext:value-type="error"`; the extension is the truth there.
@@ -615,17 +768,26 @@ impl Run<'_> {
             self.gather(raw, true, false, part)?;
         }
         let sheet = &mut *self.sheet;
-        sheet.cell_repeat = u64::from(repeat);
         sheet.value_type = value_type;
         sheet.value_present = u32::from(raw.is_some());
         sheet.paragraphs = 0;
+        sheet.formula = u32::from(found.formula.is_some());
         Ok(())
     }
 
     /// Ends an ODS cell: what it holds, by its declared type, placed in every column it
-    /// repeats over.
+    /// repeats over. A formula has no result where a type that has a value attribute has none, and
+    /// where no type is declared and there's no paragraph either: a value of spaces is text, as it
+    /// always was, so the two fills agree on it. A string's value is its text, and
+    /// `<text:p/>` with no type is how LibreOffice and Google write `=""`: those are results.
     fn ods_finish(&mut self, part: &Part) -> Result<(), Stop> {
         let (value, text) = self.gathered();
+        let uncached = self.sheet.formula != 0
+            && match self.sheet.value_type {
+                V_FLOAT | V_BOOL | V_DATE | V_TIME => value.is_empty(),
+                V_NONE => text.is_empty() && self.sheet.paragraphs == 0,
+                _ => false,
+            };
         let value_len = value.len() as u64;
         let keep_value = self.kept(0, value_len);
         let keep_text = self.kept(value_len, text.len() as u64);
@@ -657,8 +819,13 @@ impl Run<'_> {
             Some(slot) => (slot, self.sheet.used),
             None => used,
         };
+        let slot = if uncached {
+            slot.with_no_result()
+        } else {
+            slot
+        };
         let col = self.sheet.col;
-        if !slot.is_empty() && col < MAX_COLUMNS {
+        if (!slot.is_empty() || uncached) && col < MAX_COLUMNS {
             let count = self.sheet.cell_repeat.min(MAX_COLUMNS - col);
             let before = self.sheet.used;
             self.sheet.used = used;
@@ -703,6 +870,13 @@ impl Run<'_> {
                     sheet.next_number = sheet.next_number.saturating_add(repeat);
                     sheet.col = 0;
                     self.clear_row();
+                    match self.opening() {
+                        Opening::Read => {}
+                        Opening::PastEnd => return Ok(Step::Row),
+                        Opening::Finished => return Ok(Step::End),
+                        Opening::PassOver if token.kind == Kind::Start => return Ok(Step::Skip),
+                        Opening::PassOver => return Ok(Step::Take),
+                    }
                     if token.kind == Kind::Empty {
                         return Ok(Step::Row);
                     }
@@ -727,6 +901,14 @@ impl Run<'_> {
             O_CELLS => match token.kind {
                 _ if opens && matches!(local, b"table-cell" | b"covered-table-cell") => {
                     self.ods_attrs(&Tag::of(buf, token), part)?;
+                    // Wholly outside the range: not read, `ods_attrs` having kept nothing of it.
+                    if !self.wants(self.sheet.col, self.sheet.cell_repeat) {
+                        self.sheet.col = self.sheet.col.saturating_add(self.sheet.cell_repeat);
+                        if token.kind == Kind::Start {
+                            return Ok(Step::Skip);
+                        }
+                        return Ok(Step::Take);
+                    }
                     if token.kind == Kind::Empty {
                         self.ods_finish(part)?;
                     } else {
@@ -824,7 +1006,7 @@ impl Run<'_> {
                 } else {
                     sheet.repeat_left -= 1;
                 }
-                sheet.current = sheet.current.wrapping_add(1);
+                sheet.current = sheet.current.saturating_add(1);
                 return Ok(true);
             }
             if sheet.done != 0 {
@@ -834,29 +1016,51 @@ impl Run<'_> {
                 self.sheet.done = 1;
                 return Ok(false);
             }
-            let sheet = &mut *self.sheet;
-            let blank = sheet.occupied == 0 && sheet.beyond == 0;
-            let mut gap = sheet.gap;
-            let mut repeat = sheet.repeat.max(1);
-            if blank {
-                // An explicit empty row is just more gap.
-                gap = gap.wrapping_add(repeat);
-                repeat = 0;
-            }
-            let skip = sheet.skip_empty != 0;
-            if skip {
-                gap = 0;
-            }
-            // The first delivery is row `number - gap` when gaps are delivered; `current`
-            // is stepped on each delivery.
-            sheet.current = if skip {
-                sheet.number.wrapping_sub(1)
-            } else {
-                sheet.number.wrapping_sub(sheet.gap).wrapping_sub(1)
-            };
-            sheet.gap_left = gap;
-            sheet.repeat_left = repeat;
-            sheet.row_end = sheet.used;
+            self.admit();
+        }
+    }
+
+    /// Works out which of the rows a row just read stands for are delivered, in this order: the
+    /// range, then `skip`, then the filter, then what `header_row` discards.
+    /// It's counted, whatever the repeat, and nothing here goes row by row.
+    fn admit(&mut self) {
+        let sheet = &mut *self.sheet;
+        let (first, past) = sheet.rows_in_range();
+        let number = u64::from(sheet.number);
+        let end = number + u64::from(sheet.repeat.max(1));
+        // The rows that hold nothing run to here: the gap and, an explicit empty row being just
+        // more gap, the row itself.
+        let blank = sheet.occupied == 0 && sheet.beyond == 0;
+        // A formula with no result doesn't hold a row past the filter, as it never has. A row
+        // that's delivered is delivered with it, though, or nothing would say what's in the row.
+        let stored = !blank || (sheet.uncached != 0 && sheet.skip_empty == 0);
+        let held_from = if stored { number } else { end };
+        if end >= past {
+            // Nothing after this is in the range, and nothing after this is read.
+            sheet.done = 1;
+        }
+        let end = end.min(past);
+        let mut from = (number - u64::from(sheet.gap)).max(first);
+        let skipped = u64::from(sheet.skip_left).min(end.saturating_sub(from));
+        sheet.skip_left -= skipped as u32;
+        from += skipped;
+        if sheet.skip_empty != 0 {
+            from = from.max(held_from);
+        }
+        let discarded = u64::from(sheet.discard_left).min(end.saturating_sub(from));
+        sheet.discard_left -= discarded as u32;
+        from += discarded;
+        // `current` is stepped on each delivery, the first being row `from`. A row past the last
+        // number a `u32` holds says that last number, as `next_number` does.
+        sheet.current = (from.min(u64::from(u32::MAX)) as u32).wrapping_sub(1);
+        sheet.gap_left = held_from.min(end).saturating_sub(from) as u32;
+        sheet.repeat_left = end.saturating_sub(held_from.max(from)) as u32;
+        sheet.row_end = sheet.used;
+        if sheet.gap_left == 0 && sheet.repeat_left == 0 {
+            // A row nothing comes of keeps no room, or discarding many would want the arena to
+            // hold them all.
+            sheet.used = sheet.row_start;
+            sheet.row_end = sheet.row_start;
         }
     }
 
@@ -868,6 +1072,7 @@ impl Run<'_> {
         &mut self,
         specs: &[ColumnSpec],
         columns: &[ColumnBuffer],
+        read_format: fn(&ColumnSpec) -> Option<NumFormat>,
         cells: &mut [Span],
         part: &Part,
     ) -> Result<(), Stop> {
@@ -894,14 +1099,19 @@ impl Run<'_> {
                 strings: self.strings,
             };
             // SAFETY: the caller's contract.
-            let raw = unsafe { cast(&slot, door, spec, self.system, buffer, at, &mut stores) }
-                .map_err(|needed| {
-                    if needed > u64::from(u32::MAX) {
-                        Stop::Fail(part.failure(Failure::TOO_LARGE, 0))
-                    } else {
-                        Stop::Arena(needed.max(self.arena.len() as u64 * 2))
-                    }
-                })?;
+            let raw = unsafe {
+                cast(
+                    &slot,
+                    door,
+                    spec,
+                    read_format,
+                    self.system,
+                    buffer,
+                    at,
+                    &mut stores,
+                )
+            }
+            .map_err(|needed| for_room(needed, self.arena.len(), part))?;
             if let Some(entry) = cells.get_mut(base + index) {
                 *entry = raw;
             }
@@ -910,6 +1120,81 @@ impl Run<'_> {
             *entry = Span {
                 offset: self.sheet.current,
                 len: 0,
+            };
+        }
+        self.sheet.used = used as u64;
+        Ok(())
+    }
+
+    /// [`Run::write`], with what [`ColumnSpecWith`] declares, notes, and the row's width.
+    ///
+    /// # Safety
+    /// As [`Run::write`], every column's `notes` too unless they're null, and `specs`' pointers as
+    /// [`ColumnSpecWith`] says.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn write_with(
+        &mut self,
+        specs: &[ColumnSpecWith],
+        columns: &[ColumnBufferWith],
+        tokens: &[u8],
+        cells: &mut [Span],
+        widths: &mut [u32],
+        part: &Part,
+    ) -> Result<(), Stop> {
+        let at = self.sheet.rows as usize;
+        let base = at.saturating_mul(specs.len() + 1);
+        let mut used = self.sheet.used as usize;
+        let empty = self.sheet.empty_delivery != 0;
+        for (index, (spec, buffer)) in specs.iter().zip(columns).enumerate() {
+            let Some(door) = Door::from_code(spec.door, spec.param) else {
+                return Err(Stop::Contract);
+            };
+            let ordinal = u64::from(spec.ordinal);
+            // How far the row runs doesn't depend on how many slots this caller gave it.
+            let absent = empty || ordinal >= self.sheet.width;
+            let slot = if absent || ordinal >= self.sheet.extent {
+                Slot::EMPTY
+            } else {
+                self.row
+                    .get(ordinal as usize)
+                    .copied()
+                    .unwrap_or(Slot::EMPTY)
+            };
+            let mut stores = Stores {
+                arena: &mut *self.arena,
+                used: &mut used,
+                strings: self.strings,
+            };
+            // SAFETY: the caller's contract.
+            let raw = unsafe {
+                cast_with(
+                    &slot,
+                    absent,
+                    door,
+                    spec,
+                    tokens,
+                    self.system,
+                    buffer,
+                    at,
+                    &mut stores,
+                )
+            }
+            .map_err(|needed| for_room(needed, self.arena.len(), part))?;
+            if let Some(entry) = cells.get_mut(base + index) {
+                *entry = raw;
+            }
+        }
+        if let Some(entry) = cells.get_mut(base + specs.len()) {
+            *entry = Span {
+                offset: self.sheet.current,
+                len: 0,
+            };
+        }
+        if let Some(entry) = widths.get_mut(at) {
+            *entry = if empty {
+                0
+            } else {
+                self.sheet.width.min(u64::from(u32::MAX)) as u32
             };
         }
         self.sheet.used = used as u64;
@@ -994,6 +1279,46 @@ pub fn sheet(
     out: &mut Filled,
 ) -> i32 {
     *out = Filled::default();
+    let options = RawSheetOptions {
+        size: RawSheetOptions::SIZE,
+        has_header: u32::from(has_header),
+        skip_empty_rows: u32::from(skip_empty_rows),
+        ..RawSheetOptions::default()
+    };
+    position(state, container, part, index, &options, out)
+}
+
+/// [`sheet`], with the options [`RawSheetOptions`] holds. A range declared inverted, or a `size`
+/// the core doesn't read, is [`ERR_CONTRACT`], and nothing is written then. `header`, `fill` and
+/// [`fill_with`] all read the options from the state.
+pub fn sheet_with(
+    state: &mut State,
+    container: &[u8],
+    part: &[u8],
+    index: u32,
+    options: &RawSheetOptions,
+    out: &mut Filled,
+) -> i32 {
+    let inverted = |first: u32, last: u32| first != 0 && last != 0 && first > last;
+    if options.size != RawSheetOptions::SIZE
+        || inverted(options.first_row, options.last_row)
+        || inverted(options.first_column, options.last_column)
+        || state.opened != OPENED
+    {
+        return ERR_CONTRACT;
+    }
+    *out = Filled::default();
+    position(state, container, part, index, options, out)
+}
+
+fn position(
+    state: &mut State,
+    container: &[u8],
+    part: &[u8],
+    index: u32,
+    options: &RawSheetOptions,
+    out: &mut Filled,
+) -> i32 {
     if state.opened != OPENED {
         return ERR_CONTRACT;
     }
@@ -1006,9 +1331,15 @@ pub fn sheet(
             _ => O_SEEK,
         },
         table: index,
-        skip_empty: u32::from(skip_empty_rows),
-        header_pending: u32::from(has_header),
+        skip_empty: u32::from(options.skip_empty_rows != 0),
+        header_pending: u32::from(options.has_header != 0),
         next_number: 1,
+        skip_left: options.skip,
+        discard_left: options.header_row,
+        first_row: options.first_row,
+        first_column: options.first_column,
+        last_row: options.last_row,
+        last_column: options.last_column,
         ..Sheet::default()
     };
     if state.format == FORMAT_NUMBERS {
@@ -1051,11 +1382,58 @@ pub fn sheet(
     }
 }
 
+/// `A5:F200` as four numbers, or `None` for anything else: two corners, each its column's capital
+/// letters (`XFD`, the widest any format has, at most) and its row's digits (no leading zero, no
+/// row 0, nothing a `u32` can't hold), and the second no less than the first in either.
+pub fn parse_range(text: &[u8]) -> Option<RawRange> {
+    let colon = text.iter().position(|&byte| byte == b':')?;
+    let (first, last) = text.split_at_checked(colon)?;
+    let (first_column, first_row) = corner(first)?;
+    let (last_column, last_row) = corner(last.get(1..)?)?;
+    if first_row > last_row || first_column > last_column {
+        return None;
+    }
+    Some(RawRange {
+        first_row,
+        first_column,
+        last_row,
+        last_column,
+    })
+}
+
+/// One corner of a range: its 1-based column and row.
+fn corner(text: &[u8]) -> Option<(u32, u32)> {
+    let letters = text
+        .iter()
+        .take_while(|byte| byte.is_ascii_uppercase())
+        .count();
+    let (column, row) = text.split_at_checked(letters)?;
+    if column.is_empty() || column.len() > 3 {
+        return None;
+    }
+    let column = column.iter().fold(0u32, |value, &byte| {
+        value * 26 + u32::from(byte.wrapping_sub(b'A')) + 1
+    });
+    if u64::from(column) > MAX_COLUMNS || matches!(row.first(), None | Some(b'0')) {
+        return None;
+    }
+    let mut number = 0u32;
+    for &byte in row {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        number = number
+            .checked_mul(10)?
+            .checked_add(u32::from(byte.wrapping_sub(b'0')))?;
+    }
+    Some((column, number))
+}
+
 /// Reads the header: the first row delivered, each cell as text — a typed cell said the
 /// way the text door says it — one span of `cells` per column up to the last that holds a
 /// cell; `out.rows` is how many. A span with its flag set is in `arena`, one without in
 /// the shared strings. A sheet opened without a header has none, and neither has an empty
-/// sheet.
+/// sheet. A name that isn't valid UTF-8 is [`ERR_STRUCTURE`] with [`Failure::ENCODING`].
 ///
 /// Uses `window`, `arena`, `cells`, `row` and the workbook's tables. Resumes after a
 /// refusal.
@@ -1114,6 +1492,20 @@ pub fn header(
                         *name = Span::default();
                     }
                 }
+                // Judged only now, since a later cell can overwrite a name. A name has no
+                // verdict to carry a fault, and an empty one is still a name.
+                for name in memory.cells.iter().take(count) {
+                    let bytes =
+                        cell::resolve(Span::default(), Some(*name), memory.arena, memory.strings);
+                    if matches!(
+                        hypercast::cast_text(bytes),
+                        Err(fault) if fault.reason == Reason::Malformed
+                    ) {
+                        let failure = state.part.failure(Failure::ENCODING, 0);
+                        let stop = fail(sheet, Stop::Fail(failure));
+                        return refuse(stop, &mut out.needed, &mut out.failure);
+                    }
+                }
             }
             sheet.header_pending = 0;
             out.rows = count as u64;
@@ -1153,6 +1545,68 @@ pub unsafe fn fill(
     memory: &mut Memory<'_>,
     out: &mut Filled,
 ) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        fill_read(
+            state,
+            container,
+            specs,
+            columns,
+            max_rows,
+            memory,
+            out,
+            ColumnSpec::num_format,
+        )
+    }
+}
+
+/// [`fill`] as `hypertabular_workbook_fill` promises it: a format's flags as 1.0 read them
+/// ([`ColumnSpec::num_format_1_0`]), its low 8 bits, so every format reads Western there and what
+/// HyperCast answers on a shape is this version's. The extensions and the Rust API, whose callers can only have meant the flags they set
+/// in this version's terms, call [`fill`] or [`fill_with`].
+///
+/// # Safety
+/// As [`fill`].
+pub(crate) unsafe fn fill_1_0(
+    state: &mut State,
+    container: &[u8],
+    specs: &[ColumnSpec],
+    columns: &[ColumnBuffer],
+    max_rows: usize,
+    memory: &mut Memory<'_>,
+    out: &mut Filled,
+) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        fill_read(
+            state,
+            container,
+            specs,
+            columns,
+            max_rows,
+            memory,
+            out,
+            ColumnSpec::num_format_1_0,
+        )
+    }
+}
+
+/// [`fill`], with what a column's format is taken to be.
+///
+/// # Safety
+/// As [`fill`].
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn fill_read(
+    state: &mut State,
+    container: &[u8],
+    specs: &[ColumnSpec],
+    columns: &[ColumnBuffer],
+    max_rows: usize,
+    memory: &mut Memory<'_>,
+    out: &mut Filled,
+    read_format: fn(&ColumnSpec) -> Option<NumFormat>,
+) -> i32 {
     *out = Filled::default();
     if state.opened != OPENED
         || state.op != OP_ROWS
@@ -1163,18 +1617,110 @@ pub unsafe fn fill(
     }
     for (spec, buffer) in specs.iter().zip(columns) {
         if Door::from_code(spec.door, spec.param).is_none()
-            || spec.num_format().is_none()
+            || read_format(spec).is_none()
             || spec.ordinal as usize >= memory.row.len()
             || (max_rows > 0 && (buffer.values.is_null() || buffer.verdicts.is_null()))
         {
             return ERR_CONTRACT;
         }
     }
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        read_batch(
+            state,
+            container,
+            specs.len(),
+            max_rows,
+            memory,
+            out,
+            |run, cells, part| run.write(specs, columns, read_format, cells, part),
+        )
+    }
+}
+
+/// [`fill`], with the column options [`ColumnSpecWith`] declares and the notes
+/// [`ColumnBufferWith`] takes: `tokens` is the list a column without its own inherits, and
+/// `row_widths`, unless it's empty, gets the cells each delivered row had, as far as the last
+/// holding one inside the range. A text cell is judged by HyperCast's detailed doors and a typed
+/// one by their typed twins, with the verdicts and values [`fill`] gives. A formula with no cached
+/// result is `Empty` at [`ORIGIN_UNCACHED`](crate::kernel::abi::CellNote::ORIGIN_UNCACHED) and
+/// counts toward the row's width. The rows delivered are [`fill`]'s, so a row holding nothing else
+/// can be one `skip_empty_rows` drops.
+///
+/// Everything is judged before anything is written: [`ERR_CONTRACT`] leaves `state`, `out` and
+/// every buffer as they were. Once past that it behaves as [`fill`] does, a refusal for room
+/// included, so a caller grows the buffer and repeats the call.
+///
+/// # Safety
+/// As [`fill`], `notes` as `verdicts` unless it's null, `row_widths` holding `max_rows` counts
+/// unless it's empty, and `specs`' pointers as [`ColumnSpecWith`] says.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn fill_with(
+    state: &mut State,
+    container: &[u8],
+    specs: &[ColumnSpecWith],
+    columns: &[ColumnBufferWith],
+    max_rows: usize,
+    memory: &mut Memory<'_>,
+    tokens: &[u8],
+    row_widths: &mut [u32],
+    out: &mut Filled,
+) -> i32 {
+    if state.opened != OPENED
+        || state.op != OP_ROWS
+        || specs.len() != columns.len()
+        || state.rows.header_pending != 0
+        || !tokens_are_whole(tokens)
+    {
+        return ERR_CONTRACT;
+    }
+    for (spec, buffer) in specs.iter().zip(columns) {
+        // SAFETY: the caller's contract.
+        let judged =
+            unsafe { resolved_date(spec).is_some() && resolved_tokens(spec, &[]).is_some() };
+        if !judged
+            || Door::from_code(spec.door, spec.param).is_none()
+            || resolved_format(spec).is_none()
+            || spec.ordinal as usize >= memory.row.len()
+            || (max_rows > 0 && (buffer.values.is_null() || buffer.verdicts.is_null()))
+        {
+            return ERR_CONTRACT;
+        }
+    }
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        read_batch(
+            state,
+            container,
+            specs.len(),
+            max_rows,
+            memory,
+            out,
+            |run, cells, part| run.write_with(specs, columns, tokens, cells, row_widths, part),
+        )
+    }
+}
+
+/// The batch a fill reads, whichever way its rows are written.
+///
+/// # Safety
+/// `write` is safe to call for row `sheet.rows` while that's below `max_rows`.
+#[inline(always)]
+unsafe fn read_batch(
+    state: &mut State,
+    container: &[u8],
+    column_count: usize,
+    max_rows: usize,
+    memory: &mut Memory<'_>,
+    out: &mut Filled,
+    mut write: impl FnMut(&mut Run<'_>, &mut [Span], &Part) -> Result<(), Stop>,
+) -> i32 {
+    *out = Filled::default();
     if state.rows.failed != 0 {
         out.failure = state.rows.failure;
         return ERR_STRUCTURE;
     }
-    let wanted = max_rows.saturating_mul(specs.len() + 1);
+    let wanted = max_rows.saturating_mul(column_count + 1);
     if memory.cells.len() < wanted {
         out.needed = wanted as u64;
         return ERR_CELLS;
@@ -1204,7 +1750,7 @@ pub unsafe fn fill(
             }
             for slot in memory.row.iter_mut().take(sheet.extent as usize) {
                 if let Some(span) = slot.span().filter(|span| span.flagged()) {
-                    *slot = Slot::text(Span {
+                    *slot = slot.moved(Span {
                         offset: span.offset.wrapping_sub(from as u32),
                         len: span.len,
                     });
@@ -1247,8 +1793,7 @@ pub unsafe fn fill(
             // A row whose write was refused is written again from its first column.
             run.sheet.used = run.sheet.mark;
         }
-        // SAFETY: the caller's contract; `rows` is below `max_rows`.
-        match unsafe { run.write(specs, columns, memory.cells, source.part()) } {
+        match write(&mut run, memory.cells, source.part()) {
             Ok(()) => {
                 run.sheet.writing = 0;
                 run.sheet.rows += 1;
@@ -1295,6 +1840,8 @@ struct OdsAttrs<'a> {
     date: Option<&'a [u8]>,
     time: Option<&'a [u8]>,
     string: Option<&'a [u8]>,
+    /// `table:formula`, by local name.
+    formula: Option<&'a [u8]>,
 }
 
 impl<'a> OdsAttrs<'a> {
@@ -1318,6 +1865,7 @@ impl<'a> OdsAttrs<'a> {
             b"date-value" => first(&mut self.date),
             b"time-value" => first(&mut self.time),
             b"string-value" => first(&mut self.string),
+            b"formula" => first(&mut self.formula),
             _ => {}
         }
     }

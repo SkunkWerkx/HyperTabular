@@ -1,4 +1,18 @@
 module HyperTabular
+  # One thing that went wrong in a Batch: an entry of Batch#faults.
+  #
+  # +row+ is the row in the batch, from zero. +line+ is where it came from, Batch#line.
+  # +plan_column+ is the column of the plan, and +source_column+ the column in the source, from
+  # zero (for delimited text the plan column's ordinal, for a sheet its own column, A being 0,
+  # wherever the range starts), each nil for an entry about the row as a whole. +reason+ is the
+  # verdict's: :malformed, :out_of_range, or :empty for a formula with no cached value, and nil
+  # for an entry about the row as a whole. +detail+ is what failed in the cell, a HyperCast::Detail
+  # or nil. +origin+ is where the verdict came from, Batch#origin. +offset+ and +length+ are the
+  # fault's span in the characters String#[] slices the cell's text by, 0 where there is none, and
+  # +expected+ and +found+ a long row's widths, otherwise 0.
+  Problem = Data.define(:row, :line, :plan_column, :source_column, :reason, :detail, :origin, :offset, :length,
+                        :expected, :found)
+
   # The rows one DelimitedReader#read or Sheet#read delivered, as typed columns: the same
   # class for delimited text and for a sheet of a workbook.
   #
@@ -13,7 +27,9 @@ module HyperTabular
   #   end
   #
   # A batch owns what it shows — the arrays the core wrote are copied out of the reader's
-  # buffers as it is made — so it stays good after the reader has moved on. Values are
+  # buffers as it is made — so it stays good after the reader has moved on, and so do its rows
+  # and its #faults. A Fault carries the HyperCast::Detail of what failed in the cell, and #origin
+  # says where a verdict came from. Values are
   # HyperCast's gem's own for the same doors: true/false, Integer, Float, HyperCast::Decimal,
   # a hyphenated UUID String, a UTC Time, Date, DateTime, Integer nanoseconds since midnight,
   # Rational seconds, and a UTF-8 String for text.
@@ -25,8 +41,12 @@ module HyperTabular
   class Batch
     include Enumerable
 
-    # The verdict of every cell that had no bytes at all: one shared, frozen Fault.
+    # The verdict of every cell that had no bytes at all in a read with notes off: one shared,
+    # frozen Fault.
     EMPTY = HyperCast::Fault.new(reason: :empty, offset: 0, length: 0)
+
+    # The same in a read with notes on, which says it was blank: one shared, frozen Fault.
+    BLANK = HyperCast::Fault.new(reason: :empty, offset: 0, length: 0, detail: HyperCast::Detail::BLANK)
 
     # The doors whose column is one String#unpack directive away from its values: HyperCast's
     # directive for one value, repeated down the column.
@@ -44,8 +64,12 @@ module HyperTabular
 
     # Made by a reader from what the core just wrote, copied: +values+ and +verdicts+ per
     # plan column, the cell table (+per_row+ spans a row), what an unflagged span indexes
-    # (+base+, from +origin+) and what a flagged one does (+arena+).
-    def initialize(plan, rows, values, verdicts, cells, per_row, base, origin, arena, workbook:)
+    # (+base+, from +origin+) and what a flagged one does (+arena+). +notes+ is each column's
+    # CellNote array, or nil with notes off, +widths+ the row widths of a read that reports long
+    # rows, with the +expected+ width and the +long_rows+ code, and +first_column+ the source column
+    # a plan's ordinal 0 is.
+    def initialize(plan, rows, values, verdicts, cells, per_row, base, origin, arena, workbook:, notes: nil,
+                   widths: nil, expected: 0, long_rows: 0, first_column: 0)
       @columns = plan
       @rows = rows
       @bytes = values
@@ -56,9 +80,14 @@ module HyperTabular
       @origin = origin
       @arena = arena.force_encoding(Encoding::UTF_8)
       @workbook = workbook
+      @notes = notes
+      @widths = widths
+      @expected = expected
+      @long_rows = long_rows
+      @first_column = first_column
       @values = Array.new(plan.size)
       @verdicts = Array.new(plan.size)
-      @faults = Array.new(plan.size)
+      @words = Array.new(plan.size)
     end
 
     # Where row +row+ came from: for delimited text the 1-based line its record starts on,
@@ -97,7 +126,7 @@ module HyperTabular
       judged = @verdicts[column]
       return judged[index] if judged
 
-      cell(column, index, values(column), faults(column))
+      cell(column, index, values(column), verdict_words(column))
     end
 
     # The text the cell at (+column+, +row+) was cast from, whatever its door and whatever
@@ -115,6 +144,30 @@ module HyperTabular
       # A quoted cell with an escaped quote in it: unescaped, as the core cast it.
       quoted = @base.byteslice(@origin + offset, length & Runtime::Delimited::SPAN_LENGTH)
       Runtime.unescape(quoted).force_encoding(Encoding::UTF_8)
+    end
+
+    # Where the verdict of the cell at (+column+, +row+) came from: :cell, a door judged the cell's
+    # own text; :token, its exact unquoted bytes are a declared token, so it is :empty and no door
+    # ran; :padded, the row has no such cell; or :uncached, a workbook's formula with no cached
+    # value, :empty with no door run. With notes off, always :cell. IndexError for a column outside
+    # the plan or a row outside the batch.
+    def origin(column, row)
+      @columns.fetch(column)
+      index = at(row)
+      return :cell if @notes.nil?
+
+      ORIGINS.fetch(@notes.fetch(column).unpack1("S<", offset: index * NOTE_BYTES + 2))
+    end
+
+    # Everything wrong in this batch, by row then column, a row's entry first: a frozen Array of
+    # Problem. Listed: :malformed and :out_of_range cells, a workbook's formulas with no cached
+    # value, and long rows a :report dialect cut. Not listed: blanks, tokens, padding, or a row
+    # :truncate cut. With notes off a refused cell has no detail and an uncached formula isn't
+    # listed. A row the empty-row filter dropped can't be named. Made the first time it is asked
+    # for, from what the batch holds, so a read nobody asks this of pays nothing for it, and a
+    # batch kept past the next read answers for itself.
+    def faults
+      @problems ||= listed
     end
 
     # Yields a Row for each row of the batch, in order, and returns the batch; without a
@@ -138,6 +191,38 @@ module HyperTabular
 
     private
 
+    # Bytes in one CellNote: a detail code and an origin code, two u16s.
+    NOTE_BYTES = 4
+    # Bytes in one RawProblem.
+    PROBLEM_BYTES = 32
+    # What each origin code in a CellNote means.
+    ORIGINS = %i[cell token padded uncached].freeze
+    private_constant :NOTE_BYTES, :PROBLEM_BYTES, :ORIGINS
+
+    # What the core lists for this batch, as Problems.
+    def listed
+      raw = Runtime.faults(@verdict_bytes, @notes, @rows, @widths, @expected, @long_rows)
+      Array.new(raw.bytesize / PROBLEM_BYTES) do |entry|
+        problem(*raw.unpack("L<3S<2L<4", offset: entry * PROBLEM_BYTES))
+      end.freeze
+    end
+
+    # One RawProblem as a Problem: the source column worked out, the span moved to characters.
+    def problem(row, plan_column, reason, detail, origin, offset, length, expected, found)
+      whole_row = plan_column == ROW_LEVEL
+      if !whole_row && !(offset.zero? && length.zero?)
+        offset, length = HyperCast::Interop.characters(raw(plan_column, row), offset, length)
+      end
+      Problem.new(row: row, line: line(row), plan_column: whole_row ? nil : plan_column,
+                  source_column: whole_row ? nil : @columns.fetch(plan_column).ordinal + @first_column,
+                  reason: HyperCast::REASONS[reason], detail: detail.zero? ? nil : HyperCast::Detail.of(detail),
+                  origin: ORIGINS.fetch(origin), offset: offset, length: length, expected: expected, found: found)
+    end
+
+    # The plan column of an entry about the row as a whole.
+    ROW_LEVEL = 0xFFFF_FFFF
+    private_constant :ROW_LEVEL
+
     # The bytes a span names: in the arena when it is flagged, in the base when not.
     def slice(offset, length)
       return @arena.byteslice(offset, length & Runtime::Delimited::SPAN_LENGTH) if length >= Runtime::Delimited::SPAN_FLAG
@@ -155,11 +240,11 @@ module HyperTabular
     # A column's verdict array as the core wrote it — offset, length, reason per row, flat
     # — or nil when every cell cast, which one pass over the bytes answers without
     # unpacking anything.
-    def faults(index)
-      flat = @faults[index]
+    def verdict_words(index)
+      flat = @words[index]
       if flat.nil?
         bytes = @verdict_bytes.fetch(index)
-        flat = @faults[index] = bytes.count("\0") == bytes.bytesize ? false : bytes.unpack("L<*")
+        flat = @words[index] = bytes.count("\0") == bytes.bytesize ? false : bytes.unpack("L<*")
       end
       flat || nil
     end
@@ -169,7 +254,7 @@ module HyperTabular
     def decode(column, index)
       door = column.door
       bytes = @bytes.fetch(index)
-      faults = faults(index)
+      faults = verdict_words(index)
       if (directive = SCALARS[door])
         values = bytes.unpack(directive)
         values.map! { |byte| byte != 0 } if door == :bool
@@ -197,7 +282,7 @@ module HyperTabular
     # A column's verdicts: a Success around each value, a Fault where the core says so.
     def judge(column)
       values = values(column)
-      faults = faults(column)
+      faults = verdict_words(column)
       return values.map { |value| HyperCast::Success.new(value: value) }.freeze if faults.nil?
 
       Array.new(@rows) { |row| cell(column, row, values, faults) }.freeze
@@ -214,12 +299,16 @@ module HyperTabular
     # One Fault, its span moved from the bytes the core counts in to the characters
     # String#[] slices by — an identity unless the cell's text has a multi-byte character.
     def fault(column, row, reason, offset, length)
-      return EMPTY if reason == 1 && offset.zero? && length.zero?
+      detail = @notes.nil? ? 0 : @notes.fetch(column).unpack1("S<", offset: row * NOTE_BYTES)
+      if reason == 1 && offset.zero? && length.zero?
+        return EMPTY if detail.zero?
+        return BLANK if detail == BLANK.detail.code
+      end
 
       unless offset.zero? && length.zero?
         offset, length = HyperCast::Interop.characters(raw(column, row), offset, length)
       end
-      HyperCast::Interop.fault(reason, offset, length)
+      HyperCast::Interop.fault(reason, offset, length, detail)
     end
   end
 end

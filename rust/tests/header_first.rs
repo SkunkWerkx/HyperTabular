@@ -3,7 +3,7 @@
 //! The corpus replays (corpus_delimited.rs, corpus_workbook.rs) read every case header
 //! first as well; this file holds the promises around that path.
 
-use hypertabular::{Column, DelimitedReader, Dialect, Error, SheetOptions, Workbook};
+use hypertabular::{Column, DelimitedReader, Dialect, Error, Reason, SheetOptions, Workbook};
 use std::borrow::Cow;
 
 const TEXT: &[u8] = b"Region Code,Region Name,M49 Code,Region Code\n\
@@ -135,6 +135,121 @@ fn a_column_past_the_width_a_header_gives_is_refused() {
 }
 
 #[test]
+fn require_refuses_a_duplicate() {
+    let reader = DelimitedReader::from_slice_unbound(b"id,name,id\n1,a,2\n", Dialect::CSV).unwrap();
+    let header = reader.header().unwrap();
+    let refusal = header.require("id").unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            Error::AmbiguousColumn { name, first: 0, second: 2 } if name == "id"
+        ),
+        "{refusal:?}"
+    );
+    let said = refusal.to_string();
+    assert!(
+        said.contains("\"id\"") && said.contains("0") && said.contains("2"),
+        "{said}"
+    );
+    // Bytes find the same two, and the rest of the header isn't touched by them.
+    assert!(matches!(
+        header.require(b"id"),
+        Err(Error::AmbiguousColumn { .. })
+    ));
+    assert_eq!(header.require("name").unwrap(), 1);
+    assert!(matches!(header.require("nope"), Err(Error::NoColumn(_))));
+
+    // A third is the same refusal: it names the first two.
+    let reader = DelimitedReader::from_slice_unbound(b"x,a,x,x\n", Dialect::CSV).unwrap();
+    assert!(matches!(
+        reader.header().unwrap().require("x"),
+        Err(Error::AmbiguousColumn {
+            first: 0,
+            second: 2,
+            ..
+        })
+    ));
+    // Blank names are names, and a quoted one is its unescaped text.
+    let reader = DelimitedReader::from_slice_unbound(b",a,,\"b\",b\n", Dialect::CSV).unwrap();
+    let header = reader.header().unwrap();
+    assert!(matches!(
+        header.require(""),
+        Err(Error::AmbiguousColumn {
+            first: 0,
+            second: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        header.require("b"),
+        Err(Error::AmbiguousColumn {
+            first: 3,
+            second: 4,
+            ..
+        })
+    ));
+    // The match is exact, so names that differ by case or a space are two names.
+    let reader = DelimitedReader::from_slice_unbound(b"id,ID,id \n", Dialect::CSV).unwrap();
+    let header = reader.header().unwrap();
+    assert_eq!(header.require("id").unwrap(), 0);
+    assert_eq!(header.require("ID").unwrap(), 1);
+    assert_eq!(header.require("id ").unwrap(), 2);
+
+    // A sheet's header is the same header: this sheet's first two columns share a name.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../corpus/workbook/generated-a.ods"
+    );
+    let book = Workbook::open(path).unwrap();
+    let sheet = book.sheet_unbound(0, SheetOptions::default()).unwrap();
+    assert!(matches!(
+        sheet.header().unwrap().require("0.265"),
+        Err(Error::AmbiguousColumn {
+            first: 0,
+            second: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn ordinal_keeps_the_first() {
+    let reader = DelimitedReader::from_slice_unbound(b"id,name,id\n1,a,2\n", Dialect::CSV).unwrap();
+    let header = reader.header().unwrap();
+    assert_eq!(header.ordinal("id"), Some(0));
+    assert_eq!(header.ordinal(b"name"), Some(1));
+    assert_eq!(header.ordinal("nope"), None);
+}
+
+#[test]
+fn binding_a_plan_by_position_still_works() {
+    let text = b"id,name,id\n1,a,2\n";
+    let plan = [Column::i32(2), Column::i32(0), Column::text(1)];
+    let mut unbound = DelimitedReader::from_slice_unbound(text, Dialect::CSV).unwrap();
+    unbound.bind(&plan).unwrap();
+    let up_front = DelimitedReader::from_slice(text, Dialect::CSV, &plan).unwrap();
+    for mut reader in [unbound, up_front] {
+        let batch = reader.read().unwrap().unwrap();
+        assert_eq!(batch.i32(0), &[2]);
+        assert_eq!(batch.i32(1), &[1]);
+        assert_eq!(batch.text(2, 0), Ok(&b"a"[..]));
+    }
+    // And the names are kept exactly, both of them.
+    let reader = DelimitedReader::from_slice(text, Dialect::CSV, &plan).unwrap();
+    let names: Vec<&[u8]> = reader.header().unwrap().names().collect();
+    assert_eq!(names, [&b"id"[..], b"name", b"id"]);
+
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../corpus/workbook/generated-a.ods"
+    );
+    let book = Workbook::open(path).unwrap();
+    let mut sheet = book.sheet_unbound(0, SheetOptions::default()).unwrap();
+    sheet.bind(&[Column::text(1), Column::text(0)]).unwrap();
+    assert!(sheet.read().unwrap().is_some());
+}
+
+#[test]
 fn a_sheet_is_opened_header_first() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook/basic.xlsx");
     let book = Workbook::from_reader(std::fs::File::open(path).unwrap()).unwrap();
@@ -199,7 +314,7 @@ fn a_row_is_its_batch_read_across() {
 }
 
 #[test]
-fn text_as_str_borrows_and_replaces_only_what_is_not_utf8() {
+fn text_as_str_borrows_and_what_is_not_utf8_is_a_fault() {
     let plan = [Column::text(0)];
     let dialect = Dialect::CSV.with_header(false);
     let text = b"caf\xC3\xA9\n\"say \"\"hi\"\"\"\nbad\xFF\n";
@@ -207,7 +322,12 @@ fn text_as_str_borrows_and_replaces_only_what_is_not_utf8() {
     let batch = reader.read().unwrap().unwrap();
     assert!(matches!(batch.text_str(0, 0), Ok(Cow::Borrowed("café"))));
     assert_eq!(batch.text_str(0, 1).unwrap(), "say \"hi\"");
-    assert!(matches!(batch.text_str(0, 2), Ok(Cow::Owned(ref s)) if s == "bad\u{FFFD}"));
+    let fault = batch.text_str(0, 2).unwrap_err();
+    assert_eq!(
+        (fault.reason, fault.offset, fault.len),
+        (Reason::Malformed, 3, 1)
+    );
+    assert_eq!(&*batch.raw(0, 2), b"bad\xFF");
 }
 
 #[test]

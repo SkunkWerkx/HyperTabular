@@ -82,10 +82,12 @@ A plan known up front can be handed over at once —
 before the header is read.
 
 - **The header** (`reader.header`, `sheet.header`) is a `HyperTabular::Header`: a frozen
-  Array of frozen names, which also says where a name is. `header.ordinal(name)`
-  is the first column with exactly that name — case and spaces included — and a `KeyError`
-  naming it when there is none (or, with a block, the block's value, as `Hash#fetch` does);
-  `header.find_ordinal(name)` answers `nil` instead.
+  Array of frozen names, which also says where a name is. `header.ordinal(name)` is the column
+  with exactly that name — case and spaces included — and a `KeyError` naming it when there is
+  none (or, with a block, the block's value, as `Hash#fetch` does). A name two columns share is
+  a `HyperTabular::AmbiguousColumn`, an `ArgumentError` with `name`, `first` and `second`, whose
+  message names both positions, because a plan built from names mustn't read the wrong column:
+  say which by position. `header.find_ordinal(name)` answers the first match, or `nil`.
 - **Binding** happens once, before the first read: `bind` again raises `RuntimeError`, and so
   does a `read` before `bind` — which `bind` then cures. A plan that is not Columns is an
   `ArgumentError` and leaves the reader unbound; so is, once a delimited header has fixed
@@ -94,16 +96,177 @@ before the header is read.
   column reads as empty, and a plan reaching past 256 source columns reads shorter batches,
   as many rows as about 8 MiB of cell table holds. `bound?` says which it is. A `nil` plan
   means "bind later"; `[]` is an empty plan, bound at once.
+  `batch_rows` sizes the arrays a bound plan reads into. The core judges them before anything is
+  allocated: a batch asking for more than 4 GiB, and a `batch_rows` or `buffer_bytes` of 0, are an
+  `ArgumentError` from the core, at open or at `bind`. Below that they're asked for zeroed and aren't
+  written to until a row reaches them, so a large batch costs what the source holds, and one no memory
+  holds is a `NoMemoryError`. Through Fiddle on 64-bit Windows, one array stops at 2 GiB. A delimited
+  plan of no columns has no arrays, and reads at any `batch_rows` up to 2^64. `suggest` is never refused
+  for the size of its own batches: the core says what fits and the sampler reads as many as it takes. A
+  row that alone is past the limit is an `ArgumentError` naming its width.
   `reader.column_count` is the header's count, or the first record's once it has been read.
 - **Rows.** `batch.each`, `reader.each` and `sheet.each` yield a `HyperTabular::Row` —
   `index`, `line`, `get(column)` (also `[]` and `verdict`), `value(column)`, `raw(column)`,
-  `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
+  `origin(column)`, `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
   so a row stays good after the read has moved on. A Row deconstructs as its verdicts, for
   `case row in [HyperCast::Success(value: id), *]`. `reader.each_row` yields each row as
   a frozen Array of verdicts, and `sheet.each_batch` walks a sheet's batches.
 - **A workbook from an IO.** `Workbook.new(io)` reads anything with `#read` to its end into a
   String the workbook owns, as soon as it is opened; `close_source: true` closes the IO once it
   has been read. The kind of workbook is read from its bytes, never from a name.
+
+## A messier file
+
+Everything about a file is still declared, on the `Dialect` and on the `SheetOptions`, whose defaults
+read as before: lines to pass over, records to discard, what a record of the wrong width is, the
+encoding, and what stands for no value.
+
+```ruby
+require "hypertabular"
+
+# Windows-1252, with a title line above the table, NA for nothing and rows that stop short.
+dialect = HyperTabular::Dialect.new(separator: ",", skip: 1, short_rows: :pad, encoding: :windows_1252,
+                                    tokens: ["NA"])
+text = "Exported by hand\nname,amount\ncaf\xE9,NA\ntea\nmilk,12x4\n".b
+plan = [
+  HyperTabular::Column.text(0),
+  HyperTabular::Column.f64(1).with_tokens(%w[NA -]) # in place of the dialect's
+]
+reader = HyperTabular::DelimitedReader.new(text, dialect, plan)
+while (batch = reader.read)
+  batch.each do |row|
+    cell = row.get(1)
+    puts "#{row.value(0)} #{cell.reason} #{row.origin(1)} #{cell.detail}"
+  end
+  # What went wrong, and only that: a blank, a token and a padded cell aren't problems.
+  batch.faults.each do |problem|
+    puts "line #{problem.line} column #{problem.source_column} #{problem.reason} #{problem.detail}"
+  end
+end
+
+# A plan to look at, from a sample of the text. It reads nothing until it's handed to a read.
+found = HyperTabular::DelimitedReader.suggest_string(%(id,total,day\n1,"1,234.50",2026-01-07\n2,12.00,2026-01-08\n),
+                                                     HyperTabular::Dialect::CSV)
+found.report.each do |column|
+  puts "#{column.name} #{column.status} #{column.door} #{column.matched} of #{column.sampled}"
+end
+
+# A sheet takes the part of it that's the table; its plan's ordinals count from B here.
+cut = HyperTabular::Range.parse("B2:D40")
+options = HyperTabular::SheetOptions.new(range: cut)
+puts "#{options.range.first_column} #{options.range.last_row}"
+```
+
+A `TabularError` of kind `:encoding` comes after every intact row before it, and its `byte` alone
+counts the original bytes: a read's spans are all the decoded text's. A declared encoding decodes a
+String too, so it isn't read in place. A sheet's `Range` is parsed by the core, so
+`Range.parse("A5:F200")` means what it means in every binding, with `Range.new(first_row:,
+first_column:, last_row:, last_column:)`, 1-based and `0` for no limit, for what that can't say, such
+as every row from the fifth. A plan's ordinals count from the range's first column, while
+`Batch#line` and a problem's `source_column` stay the sheet's own.
+
+A `Fault` carries HyperCast's `detail`, and `batch.origin(column, row)` and `row.origin(column)` say
+where a cell's verdict came from: `:cell`, `:token`, `:padded` or `:uncached`. `batch.faults` is a
+frozen Array of `HyperTabular::Problem`s, the row, the line, the plan and source columns, the reason,
+detail, origin and span, a long row reported with its `expected` and `found`. It's worked out when
+it's first asked for and kept. A batch is a copy, so the list and the batch both stay right after the
+next read and after the reader has gone; nothing here goes stale. A span counts characters, as a
+`Fault`'s does, on the verdict and the list alike, so `raw[problem.offset, problem.length]` slices it.
+
+`notes: false`, on a reader or in `SheetOptions`, drops `detail` and `origin`, which then say `nil` and
+`:cell`: the read costs a little less, and `faults` can't list a formula with no cached value.
+`Column#with_date_options` hands a date door HyperCast's `DateOptions` and `MonthNames`, and on a sheet
+it and `with_tokens` reach only a text cell; `with_tokens([])` says a column has none, the dialect's
+included. Tokens and month names last as long as the read that holds them: this binding keeps nothing
+for the life of the process, on either backend.
+
+A stream that stalls still hands over every row it has finished: a read asks the IO for more only when
+it has no finished row in hand, and each ask is one `#readpartial` or `#read`, declared encodings
+included. Whatever the IO's read raises goes to the caller and is final, as in Rust and Go, a
+transient `IOError` or `SystemCallError` (`Errno::EAGAIN`, `Errno::ETIMEDOUT`) included: Ruby can't
+tell one from an exception that landed in the read (below), which may have taken bytes with it, so
+the reader isn't resumable after it. Every later read raises `RuntimeError` naming it; open the
+source again to go on. A broken record is final too, the same failure on every later read.
+
+A reader or a sheet is called into once at a time. A call back into it from the IO it reads or from
+a plan's `each` while it reads or binds (`read`, `each`, `bind`, `close`, a sheet's `suggest`)
+raises `RuntimeError`, "the reader is in the middle of a call; nothing that call runs can call back
+into it" ("the sheet …" for a sheet), and the call it came from goes on as it was. A call from your
+own block, between batches, is yours to make. An exception that lands mid-read, such as
+`Timeout.timeout`, `Thread#raise` or Ctrl-C's `Interrupt`, waits until the core and the reader agree
+again, so no row is lost or numbered wrong inside the read: a batch it lands on is handed over by
+the next `read`, with its own lines. The one place it doesn't wait is the IO's own read while that
+blocks, so a timeout still breaks a read waiting on a pipe. Ruby may drop bytes it had already read
+from the IO when an exception lands there, so that read raises the exception and every later read
+(`each` and the rest included) raises `RuntimeError` naming it: "the reader can't read on: Interrupt
+(…) was raised while it was reading its IO, and what that read had taken from the IO may be lost". Once
+the IO has answered, the exception waits until its answer is held. Anything raised inside the reader
+once the core has read past a batch, such as a `NoMemoryError` while the batch is copied, makes
+every later read raise `RuntimeError` naming it. One gap no Ruby method can close is the caller's
+own: an exception that lands after `read` has let go of its batch and before the caller holds it
+loses that batch. Its rows are missing, never wrong, and the lines `Batch#line` gives the next batch
+skip them. A caller that can't lose one holds such exceptions back itself around the read and
+whatever keeps its batch, as in
+`Thread.handle_interrupt(Object => :never) { batches << reader.read }`; the read hands the batch
+over whole, and the exception lands after.
+
+A walk through the rows (`each`, `each_row`, a sheet's `each` and `each_batch`) left part-way
+through a batch, by `break`, `first`, `take` or an exception from the block, leaves the rest of that
+batch behind, as the Rust core and Python's `reader.rows()` do: the next walk or `read` starts at
+the next batch, and the lines `Batch#line` gives show the skip. An Enumerator from `each` without a
+block, kept and advanced with `next`, is one walk and goes on where it was.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied. Read
+the report first: only a resolved column reads through its door in the plan, the rest as text. With no
+format declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read
+only with `,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the
+plan is in whichever is left. `1,234` and `1.234` read both ways, so they come back `:ambiguous` and
+read as text until a format is declared or another cell settles them, which takes in a column of prices
+at three decimals; `SuggestOptions.new(date_order: ...)` does the same for `01/02/2026`. `2,5` beside
+`2.5` is `:unresolved`, and `1,23,456`, Indian grouping, is text until the column declares Indian
+grouping, because nothing says its culture.
+
+`DelimitedReader.suggest(path, dialect, options)` and `suggest_string(text, dialect, options)` sample a
+file or a String, and `sheet.suggest(options)` a sheet, whatever it has been up to, leaving it where it
+was. `SuggestOptions.new(sample_rows: 0)` means 1 and a negative count is refused; options that declare
+only a format still sample a thousand rows, at most a batch. A headerless file is opened twice, so no
+suggestion is offered of a stream. A failure among the sampled rows is raised, and one past them only
+says `truncated`. `SuggestOptions`' `column_formats` and `column_date_orders` take a Hash or an Array
+of pairs, the last for a column winning, and a format anywhere in them that the core refuses is an
+`ArgumentError` before anything is opened, whether or not the sample would reach its column. Compare
+two formats with `==`: the policy counts.
+
+A sheet's number cell has no notation, so a column of them is a number under any format, where text
+holding the same digits asks. A column of `0` and `1` is bool, `007` and an integer past int64 are text,
+and a typed date in a sheet is text, for a plan to change by hand. With nothing to choose between, a
+resolved number is planned in `,` groups of three, and `SuggestedColumn#format` names what the plan
+uses: a later `1,23,456` is refused.
+
+**To keep every row of a sheet, set `skip_empty_rows: false`.** By default a row whose only cells are
+formulas with no cached value is filtered out as empty, with nothing to say so; off, those rows are
+delivered, their cells at origin `:uncached`.
+
+A column given no format is Western, the same as `HyperCast::NumFormat::INVARIANT`: `1,234,567` is
+1234567 and `1,23,456` is `:malformed`. If a column of Indian numbers comes back refused, declare it,
+one column at a time, so an Indian column reads beside a Western one in the same read:
+
+```ruby
+indian = HyperCast::NumFormat::INVARIANT.with(grouping: :indian)
+either = [
+  HyperTabular::Column.i32(0, indian), # 1,23,456 is 123456, and 1,234,567 is :malformed
+  HyperTabular::Column.i32(1)          # 1,234,567 is 1234567, and 1,23,456 is :malformed
+]
+```
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `HyperCast::NumFormat::DETECT` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `Column.f64` reads `1,2345` as
+1.2345, `12,34` as 12.34 and `0,125` as 0.125. A format holding the retired grouping bit `256` (the
+words `351` and `863`), which only a 1.0 Marshal payload or a hand-packed format can hold, raises
+`ArgumentError` when the plan is bound, before any cell, and in a suggest's options before it opens
+anything. HyperCast's
+[grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
+and the locales neither policy matches.
 
 ## The shape
 
@@ -115,13 +278,14 @@ boundary is crossed once per few thousand rows, not once per cell.
 
 - **One batch class.** `read` returns a `HyperTabular::Batch` — `rows`, `columns`,
   `line(row)`, `values(column)`, `verdicts(column)`, `get(column, row)`, `raw(column,
-  row)`, and a `Row` for each row through `each` — or `nil` once there are no more rows,
+  row)`, `origin(column, row)`, `faults`, and a `Row` for each row through `each` — or `nil` once there are no more rows,
   for delimited text and a sheet alike. A batch owns what it shows: it stays good after the
   reader has moved on.
-- **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header, whether empty rows are skipped and the batch size;
-  the plan
-  states each column's door and, for numbers, its `HyperCast::NumFormat`.
+- **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and what
+  [a messier file](#a-messier-file) needs; `SheetOptions` states a sheet's header, whether empty rows
+  are skipped, the batch size and the rest of that; the plan states each column's door and, for
+  numbers, its `HyperCast::NumFormat`. A suggestion is a plan to inspect, and nothing reads through
+  one until it's handed over.
 - **HyperCast is the judge.** `HyperCast::Success`, `HyperCast::Fault`,
   `HyperCast::NumFormat`, `HyperCast::Decimal` and the declared options (`:milliseconds`,
   `:day_month_year`, `:y1904`) are the `hypercast` gem's own. A text cell means exactly
@@ -136,7 +300,7 @@ boundary is crossed once per few thousand rows, not once per cell.
   from, whatever its door and verdict, and a `Fault`'s span indexes it in the units
   `String#[]` slices by, as HyperCast's gem does: `raw[fault.offset, fault.length]` is the
   offending text.
-- **A String is read in place.** An IO is read forward only, through a buffer that grows
+- **A String is read in place**, unless its dialect declares an encoding. An IO is read forward only, through a buffer that grows
   when a record does not fit it.
 - **No async API, and none needed.** An IO is read with `#readpartial` or `#read`, which yield
   to the Fiber scheduler (the `async` gem's, or any other) instead of blocking, and a task
@@ -174,9 +338,12 @@ Selection happens once, at `require`, in that order. Both backends read a batch 
 call and hand back the same bytes; everything above that crossing — the readers, the
 workbook, `Batch` and every value and verdict it builds — is the same Ruby on either, and
 `spec/native_backend_spec.rb` holds the two to the same answer over every cell of both corpora.
-So the extension is not where a read gets faster (either backend crosses once per batch);
-what it buys is a platform gem with no shared library for Fiddle to find, and Ruby in the
-browser, where there is no Fiddle at all.
+Either backend crosses once per batch, yet they don't read at the same speed, and the cause
+hasn't been looked into. Through `benchmark/workbook_benchmark.rb`'s eight-column plan on an Apple
+M6 on 2026-11-08, making every value, Fiddle is the slower: an xlsx sheet of 300k rows reads in
+704 ms against the extension's 458 ms (54% slower), an ods one in 1.02 s against 787 ms (30%), and a
+Numbers one in 887 ms against 875 ms. The extension also buys a platform gem with no shared library
+for Fiddle to find, and Ruby in the browser, where there is no Fiddle at all.
 
 `HYPERTABULAR_PURE` forces `:fiddle`, as `HYPERCAST_PURE` does for hypercast. It is a testing
 and diagnostic switch — CI runs the whole suite through it — read for presence, not value. A

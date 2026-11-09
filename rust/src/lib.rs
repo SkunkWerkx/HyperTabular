@@ -41,10 +41,16 @@
 //!
 //! - [`Column`] — one output column: a source ordinal, a [`Door`], a numeric format. A
 //!   plan is a slice of them.
-//! - [`DelimitedReader`] and [`Dialect`]; [`Workbook`], [`Sheet`] and [`SheetOptions`].
-//! - [`Header`] — the names a source declared, and the ordinal each is at.
-//! - [`Batch`] — the rows of one read, column-major, lent by the reader that owns them;
-//!   [`Row`] — one of them, read across.
+//! - [`DelimitedReader`] and [`Dialect`]; [`Workbook`], [`Sheet`], [`SheetOptions`] and
+//!   [`Range`].
+//! - [`Header`] — the names a source declared, and the ordinal each is at:
+//!   [`Header::require`] refuses a name two columns share, and [`Header::ordinal`] keeps the
+//!   first.
+//! - [`Batch`] — the rows of one read, column-major, lent by the reader that owns them, with what
+//!   failed in a cell ([`Batch::detail`]), where its verdict came from ([`Batch::origin`]) and
+//!   what went wrong in the batch ([`Batch::faults`]); [`Row`] — one of them, read across.
+//! - [`DelimitedReader::suggest`] and [`Sheet::suggest`] — what a sample's columns look like, as
+//!   a plan to look at and pass to a read: never applied, since nothing here sniffs.
 //! - [`Error`] — the read, the caller's declarations, or a structural [`Failure`]. A cell
 //!   that does not cast is never an error: it is a [`Fault`] in the batch.
 //!
@@ -153,8 +159,12 @@ pub mod delimited;
 mod error;
 #[cfg(feature = "std")]
 mod header;
+#[cfg(feature = "std")]
+mod kept;
 #[cfg(feature = "php")]
 mod php_ext;
+#[cfg(feature = "std")]
+mod suggest;
 #[cfg(feature = "std")]
 pub mod workbook;
 
@@ -170,25 +180,30 @@ mod ruby_ext;
 
 #[cfg(feature = "std")]
 pub use hypercast::{
-    CivilDateTime, CurrencySymbol, Date, DateOrder, Decimal, Duration, ExcelEpoch, Fault,
-    NativeDigits, NumFormat, Reason, Symbol, Timestamp, UnixPrecision,
+    CivilDateTime, CurrencySymbol, Date, DateOptions, DateOrder, Decimal, Detail, Duration,
+    ExcelEpoch, Fault, Grouping, MonthNames, NativeDigits, NumFormat, Reason, Symbol, Timestamp,
+    UnixPrecision,
 };
 
-pub use kernel::abi::{CellVerdict, Span};
+pub use kernel::abi::{CellNote, CellVerdict, Span};
 pub use kernel::door::Door;
 
 #[cfg(feature = "std")]
-pub use batch::{Batch, Row, Rows, Value};
+pub use batch::{Batch, Faults, Origin, Problem, Row, Rows, Value};
 #[cfg(feature = "std")]
 pub use column::Column;
 #[cfg(feature = "std")]
-pub use delimited::{DelimitedOptions, DelimitedReader, Dialect};
+pub use delimited::{DelimitedOptions, DelimitedReader, Dialect, Encoding, LongRows, ShortRows};
 #[cfg(feature = "std")]
 pub use error::{Error, Failure, FailureKind};
 #[cfg(feature = "std")]
 pub use header::Header;
 #[cfg(feature = "std")]
-pub use workbook::{Format, Sheet, SheetInfo, SheetOptions, SheetRef, Workbook};
+pub use kept::{KeptBatch, KeptColumn, KeptFaults};
+#[cfg(feature = "std")]
+pub use suggest::{Candidate, SuggestOptions, SuggestStatus, SuggestedColumn, Suggestion};
+#[cfg(feature = "std")]
+pub use workbook::{Format, Range, Sheet, SheetInfo, SheetOptions, SheetRef, Workbook};
 
 // Internal tests can exercise parser machinery without publishing it to consumers.
 #[cfg(all(test, feature = "std"))]

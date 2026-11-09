@@ -114,7 +114,7 @@ def test_one_reader_shared_by_threads_hands_out_every_row_exactly_once():
                 try:
                     batch = reader.read()
                 except RuntimeError as error:
-                    assert "borrow" in str(error), error
+                    assert "in the middle of a call" in str(error), error
                     refused += 1
                     # Lets a GIL build's reading thread have the GIL back rather than wait
                     # out a switch interval behind this loop; free-threaded, it is a yield.

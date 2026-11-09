@@ -8,6 +8,7 @@ type while bad data never is.
 from __future__ import annotations
 
 import array
+import asyncio
 import copy
 import datetime as dt
 import io
@@ -28,6 +29,7 @@ from hypertabular import _native
 from hypertabular import (
     Batch,
     CastFailure,
+    Detail,
     Column,
     ColumnData,
     DateOrder,
@@ -36,7 +38,9 @@ from hypertabular import (
     Door,
     ExcelEpoch,
     Fault,
+    LongRows,
     NumFormat,
+    ShortRows,
     Success,
     TabularError,
     TabularFailure,
@@ -430,13 +434,17 @@ def test_raw_is_the_text_a_cell_was_cast_from():
     assert batch.column(-1).column is batch.columns[2].column
 
 
-def test_text_that_is_not_utf8_is_replaced_in_the_str_and_kept_in_raw():
-    """Invalid UTF-8 is replaced in the str value and kept byte for byte in raw."""
+def test_text_that_is_not_utf8_is_malformed_and_kept_in_raw():
+    """A text cell judged like any other: not UTF-8 is a fault, its span where the bytes stop
+    being text, and raw holds them. In a header there is no row to fault, so the input ends."""
     column = one_batch(b"caf\xe9\nok\n", [Column.text(0)]).column(0)
-    assert column.values == ["caf�", "ok"]
+    assert column.values == [None, "ok"]
+    assert column[0].reason is CastFailure.MALFORMED
+    assert column[0].detail is Detail.INVALID_UTF8 and column[0].offset == 3
     assert column.raw(0) == b"caf\xe9"
-    header = DelimitedReader(b"caf\xe9\n1\n", Dialect.CSV, [Column.i32(0)]).header
-    assert header == ("caf�",)
+    with pytest.raises(TabularError) as failed:
+        DelimitedReader(b"caf\xe9\n1\n", Dialect.CSV, [Column.i32(0)])
+    assert failed.value.kind is TabularFailure.ENCODING
 
 
 def test_a_plan_is_a_projection():
@@ -923,7 +931,7 @@ def test_the_plan_is_columns_and_checked():
 
 
 def test_sizes_are_checked():
-    """batch_rows and buffer_bytes must be positive."""
+    """The core refuses a batch_rows or a buffer_bytes of 0; a count that isn't one is Python's."""
     plan = [Column.i32(0)]
     for name in ("batch_rows", "buffer_bytes"):
         with pytest.raises(ValueError, match=name):
@@ -934,15 +942,137 @@ def test_sizes_are_checked():
             DelimitedReader(io.BytesIO(b""), Dialect.CSV, plan, **{name: "1"})
     with pytest.raises(TypeError):
         DelimitedReader(b"", Dialect.CSV, plan, 1024)  # type: ignore[misc]
-    # The reader allocates its arrays once, up front: a batch nobody could allocate is
-    # refused there, and is not a crash.
+    # The core judges the batch before anything is allocated.
     for plan in ([Column.i32(0)], [Column.text(0)]):
-        with pytest.raises(MemoryError, match="batch_rows"):
+        with pytest.raises(ValueError, match="batch_rows asks for 18446744073709551615 bytes"):
             DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=sys.maxsize)
     # A plan of no columns has no arrays, and a cell table no larger than its budget.
     assert [
         b.rows for b in DelimitedReader(b"a\n1\n", Dialect.CSV, [], batch_rows=sys.maxsize)
     ] == [1]
+    # These are just over the limit, so a regression asks for little more than it.
+    plan = [Column.i32(0)]
+    just_over = "^batch_rows asks for 5377130496 bytes, past the limit of 4294967296$"
+    with pytest.raises(ValueError, match=just_over):
+        DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=1 << 28)
+    with pytest.raises(ValueError, match=just_over):
+        DelimitedReader(io.BytesIO(b"a\n1\n"), Dialect.CSV, plan, batch_rows=1 << 28)
+    late = DelimitedReader(b"a\n1\n", Dialect.CSV, batch_rows=1 << 28)
+    with pytest.raises(ValueError, match=just_over):
+        late.bind(plan)
+    assert not late.is_bound
+    # A modest batch reads; what's left out has its default; a sample of none is one row.
+    assert [b.rows for b in DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=1 << 16)] == [
+        1
+    ]
+    assert DelimitedReader(b"a\n1\n", Dialect.CSV, plan).batch_rows == 4096
+    assert [b.rows for b in DelimitedReader(io.BytesIO(b"a\n1\n"), Dialect.CSV, plan)] == [1]
+    with pytest.raises(ValueError, match="^batch_rows must be at least 1$"):
+        DelimitedReader(b"a\n1\n", Dialect.CSV, plan, batch_rows=0)
+    with pytest.raises(ValueError, match="^buffer_bytes must be at least 1$"):
+        DelimitedReader(b"a\n1\n", Dialect.CSV, plan, buffer_bytes=0)
+
+
+def test_the_core_judges_sizes_before_a_stream_is_read():
+    """A plan's size is refused ahead of the stream's first read, whatever that would have said."""
+
+    class Unreadable:
+        def read(self, _size: int) -> bytes:
+            raise AssertionError("read before the sizes were judged")
+
+    with pytest.raises(ValueError, match="past the limit of 4294967296$"):
+        DelimitedReader(Unreadable(), Dialect.CSV, [Column.i32(0)], batch_rows=1 << 28)  # type: ignore[arg-type]
+
+    # And ahead of opening a path.
+    with pytest.raises(ValueError, match="past the limit of 4294967296$"):
+        DelimitedReader.open("no such file", Dialect.CSV, [Column.i32(0)], batch_rows=1 << 28)
+    with pytest.raises(ValueError, match="^batch_rows must be at least 1$"):
+        DelimitedReader.open("no such file", Dialect.CSV, batch_rows=0)
+    with pytest.raises(ValueError, match="^buffer_bytes must be at least 1$"):
+        DelimitedReader.open("no such file", Dialect.CSV, buffer_bytes=0)
+
+    class AsyncUnreadable:
+        async def read(self, _size: int) -> bytes:
+            raise AssertionError("read before the sizes were judged")
+
+    async def opened() -> DelimitedReader:
+        return await DelimitedReader.open_async(
+            AsyncUnreadable(), Dialect.CSV, [Column.i32(0)], batch_rows=1 << 28
+        )
+
+    with pytest.raises(ValueError, match="past the limit of 4294967296$"):
+        asyncio.run(opened())
+
+
+def test_the_core_judges_sizes_for_an_asyncio_read():
+    """A stream is opened asynchronously, and the core is asked the same way, before it's read."""
+
+    async def opened(**sizes: int) -> DelimitedReader:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"a\n1\n")
+        reader.feed_eof()
+        return await DelimitedReader.open_async(reader, Dialect.CSV, [Column.i32(0)], **sizes)
+
+    with pytest.raises(ValueError, match="past the limit of 4294967296$"):
+        asyncio.run(opened(batch_rows=1 << 28))
+    with pytest.raises(ValueError, match="^batch_rows must be at least 1$"):
+        asyncio.run(opened(batch_rows=0))
+    with pytest.raises(ValueError, match="^buffer_bytes must be at least 1$"):
+        asyncio.run(opened(buffer_bytes=0))
+    assert asyncio.run(opened()).batch_rows == 4096
+    assert asyncio.run(opened(batch_rows=1 << 16)).batch_rows == 1 << 16
+
+
+def _faults_cases() -> list[tuple[str, bytes, Dialect, list[Column], bool]]:
+    bad = b"a,b,c\n1,x,2020-01-01\n,2,nope\n99999999999,3,2020-13-01\n4,5,2020-02-02\n"
+    long = b"a,b\n1,2\n3,4,5\nx,6,7,8\n9\n"
+    plan = [Column.i32(0), Column.i64(1), Column.date(2)]
+    pair = [Column.i32(0), Column.i32(1)]
+    reporting = Dialect(",", long_rows=LongRows.REPORT, short_rows=ShortRows.PAD)
+    return [
+        ("cells", bad, Dialect.CSV, plan, True),
+        ("cells, notes off", bad, Dialect.CSV, plan, False),
+        ("projected", bad, Dialect.CSV, [Column.date(2), Column.i32(0)], True),
+        ("long rows", long, reporting, pair, True),
+        ("long rows, notes off", long, reporting, pair, False),
+        ("long rows, no plan columns", long, reporting, [], True),
+    ]
+
+
+@pytest.mark.parametrize("case", _faults_cases(), ids=lambda case: case[0])
+@pytest.mark.parametrize("batch_rows", [1, 2, 1024])
+@pytest.mark.parametrize("source", ["bytes", "stream"])
+def test_a_batch_held_past_the_next_read_still_answers_for_itself(
+    case: tuple[str, bytes, Dialect, list[Column], bool], batch_rows: int, source: str
+):
+    """A faults list is worked out when it's asked for, from the batch's own copies: asked after
+    every later read, and asked twice, it's the same as asked at once, and it's that batch's."""
+    _, data, dialect, plan, notes = case
+
+    def batches() -> DelimitedReader:
+        made = data if source == "bytes" else io.BytesIO(data)
+        return DelimitedReader(made, dialect, plan, batch_rows=batch_rows, notes=notes)
+
+    at_once = [batch.faults() for batch in batches()]
+    assert any(at_once) or not plan
+    held = list(batches())
+    for later, expected in zip(held, at_once, strict=True):
+        assert later.faults() == expected
+    for later, expected in zip(reversed(held), reversed(at_once), strict=True):
+        assert later.faults() == expected
+
+
+def test_faults_past_what_the_core_writes_in_a_call():
+    """A list longer than one call to the core writes comes back whole and in order."""
+    rows = 500
+    data = b"a,b\n" + b"x,y\n" * rows
+    batch = next(iter(DelimitedReader(data, Dialect.CSV, [Column.i32(0), Column.i32(1)])))
+    faults = batch.faults()
+    assert [(fault.row, fault.plan_column) for fault in faults] == [
+        (row, column) for row in range(rows) for column in (0, 1)
+    ]
+    assert [fault.line for fault in faults[:4]] == [2, 2, 3, 3]
+    assert {fault.source_column for fault in faults} == {0, 1}
 
 
 def test_a_column_past_the_width_the_header_gives_is_refused():

@@ -10,20 +10,34 @@
 //! throws for data or for an argument of the wrong JavaScript type: each argument crosses as
 //! an `Unknown` and is read here, because napi's own typed conversions throw a `TypeError`
 //! before the method runs. What can still throw is the engine itself (out of memory building
-//! a result) and `new` on a class, which has no constructor.
+//! a result, or an exception a caller's own setter or getter throws past an outcome) and
+//! `new` on a class, which has no constructor.
 //!
 //! A batch is copied out of the reader as it is read, as Python's, Ruby's and PHP's are: a
 //! garbage-collected caller cannot be held to "valid until the next read". A fault's span is
 //! in bytes of the cell's raw text, which `raw` hands back as a `Uint8Array`.
+//!
+//! Every rule is the Rust binding's: what a size, a format, a name or a range may be, every
+//! default, and what a read answers. This crate turns JavaScript values into the Rust
+//! binding's types and its answers back, and never decides anything a Rust caller would get a
+//! different answer to.
+//!
+//! JavaScript can run in the middle of a call: a getter or a Proxy trap in an argument, or a
+//! setter a caller put on `Object.prototype`. A reader's and a sheet's state is therefore held
+//! in a `RefCell` and every method takes `&self`, so a call back into the same reader or sheet
+//! from that JavaScript finds it borrowed and answers `busy`, never a second `&mut` to state
+//! the outer call is using.
 
 use hypercast as hc;
 use hypertabular as ht;
 use napi::bindgen_prelude::{
-    Array, BigInt, ClassInstance, Either, Either9, JavaScriptClassExt, JsValue, Null, Object,
-    ObjectFinalize, ToNapiValue, Uint8Array, Unknown,
+    Array, BigInt, ClassInstance, Either, Either9, JavaScriptClassExt, Null, Object, ToNapiValue,
+    Uint8Array, Unknown, sys,
 };
-use napi::{Env, Result, ValueType};
+use napi::{Env, JsValue, Result, ValueType};
 use napi_derive::napi;
+use std::cell::RefCell;
+use std::ffi::CStr;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------------------
@@ -106,6 +120,13 @@ pub enum ErrorKind {
     /// The header has no column of that name.
     #[napi(value = "noColumn")]
     NoColumn,
+    /// The header has two columns of that name, `first` and `second`, and `require` will not
+    /// choose between them.
+    #[napi(value = "ambiguousColumn")]
+    AmbiguousColumn,
+    /// Text that is not a range, or a range whose last row or column is before its first.
+    #[napi(value = "range")]
+    Range,
     /// A reader opened without a plan was read before one was bound.
     #[napi(value = "unbound")]
     Unbound,
@@ -115,12 +136,18 @@ pub enum ErrorKind {
     /// The data is structurally broken; `failure` says what and where.
     #[napi(value = "structure")]
     Structure,
-    /// An argument of a type the declarations rule out.
+    /// An argument of a type the declarations rule out, or a size the core refuses (a batch
+    /// of no rows, a buffer of no bytes, a batch past the memory a batch may ask for).
     #[napi(value = "argument")]
     Argument,
     /// The reader, sheet or workbook was closed.
     #[napi(value = "closed")]
     Closed,
+    /// JavaScript the call ran (a getter or a Proxy trap in an argument, a setter on
+    /// `Object.prototype`) called back into the same reader or sheet, which a call is never
+    /// re-entered by.
+    #[napi(value = "busy")]
+    Busy,
 }
 
 /// What a structural failure is, as the core numbers it.
@@ -168,6 +195,10 @@ pub enum FailureKind {
     /// A Numbers part is not what the IWA packaging says.
     #[napi(value = "iwa")]
     Iwa,
+    /// A header name that is not UTF-8, or a unit the dialect's declared encoding has no
+    /// character for; that one's `byte` counts the original input, not the decoded text.
+    #[napi(value = "encoding")]
+    Encoding,
 }
 
 /// A structural failure: what is broken, and where (the core's `Failure`).
@@ -180,8 +211,9 @@ pub struct StructuralFailure {
     pub record: f64,
     /// Delimited text: the 1-based line the record starts on. A workbook: the sheet row.
     pub line: u32,
-    /// Delimited text: the record's byte offset. A workbook: how far into the part's
-    /// inflated bytes the read had got.
+    /// Delimited text: the record's byte offset in the decoded text (an `encoding` failure's
+    /// counts the original input). A workbook: how far into the part's inflated bytes the
+    /// read had got.
     pub byte: f64,
     /// What was expected, for the kinds that say.
     pub expected: u32,
@@ -200,6 +232,10 @@ pub struct TabularError {
     pub failure: Option<StructuralFailure>,
     /// The plan column, for `plan`.
     pub column: Option<u32>,
+    /// The first column with the name, for `ambiguousColumn`.
+    pub first: Option<u32>,
+    /// The next column with the name, for `ambiguousColumn`.
+    pub second: Option<u32>,
 }
 
 /// The failure case of an outcome: `ok` is `false` and `error` says why.
@@ -327,34 +363,117 @@ pub struct SheetInfo {
     pub hidden: bool,
 }
 
-/// How delimited text is written: the separator, and whether `"` quotes, the first record
-/// is the header and blank lines are skipped. Each flag left out is `true`, as in
-/// `Dialect.CSV`.
+/// What a record with fewer cells than the width is: refused (the default), or padded with
+/// `empty` verdicts whose origin is `padded`.
+#[napi(string_enum)]
+pub enum ShortRows {
+    #[napi(value = "reject")]
+    Reject,
+    #[napi(value = "pad")]
+    Pad,
+}
+
+/// What a record with more cells than the width is: refused (the default); its extra cells
+/// dropped and the row listed by `Batch.faults`; or its extra cells dropped silently.
+#[napi(string_enum)]
+pub enum LongRows {
+    #[napi(value = "reject")]
+    Reject,
+    #[napi(value = "report")]
+    Report,
+    #[napi(value = "truncate")]
+    Truncate,
+}
+
+/// What the input's bytes are: UTF-8 (the default), or one decoded to it ahead of the read.
+/// Never sniffed.
+#[napi(string_enum)]
+pub enum Encoding {
+    #[napi(value = "utf8")]
+    Utf8,
+    #[napi(value = "windows1252")]
+    Windows1252,
+    #[napi(value = "latin1")]
+    Latin1,
+    #[napi(value = "utf16le")]
+    Utf16le,
+}
+
+/// Where a cell's verdict came from: a door judged its text (`cell`), its exact unquoted
+/// bytes are a declared token (`token`), the row has no such cell (`padded`), or a
+/// workbook's formula has no cached value (`uncached`). All but `cell` are `empty`.
+#[napi(string_enum)]
+#[derive(Clone, Copy)]
+pub enum Origin {
+    #[napi(value = "cell")]
+    Cell,
+    #[napi(value = "token")]
+    Token,
+    #[napi(value = "padded")]
+    Padded,
+    #[napi(value = "uncached")]
+    Uncached,
+}
+
+/// How delimited text is written. Every field left out is the core's default: comma-
+/// separated (`Dialect.CSV`), `"` quoting, a header, blank lines skipped, nothing skipped,
+/// short and long rows refused, UTF-8, no tokens.
 #[napi(object, object_to_js = false, object_from_js = false)]
 pub struct Dialect {
     /// One character: a tab, or printable ASCII other than `"`.
-    pub separator: String,
+    pub separator: Option<String>,
     pub quoting: Option<bool>,
     pub has_header: Option<bool>,
     pub skip_blank_lines: Option<bool>,
+    /// Physical lines to pass over first, after a byte-order mark; a quote in one means
+    /// nothing.
+    pub skip: Option<u32>,
+    /// Records to discard after those, ahead of the header if there is one.
+    pub header_row: Option<u32>,
+    pub short_rows: Option<ShortRows>,
+    pub long_rows: Option<LongRows>,
+    pub encoding: Option<Encoding>,
+    /// The exact unquoted cells that stand for no value, in every column without tokens of
+    /// its own: such a cell is `empty`, its origin `token`. Each distinct list is kept for the
+    /// life of the process.
+    #[napi(ts_type = "ReadonlyArray<string>")]
+    pub tokens: Option<Vec<String>>,
 }
 
-/// How a delimited reader sizes what it owns.
+/// How a delimited reader sizes what it owns. Each left out is the core's default.
 #[napi(object, object_to_js = false, object_from_js = false)]
 pub struct DelimitedOptions {
-    /// The most rows a batch holds; 4096 when left out.
-    pub batch_rows: Option<u32>,
+    /// The most rows a batch holds; 4096 when left out. The core refuses `0`, and a batch of
+    /// the plan that would ask for more memory than a batch may.
+    pub batch_rows: Option<f64>,
     /// The input buffer a file is read through to begin with (it grows to hold the longest
-    /// record); 256 KiB when left out.
-    pub buffer_bytes: Option<u32>,
+    /// record); 256 KiB when left out. The core refuses `0`.
+    pub buffer_bytes: Option<f64>,
+    /// Whether a batch keeps each cell's `detail` and `origin`; `true` when left out.
+    pub notes: Option<bool>,
 }
 
-/// How a sheet is read. Left out: a header, empty rows skipped, 4096 rows a batch.
+/// How a sheet is read. Each left out is the core's default: a header, empty rows skipped,
+/// 4096 rows a batch, nothing skipped, the whole sheet, no tokens, notes kept.
 #[napi(object, object_to_js = false, object_from_js = false)]
 pub struct SheetOptions {
     pub has_header: Option<bool>,
     pub skip_empty_rows: Option<bool>,
-    pub batch_rows: Option<u32>,
+    /// The most rows a batch holds. The core refuses `0`.
+    pub batch_rows: Option<f64>,
+    /// Rows at the range's start to pass over, empty ones included.
+    pub skip: Option<u32>,
+    /// Rows read and discarded after those, ahead of the header.
+    pub header_row: Option<u32>,
+    /// The part of the sheet to read: a `Range`, or its text (`'A5:F200'`).
+    #[napi(ts_type = "Range | string")]
+    pub range: Option<String>,
+    /// The exact text cells that stand for no value, in every column without tokens of its
+    /// own. Each distinct list is kept for the life of the process.
+    #[napi(ts_type = "ReadonlyArray<string>")]
+    pub tokens: Option<Vec<String>>,
+    /// Whether a batch keeps each cell's `detail` and `origin`.
+    pub notes: Option<bool>,
 }
 
 /// What a numeric column's notation is read from: a `NumFormat` of `@skunkwerkx/hypercast`,
@@ -362,6 +481,210 @@ pub struct SheetOptions {
 #[napi(object, object_to_js = false, object_from_js = false)]
 pub struct PackedNumFormat {
     pub packed: Uint8Array,
+}
+
+/// What a column's date doors read beyond their own shapes: a `DateOptions` of
+/// `@skunkwerkx/hypercast`, its month names included.
+#[napi(object, object_to_js = false, object_from_js = false)]
+pub struct DeclaredDateOptions {
+    pub flags: u32,
+    pub pivot: u32,
+    #[napi(ts_type = "{ readonly packed: Uint8Array } | null")]
+    pub months: Option<bool>,
+}
+
+/// What a suggestion is asked with. Each left out is the core's default: a sample of 1,000
+/// rows (an explicit `0` is one row), no notation and no date order declared.
+#[napi(object, object_to_js = false, object_from_js = false)]
+pub struct SuggestOptions {
+    /// The most rows the sample holds. It stops at 4096 rows of delimited text and at a
+    /// sheet's own batch size.
+    pub sample_rows: Option<f64>,
+    /// Every column's notation: a HyperCast `NumFormat`.
+    pub format: Option<PackedNumFormat>,
+    /// A column's own notation, ahead of `format`: `[ordinal, NumFormat]` pairs, the last for
+    /// an ordinal winning.
+    #[napi(ts_type = "ReadonlyArray<readonly [number, PackedNumFormat]>")]
+    pub column_formats: Option<Vec<bool>>,
+    /// Every column's date order where the sample leaves it open: a HyperCast `DateOrder`.
+    pub date_order: Option<u32>,
+    /// A column's own date order, ahead of `dateOrder`: `[ordinal, DateOrder]` pairs.
+    #[napi(ts_type = "ReadonlyArray<readonly [number, number]>")]
+    pub column_date_orders: Option<Vec<bool>>,
+}
+
+/// A notation a suggestion names: the 92 bytes the core reads, which a `Column` factory
+/// takes as its `format` and which compare with a HyperCast `NumFormat`'s own `packed`. A
+/// copy, the caller's own.
+#[napi(object, object_from_js = false)]
+pub struct SuggestedFormat {
+    pub packed: Uint8Array,
+}
+
+/// How far a sample settles a column.
+#[napi(string_enum)]
+pub enum SuggestStatus {
+    /// One door and one declaration take every cell, and the plan reads the column through
+    /// them.
+    #[napi(value = "resolved")]
+    Resolved,
+    /// Every cell is read, but the sample cannot say which declaration it is written in:
+    /// `candidates` are the choices, and the plan reads the column as text.
+    #[napi(value = "ambiguous")]
+    Ambiguous,
+    /// Nothing to go on, or cells no door took beside cells one did: the plan reads text.
+    #[napi(value = "unresolved")]
+    Unresolved,
+}
+
+/// What a candidate declares.
+#[napi(string_enum)]
+pub enum CandidateKind {
+    #[napi(value = "dateOrder")]
+    DateOrder,
+    #[napi(value = "numFormat")]
+    NumFormat,
+}
+
+/// A declaration that would settle an ambiguous column: a date order (a HyperCast
+/// `DateOrder`, in `order`) or a notation (in `format`).
+#[napi(object, object_from_js = false, use_nullable = true)]
+pub struct Candidate {
+    pub kind: CandidateKind,
+    pub order: Option<u32>,
+    pub format: Option<SuggestedFormat>,
+}
+
+/// What a sample says of one source column.
+#[napi(object, object_from_js = false, use_nullable = true)]
+pub struct SuggestedColumn {
+    /// The zero-based source column, as a `Column` names it.
+    pub ordinal: u32,
+    /// The header's name for it, or `null` with no header.
+    pub name: Option<String>,
+    /// The door found: text when unresolved, and under the first candidate when ambiguous.
+    pub door: Door,
+    /// What the door declares beside itself (a `UnixPrecision`, `DateOrder` or
+    /// `ExcelEpoch`), or `null`.
+    pub declared: Option<u32>,
+    /// The notation the plan reads a resolved numeric column in, or `null`.
+    pub format: Option<SuggestedFormat>,
+    /// What to choose between: empty unless ambiguous.
+    pub candidates: Vec<Candidate>,
+    pub status: SuggestStatus,
+    /// The cells `door` took.
+    pub matched: u32,
+    /// The cells that are not blank.
+    pub sampled: u32,
+}
+
+/// What a suggestion found: a plan to inspect, change and pass to a read, a report for each
+/// source column, and whether the source has rows past the sample. Never applied.
+#[napi(object, object_to_js = false, object_from_js = false)]
+pub struct Suggestion {
+    #[napi(ts_type = "Array<Column>")]
+    pub plan: Vec<bool>,
+    pub report: Vec<SuggestedColumn>,
+    pub truncated: bool,
+}
+
+/// What failed in a cell, as HyperCast names it: the names `@skunkwerkx/hypercast`'s
+/// `Detail` uses, and `unknown` for one a later core adds that this binding does not know.
+#[napi(string_enum)]
+pub enum Detail {
+    #[napi(value = "blank")]
+    Blank,
+    #[napi(value = "unexpectedCharacter")]
+    UnexpectedCharacter,
+    #[napi(value = "digitExpected")]
+    DigitExpected,
+    #[napi(value = "delimiterExpected")]
+    DelimiterExpected,
+    #[napi(value = "trailingText")]
+    TrailingText,
+    #[napi(value = "noDigits")]
+    NoDigits,
+    #[napi(value = "signMisplaced")]
+    SignMisplaced,
+    #[napi(value = "parenthesesUnbalanced")]
+    ParenthesesUnbalanced,
+    #[napi(value = "markRepeated")]
+    MarkRepeated,
+    #[napi(value = "groupMisplaced")]
+    GroupMisplaced,
+    #[napi(value = "groupSize")]
+    GroupSize,
+    #[napi(value = "groupInFraction")]
+    GroupInFraction,
+    #[napi(value = "ambiguousSeparator")]
+    AmbiguousSeparator,
+    #[napi(value = "fractionNotAllowed")]
+    FractionNotAllowed,
+    #[napi(value = "fieldWidth")]
+    FieldWidth,
+    #[napi(value = "wrongLength")]
+    WrongLength,
+    #[napi(value = "componentMissing")]
+    ComponentMissing,
+    #[napi(value = "notRecognized")]
+    NotRecognized,
+    #[napi(value = "unknownUnit")]
+    UnknownUnit,
+    #[napi(value = "invalidUtf8")]
+    InvalidUtf8,
+    #[napi(value = "tooLong")]
+    TooLong,
+    #[napi(value = "notFinite")]
+    NotFinite,
+    #[napi(value = "notWhole")]
+    NotWhole,
+    #[napi(value = "negativeNotAllowed")]
+    NegativeNotAllowed,
+    #[napi(value = "tooLarge")]
+    TooLarge,
+    #[napi(value = "tooSmall")]
+    TooSmall,
+    #[napi(value = "tooPrecise")]
+    TooPrecise,
+    #[napi(value = "dateFieldOutOfRange")]
+    DateFieldOutOfRange,
+    #[napi(value = "timeFieldOutOfRange")]
+    TimeFieldOutOfRange,
+    #[napi(value = "outsideWindow")]
+    OutsideWindow,
+    #[napi(value = "nonexistentDate")]
+    NonexistentDate,
+    #[napi(value = "notAScalar")]
+    NotAScalar,
+    #[napi(value = "unknown")]
+    Unknown,
+}
+
+/// One thing that went wrong in a batch (`Batch.faults`): a cell at `malformed` or
+/// `outOfRange`, a formula with no cached value, or a row longer than the width under
+/// `longRows: 'report'`. Blanks, tokens and padding are not problems.
+#[napi(object, object_from_js = false, use_nullable = true)]
+pub struct Problem {
+    /// The row in the batch, from zero.
+    pub row: u32,
+    /// The line (delimited text) or sheet row (a workbook) it came from.
+    pub line: u32,
+    /// The plan column, or `null` for an entry about the row as a whole.
+    pub plan_column: Option<u32>,
+    /// The source column, from zero (a sheet's own, `A` being 0), or `null` for a row.
+    pub source_column: Option<u32>,
+    /// The verdict's reason, or `null` for a row.
+    pub reason: Option<CastFailure>,
+    /// What failed, by HyperCast's `Detail` name, or `null`.
+    pub detail: Option<Detail>,
+    /// Where the verdict came from; `cell` for a row.
+    pub origin: Origin,
+    /// The span in the cell's raw text; 0 where there is none.
+    pub offset: u32,
+    pub length: u32,
+    /// For a long row, the width the first record fixed and the cells it had; otherwise 0.
+    pub expected: u32,
+    pub found: u32,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -374,40 +697,69 @@ fn clear_pending_exception(env: &Env) {
     let mut pending = false;
     // SAFETY: `env` is the live environment of the call in progress.
     unsafe {
-        if napi::sys::napi_is_exception_pending(env.raw(), &mut pending)
-            == napi::sys::Status::napi_ok
+        if sys::napi_is_exception_pending(env.raw(), &mut pending) == sys::Status::napi_ok
             && pending
         {
             let mut exception = std::ptr::null_mut();
-            napi::sys::napi_get_and_clear_last_exception(env.raw(), &mut exception);
+            sys::napi_get_and_clear_last_exception(env.raw(), &mut exception);
         }
     }
 }
 
+/// A plain object holding exactly these own properties, defined rather than assigned, so a
+/// setter on `Object.prototype` neither runs nor keeps a field off the object.
+fn record<'env>(env: &'env Env, fields: &[(&CStr, sys::napi_value)]) -> Result<Object<'env>> {
+    let properties: Vec<sys::napi_property_descriptor> = fields
+        .iter()
+        .map(|(name, value)| sys::napi_property_descriptor {
+            utf8name: name.as_ptr(),
+            name: std::ptr::null_mut(),
+            method: None,
+            getter: None,
+            setter: None,
+            value: *value,
+            attributes: sys::PropertyAttributes::writable
+                | sys::PropertyAttributes::enumerable
+                | sys::PropertyAttributes::configurable,
+            data: std::ptr::null_mut(),
+        })
+        .collect();
+    // SAFETY: `env` is the live environment of the call in progress, and each descriptor's
+    // name is a static C string and its value a handle made in it; `raw` is the object made.
+    unsafe {
+        let raw = napi::bindgen_prelude::create_object_with_properties(env.raw(), &properties)?;
+        napi::bindgen_prelude::FromNapiValue::from_napi_value(env.raw(), raw)
+    }
+}
+
+fn js<V: ToNapiValue>(env: &Env, value: V) -> Result<sys::napi_value> {
+    // SAFETY: `env` is the live environment of the call in progress.
+    unsafe { V::to_napi_value(env.raw(), value) }
+}
+
 fn success<'env, V: ToNapiValue>(env: &'env Env, value: V) -> Result<Object<'env>> {
-    let mut outcome = Object::new(env)?;
-    outcome.set("ok", true)?;
-    outcome.set("value", value)?;
-    Ok(outcome)
+    let value = js(env, value)?;
+    record(env, &[(c"ok", js(env, true)?), (c"value", value)])
 }
 
 fn failure(env: &Env, fault: hc::Fault) -> Result<Object<'_>> {
-    let reason = match fault.reason {
-        hc::Reason::Empty => CastFailure::Empty,
-        hc::Reason::Malformed => CastFailure::Malformed,
-        hc::Reason::OutOfRange => CastFailure::OutOfRange,
-    };
-    let mut verdict = Object::new(env)?;
-    verdict.set("ok", false)?;
-    verdict.set(
-        "fault",
+    let fault = js(
+        env,
         Fault {
-            reason,
+            reason: cast_failure(fault.reason),
             offset: fault.offset,
             length: fault.len,
         },
     )?;
-    Ok(verdict)
+    record(env, &[(c"ok", js(env, false)?), (c"fault", fault)])
+}
+
+fn cast_failure(reason: hc::Reason) -> CastFailure {
+    match reason {
+        hc::Reason::Empty => CastFailure::Empty,
+        hc::Reason::Malformed => CastFailure::Malformed,
+        hc::Reason::OutOfRange => CastFailure::OutOfRange,
+    }
 }
 
 /// A cell asked for at a column or a row the batch does not have, or with an index that is
@@ -418,27 +770,110 @@ const CONTRACT: hc::Fault = hc::Fault {
     len: 0,
 };
 
-/// An error this binding raises itself, before the core is asked anything.
+/// Why a call answers an error: the Rust binding's own, or one this binding raises before
+/// the Rust binding is asked anything (an argument of the wrong type, a closed or busy
+/// reader).
 struct Refusal {
     kind: ErrorKind,
     message: String,
     column: Option<u32>,
+    ambiguous: Option<(u32, u32)>,
+    failure: Option<ht::Failure>,
+}
+
+type Refused<T> = std::result::Result<T, Refusal>;
+
+impl Refusal {
+    fn new(kind: ErrorKind, message: impl Into<String>) -> Refusal {
+        Refusal {
+            kind,
+            message: message.into(),
+            column: None,
+            ambiguous: None,
+            failure: None,
+        }
+    }
 }
 
 fn argument(message: impl Into<String>) -> Refusal {
-    Refusal {
-        kind: ErrorKind::Argument,
-        message: message.into(),
-        column: None,
-    }
+    Refusal::new(ErrorKind::Argument, message)
 }
 
-fn plan_refusal(column: usize, message: impl Into<String>) -> Refusal {
-    Refusal {
-        kind: ErrorKind::Plan,
-        message: message.into(),
-        column: Some(column as u32),
+fn closed(what: &str) -> Refusal {
+    Refusal::new(ErrorKind::Closed, format!("the {what} was closed"))
+}
+
+fn busy(what: &str) -> Refusal {
+    Refusal::new(
+        ErrorKind::Busy,
+        format!(
+            "the {what} is in the middle of a call; nothing that call runs can call back into it"
+        ),
+    )
+}
+
+/// What a getter does from inside one of its object's own calls, where it has no outcome to
+/// answer in: throws the `busy` error, an `Error` whose `code` is `ERR_HYPERTABULAR_BUSY`, whose
+/// `kind` is `busy` and whose message is the one every other call answers it with.
+fn thrown_busy<T>(env: &Env, what: &str) -> Result<T> {
+    let refusal = busy(what);
+    let kind = js(env, ErrorKind::Busy)?;
+    // SAFETY: `env` is the live environment of the call in progress; each handle is made in it,
+    // and the descriptors' names are NUL-terminated literals.
+    unsafe {
+        let mut code = std::ptr::null_mut();
+        let mut message = std::ptr::null_mut();
+        let mut error = std::ptr::null_mut();
+        let own = |name: &'static std::ffi::CStr, value| sys::napi_property_descriptor {
+            utf8name: name.as_ptr(),
+            name: std::ptr::null_mut(),
+            method: None,
+            getter: None,
+            setter: None,
+            value,
+            attributes: sys::PropertyAttributes::writable
+                | sys::PropertyAttributes::enumerable
+                | sys::PropertyAttributes::configurable,
+            data: std::ptr::null_mut(),
+        };
+        // `code` and `kind` are defined as own properties rather than assigned (as
+        // `napi_create_error` would assign `code`), so no setter on the prototype chain runs.
+        let made = sys::napi_create_string_utf8(
+            env.raw(),
+            c"ERR_HYPERTABULAR_BUSY".as_ptr(),
+            "ERR_HYPERTABULAR_BUSY".len() as isize,
+            &mut code,
+        ) == sys::Status::napi_ok
+            && sys::napi_create_string_utf8(
+                env.raw(),
+                refusal.message.as_ptr().cast(),
+                refusal.message.len() as isize,
+                &mut message,
+            ) == sys::Status::napi_ok
+            && sys::napi_create_error(env.raw(), std::ptr::null_mut(), message, &mut error)
+                == sys::Status::napi_ok
+            && {
+                let properties = [own(c"code", code), own(c"kind", kind)];
+                sys::napi_define_properties(env.raw(), error, properties.len(), properties.as_ptr())
+                    == sys::Status::napi_ok
+            }
+            && sys::napi_throw(env.raw(), error) == sys::Status::napi_ok;
+        if made {
+            // Thrown already: napi-rs leaves a pending exception as it is.
+            return Err(napi::Error::new(
+                napi::Status::PendingException,
+                refusal.message,
+            ));
+        }
     }
+    Err(napi::Error::new(
+        napi::Status::GenericFailure,
+        refusal.message,
+    ))
+}
+
+fn narrow(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 fn failure_kind(kind: ht::FailureKind) -> FailureKind {
@@ -456,77 +891,85 @@ fn failure_kind(kind: ht::FailureKind) -> FailureKind {
         ht::FailureKind::SharedString => FailureKind::SharedString,
         ht::FailureKind::TooLarge => FailureKind::TooLarge,
         ht::FailureKind::Iwa => FailureKind::Iwa,
+        ht::FailureKind::Encoding => FailureKind::Encoding,
         // `Container`, and the reading of any kind the Rust binding gains later.
         _ => FailureKind::Container,
     }
 }
 
-fn refusal_of(error: &ht::Error) -> Refusal {
-    let message = error.to_string();
-    let (kind, column) = match error {
-        ht::Error::Io(_) => (ErrorKind::Io, None),
-        ht::Error::Separator(_) => (ErrorKind::Separator, None),
-        ht::Error::Plan { column } => (ErrorKind::Plan, Some(*column as u32)),
-        ht::Error::NoSheet(_) => (ErrorKind::NoSheet, None),
-        ht::Error::NoColumn(_) => (ErrorKind::NoColumn, None),
-        ht::Error::Unbound => (ErrorKind::Unbound, None),
-        ht::Error::AlreadyBound => (ErrorKind::AlreadyBound, None),
-        ht::Error::Structure(_) => (ErrorKind::Structure, None),
-        // A kind the Rust binding gains later reads as the most general one.
-        _ => (ErrorKind::Io, None),
-    };
-    Refusal {
-        kind,
-        message,
-        column,
+impl From<&ht::Error> for Refusal {
+    /// The Rust binding's error, in its own words.
+    fn from(error: &ht::Error) -> Refusal {
+        let mut refusal = Refusal::new(ErrorKind::Io, error.to_string());
+        refusal.kind = match error {
+            ht::Error::Io(_) => ErrorKind::Io,
+            ht::Error::Separator(_) => ErrorKind::Separator,
+            ht::Error::Plan { column } => {
+                refusal.column = Some(narrow(*column));
+                ErrorKind::Plan
+            }
+            ht::Error::NoSheet(_) => ErrorKind::NoSheet,
+            ht::Error::NoColumn(_) => ErrorKind::NoColumn,
+            ht::Error::AmbiguousColumn { first, second, .. } => {
+                refusal.ambiguous = Some((narrow(*first), narrow(*second)));
+                ErrorKind::AmbiguousColumn
+            }
+            ht::Error::Range(_) => ErrorKind::Range,
+            ht::Error::Unbound => ErrorKind::Unbound,
+            ht::Error::AlreadyBound => ErrorKind::AlreadyBound,
+            ht::Error::Structure(failure) => {
+                refusal.failure = Some(*failure);
+                ErrorKind::Structure
+            }
+            // The sizes the core refuses are the caller's arguments, as a Rust caller's are.
+            ht::Error::ZeroBatchRows
+            | ht::Error::ZeroBufferBytes
+            | ht::Error::BatchTooLarge { .. }
+            | ht::Error::RowTooWide { .. }
+            | ht::Error::NoMemory { .. } => ErrorKind::Argument,
+            // A kind the Rust binding gains later reads as the most general one.
+            _ => ErrorKind::Io,
+        };
+        refusal
     }
 }
 
-fn broken<'env>(
-    env: &'env Env,
-    refusal: Refusal,
-    error: Option<&ht::Error>,
-) -> Result<Object<'env>> {
+impl From<ht::Error> for Refusal {
+    fn from(error: ht::Error) -> Refusal {
+        Refusal::from(&error)
+    }
+}
+
+fn refused(env: &Env, refusal: Refusal) -> Result<Object<'_>> {
     clear_pending_exception(env);
-    let failure = match error {
-        Some(ht::Error::Structure(failure)) => Some(StructuralFailure {
-            kind: failure_kind(failure.kind),
-            record: failure.record as f64,
-            line: failure.line,
-            byte: failure.byte as f64,
-            expected: failure.expected,
-            found: failure.found,
-        }),
-        _ => None,
-    };
-    let mut outcome = Object::new(env)?;
-    outcome.set("ok", false)?;
-    outcome.set(
-        "error",
+    let failure = refusal.failure.map(|failure| StructuralFailure {
+        kind: failure_kind(failure.kind),
+        record: failure.record as f64,
+        line: failure.line,
+        byte: failure.byte as f64,
+        expected: failure.expected,
+        found: failure.found,
+    });
+    let error = js(
+        env,
         TabularError {
             kind: refusal.kind,
             message: refusal.message,
             failure,
             column: refusal.column,
+            first: refusal.ambiguous.map(|(first, _)| first),
+            second: refusal.ambiguous.map(|(_, second)| second),
         },
     )?;
-    Ok(outcome)
+    record(env, &[(c"ok", js(env, false)?), (c"error", error)])
 }
 
-fn closed(what: &str) -> Refusal {
-    Refusal {
-        kind: ErrorKind::Closed,
-        message: format!("the {what} was closed"),
-        column: None,
+/// An outcome: the value `made` builds, or the refusal.
+fn outcome<'env>(env: &'env Env, answer: Refused<impl ToNapiValue>) -> Result<Object<'env>> {
+    match answer {
+        Ok(value) => success(env, value),
+        Err(refusal) => refused(env, refusal),
     }
-}
-
-fn refused(env: &Env, refusal: Refusal) -> Result<Object<'_>> {
-    broken(env, refusal, None)
-}
-
-fn errored<'env>(env: &'env Env, error: &ht::Error) -> Result<Object<'env>> {
-    broken(env, refusal_of(error), Some(error))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -537,7 +980,7 @@ fn is_absent(value: &Unknown<'_>) -> bool {
     matches!(value.get_type(), Ok(ValueType::Undefined | ValueType::Null))
 }
 
-/// A whole number from 0 to `max`, the way an index or a size crosses.
+/// A whole number from 0 to `max`, the way an index, a count or a size crosses.
 fn whole(value: &Unknown<'_>, max: f64) -> Option<f64> {
     match value.get_type() {
         Ok(ValueType::Number) => unsafe { value.cast::<f64>() }
@@ -547,8 +990,19 @@ fn whole(value: &Unknown<'_>, max: f64) -> Option<f64> {
     }
 }
 
+/// A whole number, as a `usize`, however large: one past the host's address space is the
+/// largest, which the core then refuses in its own words as a size it cannot have (2^53 and
+/// beyond included, which a JavaScript number holds only rounded).
+fn whole_usize(value: &Unknown<'_>) -> Option<usize> {
+    whole(value, f64::MAX).map(|number| usize::try_from(number as u64).unwrap_or(usize::MAX))
+}
+
 fn index(value: &Unknown<'_>) -> Option<usize> {
-    whole(value, f64::from(u32::MAX)).map(|number| number as usize)
+    whole_usize(value)
+}
+
+fn code(value: &Unknown<'_>) -> Option<u32> {
+    whole(value, f64::from(u32::MAX)).map(|number| number as u32)
 }
 
 /// The bytes a reader reads: a string as its UTF-8, or a `Uint8Array`'s bytes (a `Buffer`
@@ -577,7 +1031,7 @@ fn options_object<'env>(
     env: &Env,
     value: &Unknown<'env>,
     what: &str,
-) -> std::result::Result<Option<Object<'env>>, Refusal> {
+) -> Refused<Option<Object<'env>>> {
     match value.get_type() {
         Ok(ValueType::Undefined | ValueType::Null) => Ok(None),
         Ok(ValueType::Object) => match unsafe { value.cast::<Object>() } {
@@ -591,14 +1045,14 @@ fn options_object<'env>(
     }
 }
 
-/// One field of an options object, read the one way that can run the caller's JavaScript (a
-/// getter, a Proxy trap); an exception it throws is cleared and refused.
+/// One field of an object, read the one way that can run the caller's JavaScript (a getter,
+/// a Proxy trap); an exception it throws is cleared and refused. Absent is `None`.
 fn field<'env>(
     env: &Env,
     object: &Object<'env>,
     what: &str,
     name: &str,
-) -> std::result::Result<Option<Unknown<'env>>, Refusal> {
+) -> Refused<Option<Unknown<'env>>> {
     match object.get::<Unknown>(name) {
         Ok(value) => Ok(value.filter(|value| !is_absent(value))),
         Err(_) => {
@@ -608,102 +1062,248 @@ fn field<'env>(
     }
 }
 
-fn flag(
-    env: &Env,
-    object: &Object<'_>,
-    what: &str,
-    name: &str,
-    default: bool,
-) -> std::result::Result<bool, Refusal> {
+fn flag(env: &Env, object: &Object<'_>, what: &str, name: &str) -> Refused<Option<bool>> {
     let Some(value) = field(env, object, what, name)? else {
-        return Ok(default);
+        return Ok(None);
     };
     match value.get_type() {
         Ok(ValueType::Boolean) => unsafe { value.cast::<bool>() }
+            .map(Some)
             .map_err(|_| argument(format!("{what}.{name} must be a boolean"))),
         _ => Err(argument(format!("{what}.{name} must be a boolean"))),
     }
 }
 
-fn size(
+/// A size: any whole number, which the core judges (`0` and too large included).
+fn size(env: &Env, object: &Object<'_>, what: &str, name: &str) -> Refused<Option<usize>> {
+    let Some(value) = field(env, object, what, name)? else {
+        return Ok(None);
+    };
+    whole_usize(&value)
+        .map(Some)
+        .ok_or_else(|| argument(format!("{what}.{name} must be a whole number, 0 or more")))
+}
+
+/// A count of lines, records or rows: a whole number that fits in 32 bits.
+fn count(env: &Env, object: &Object<'_>, what: &str, name: &str) -> Refused<Option<u32>> {
+    let Some(value) = field(env, object, what, name)? else {
+        return Ok(None);
+    };
+    code(&value).map(Some).ok_or_else(|| {
+        argument(format!(
+            "{what}.{name} must be a whole number from 0 to 4294967295"
+        ))
+    })
+}
+
+/// One of a closed set of names.
+fn named<T: Copy>(
     env: &Env,
     object: &Object<'_>,
     what: &str,
     name: &str,
-    default: usize,
-) -> std::result::Result<usize, Refusal> {
+    names: &[(&str, T)],
+) -> Refused<Option<T>> {
     let Some(value) = field(env, object, what, name)? else {
-        return Ok(default);
+        return Ok(None);
     };
-    match whole(&value, f64::from(u32::MAX)) {
-        Some(number) if number >= 1.0 => Ok(number as usize),
-        _ => Err(argument(format!(
-            "{what}.{name} must be a whole number from 1 to 4294967295"
-        ))),
-    }
+    let text = string_of(&value);
+    names
+        .iter()
+        .find(|(known, _)| Some(*known) == text.as_deref())
+        .map(|(_, member)| Some(*member))
+        .ok_or_else(|| {
+            let known: Vec<String> = names
+                .iter()
+                .map(|(known, _)| format!("'{known}'"))
+                .collect();
+            argument(format!("{what}.{name} must be one of {}", known.join(", ")))
+        })
 }
 
-fn dialect_of(env: &Env, value: &Unknown<'_>) -> std::result::Result<ht::Dialect, Refusal> {
+/// An array, each element read by `item` (`None` refusing it).
+fn list<'env, T>(
+    env: &Env,
+    value: &Unknown<'env>,
+    what: &str,
+    mut item: impl FnMut(usize, Unknown<'env>) -> Refused<T>,
+) -> Refused<Vec<T>> {
+    let array = match value.is_array() {
+        Ok(true) => unsafe { value.cast::<Array>() }.ok(),
+        _ => None,
+    };
+    let Some(array) = array else {
+        clear_pending_exception(env);
+        return Err(argument(format!("{what} must be an array")));
+    };
+    let mut items = Vec::new();
+    for at in 0..array.len() {
+        let element = match array.get::<Unknown>(at) {
+            Ok(Some(element)) => element,
+            _ => {
+                clear_pending_exception(env);
+                return Err(argument(format!("{what}[{at}] could not be read")));
+            }
+        };
+        items.push(item(at as usize, element)?);
+    }
+    Ok(items)
+}
+
+/// A list of tokens: strings, matched as their UTF-8.
+fn tokens_of(env: &Env, value: &Unknown<'_>, what: &str) -> Refused<Vec<String>> {
+    list(env, value, what, |at, element| {
+        string_of(&element).ok_or_else(|| argument(format!("{what}[{at}] must be a string")))
+    })
+}
+
+fn as_strs(tokens: &[String]) -> Vec<&str> {
+    tokens.iter().map(String::as_str).collect()
+}
+
+fn dialect_of(env: &Env, value: &Unknown<'_>) -> Refused<ht::Dialect> {
     let Some(object) = options_object(env, value, "the dialect")? else {
         return Ok(ht::Dialect::CSV);
     };
     let what = "dialect";
-    let separator = match field(env, &object, what, "separator")? {
-        None => b',',
+    let mut dialect = match field(env, &object, what, "separator")? {
+        None => ht::Dialect::CSV,
         Some(value) => {
             let text = string_of(&value)
                 .ok_or_else(|| argument("dialect.separator must be a one-character string"))?;
             match text.as_bytes() {
-                [byte] => *byte,
+                [byte] => ht::Dialect::new(*byte),
                 _ => {
-                    return Err(Refusal {
-                        kind: ErrorKind::Separator,
-                        message: format!(
+                    return Err(Refusal::new(
+                        ErrorKind::Separator,
+                        format!(
                             "separator {text:?} is not one tab or printable ASCII character other than '\"'"
                         ),
-                        column: None,
-                    });
+                    ));
                 }
             }
         }
     };
-    Ok(ht::Dialect::new(separator)
-        .with_quoting(flag(env, &object, what, "quoting", true)?)
-        .with_header(flag(env, &object, what, "hasHeader", true)?)
-        .with_blank_lines_skipped(flag(env, &object, what, "skipBlankLines", true)?))
+    if let Some(quoting) = flag(env, &object, what, "quoting")? {
+        dialect = dialect.with_quoting(quoting);
+    }
+    if let Some(header) = flag(env, &object, what, "hasHeader")? {
+        dialect = dialect.with_header(header);
+    }
+    if let Some(skip) = flag(env, &object, what, "skipBlankLines")? {
+        dialect = dialect.with_blank_lines_skipped(skip);
+    }
+    if let Some(skip) = count(env, &object, what, "skip")? {
+        dialect = dialect.with_skip(skip);
+    }
+    if let Some(row) = count(env, &object, what, "headerRow")? {
+        dialect = dialect.with_header_row(row);
+    }
+    let short = [
+        ("reject", ht::ShortRows::Reject),
+        ("pad", ht::ShortRows::Pad),
+    ];
+    if let Some(short) = named(env, &object, what, "shortRows", &short)? {
+        dialect = dialect.with_short_rows(short);
+    }
+    let long = [
+        ("reject", ht::LongRows::Reject),
+        ("report", ht::LongRows::Report),
+        ("truncate", ht::LongRows::Truncate),
+    ];
+    if let Some(long) = named(env, &object, what, "longRows", &long)? {
+        dialect = dialect.with_long_rows(long);
+    }
+    let encodings = [
+        ("utf8", ht::Encoding::Utf8),
+        ("windows1252", ht::Encoding::Windows1252),
+        ("latin1", ht::Encoding::Latin1),
+        ("utf16le", ht::Encoding::Utf16Le),
+    ];
+    if let Some(encoding) = named(env, &object, what, "encoding", &encodings)? {
+        dialect = dialect.with_encoding(encoding);
+    }
+    if let Some(tokens) = field(env, &object, what, "tokens")? {
+        let tokens = tokens_of(env, &tokens, "dialect.tokens")?;
+        dialect = dialect.with_tokens(&as_strs(&tokens));
+    }
+    Ok(dialect)
 }
 
-fn delimited_options(
-    env: &Env,
-    value: &Unknown<'_>,
-) -> std::result::Result<ht::DelimitedOptions, Refusal> {
-    let defaults = ht::DelimitedOptions::new();
+fn delimited_options(env: &Env, value: &Unknown<'_>) -> Refused<ht::DelimitedOptions> {
+    let mut options = ht::DelimitedReader::options();
     let Some(object) = options_object(env, value, "the options")? else {
-        return Ok(defaults);
+        return Ok(options);
     };
     let what = "options";
-    Ok(defaults
-        .batch_rows(size(env, &object, what, "batchRows", 4096)?)
-        .buffer_bytes(size(env, &object, what, "bufferBytes", 256 * 1024)?))
+    if let Some(rows) = size(env, &object, what, "batchRows")? {
+        options = options.batch_rows(rows);
+    }
+    if let Some(bytes) = size(env, &object, what, "bufferBytes")? {
+        options = options.buffer_bytes(bytes);
+    }
+    if let Some(notes) = flag(env, &object, what, "notes")? {
+        options = options.notes(notes);
+    }
+    Ok(options)
 }
 
-fn sheet_options(env: &Env, value: &Unknown<'_>) -> std::result::Result<ht::SheetOptions, Refusal> {
+fn sheet_options(env: &Env, value: &Unknown<'_>) -> Refused<ht::SheetOptions> {
+    let mut options = ht::SheetOptions::new();
     let Some(object) = options_object(env, value, "the options")? else {
-        return Ok(ht::SheetOptions::new());
+        return Ok(options);
     };
     let what = "options";
-    Ok(ht::SheetOptions::new()
-        .with_header(flag(env, &object, what, "hasHeader", true)?)
-        .with_empty_rows_skipped(flag(env, &object, what, "skipEmptyRows", true)?)
-        .with_batch_rows(size(env, &object, what, "batchRows", 4096)?))
+    if let Some(header) = flag(env, &object, what, "hasHeader")? {
+        options = options.with_header(header);
+    }
+    if let Some(skip) = flag(env, &object, what, "skipEmptyRows")? {
+        options = options.with_empty_rows_skipped(skip);
+    }
+    if let Some(rows) = size(env, &object, what, "batchRows")? {
+        options = options.with_batch_rows(rows);
+    }
+    if let Some(skip) = count(env, &object, what, "skip")? {
+        options = options.with_skip(skip);
+    }
+    if let Some(row) = count(env, &object, what, "headerRow")? {
+        options = options.with_header_row(row);
+    }
+    if let Some(range) = field(env, &object, what, "range")? {
+        options = options.with_range(range_of(env, &range)?);
+    }
+    if let Some(tokens) = field(env, &object, what, "tokens")? {
+        let tokens = tokens_of(env, &tokens, "options.tokens")?;
+        options = options.with_tokens(&as_strs(&tokens));
+    }
+    if let Some(notes) = flag(env, &object, what, "notes")? {
+        options = options.with_notes(notes);
+    }
+    Ok(options)
+}
+
+/// A `Range`, or text the core parses as one.
+fn range_of(env: &Env, value: &Unknown<'_>) -> Refused<ht::Range> {
+    if let Some(text) = string_of(value) {
+        return Ok(ht::Range::parse(&text)?);
+    }
+    let range = match value.get_type() {
+        Ok(ValueType::Object) => unsafe { value.cast::<ClassInstance<Range>>() }.ok(),
+        _ => None,
+    };
+    match range {
+        Some(range) => Ok(range.inner),
+        None => {
+            clear_pending_exception(env);
+            Err(argument("options.range must be a Range or its text"))
+        }
+    }
 }
 
 /// A plan: `undefined` or `null` is none (the reader waits for `bind`); otherwise an array of
-/// `Column`s, each of which must have been declared with values the core can honour.
-fn plan_of(
-    env: &Env,
-    value: &Unknown<'_>,
-) -> std::result::Result<Option<Vec<ht::Column>>, Refusal> {
+/// `Column`s. A column the binding could not make (an argument of the wrong type) is the
+/// core's own `plan` error at its place.
+fn plan_of(env: &Env, value: &Unknown<'_>) -> Refused<Option<Vec<ht::Column>>> {
     if is_absent(value) {
         return Ok(None);
     }
@@ -724,53 +1324,37 @@ fn plan_of(
             .and_then(|item| unsafe { item.cast::<ClassInstance<Column>>() }.ok());
         let Some(column) = column else {
             clear_pending_exception(env);
-            return Err(plan_refusal(
-                at as usize,
-                format!("plan column {at} is not a Column"),
-            ));
+            let mut refusal = Refusal::from(ht::Error::Plan {
+                column: at as usize,
+            });
+            refusal.message = format!("plan column {at} is not a Column");
+            return Err(refusal);
         };
         match column.resolved {
             Some(resolved) => plan.push(resolved),
             None => {
-                return Err(plan_refusal(
-                    at as usize,
-                    format!(
-                        "plan column {at} declares an ordinal, a format or a {} the core cannot honour",
-                        "precision, order or epoch"
-                    ),
-                ));
+                return Err(ht::Error::Plan {
+                    column: at as usize,
+                }
+                .into());
             }
         }
     }
     Ok(Some(plan))
 }
 
-// ---------------------------------------------------------------------------------------
-// Columns.
-// ---------------------------------------------------------------------------------------
-
-/// One output column: the source column it reads, the door its cells go through, and, for a
-/// numeric door, the notation. Made by a factory (`Column.i32(0)`), never by `new`. A factory
-/// never refuses: a column it cannot honour (an ordinal that is not a whole number below
-/// 2^20, a format or a declared precision, order or epoch that is not one) is refused, with
-/// its place in the plan, when the plan is bound.
-#[napi]
-pub struct Column {
-    door: Door,
-    ordinal: f64,
-    resolved: Option<ht::Column>,
-}
-
-/// A `format` argument: absent is the invariant format; otherwise its `packed` bytes, the
-/// 92-byte layout `@skunkwerkx/hypercast`'s `NumFormat` hands out, as the core reads them.
-fn format_of(env: &Env, value: &Unknown<'_>) -> Option<hc::NumFormat> {
+/// A `format` argument: absent is none, which reads as the core's default; otherwise its
+/// `packed` bytes, the 92-byte layout `@skunkwerkx/hypercast`'s `NumFormat` hands out, as
+/// HyperCast resolves them. `Err` for anything else, a retired grouping word included.
+fn format_of(env: &Env, value: &Unknown<'_>) -> std::result::Result<Option<hc::NumFormat>, ()> {
     if is_absent(value) {
-        return Some(hc::NumFormat::STRICT);
+        return Ok(None);
     }
     let object = match value.get_type() {
         Ok(ValueType::Object | ValueType::Function) => unsafe { value.cast::<Object>() }.ok(),
         _ => None,
-    }?;
+    }
+    .ok_or(())?;
     let packed = match object.get::<Unknown>("packed") {
         Ok(Some(packed)) => match packed.get_type() {
             Ok(ValueType::Object) => unsafe { packed.cast::<Uint8Array>() }.ok(),
@@ -780,15 +1364,107 @@ fn format_of(env: &Env, value: &Unknown<'_>) -> Option<hc::NumFormat> {
     };
     let Some(packed) = packed else {
         clear_pending_exception(env);
-        return None;
+        return Err(());
     };
-    let bytes: [u8; 92] = packed.as_ref().try_into().ok()?;
-    hc::RawNumFormat::from_le_bytes(bytes).resolve().copied()
+    let bytes: [u8; 92] = packed.as_ref().try_into().map_err(|_| ())?;
+    hc::RawNumFormat::from_le_bytes(bytes)
+        .resolve()
+        .copied()
+        .map(Some)
+        .ok_or(())
 }
 
-/// An enum member, the way a HyperCast enum crosses: a whole number.
-fn code(value: &Unknown<'_>) -> Option<u32> {
-    whole(value, f64::from(u32::MAX)).map(|number| number as u32)
+fn date_order_of(value: &Unknown<'_>) -> Option<hc::DateOrder> {
+    code(value).and_then(hc::DateOrder::from_code)
+}
+
+/// An `[ordinal, value]` pair.
+fn pair<'env>(env: &Env, element: &Unknown<'env>, what: &str) -> Refused<(usize, Unknown<'env>)> {
+    let parts = list(env, element, what, |_, part| Ok(part))?;
+    match <[Unknown; 2]>::try_from(parts) {
+        Ok([ordinal, value]) => index(&ordinal)
+            .map(|ordinal| (ordinal, value))
+            .ok_or_else(|| argument(format!("{what}[0] must be a whole-number ordinal"))),
+        Err(_) => Err(argument(format!("{what} must be an [ordinal, value] pair"))),
+    }
+}
+
+fn suggest_options(env: &Env, value: &Unknown<'_>) -> Refused<ht::SuggestOptions> {
+    let mut options = ht::SuggestOptions::new();
+    let Some(object) = options_object(env, value, "the options")? else {
+        return Ok(options);
+    };
+    let what = "options";
+    if let Some(rows) = size(env, &object, what, "sampleRows")? {
+        options = options.sample_rows(rows);
+    }
+    // A format HyperCast won't resolve is the core's `plan` error at its ordinal (`0` for every
+    // column's), as the Rust binding's own check of a suggestion's formats answers.
+    let stale = |ordinal: usize| Refusal::from(ht::Error::Plan { column: ordinal });
+    if let Some(format) = field(env, &object, what, "format")?
+        && let Some(format) = format_of(env, &format).map_err(|()| stale(0))?
+    {
+        options = options.format(format);
+    }
+    if let Some(entries) = field(env, &object, what, "columnFormats")? {
+        let entries = list(env, &entries, "options.columnFormats", |at, element| {
+            let (ordinal, format) = pair(env, &element, &format!("options.columnFormats[{at}]"))?;
+            match format_of(env, &format) {
+                Ok(Some(format)) => Ok((ordinal, format)),
+                _ => Err(stale(ordinal)),
+            }
+        })?;
+        for (ordinal, format) in entries {
+            options = options.column_format(ordinal, format);
+        }
+    }
+    if let Some(order) = field(env, &object, what, "dateOrder")? {
+        let order = date_order_of(&order)
+            .ok_or_else(|| argument("options.dateOrder must be a DateOrder"))?;
+        options = options.date_order(order);
+    }
+    if let Some(entries) = field(env, &object, what, "columnDateOrders")? {
+        let entries = list(env, &entries, "options.columnDateOrders", |at, element| {
+            let what = format!("options.columnDateOrders[{at}]");
+            let (ordinal, order) = pair(env, &element, &what)?;
+            date_order_of(&order)
+                .map(|order| (ordinal, order))
+                .ok_or_else(|| argument(format!("{what}[1] must be a DateOrder")))
+        })?;
+        for (ordinal, order) in entries {
+            options = options.column_date_order(ordinal, order);
+        }
+    }
+    Ok(options)
+}
+
+/// The state a reader or a sheet keeps, for this call alone: `None` (and the caller answered
+/// `busy`) when a call already holds it, as one does while JavaScript it runs calls back in.
+fn exclusive<T, R>(cell: &RefCell<T>, call: impl FnOnce(&mut T) -> R) -> Option<R> {
+    let mut held = cell.try_borrow_mut().ok()?;
+    Some(call(&mut held))
+}
+
+/// The state, to look at: `None` while a call that changes it holds it.
+fn shared<T, R>(cell: &RefCell<T>, call: impl FnOnce(&T) -> R) -> Option<R> {
+    let held = cell.try_borrow().ok()?;
+    Some(call(&held))
+}
+
+// ---------------------------------------------------------------------------------------
+// Columns.
+// ---------------------------------------------------------------------------------------
+
+/// One output column: the source column it reads, the door its cells go through, and what it
+/// declares beside them. Made by a factory (`Column.i32(0)`), never by `new`. A factory never
+/// refuses: a column whose arguments are not of the declared types is refused, with its
+/// place in the plan, when the plan is bound, as is one the core cannot honour (an ordinal
+/// past the core's limit, a format or date options HyperCast refuses).
+#[napi]
+pub struct Column {
+    door: Door,
+    ordinal: f64,
+    resolved: Option<ht::Column>,
 }
 
 impl Column {
@@ -797,23 +1473,43 @@ impl Column {
         door: Door,
         ordinal: &Unknown<'_>,
         declared: Option<ht::Door>,
-        format: Option<hc::NumFormat>,
+        format: std::result::Result<Option<hc::NumFormat>, ()>,
     ) -> Column {
         let given = match ordinal.get_type() {
             Ok(ValueType::Number) => unsafe { ordinal.cast::<f64>() }.unwrap_or(f64::NAN),
             _ => f64::NAN,
         };
         clear_pending_exception(env);
-        // Below 2^20, the Rust binding's own ceiling, so `valid` says what `bind` will.
-        let ordinal_index = index(ordinal).filter(|at| *at < 1 << 20);
-        let resolved = match (ordinal_index, declared, format) {
-            (Some(at), Some(door), Some(format)) => Some(ht::Column::new(at, door).format(format)),
+        let resolved = match (index(ordinal), declared, format) {
+            (Some(at), Some(door), Ok(format)) => {
+                let column = ht::Column::new(at, door);
+                Some(match format {
+                    Some(format) => column.format(format),
+                    None => column,
+                })
+            }
             _ => None,
         };
         Column {
             door,
             ordinal: given,
             resolved,
+        }
+    }
+
+    fn of(column: ht::Column) -> Column {
+        Column {
+            door: door_name(column.door),
+            ordinal: column.ordinal as f64,
+            resolved: Some(column),
+        }
+    }
+
+    fn with(&self, change: impl FnOnce(ht::Column) -> Option<ht::Column>) -> Column {
+        Column {
+            door: self.door,
+            ordinal: self.ordinal,
+            resolved: self.resolved.and_then(change),
         }
     }
 }
@@ -829,7 +1525,7 @@ macro_rules! plain_columns {
             #[doc = $doc]
             #[napi(catch_unwind, ts_args_type = "ordinal: number")]
             pub fn $name(env: &Env, ordinal: Unknown<'_>) -> Column {
-                Column::make(env, Door::$door, &ordinal, Some(ht::Door::$door), Some(hc::NumFormat::STRICT))
+                Column::make(env, Door::$door, &ordinal, Some(ht::Door::$door), Ok(None))
             }
         }
     )+};
@@ -903,7 +1599,7 @@ impl Column {
         let door = code(&precision)
             .and_then(hc::UnixPrecision::from_code)
             .map(ht::Door::Unix);
-        Column::make(env, Door::Unix, &ordinal, door, Some(hc::NumFormat::STRICT))
+        Column::make(env, Door::Unix, &ordinal, door, Ok(None))
     }
 
     /// An Excel date serial in the declared `ExcelEpoch`.
@@ -912,43 +1608,51 @@ impl Column {
         let door = code(&epoch)
             .and_then(hc::ExcelEpoch::from_code)
             .map(ht::Door::ExcelSerial);
-        Column::make(
-            env,
-            Door::ExcelSerial,
-            &ordinal,
-            door,
-            Some(hc::NumFormat::STRICT),
-        )
+        Column::make(env, Door::ExcelSerial, &ordinal, door, Ok(None))
     }
 
     /// A separated calendar date whose fields come in the declared `DateOrder`.
     #[napi(catch_unwind, ts_args_type = "ordinal: number, order: number")]
     pub fn date_ordered(env: &Env, ordinal: Unknown<'_>, order: Unknown<'_>) -> Column {
-        let door = code(&order)
-            .and_then(hc::DateOrder::from_code)
-            .map(ht::Door::DateOrdered);
-        Column::make(
-            env,
-            Door::DateOrdered,
-            &ordinal,
-            door,
-            Some(hc::NumFormat::STRICT),
-        )
+        let door = date_order_of(&order).map(ht::Door::DateOrdered);
+        Column::make(env, Door::DateOrdered, &ordinal, door, Ok(None))
     }
 
     /// A zone-less civil date-time whose date fields come in the declared `DateOrder`.
     #[napi(catch_unwind, ts_args_type = "ordinal: number, order: number")]
     pub fn datetime(env: &Env, ordinal: Unknown<'_>, order: Unknown<'_>) -> Column {
-        let door = code(&order)
-            .and_then(hc::DateOrder::from_code)
-            .map(ht::Door::DateTime);
-        Column::make(
-            env,
-            Door::Datetime,
-            &ordinal,
-            door,
-            Some(hc::NumFormat::STRICT),
-        )
+        let door = date_order_of(&order).map(ht::Door::DateTime);
+        Column::make(env, Door::Datetime, &ordinal, door, Ok(None))
+    }
+
+    /// The same column answering to these tokens rather than its dialect's or sheet's: a
+    /// cell whose exact unquoted text is one of them is `empty`, its origin `token`. An empty
+    /// list means none, so a column can opt out of its dialect's. Each distinct list is kept
+    /// for the life of the process: a program building lists from request data grows without
+    /// bound.
+    #[napi(catch_unwind, ts_args_type = "tokens: ReadonlyArray<string>")]
+    pub fn with_tokens(&self, env: &Env, tokens: Unknown<'_>) -> Column {
+        let tokens = tokens_of(env, &tokens, "tokens").ok();
+        clear_pending_exception(env);
+        self.with(|column| tokens.map(|tokens| column.tokens(&as_strs(&tokens))))
+    }
+
+    /// The same column reading dates under a HyperCast `DateOptions`, its month names
+    /// included: the `timestamp`, `date`, `dateOrdered` and `datetime` doors read them. On a
+    /// sheet they reach only a text cell. Each distinct month list is kept for the life of the
+    /// process.
+    #[napi(catch_unwind, ts_args_type = "options: DeclaredDateOptions")]
+    pub fn with_date_options(&self, env: &Env, options: Unknown<'_>) -> Column {
+        let declared = date_options_of(env, &options);
+        clear_pending_exception(env);
+        self.with(|column| {
+            let (options, months) = declared?;
+            let months = match &months {
+                Some(packed) => Some(hc::MonthNames::from_packed(packed).ok()?),
+                None => None,
+            };
+            Some(column.date_options(options, months))
+        })
     }
 
     /// The door its cells go through.
@@ -963,35 +1667,59 @@ impl Column {
         self.ordinal
     }
 
-    /// Whether the core can honour it: a plan holding a column that is not valid is refused
-    /// when it is bound, with the column's place in the plan.
+    /// The notation a number door reads in, as its 92 bytes (other doors carry one too, and
+    /// read nothing of it); `null` for a column that is not valid.
+    #[napi(getter, catch_unwind)]
+    pub fn format(&self) -> Option<SuggestedFormat> {
+        self.resolved.map(|column| format_out(column.format))
+    }
+
+    /// Whether its arguments were of the declared types. A plan holding a column that is not
+    /// valid is refused when it is bound, with the column's place in the plan; so is one the
+    /// core cannot honour, valid or not.
     #[napi(getter, catch_unwind)]
     pub fn valid(&self) -> bool {
         self.resolved.is_some()
     }
 }
 
+/// A HyperCast `DateOptions`: its flags, its pivot and its month names' packed bytes.
+fn date_options_of(env: &Env, value: &Unknown<'_>) -> Option<(hc::DateOptions, Option<Vec<u8>>)> {
+    let object = match value.get_type() {
+        Ok(ValueType::Object) => unsafe { value.cast::<Object>() }.ok(),
+        _ => None,
+    }?;
+    let what = "options";
+    let flags = field(env, &object, what, "flags").ok()?;
+    let pivot = field(env, &object, what, "pivot").ok()?;
+    let flags = flags.as_ref().map_or(Some(0), code)?;
+    let pivot = u16::try_from(pivot.as_ref().map_or(Some(0), code)?).ok()?;
+    let months = match field(env, &object, what, "months").ok()? {
+        None => None,
+        Some(months) => {
+            let names = match months.get_type() {
+                Ok(ValueType::Object) => unsafe { months.cast::<Object>() }.ok(),
+                _ => None,
+            }?;
+            let packed = names.get::<Unknown>("packed").ok().flatten()?;
+            let packed = match packed.get_type() {
+                Ok(ValueType::Object) => unsafe { packed.cast::<Uint8Array>() }.ok(),
+                _ => None,
+            }?;
+            Some(packed.to_vec())
+        }
+    };
+    Some((hc::DateOptions::from_flags(flags).with_pivot(pivot), months))
+}
+
 // ---------------------------------------------------------------------------------------
-// The header.
+// The header and ranges.
 // ---------------------------------------------------------------------------------------
 
 /// The names a source's header declared, in column order.
 #[napi]
 pub struct Header {
-    names: Vec<Vec<u8>>,
-}
-
-impl Header {
-    fn from(header: &ht::Header) -> Header {
-        Header {
-            names: header.names().map(<[u8]>::to_vec).collect(),
-        }
-    }
-
-    fn find(&self, name: &Unknown<'_>) -> Option<Option<usize>> {
-        let wanted = bytes_of(name)?;
-        Some(self.names.iter().position(|candidate| *candidate == wanted))
-    }
+    inner: ht::Header,
 }
 
 #[napi]
@@ -999,8 +1727,8 @@ impl Header {
     /// Every name, in column order (bytes that are not UTF-8 replaced by U+FFFD).
     #[napi(getter, catch_unwind)]
     pub fn names(&self) -> Vec<String> {
-        self.names
-            .iter()
+        self.inner
+            .names()
             .map(|name| String::from_utf8_lossy(name).into_owned())
             .collect()
     }
@@ -1008,41 +1736,170 @@ impl Header {
     /// How many columns the header names.
     #[napi(getter, catch_unwind)]
     pub fn length(&self) -> u32 {
-        self.names.len() as u32
+        narrow(self.inner.len())
     }
 
     /// The first column with exactly this name (byte for byte, case and spaces included; a
     /// `Uint8Array` is matched against the bytes the file holds), or `null` if none has it.
+    /// Two columns with the name answer the first: `require` refuses that instead.
     #[napi(catch_unwind, ts_args_type = "name: string | Uint8Array")]
     pub fn ordinal(&self, name: Unknown<'_>) -> Option<u32> {
-        self.find(&name).flatten().map(|at| at as u32)
+        let wanted = bytes_of(&name)?;
+        self.inner.ordinal(wanted).map(narrow)
     }
 
-    /// The first column with exactly this name, or the `noColumn` error naming it: what a
-    /// plan built from names reads best with.
+    /// The column with exactly this name: the `noColumn` error naming it if none has it, and
+    /// the `ambiguousColumn` error naming both if two have, since a plan built from names must
+    /// not choose for its caller.
     #[napi(
         catch_unwind,
         ts_args_type = "name: string | Uint8Array",
         ts_return_type = "Outcome<number>"
     )]
     pub fn require<'env>(&self, env: &'env Env, name: Unknown<'env>) -> Result<Object<'env>> {
-        match self.find(&name) {
-            None => refused(env, argument("the name must be a string or a Uint8Array")),
-            Some(Some(at)) => success(env, at as u32),
-            Some(None) => {
-                let wanted = bytes_of(&name).unwrap_or_default();
-                errored(
-                    env,
-                    &ht::Error::NoColumn(String::from_utf8_lossy(&wanted).into_owned()),
-                )
-            }
+        let answer = bytes_of(&name)
+            .ok_or_else(|| argument("the name must be a string or a Uint8Array"))
+            .and_then(|wanted| Ok(narrow(self.inner.require(wanted)?)));
+        outcome(env, answer)
+    }
+}
+
+/// A part of a sheet: rows and columns, each 1-based, `0` meaning no limit on that side.
+/// Made by `Range.parse` or `Range.of`, never by `new`.
+#[napi]
+pub struct Range {
+    inner: ht::Range,
+}
+
+#[napi]
+impl Range {
+    /// A range from its text, `A5:F200`: capital column letters, both corners, the last not
+    /// before the first. Anything else is the `range` error.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "text: string",
+        ts_return_type = "Outcome<Range>"
+    )]
+    pub fn parse<'env>(env: &'env Env, text: Unknown<'env>) -> Result<Object<'env>> {
+        let made = string_of(&text)
+            .ok_or_else(|| argument("the range must be a string"))
+            .and_then(|text| Ok(ht::Range::parse(&text)?));
+        match made {
+            Ok(inner) => success(env, Range { inner }.into_instance(env)?),
+            Err(refusal) => refused(env, refusal),
         }
+    }
+
+    /// A range from its four numbers, each 1-based, `0` for no limit on that side: what text
+    /// cannot say, such as every row from the fifth. A last before its first is the `range`
+    /// error.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "firstRow: number, firstColumn: number, lastRow: number, lastColumn: number",
+        ts_return_type = "Outcome<Range>"
+    )]
+    pub fn of<'env>(
+        env: &'env Env,
+        first_row: Unknown<'env>,
+        first_column: Unknown<'env>,
+        last_row: Unknown<'env>,
+        last_column: Unknown<'env>,
+    ) -> Result<Object<'env>> {
+        let made = match (
+            code(&first_row),
+            code(&first_column),
+            code(&last_row),
+            code(&last_column),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d)) => {
+                ht::Range::new(a, b, c, d).map_err(Refusal::from)
+            }
+            _ => Err(argument(
+                "each side of a range must be a whole number from 0 to 4294967295",
+            )),
+        };
+        match made {
+            Ok(inner) => success(env, Range { inner }.into_instance(env)?),
+            Err(refusal) => refused(env, refusal),
+        }
+    }
+
+    #[napi(getter, catch_unwind)]
+    pub fn first_row(&self) -> u32 {
+        self.inner.first_row()
+    }
+
+    #[napi(getter, catch_unwind)]
+    pub fn first_column(&self) -> u32 {
+        self.inner.first_column()
+    }
+
+    #[napi(getter, catch_unwind)]
+    pub fn last_row(&self) -> u32 {
+        self.inner.last_row()
+    }
+
+    #[napi(getter, catch_unwind)]
+    pub fn last_column(&self) -> u32 {
+        self.inner.last_column()
     }
 }
 
 // ---------------------------------------------------------------------------------------
 // Batches: what a read copied out of the reader.
 // ---------------------------------------------------------------------------------------
+//
+// A read copies its batch into one store of bytes. Under Node, Bun and Deno that store is an
+// `ArrayBuffer` V8 allocates, held by the batch object as a property; the native object
+// behind the batch keeps only its row count and its doors. So a batch the caller drops is
+// reclaimed by V8's own collection, inside a synchronous loop too, where a finalizer the
+// engine defers to the next turn of the event loop would hold every batch until the loop
+// returned. Under WebAssembly the store is a buffer of the module's own memory, held by the
+// native object, since emnapi would copy a JavaScript buffer into that memory on every look.
+//
+// Nothing here runs JavaScript while it borrows the store: a call copies what it needs out
+// (a value, a span's bytes, the faults list) and only then builds what it hands back, since
+// JavaScript that ran could detach the buffer. A store that is not one, or was detached, is
+// a batch of no rows and no columns.
+//
+// The store's layout, every word a `u64` in the host's byte order:
+//
+// - a head: rows, columns, where the lines are, where the widths are (0 for none), the width a
+//   read that reports long rows expected;
+// - each column's 10 words: how its values are kept (`KIND_*`), its source column, how many of
+//   its cells did not cast, where its verdicts (0 for a column whose every cell cast), notes (0
+//   for none), values, raw spans and heap are, the heap's length, and whether the column is
+//   wide (a heap past what a `u32` reaches);
+// - then the sections, each starting on 8 bytes: the lines and the widths (`u32` a row), and
+//   for each column its verdicts (`CellVerdict`, 12 bytes a row) and notes (`CellNote`, 4
+//   bytes a row), both kept only for a column with a cell that did not cast, its values (a
+//   `Shape` a row: one word, two, or a text's place in the heap), its raw spans (a place in
+//   the heap a row: two `u32`s, or two `u64`s in a wide column) and its heap (each cell's raw
+//   text, back to back, then each text value that is not its raw text).
+//
+// The faults list is worked out from the verdicts and notes when it is asked for, through the
+// Rust binding's `KeptBatch`.
+
+const HEAD: usize = 5;
+const COLUMN_WORDS: usize = 10;
+
+/// How a column's values are kept: the value of each `Value` variant.
+const KIND_BOOL: u64 = 0;
+const KIND_INT: u64 = 1;
+const KIND_UINT: u64 = 2;
+const KIND_BIG: u64 = 3;
+const KIND_UBIG: u64 = 4;
+const KIND_REAL: u64 = 5;
+const KIND_DECIMAL: u64 = 6;
+const KIND_UUID: u64 = 7;
+const KIND_INSTANT: u64 = 8;
+const KIND_DATE: u64 = 9;
+const KIND_CIVIL: u64 = 10;
+const KIND_TIME: u64 = 11;
+const KIND_SPAN: u64 = 12;
+const KIND_TEXT: u64 = 13;
+/// A door the Rust binding gains later: nothing here knows its type, so no value.
+const KIND_NONE: u64 = 14;
 
 /// A cell's value, as the door made it.
 enum Value {
@@ -1060,22 +1917,6 @@ enum Value {
     Time(u64),
     Span(hc::Duration),
     Text(String),
-}
-
-/// One column of a batch: each cell's verdict, and the raw text a fault's span indexes.
-struct Cells {
-    cells: Vec<std::result::Result<Value, hc::Fault>>,
-    /// Every cell's raw text, back to back; `spans[row]` is where a row's is.
-    raw: Vec<u8>,
-    spans: Vec<(usize, usize)>,
-    faults: usize,
-}
-
-struct BatchData {
-    rows: usize,
-    doors: Vec<Door>,
-    lines: Vec<u32>,
-    columns: Vec<Cells>,
 }
 
 fn door_name(door: ht::Door) -> Door {
@@ -1107,135 +1948,914 @@ fn door_name(door: ht::Door) -> Door {
     }
 }
 
-/// One cell, read through the accessor its door's type is read with (the only one the Rust
-/// binding answers for that door).
-fn cell(
-    batch: &ht::Batch<'_>,
-    door: ht::Door,
-    column: usize,
-    row: usize,
-) -> std::result::Result<Value, hc::Fault> {
+/// What a door declares beside itself, as HyperCast numbers it.
+fn door_param(door: ht::Door) -> Option<u32> {
     match door {
-        ht::Door::Bool => batch.get::<bool>(column, row).map(Value::Bool),
-        ht::Door::I8 => batch.get::<i8>(column, row).map(|v| Value::Int(v.into())),
-        ht::Door::I16 => batch.get::<i16>(column, row).map(|v| Value::Int(v.into())),
-        ht::Door::I32 => batch.get::<i32>(column, row).map(Value::Int),
-        ht::Door::I64 => batch.get::<i64>(column, row).map(Value::Big),
-        ht::Door::U8 => batch.get::<u8>(column, row).map(|v| Value::Uint(v.into())),
-        ht::Door::U16 => batch.get::<u16>(column, row).map(|v| Value::Uint(v.into())),
-        ht::Door::U32 => batch.get::<u32>(column, row).map(Value::Uint),
-        ht::Door::U64 => batch.get::<u64>(column, row).map(Value::UBig),
-        ht::Door::F32 => batch.get::<f32>(column, row).map(|v| Value::Real(v.into())),
-        ht::Door::F64 => batch.get::<f64>(column, row).map(Value::Real),
-        ht::Door::Decimal => batch.get::<hc::Decimal>(column, row).map(Value::Decimal),
-        ht::Door::Uuid => batch.get::<[u8; 16]>(column, row).map(Value::Uuid),
-        ht::Door::Timestamp | ht::Door::Unix(_) | ht::Door::ExcelSerial(_) => {
-            batch.get::<hc::Timestamp>(column, row).map(Value::Instant)
-        }
-        ht::Door::Date | ht::Door::DateOrdered(_) => {
-            batch.get::<hc::Date>(column, row).map(Value::Date)
-        }
-        ht::Door::DateTime(_) => batch
-            .get::<hc::CivilDateTime>(column, row)
-            .map(Value::Civil),
-        ht::Door::Time => batch.get::<u64>(column, row).map(Value::Time),
-        ht::Door::Duration => batch.get::<hc::Duration>(column, row).map(Value::Span),
-        ht::Door::Text => batch
-            .text_str(column, row)
-            .map(|text| Value::Text(text.into_owned())),
-        // A door the Rust binding gains later: nothing here knows its type, so no value.
-        _ => Err(CONTRACT),
+        ht::Door::Unix(precision) => Some(precision as u32),
+        ht::Door::DateOrdered(order) | ht::Door::DateTime(order) => Some(order as u32),
+        ht::Door::ExcelSerial(epoch) => Some(epoch as u32),
+        _ => None,
     }
 }
 
-impl BatchData {
-    fn copy(batch: &ht::Batch<'_>) -> BatchData {
+fn origin_name(origin: ht::Origin) -> Origin {
+    match origin {
+        ht::Origin::Token => Origin::Token,
+        ht::Origin::Padded => Origin::Padded,
+        ht::Origin::Uncached => Origin::Uncached,
+        // `Cell`, and an origin the Rust binding gains later.
+        _ => Origin::Cell,
+    }
+}
+
+/// A detail by HyperCast's own name for it.
+fn detail_name(detail: hc::Detail) -> Detail {
+    match detail {
+        hc::Detail::Blank => Detail::Blank,
+        hc::Detail::UnexpectedCharacter => Detail::UnexpectedCharacter,
+        hc::Detail::DigitExpected => Detail::DigitExpected,
+        hc::Detail::DelimiterExpected => Detail::DelimiterExpected,
+        hc::Detail::TrailingText => Detail::TrailingText,
+        hc::Detail::NoDigits => Detail::NoDigits,
+        hc::Detail::SignMisplaced => Detail::SignMisplaced,
+        hc::Detail::ParenthesesUnbalanced => Detail::ParenthesesUnbalanced,
+        hc::Detail::MarkRepeated => Detail::MarkRepeated,
+        hc::Detail::GroupMisplaced => Detail::GroupMisplaced,
+        hc::Detail::GroupSize => Detail::GroupSize,
+        hc::Detail::GroupInFraction => Detail::GroupInFraction,
+        hc::Detail::AmbiguousSeparator => Detail::AmbiguousSeparator,
+        hc::Detail::FractionNotAllowed => Detail::FractionNotAllowed,
+        hc::Detail::FieldWidth => Detail::FieldWidth,
+        hc::Detail::WrongLength => Detail::WrongLength,
+        hc::Detail::ComponentMissing => Detail::ComponentMissing,
+        hc::Detail::NotRecognized => Detail::NotRecognized,
+        hc::Detail::UnknownUnit => Detail::UnknownUnit,
+        hc::Detail::InvalidUtf8 => Detail::InvalidUtf8,
+        hc::Detail::TooLong => Detail::TooLong,
+        hc::Detail::NotFinite => Detail::NotFinite,
+        hc::Detail::NotWhole => Detail::NotWhole,
+        hc::Detail::NegativeNotAllowed => Detail::NegativeNotAllowed,
+        hc::Detail::TooLarge => Detail::TooLarge,
+        hc::Detail::TooSmall => Detail::TooSmall,
+        hc::Detail::TooPrecise => Detail::TooPrecise,
+        hc::Detail::DateFieldOutOfRange => Detail::DateFieldOutOfRange,
+        hc::Detail::TimeFieldOutOfRange => Detail::TimeFieldOutOfRange,
+        hc::Detail::OutsideWindow => Detail::OutsideWindow,
+        hc::Detail::NonexistentDate => Detail::NonexistentDate,
+        hc::Detail::NotAScalar => Detail::NotAScalar,
+        // `hc::Detail` is non-exhaustive: a detail a later core adds is named when this binding
+        // learns it, and `unknown` until then, as `@skunkwerkx/hypercast` says it.
+        _ => Detail::Unknown,
+    }
+}
+
+/// How a door's values are kept.
+fn kind(door: ht::Door) -> u64 {
+    match door {
+        ht::Door::Bool => KIND_BOOL,
+        ht::Door::I8 | ht::Door::I16 | ht::Door::I32 => KIND_INT,
+        ht::Door::U8 | ht::Door::U16 | ht::Door::U32 => KIND_UINT,
+        ht::Door::I64 => KIND_BIG,
+        ht::Door::U64 => KIND_UBIG,
+        ht::Door::F32 | ht::Door::F64 => KIND_REAL,
+        ht::Door::Decimal => KIND_DECIMAL,
+        ht::Door::Uuid => KIND_UUID,
+        ht::Door::Timestamp | ht::Door::Unix(_) | ht::Door::ExcelSerial(_) => KIND_INSTANT,
+        ht::Door::Date | ht::Door::DateOrdered(_) => KIND_DATE,
+        ht::Door::DateTime(_) => KIND_CIVIL,
+        ht::Door::Time => KIND_TIME,
+        ht::Door::Duration => KIND_SPAN,
+        ht::Door::Text => KIND_TEXT,
+        _ => KIND_NONE,
+    }
+}
+
+fn pack_date(date: hc::Date) -> u64 {
+    u64::from(date.year) | u64::from(date.month) << 16 | u64::from(date.day) << 24
+}
+
+fn unpack_date(word: u64) -> hc::Date {
+    hc::Date {
+        year: word as u16,
+        month: (word >> 16) as u8,
+        day: (word >> 24) as u8,
+    }
+}
+
+/// One cell's value as two words, read through the accessor its door's type is read with
+/// (the only one the Rust binding answers for that door); a text or a decimal written to
+/// `heap`, unless it is the cell's raw text, already there at `raw`.
+fn cell(
+    batch: &ht::Batch<'_>,
+    kind: u64,
+    column: usize,
+    row: usize,
+    raw: (usize, usize),
+    heap: &mut Vec<u8>,
+) -> std::result::Result<[u64; 2], hc::Fault> {
+    let mut text = |text: &[u8]| -> [u64; 2] {
+        if heap.get(raw.0..raw.0 + raw.1) == Some(text) {
+            return [raw.0 as u64, raw.1 as u64];
+        }
+        let at = heap.len();
+        heap.extend_from_slice(text);
+        [at as u64, text.len() as u64]
+    };
+    let one = |word: u64| [word, 0];
+    Ok(match kind {
+        KIND_BOOL => one(u64::from(batch.get::<bool>(column, row)?)),
+        KIND_INT => one(match batch.columns()[column].door {
+            ht::Door::I8 => i64::from(batch.get::<i8>(column, row)?),
+            ht::Door::I16 => i64::from(batch.get::<i16>(column, row)?),
+            _ => i64::from(batch.get::<i32>(column, row)?),
+        } as u64),
+        KIND_UINT => one(match batch.columns()[column].door {
+            ht::Door::U8 => u64::from(batch.get::<u8>(column, row)?),
+            ht::Door::U16 => u64::from(batch.get::<u16>(column, row)?),
+            _ => u64::from(batch.get::<u32>(column, row)?),
+        }),
+        KIND_BIG => one(batch.get::<i64>(column, row)? as u64),
+        KIND_UBIG | KIND_TIME => one(batch.get::<u64>(column, row)?),
+        KIND_REAL => one(match batch.columns()[column].door {
+            ht::Door::F32 => f64::from(batch.get::<f32>(column, row)?),
+            _ => batch.get::<f64>(column, row)?,
+        }
+        .to_bits()),
+        KIND_DECIMAL => {
+            let value = batch.get::<hc::Decimal>(column, row)?;
+            [
+                value.lo,
+                u64::from(value.hi)
+                    | u64::from(value.scale) << 32
+                    | u64::from(value.negative) << 40,
+            ]
+        }
+        KIND_UUID => {
+            let value = batch.get::<[u8; 16]>(column, row)?;
+            let (high, low) = value.split_at(8);
+            [
+                u64::from_ne_bytes(high.try_into().unwrap_or_default()),
+                u64::from_ne_bytes(low.try_into().unwrap_or_default()),
+            ]
+        }
+        KIND_INSTANT => {
+            let value = batch.get::<hc::Timestamp>(column, row)?;
+            [value.seconds as u64, i64::from(value.nanos) as u64]
+        }
+        KIND_DATE => one(pack_date(batch.get::<hc::Date>(column, row)?)),
+        KIND_CIVIL => {
+            let value = batch.get::<hc::CivilDateTime>(column, row)?;
+            [pack_date(value.date), value.nanos_of_day]
+        }
+        KIND_SPAN => {
+            let value = batch.get::<hc::Duration>(column, row)?;
+            [value.seconds as u64, i64::from(value.nanos) as u64]
+        }
+        KIND_TEXT => text(batch.text_str(column, row)?.as_bytes()),
+        _ => return Err(CONTRACT),
+    })
+}
+
+/// One column of a batch as the read copied it, before it is laid out in the store.
+struct ColumnCopy {
+    kind: u64,
+    source: u64,
+    faults: u64,
+    verdicts: Vec<ht::CellVerdict>,
+    notes: Vec<ht::CellNote>,
+    values: Vec<[u64; 2]>,
+    spans: Vec<[u64; 2]>,
+    heap: Vec<u8>,
+}
+
+/// A batch as the read copied it.
+struct BatchCopy {
+    rows: usize,
+    doors: Vec<Door>,
+    lines: Vec<u32>,
+    widths: Option<(u32, Vec<u32>)>,
+    columns: Vec<ColumnCopy>,
+}
+
+/// `at` rounded up to a multiple of 8.
+fn eight(at: usize) -> usize {
+    at.div_ceil(8) * 8
+}
+
+impl BatchCopy {
+    fn of(batch: &ht::Batch<'_>) -> BatchCopy {
         let rows = batch.rows();
         let plan = batch.columns();
         let columns = plan
             .iter()
             .enumerate()
             .map(|(column, spec)| {
-                let mut cells = Cells {
-                    cells: Vec::with_capacity(rows),
-                    raw: Vec::new(),
-                    spans: Vec::with_capacity(rows),
+                let kind = kind(spec.door);
+                let mut copied = ColumnCopy {
+                    kind,
+                    source: batch.source_column(column) as u64,
                     faults: 0,
+                    verdicts: batch.verdicts(column).to_vec(),
+                    notes: Vec::new(),
+                    values: Vec::with_capacity(rows),
+                    spans: Vec::with_capacity(rows),
+                    heap: Vec::new(),
                 };
                 for row in 0..rows {
-                    let verdict = cell(batch, spec.door, column, row);
-                    cells.faults += usize::from(verdict.is_err());
-                    cells.cells.push(verdict);
                     let raw = batch.raw(column, row);
-                    cells.spans.push((cells.raw.len(), raw.len()));
-                    cells.raw.extend_from_slice(&raw);
+                    let span = (copied.heap.len(), raw.len());
+                    copied.heap.extend_from_slice(&raw);
+                    copied.spans.push([span.0 as u64, span.1 as u64]);
+                    let ok = copied.verdicts[row].is_ok();
+                    let value = if ok {
+                        cell(batch, kind, column, row, span, &mut copied.heap)
+                    } else {
+                        Ok([0; 2])
+                    };
+                    match value {
+                        Ok(value) => copied.values.push(value),
+                        Err(fault) => {
+                            // A cell the core passed that its accessor did not: the accessor's
+                            // verdict is the one handed out.
+                            copied.verdicts[row] = ht::CellVerdict {
+                                offset: fault.offset,
+                                len: fault.len,
+                                reason: fault.reason as u32,
+                            };
+                            copied.values.push([0; 2]);
+                        }
+                    }
+                    copied.faults += u64::from(!copied.verdicts[row].is_ok());
                 }
-                cells
+                if copied.faults > 0 {
+                    copied.notes = batch.notes(column).to_vec();
+                }
+                copied
             })
             .collect();
-        BatchData {
+        BatchCopy {
             rows,
             doors: plan.iter().map(|column| door_name(column.door)).collect(),
             lines: (0..rows).map(|row| batch.line(row)).collect(),
+            widths: batch
+                .reported_widths()
+                .map(|(width, widths)| (width, widths[..rows.min(widths.len())].to_vec())),
             columns,
         }
     }
 
-    /// Roughly the heap it holds, for V8's sense of when to collect.
-    fn size(&self) -> usize {
-        let cell = std::mem::size_of::<std::result::Result<Value, hc::Fault>>();
-        let span = std::mem::size_of::<(usize, usize)>();
-        self.lines.len() * 4
-            + self
-                .columns
-                .iter()
-                .map(|cells| cells.cells.len() * (cell + span) + cells.raw.len())
-                .sum::<usize>()
-    }
-
-    fn at(&self, column: &Unknown<'_>, row: &Unknown<'_>) -> Option<(usize, usize)> {
-        let (column, row) = (index(column)?, index(row)?);
-        (column < self.columns.len() && row < self.rows).then_some((column, row))
-    }
-
-    fn raw(&self, at: Option<(usize, usize)>) -> &[u8] {
-        let Some((column, row)) = at else {
-            return &[];
+    /// The store's length in bytes, and where each section starts: the lines, the widths and
+    /// each column's verdicts, notes, values, spans and heap.
+    fn layout(&self) -> (usize, Vec<usize>) {
+        let mut at = (HEAD + COLUMN_WORDS * self.columns.len()) * 8;
+        let mut starts = Vec::with_capacity(2 + 5 * self.columns.len());
+        let mut section = |at: &mut usize, len: usize| {
+            *at = eight(*at);
+            starts.push(*at);
+            *at += len;
         };
-        let cells = &self.columns[column];
-        let (from, len) = cells.spans[row];
-        &cells.raw[from..from + len]
+        section(&mut at, self.lines.len() * 4);
+        section(
+            &mut at,
+            self.widths
+                .as_ref()
+                .map_or(0, |(_, widths)| widths.len() * 4),
+        );
+        for column in &self.columns {
+            let rows = column.values.len();
+            let verdicts = if column.faults > 0 { rows } else { 0 };
+            section(&mut at, verdicts * ht::CellVerdict::SIZE as usize);
+            section(&mut at, column.notes.len() * size_of::<ht::CellNote>());
+            section(
+                &mut at,
+                rows * Shape::of(column.kind, column.wide()).width(),
+            );
+            section(
+                &mut at,
+                rows * Shape::Pair {
+                    wide: column.wide(),
+                }
+                .width(),
+            );
+            section(&mut at, column.heap.len());
+        }
+        (eight(at), starts)
     }
 
-    fn verdict<'env>(&self, env: &'env Env, at: Option<(usize, usize)>) -> Result<Object<'env>> {
-        let Some((column, row)) = at else {
-            return failure(env, CONTRACT);
+    /// The store, written into `out`, which is `layout`'s length and zeroed.
+    fn write(&self, out: &mut [u8], starts: &[usize]) {
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(to) = out.get_mut(at..at + bytes.len()) {
+                to.copy_from_slice(bytes);
+            }
         };
-        match &self.columns[column].cells[row] {
-            Err(fault) => failure(env, *fault),
-            Ok(value) => match value {
-                Value::Bool(value) => success(env, *value),
-                Value::Int(value) => success(env, *value),
-                Value::Uint(value) => success(env, *value),
-                Value::Big(value) => success(env, BigInt::from(*value)),
-                Value::UBig(value) => success(env, BigInt::from(*value)),
-                Value::Real(value) => success(env, *value),
-                Value::Decimal(value) => success(env, value.to_string()),
-                Value::Uuid(value) => success(env, uuid_text(*value)),
-                Value::Instant(value) => success(env, timestamp(*value)),
-                Value::Date(value) => success(env, calendar(*value)),
-                Value::Civil(value) => success(env, civil(*value)),
-                Value::Time(value) => success(env, time_of_day(*value)),
-                Value::Span(value) => success(env, duration(*value)),
-                Value::Text(value) => success(env, value.as_str()),
-            },
+        let word = |index: usize| index * 8;
+        put(word(0), &(self.rows as u64).to_ne_bytes());
+        put(word(1), &(self.columns.len() as u64).to_ne_bytes());
+        put(word(2), &(starts[0] as u64).to_ne_bytes());
+        if let Some((width, _)) = &self.widths {
+            put(word(3), &(starts[1] as u64).to_ne_bytes());
+            put(word(4), &u64::from(*width).to_ne_bytes());
+        }
+        put(starts[0], as_bytes(&self.lines));
+        if let Some((_, widths)) = &self.widths {
+            put(starts[1], as_bytes(widths));
+        }
+        for (index, column) in self.columns.iter().enumerate() {
+            let head = HEAD + COLUMN_WORDS * index;
+            let at = &starts[2 + 5 * index..2 + 5 * index + 5];
+            let wide = column.wide();
+            let words = [
+                column.kind,
+                column.source,
+                column.faults,
+                if column.faults > 0 { at[0] as u64 } else { 0 },
+                if column.notes.is_empty() {
+                    0
+                } else {
+                    at[1] as u64
+                },
+                at[2] as u64,
+                at[3] as u64,
+                at[4] as u64,
+                column.heap.len() as u64,
+                u64::from(wide),
+            ];
+            for (offset, value) in words.iter().enumerate() {
+                put(word(head + offset), &value.to_ne_bytes());
+            }
+            if column.faults > 0 {
+                put(at[0], as_bytes(&column.verdicts));
+            }
+            put(at[1], as_bytes(&column.notes));
+            for (pairs, start, shape) in [
+                (&column.values, at[2], Shape::of(column.kind, wide)),
+                (&column.spans, at[3], Shape::Pair { wide }),
+            ] {
+                for (row, value) in pairs.iter().enumerate() {
+                    let (bytes, width) = shape.bytes(*value);
+                    put(start + row * width, &bytes[..width]);
+                }
+            }
+            put(at[4], &column.heap);
+        }
+    }
+}
+
+impl ColumnCopy {
+    /// Whether the column's heap is past what a `u32` offset reaches, so that its spans and
+    /// texts are kept in two `u64`s rather than two `u32`s.
+    fn wide(&self) -> bool {
+        u32::try_from(self.heap.len()).is_err()
+    }
+}
+
+/// How a value or a span is kept.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// One `u64`.
+    Word,
+    /// Two `u64`s: a decimal, a UUID, an instant, a date-time, a duration.
+    TwoWords,
+    /// A place in the heap (a span, a text): two `u32`s, or two `u64`s in a wide column.
+    Pair { wide: bool },
+}
+
+impl Shape {
+    fn of(kind: u64, wide: bool) -> Shape {
+        match kind {
+            KIND_TEXT => Shape::Pair { wide },
+            KIND_DECIMAL | KIND_UUID | KIND_INSTANT | KIND_CIVIL | KIND_SPAN => Shape::TwoWords,
+            _ => Shape::Word,
         }
     }
 
-    fn line(&self, row: &Unknown<'_>) -> u32 {
-        index(row)
-            .and_then(|row| self.lines.get(row).copied())
+    fn width(self) -> usize {
+        match self {
+            Shape::Word | Shape::Pair { wide: false } => 8,
+            Shape::TwoWords | Shape::Pair { wide: true } => 16,
+        }
+    }
+
+    /// `value` as its bytes, `width` of them.
+    fn bytes(self, value: [u64; 2]) -> ([u8; 16], usize) {
+        let mut out = [0; 16];
+        match self {
+            Shape::Word => out[..8].copy_from_slice(&value[0].to_ne_bytes()),
+            Shape::Pair { wide: false } => {
+                out[..4].copy_from_slice(&(value[0] as u32).to_ne_bytes());
+                out[4..8].copy_from_slice(&(value[1] as u32).to_ne_bytes());
+            }
+            Shape::TwoWords | Shape::Pair { wide: true } => {
+                out[..8].copy_from_slice(&value[0].to_ne_bytes());
+                out[8..].copy_from_slice(&value[1].to_ne_bytes());
+            }
+        }
+        (out, self.width())
+    }
+
+    /// The value at `row` of `bytes`.
+    fn read(self, bytes: &[u8], row: usize) -> Option<[u64; 2]> {
+        let width = self.width();
+        let at = row.checked_mul(width)?;
+        let bytes = bytes.get(at..at.checked_add(width)?)?;
+        let word = |from: usize| {
+            Some(u64::from_ne_bytes(
+                bytes.get(from..from + 8)?.try_into().ok()?,
+            ))
+        };
+        let half = |from: usize| {
+            Some(u64::from(u32::from_ne_bytes(
+                bytes.get(from..from + 4)?.try_into().ok()?,
+            )))
+        };
+        Some(match self {
+            Shape::Word => [word(0)?, 0],
+            Shape::Pair { wide: false } => [half(0)?, half(4)?],
+            Shape::TwoWords | Shape::Pair { wide: true } => [word(0)?, word(8)?],
+        })
+    }
+}
+
+/// A batch's store, read back: every look is bounds-checked, so a store that is not whole
+/// reads as no rows and no columns.
+#[derive(Clone, Copy)]
+struct Store<'a> {
+    bytes: &'a [u8],
+}
+
+/// One column of a store.
+struct StoredColumn<'a> {
+    kind: u64,
+    source: usize,
+    faults: u64,
+    /// The verdicts, none kept for a column whose every cell cast.
+    verdicts: Option<&'a [ht::CellVerdict]>,
+    notes: &'a [ht::CellNote],
+    values: &'a [u8],
+    spans: &'a [u8],
+    heap: &'a [u8],
+    wide: bool,
+    rows: usize,
+}
+
+impl<'a> Store<'a> {
+    fn word(&self, index: usize) -> Option<u64> {
+        let at = index.checked_mul(8)?;
+        let bytes = self.bytes.get(at..at.checked_add(8)?)?;
+        Some(u64::from_ne_bytes(bytes.try_into().ok()?))
+    }
+
+    fn section(&self, at: u64, len: usize) -> Option<&'a [u8]> {
+        let at = usize::try_from(at).ok()?;
+        self.bytes.get(at..at.checked_add(len)?)
+    }
+
+    fn rows(&self) -> usize {
+        self.word(0)
+            .and_then(|rows| usize::try_from(rows).ok())
             .unwrap_or(0)
+    }
+
+    fn columns(&self) -> usize {
+        self.word(1)
+            .and_then(|columns| usize::try_from(columns).ok())
+            .unwrap_or(0)
+    }
+
+    fn lines(&self) -> &'a [u32] {
+        let rows = self.rows();
+        self.word(2)
+            .and_then(|at| self.section(at, rows.checked_mul(4)?))
+            .and_then(as_slice)
+            .unwrap_or_default()
+    }
+
+    fn line(&self, row: usize) -> u32 {
+        self.lines().get(row).copied().unwrap_or(0)
+    }
+
+    fn column(&self, column: usize) -> Option<StoredColumn<'a>> {
+        if column >= self.columns() {
+            return None;
+        }
+        let rows = self.rows();
+        let head = HEAD + COLUMN_WORDS * column;
+        let word = |offset: usize| self.word(head + offset);
+        let kind = word(0)?;
+        let wide = word(9)? != 0;
+        let verdicts = match word(3)? {
+            0 => None,
+            at => Some(as_slice(
+                self.section(at, rows.checked_mul(ht::CellVerdict::SIZE as usize)?)?,
+            )?),
+        };
+        let notes = match word(4)? {
+            0 => &[][..],
+            at => self.section(at, rows.checked_mul(size_of::<ht::CellNote>())?)?,
+        };
+        Some(StoredColumn {
+            kind,
+            source: usize::try_from(word(1)?).ok()?,
+            faults: word(2)?,
+            verdicts,
+            notes: as_slice(notes)?,
+            values: self.section(word(5)?, rows.checked_mul(Shape::of(kind, wide).width())?)?,
+            spans: self.section(word(6)?, rows.checked_mul(Shape::Pair { wide }.width())?)?,
+            heap: self.section(word(7)?, usize::try_from(word(8)?).ok()?)?,
+            wide,
+            rows,
+        })
+    }
+
+    /// The batch's faults list, worked out now.
+    fn faults(&self) -> Vec<Problem> {
+        let rows = self.rows();
+        let Some(stored) = (0..self.columns())
+            .map(|column| self.column(column))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Vec::new();
+        };
+        // A column whose every cell cast keeps no verdicts: its own are all `OK`.
+        let cast = if stored.iter().any(|column| column.verdicts.is_none()) {
+            vec![ht::CellVerdict::OK; rows]
+        } else {
+            Vec::new()
+        };
+        let columns: Vec<ht::KeptColumn<'_>> = stored
+            .iter()
+            .map(|column| {
+                ht::KeptColumn::new(
+                    column.verdicts.unwrap_or(&cast),
+                    column.notes,
+                    column.source,
+                )
+            })
+            .collect();
+        let widths = match self.word(3) {
+            Some(0) | None => None,
+            Some(at) => rows
+                .checked_mul(4)
+                .and_then(|len| self.section(at, len))
+                .and_then(as_slice)
+                .map(|widths| (self.word(4).unwrap_or(0) as u32, widths)),
+        };
+        ht::KeptBatch::new(self.lines(), &columns, widths)
+            .map(|kept| kept.faults().map(|found| problem(&found)).collect())
+            .unwrap_or_default()
+    }
+}
+
+impl StoredColumn<'_> {
+    /// The column as the Rust binding reads a kept one, for one look at a cell.
+    fn kept(&self) -> ht::KeptColumn<'_> {
+        ht::KeptColumn::new(self.verdicts.unwrap_or_default(), self.notes, self.source)
+    }
+
+    /// The bytes of the heap at a place a pair names.
+    fn heap_at(&self, place: [u64; 2]) -> Option<&[u8]> {
+        let at = usize::try_from(place[0]).ok()?;
+        self.heap
+            .get(at..at.checked_add(usize::try_from(place[1]).ok()?)?)
+    }
+
+    fn raw(&self, row: usize) -> &[u8] {
+        Shape::Pair { wide: self.wide }
+            .read(self.spans, row)
+            .and_then(|place| self.heap_at(place))
+            .unwrap_or_default()
+    }
+
+    fn detail(&self, row: usize) -> Option<hc::Detail> {
+        self.kept().detail(row)
+    }
+
+    fn origin(&self, row: usize) -> ht::Origin {
+        self.kept().origin(row)
+    }
+
+    fn value(&self, row: usize) -> std::result::Result<Value, hc::Fault> {
+        if row >= self.rows {
+            return Err(CONTRACT);
+        }
+        if self.verdicts.is_some() {
+            match self.kept().verdict(row) {
+                Some(Ok(())) => {}
+                Some(Err(fault)) => return Err(fault),
+                None => return Err(CONTRACT),
+            }
+        }
+        let [first, second] = Shape::of(self.kind, self.wide)
+            .read(self.values, row)
+            .ok_or(CONTRACT)?;
+        Ok(match self.kind {
+            KIND_BOOL => Value::Bool(first != 0),
+            KIND_INT => Value::Int(first as i32),
+            KIND_UINT => Value::Uint(first as u32),
+            KIND_BIG => Value::Big(first as i64),
+            KIND_UBIG => Value::UBig(first),
+            KIND_REAL => Value::Real(f64::from_bits(first)),
+            KIND_DECIMAL => Value::Decimal(hc::Decimal {
+                lo: first,
+                hi: second as u32,
+                scale: (second >> 32) as u8,
+                negative: (second >> 40) & 1 == 1,
+            }),
+            KIND_UUID => {
+                let mut bytes = [0; 16];
+                bytes[..8].copy_from_slice(&first.to_ne_bytes());
+                bytes[8..].copy_from_slice(&second.to_ne_bytes());
+                Value::Uuid(bytes)
+            }
+            KIND_INSTANT => Value::Instant(hc::Timestamp {
+                seconds: first as i64,
+                nanos: second as i32,
+            }),
+            KIND_DATE => Value::Date(unpack_date(first)),
+            KIND_CIVIL => Value::Civil(hc::CivilDateTime {
+                date: unpack_date(first),
+                nanos_of_day: second,
+            }),
+            KIND_TIME => Value::Time(first),
+            KIND_SPAN => Value::Span(hc::Duration {
+                seconds: first as i64,
+                nanos: second as i32,
+            }),
+            KIND_TEXT => {
+                let text = self.heap_at([first, second]).ok_or(CONTRACT)?;
+                Value::Text(String::from_utf8_lossy(text).into_owned())
+            }
+            _ => return Err(CONTRACT),
+        })
+    }
+}
+
+/// A plain-integer ABI type a store keeps as bytes: `CellVerdict`, `CellNote` and `u32` (a line,
+/// a width). Each is `repr(C)` integers with no padding, so every byte pattern is a value.
+trait Plain: Copy {}
+impl Plain for ht::CellVerdict {}
+impl Plain for ht::CellNote {}
+impl Plain for u32 {}
+
+const _: () = assert!(size_of::<ht::CellVerdict>() == 12 && align_of::<ht::CellVerdict>() == 4);
+const _: () = assert!(size_of::<ht::CellNote>() == 4 && align_of::<ht::CellNote>() == 2);
+
+/// `bytes` as the elements they hold, in this host's byte order; `None` when `bytes` isn't a
+/// whole number of them or isn't aligned for them. No bytes are no elements, wherever they are.
+fn as_slice<T: Plain>(bytes: &[u8]) -> Option<&[T]> {
+    if bytes.is_empty() {
+        return Some(&[]);
+    }
+    let size = size_of::<T>();
+    if !bytes.len().is_multiple_of(size) || bytes.as_ptr().align_offset(align_of::<T>()) != 0 {
+        return None;
+    }
+    // SAFETY: the pointer is aligned for `T` and the length a whole number of `T`s, all within
+    // `bytes`, which the result borrows; any bytes are a valid `T` (see `Plain`).
+    Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<T>(), bytes.len() / size) })
+}
+
+/// `items` as bytes, in this host's byte order: what `as_slice` reads back.
+fn as_bytes<T: Plain>(items: &[T]) -> &[u8] {
+    // SAFETY: the bytes of `items`, which the result borrows; a `Plain` type has no padding, so
+    // every byte is initialized.
+    unsafe { std::slice::from_raw_parts(items.as_ptr().cast::<u8>(), size_of_val(items)) }
+}
+
+/// A store in the module's own memory: what the native `Batch` and `Row` hold, and, under
+/// WebAssembly, what a JavaScript batch holds through a `BatchStore`.
+#[derive(Clone)]
+struct Held(Arc<[u64]>);
+
+impl Held {
+    fn of(copy: &BatchCopy) -> Held {
+        let (len, starts) = copy.layout();
+        let mut words = vec![0u64; len / 8];
+        // SAFETY: the bytes of `words`, `len` of them (a multiple of 8), borrowed for the write.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), len) };
+        copy.write(bytes, &starts);
+        Held(Arc::from(words))
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the bytes of the words, borrowed with them.
+        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast::<u8>(), self.0.len() * 8) }
+    }
+}
+
+/// A batch's store under WebAssembly, as `index.js`'s batch holds it: opaque, and of no use to
+/// anything but this package's own `batch*` functions. (Under Node, Bun and Deno the store is an
+/// `ArrayBuffer` instead.)
+#[napi]
+pub struct BatchStore {
+    held: Held,
+}
+
+/// Where a call finds a batch's store: what a native object holds, or what `index.js`'s batch
+/// passed in.
+enum StoreAt<'a, 'env> {
+    Held(&'a Held),
+    Given(&'a Env, &'a Unknown<'env>),
+}
+
+/// The store `source` names, looked at by `look`, which runs no JavaScript. A value that is no
+/// store, or a buffer that was detached, is a store of no rows and no columns.
+fn with_store<R>(source: &StoreAt<'_, '_>, look: impl FnOnce(Store<'_>) -> R) -> R {
+    let (env, given) = match source {
+        StoreAt::Held(held) => {
+            return look(Store {
+                bytes: held.bytes(),
+            });
+        }
+        StoreAt::Given(env, given) => (*env, *given),
+    };
+    let mut is_buffer = false;
+    let mut data = std::ptr::null_mut();
+    let mut len = 0;
+    // SAFETY: `env` is the live environment of the call in progress and `given` a value in it;
+    // the buffer's bytes are V8's, held by the caller's argument for the whole call, and `look`
+    // runs no JavaScript that could detach them.
+    unsafe {
+        if sys::napi_is_arraybuffer(env.raw(), given.raw(), &mut is_buffer) == sys::Status::napi_ok
+            && is_buffer
+        {
+            let bytes: &[u8] =
+                if sys::napi_get_arraybuffer_info(env.raw(), given.raw(), &mut data, &mut len)
+                    == sys::Status::napi_ok
+                    && !data.is_null()
+                {
+                    std::slice::from_raw_parts(data.cast::<u8>(), len)
+                } else {
+                    &[]
+                };
+            return look(Store { bytes });
+        }
+        // `ClassInstance` unwraps and checks the class it was wrapped as; `&BatchStore` would
+        // ask napi-rs to register a borrow, which only its generated argument conversion may.
+        match <ClassInstance<'_, BatchStore> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(
+            env.raw(),
+            given.raw(),
+        ) {
+            Ok(store) => look(Store {
+                bytes: store.held.bytes(),
+            }),
+            Err(_) => {
+                clear_pending_exception(env);
+                look(Store { bytes: &[] })
+            }
+        }
+    }
+}
+
+/// The store a JavaScript batch is made with: under Node, Bun and Deno an `ArrayBuffer` V8
+/// allocates, which V8 reclaims with the batch; under WebAssembly a `BatchStore`.
+fn js_store(env: &Env, copy: &BatchCopy) -> Result<sys::napi_value> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let (len, starts) = copy.layout();
+        let mut data = std::ptr::null_mut();
+        let mut buffer = std::ptr::null_mut();
+        // SAFETY: `env` is the live environment of the call in progress; V8 allocates the buffer
+        // zeroed and `data` is its `len` bytes, written here before any JavaScript can see it.
+        unsafe {
+            let status = sys::napi_create_arraybuffer(env.raw(), len, &mut data, &mut buffer);
+            if status != sys::Status::napi_ok || (data.is_null() && len > 0) {
+                return Err(napi::Error::from_reason(
+                    "could not allocate a batch's store",
+                ));
+            }
+            if len > 0 {
+                copy.write(
+                    std::slice::from_raw_parts_mut(data.cast::<u8>(), len),
+                    &starts,
+                );
+            }
+        }
+        Ok(buffer)
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        js(
+            env,
+            BatchStore {
+                held: Held::of(copy),
+            }
+            .into_instance(env)?,
+        )
+    }
+}
+
+/// What `index.js` registered to make its batches with: a function taking the store, the row
+/// count and the doors.
+struct BatchMaker(sys::napi_ref);
+
+/// Makes every batch this environment reads with `make(store, rows, doors)`, `index.js`'s own,
+/// rather than as the native `Batch`, which a native finalizer frees only once the event loop
+/// turns. Internal to the package: what `make` is given is of no use to anything else.
+#[napi(
+    catch_unwind,
+    js_name = "__makeBatchesWith",
+    ts_args_type = "make: (store: unknown, rows: number, doors: Array<Door>) => Batch"
+)]
+pub fn make_batches_with(env: &Env, make: Unknown<'_>) -> Result<()> {
+    if make.get_type()? != ValueType::Function {
+        return Err(napi::Error::from_reason("make must be a function"));
+    }
+    let mut reference = std::ptr::null_mut();
+    // SAFETY: `env` is the live environment of the call in progress and `make` a function in
+    // it; the strong reference lives as long as the environment's instance data.
+    unsafe {
+        if sys::napi_create_reference(env.raw(), make.raw(), 1, &mut reference)
+            != sys::Status::napi_ok
+        {
+            return Err(napi::Error::from_reason("could not hold make"));
+        }
+    }
+    env.set_instance_data(BatchMaker(reference), (), |context| {
+        // SAFETY: the reference was made in this environment, which is tearing down; it is
+        // deleted once, here.
+        unsafe { sys::napi_delete_reference(context.env.raw(), context.value.0) };
+    })
+}
+
+/// The function `index.js` registered, if it did.
+fn batch_maker(env: &Env) -> Option<sys::napi_value> {
+    let maker = env.get_instance_data::<BatchMaker>().ok()??;
+    let mut make = std::ptr::null_mut();
+    // SAFETY: the reference was made in this environment and is alive while its data is.
+    let status = unsafe { sys::napi_get_reference_value(env.raw(), maker.0, &mut make) };
+    (status == sys::Status::napi_ok && !make.is_null()).then_some(make)
+}
+
+/// A value as JavaScript holds it, in a success.
+fn verdict(env: &Env, value: std::result::Result<Value, hc::Fault>) -> Result<Object<'_>> {
+    match value {
+        Err(fault) => failure(env, fault),
+        Ok(value) => match value {
+            Value::Bool(value) => success(env, value),
+            Value::Int(value) => success(env, value),
+            Value::Uint(value) => success(env, value),
+            Value::Big(value) => success(env, BigInt::from(value)),
+            Value::UBig(value) => success(env, BigInt::from(value)),
+            Value::Real(value) => success(env, value),
+            Value::Decimal(value) => success(env, value.to_string()),
+            Value::Uuid(value) => success(env, uuid_text(value)),
+            Value::Instant(value) => success(env, timestamp(value)),
+            Value::Date(value) => success(env, calendar(value)),
+            Value::Civil(value) => success(env, civil(value)),
+            Value::Time(value) => success(env, time_of_day(value)),
+            Value::Span(value) => success(env, duration(value)),
+            Value::Text(value) => success(env, value),
+        },
+    }
+}
+
+/// Bytes as a `Uint8Array` the caller owns: under Node, Bun and Deno over a buffer V8
+/// allocates, so it is reclaimed like any other.
+fn bytes_out<'env>(env: &'env Env, bytes: &[u8]) -> Result<Unknown<'env>> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let buffer = napi::bindgen_prelude::ArrayBuffer::copy_from(env, bytes)?;
+        let mut array = std::ptr::null_mut();
+        // SAFETY: `env` is the live environment of the call in progress and `buffer` a buffer
+        // made in it, `bytes.len()` long.
+        unsafe {
+            let status = sys::napi_create_typedarray(
+                env.raw(),
+                sys::TypedarrayType::uint8_array,
+                bytes.len(),
+                buffer.raw(),
+                0,
+                &mut array,
+            );
+            if status != sys::Status::napi_ok {
+                return Err(napi::Error::from_reason("could not make a Uint8Array"));
+            }
+            napi::bindgen_prelude::FromNapiValue::from_napi_value(env.raw(), array)
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        let array = js(env, Uint8Array::from(bytes.to_vec()))?;
+        // SAFETY: `array` was made in `env`, the live environment of the call in progress.
+        unsafe { napi::bindgen_prelude::FromNapiValue::from_napi_value(env.raw(), array) }
+    }
+}
+
+fn problem(problem: &ht::Problem) -> Problem {
+    Problem {
+        row: narrow(problem.row),
+        line: problem.line,
+        plan_column: problem.plan_column.map(narrow),
+        source_column: problem.source_column.map(narrow),
+        reason: problem.reason.map(cast_failure),
+        detail: problem.detail.map(detail_name),
+        origin: origin_name(problem.origin),
+        offset: problem.offset,
+        length: problem.len,
+        expected: problem.expected,
+        found: problem.found,
     }
 }
 
@@ -1297,19 +2917,217 @@ fn duration(value: hc::Duration) -> Duration {
     }
 }
 
-/// The rows of one read, column-major, copied out of the reader: a batch stays valid after
-/// the reader has moved on.
-#[napi(custom_finalize)]
-pub struct Batch {
-    data: Arc<BatchData>,
-    /// The bytes it told V8 it holds, given back when it is collected.
-    external: i64,
+// The cells a call asks for: a column and a row as whole numbers, judged against the store.
+
+/// The cell at `column` and `row` of `source`'s store: HyperCast's contract violation for one
+/// it does not have.
+fn value_at(
+    source: &StoreAt<'_, '_>,
+    column: Option<usize>,
+    row: Option<usize>,
+) -> std::result::Result<Value, hc::Fault> {
+    let (Some(column), Some(row)) = (column, row) else {
+        return Err(CONTRACT);
+    };
+    with_store(source, |store| {
+        store
+            .column(column)
+            .map_or(Err(CONTRACT), |stored| stored.value(row))
+    })
 }
 
-impl ObjectFinalize for Batch {
-    fn finalize(self, env: Env) -> Result<()> {
-        env.adjust_external_memory(-self.external).map(|_| ())
+fn detail_at(
+    source: &StoreAt<'_, '_>,
+    column: Option<usize>,
+    row: Option<usize>,
+) -> Option<Detail> {
+    let (column, row) = (column?, row?);
+    with_store(source, |store| store.column(column)?.detail(row)).map(detail_name)
+}
+
+fn origin_at(
+    source: &StoreAt<'_, '_>,
+    column: Option<usize>,
+    row: Option<usize>,
+) -> Option<Origin> {
+    let (column, row) = (column?, row?);
+    with_store(source, |store| {
+        (row < store.rows())
+            .then(|| store.column(column).map(|stored| stored.origin(row)))
+            .flatten()
+    })
+    .map(origin_name)
+}
+
+fn raw_at(source: &StoreAt<'_, '_>, column: Option<usize>, row: Option<usize>) -> Vec<u8> {
+    let (Some(column), Some(row)) = (column, row) else {
+        return Vec::new();
+    };
+    with_store(source, |store| {
+        store
+            .column(column)
+            .map(|stored| stored.raw(row).to_vec())
+            .unwrap_or_default()
+    })
+}
+
+fn line_at(source: &StoreAt<'_, '_>, row: Option<usize>) -> u32 {
+    row.map_or(0, |row| with_store(source, |store| store.line(row)))
+}
+
+fn faults_of(source: &StoreAt<'_, '_>) -> Vec<Problem> {
+    with_store(source, |store| store.faults())
+}
+
+fn fault_count_at(source: &StoreAt<'_, '_>, column: Option<usize>) -> u32 {
+    column.map_or(0, |column| {
+        with_store(source, |store| {
+            store
+                .column(column)
+                .map_or(0, |stored| u32::try_from(stored.faults).unwrap_or(u32::MAX))
+        })
+    })
+}
+
+fn column_at<'env>(
+    env: &'env Env,
+    source: &StoreAt<'_, '_>,
+    column: Option<usize>,
+) -> Result<Array<'env>> {
+    let rows = column.map_or(0, |column| {
+        with_store(source, |store| {
+            if column < store.columns() {
+                store.rows()
+            } else {
+                0
+            }
+        })
+    });
+    let mut list = Array::from_vec(env, Vec::<bool>::new())?;
+    for row in 0..rows {
+        // The store is looked at afresh for each row: making a verdict can run JavaScript.
+        list.insert(verdict(env, value_at(source, column, Some(row)))?)?;
     }
+    Ok(list)
+}
+
+// What `index.js`'s batch calls, its store in hand. Internal to the package: what they take is
+// what `__makeBatchesWith`'s function is given.
+
+/// `Batch.line`, over a store.
+#[napi(catch_unwind, ts_args_type = "store: unknown, row: number")]
+pub fn batch_line(env: &Env, store: Unknown<'_>, row: Unknown<'_>) -> u32 {
+    line_at(&StoreAt::Given(env, &store), index(&row))
+}
+
+/// `Batch.get`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number",
+    ts_return_type = "Verdict<Value>"
+)]
+pub fn batch_get<'env>(
+    env: &'env Env,
+    store: Unknown<'env>,
+    column: Unknown<'env>,
+    row: Unknown<'env>,
+) -> Result<Object<'env>> {
+    let value = value_at(&StoreAt::Given(env, &store), index(&column), index(&row));
+    verdict(env, value)
+}
+
+/// `Batch.detail`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number"
+)]
+pub fn batch_detail(
+    env: &Env,
+    store: Unknown<'_>,
+    column: Unknown<'_>,
+    row: Unknown<'_>,
+) -> Option<Detail> {
+    detail_at(&StoreAt::Given(env, &store), index(&column), index(&row))
+}
+
+/// `Batch.origin`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number"
+)]
+pub fn batch_origin(
+    env: &Env,
+    store: Unknown<'_>,
+    column: Unknown<'_>,
+    row: Unknown<'_>,
+) -> Option<Origin> {
+    origin_at(&StoreAt::Given(env, &store), index(&column), index(&row))
+}
+
+/// `Batch.faults`, over a store.
+#[napi(catch_unwind, ts_args_type = "store: unknown")]
+pub fn batch_faults(env: &Env, store: Unknown<'_>) -> Vec<Problem> {
+    faults_of(&StoreAt::Given(env, &store))
+}
+
+/// `Batch.raw`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number",
+    ts_return_type = "Uint8Array"
+)]
+pub fn batch_raw<'env>(
+    env: &'env Env,
+    store: Unknown<'env>,
+    column: Unknown<'env>,
+    row: Unknown<'env>,
+) -> Result<Unknown<'env>> {
+    let bytes = raw_at(&StoreAt::Given(env, &store), index(&column), index(&row));
+    bytes_out(env, &bytes)
+}
+
+/// `Batch.rawString`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number"
+)]
+pub fn batch_raw_string(
+    env: &Env,
+    store: Unknown<'_>,
+    column: Unknown<'_>,
+    row: Unknown<'_>,
+) -> String {
+    let bytes = raw_at(&StoreAt::Given(env, &store), index(&column), index(&row));
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `Batch.column`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number",
+    ts_return_type = "Array<Verdict<Value>>"
+)]
+pub fn batch_column<'env>(
+    env: &'env Env,
+    store: Unknown<'env>,
+    column: Unknown<'env>,
+) -> Result<Array<'env>> {
+    column_at(env, &StoreAt::Given(env, &store), index(&column))
+}
+
+/// `Batch.faultCount`, over a store.
+#[napi(catch_unwind, ts_args_type = "store: unknown, column: number")]
+pub fn batch_fault_count(env: &Env, store: Unknown<'_>, column: Unknown<'_>) -> u32 {
+    fault_count_at(&StoreAt::Given(env, &store), index(&column))
+}
+
+/// The rows of one read, column-major, copied out of the reader: a batch stays valid after
+/// the reader has moved on, and after it is closed.
+#[napi]
+pub struct Batch {
+    rows: usize,
+    doors: Vec<Door>,
+    held: Held,
 }
 
 #[napi]
@@ -1317,26 +3135,26 @@ impl Batch {
     /// How many rows the batch holds.
     #[napi(getter, catch_unwind)]
     pub fn rows(&self) -> u32 {
-        self.data.rows as u32
+        narrow(self.rows)
     }
 
     /// How many columns: the plan's length.
     #[napi(getter, catch_unwind)]
     pub fn column_count(&self) -> u32 {
-        self.data.columns.len() as u32
+        narrow(self.doors.len())
     }
 
     /// The door each column was read through, in plan order.
     #[napi(getter, catch_unwind)]
     pub fn doors(&self) -> Vec<Door> {
-        self.data.doors.clone()
+        self.doors.clone()
     }
 
     /// The line (delimited text) or the sheet row (a workbook) the row came from; 0 for a
     /// row the batch does not have.
     #[napi(catch_unwind, ts_args_type = "row: number")]
     pub fn line(&self, row: Unknown<'_>) -> u32 {
-        self.data.line(&row)
+        line_at(&StoreAt::Held(&self.held), index(&row))
     }
 
     /// The cell at `row` of `column` as HyperCast judged it. A column or row the batch does
@@ -1353,22 +3171,60 @@ impl Batch {
         column: Unknown<'env>,
         row: Unknown<'env>,
     ) -> Result<Object<'env>> {
-        self.data.verdict(env, self.data.at(&column, &row))
+        verdict(
+            env,
+            value_at(&StoreAt::Held(&self.held), index(&column), index(&row)),
+        )
+    }
+
+    /// What failed in the cell, by HyperCast's `Detail` name: `null` for a cell that cast,
+    /// one no door was asked about (a token, padding, a formula with no cached value), a read
+    /// with notes off, and a cell the batch does not have.
+    #[napi(catch_unwind, ts_args_type = "column: number, row: number")]
+    pub fn detail(&self, column: Unknown<'_>, row: Unknown<'_>) -> Option<Detail> {
+        detail_at(&StoreAt::Held(&self.held), index(&column), index(&row))
+    }
+
+    /// Where the cell's verdict came from (`cell` for every cell of a read with notes off), or
+    /// `null` for a cell the batch does not have.
+    #[napi(catch_unwind, ts_args_type = "column: number, row: number")]
+    pub fn origin(&self, column: Unknown<'_>, row: Unknown<'_>) -> Option<Origin> {
+        origin_at(&StoreAt::Held(&self.held), index(&column), index(&row))
+    }
+
+    /// What went wrong in the batch, by row and then column, a row's own entry first: worked
+    /// out when asked for, a new array each call, the caller's own.
+    #[napi(catch_unwind)]
+    pub fn faults(&self) -> Vec<Problem> {
+        faults_of(&StoreAt::Held(&self.held))
     }
 
     /// The text of the cell, whatever its door and verdict: what a fault's span is a span of.
     /// Empty for an empty cell, a typed workbook cell that cast, and a cell the batch does
     /// not have.
-    #[napi(catch_unwind, ts_args_type = "column: number, row: number")]
-    pub fn raw(&self, column: Unknown<'_>, row: Unknown<'_>) -> Uint8Array {
-        Uint8Array::from(self.data.raw(self.data.at(&column, &row)).to_vec())
+    #[napi(
+        catch_unwind,
+        ts_args_type = "column: number, row: number",
+        ts_return_type = "Uint8Array"
+    )]
+    pub fn raw<'env>(
+        &self,
+        env: &'env Env,
+        column: Unknown<'env>,
+        row: Unknown<'env>,
+    ) -> Result<Unknown<'env>> {
+        bytes_out(
+            env,
+            &raw_at(&StoreAt::Held(&self.held), index(&column), index(&row)),
+        )
     }
 
     /// `raw` as a string, each invalid UTF-8 sequence replaced by U+FFFD: for display, since
     /// a fault's span counts bytes of `raw`, not UTF-16 code units of this.
     #[napi(catch_unwind, ts_args_type = "column: number, row: number")]
     pub fn raw_string(&self, column: Unknown<'_>, row: Unknown<'_>) -> String {
-        String::from_utf8_lossy(self.data.raw(self.data.at(&column, &row))).into_owned()
+        let bytes = raw_at(&StoreAt::Held(&self.held), index(&column), index(&row));
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     /// The whole column, a verdict a row; empty for a column the batch does not have.
@@ -1379,40 +3235,30 @@ impl Batch {
         ts_return_type = "Array<Verdict<T>>"
     )]
     pub fn column<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Array<'env>> {
-        let column = index(&column).filter(|column| *column < self.data.columns.len());
-        let rows = if column.is_some() { self.data.rows } else { 0 };
-        let mut list = Array::from_vec(env, Vec::<bool>::new())?;
-        for row in 0..rows {
-            list.insert(self.data.verdict(env, column.map(|column| (column, row)))?)?;
-        }
-        Ok(list)
+        column_at(env, &StoreAt::Held(&self.held), index(&column))
     }
 
     /// How many cells of the column did not cast; 0 for a column the batch does not have.
     #[napi(catch_unwind, ts_args_type = "column: number")]
     pub fn fault_count(&self, column: Unknown<'_>) -> u32 {
-        index(&column)
-            .and_then(|column| self.data.columns.get(column))
-            .map_or(0, |cells| cells.faults as u32)
+        fault_count_at(&StoreAt::Held(&self.held), index(&column))
     }
 
     /// The row at `row`, read across; `null` for a row the batch does not have.
     #[napi(catch_unwind, ts_args_type = "row: number")]
     pub fn row(&self, row: Unknown<'_>) -> Option<Row> {
-        index(&row)
-            .filter(|row| *row < self.data.rows)
-            .map(|index| Row {
-                data: Arc::clone(&self.data),
-                index,
-            })
+        index(&row).filter(|row| *row < self.rows).map(|index| Row {
+            index,
+            held: self.held.clone(),
+        })
     }
 }
 
-/// One row of a batch, read across: the batch and an index, nothing copied.
+/// One row of a batch, read across: the batch's store and an index, nothing copied.
 #[napi]
 pub struct Row {
-    data: Arc<BatchData>,
     index: usize,
+    held: Held,
 }
 
 #[napi]
@@ -1420,13 +3266,13 @@ impl Row {
     /// The row's place in its batch.
     #[napi(getter, catch_unwind)]
     pub fn index(&self) -> u32 {
-        self.index as u32
+        narrow(self.index)
     }
 
     /// The line or the sheet row it came from.
     #[napi(getter, catch_unwind)]
     pub fn line(&self) -> u32 {
-        self.data.lines[self.index]
+        line_at(&StoreAt::Held(&self.held), Some(self.index))
     }
 
     /// The cell in `column` as HyperCast judged it; a column the row does not have is the
@@ -1438,59 +3284,159 @@ impl Row {
         ts_return_type = "Verdict<T>"
     )]
     pub fn get<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Object<'env>> {
-        let at = index(&column)
-            .filter(|column| *column < self.data.columns.len())
-            .map(|column| (column, self.index));
-        self.data.verdict(env, at)
+        verdict(
+            env,
+            value_at(&StoreAt::Held(&self.held), index(&column), Some(self.index)),
+        )
+    }
+
+    /// What failed in the cell in `column`, as `Batch.detail`.
+    #[napi(catch_unwind, ts_args_type = "column: number")]
+    pub fn detail(&self, column: Unknown<'_>) -> Option<Detail> {
+        detail_at(&StoreAt::Held(&self.held), index(&column), Some(self.index))
+    }
+
+    /// Where the verdict of the cell in `column` came from, as `Batch.origin`.
+    #[napi(catch_unwind, ts_args_type = "column: number")]
+    pub fn origin(&self, column: Unknown<'_>) -> Option<Origin> {
+        origin_at(&StoreAt::Held(&self.held), index(&column), Some(self.index))
     }
 
     /// The raw text of the cell in `column`, as `Batch.raw`.
-    #[napi(catch_unwind, ts_args_type = "column: number")]
-    pub fn raw(&self, column: Unknown<'_>) -> Uint8Array {
-        let at = index(&column)
-            .filter(|column| *column < self.data.columns.len())
-            .map(|column| (column, self.index));
-        Uint8Array::from(self.data.raw(at).to_vec())
+    #[napi(
+        catch_unwind,
+        ts_args_type = "column: number",
+        ts_return_type = "Uint8Array"
+    )]
+    pub fn raw<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Unknown<'env>> {
+        bytes_out(
+            env,
+            &raw_at(&StoreAt::Held(&self.held), index(&column), Some(self.index)),
+        )
     }
 
     /// `raw` as a string, as `Batch.rawString`.
     #[napi(catch_unwind, ts_args_type = "column: number")]
     pub fn raw_string(&self, column: Unknown<'_>) -> String {
-        let at = index(&column)
-            .filter(|column| *column < self.data.columns.len())
-            .map(|column| (column, self.index));
-        String::from_utf8_lossy(self.data.raw(at)).into_owned()
+        let bytes = raw_at(&StoreAt::Held(&self.held), index(&column), Some(self.index));
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 }
 
-/// A read's outcome: the batch, or `null` past the end, or the error that stopped it.
+/// A read's outcome: the batch, or `null` past the end, or the error that stopped it. Under
+/// `index.js` a batch is its own JavaScript object over the store; read through the module on
+/// its own (the browser entry) it is the native `Batch`.
 fn read_outcome<'env>(
     env: &'env Env,
     read: std::result::Result<Option<ht::Batch<'_>>, ht::Error>,
 ) -> Result<Object<'env>> {
     match read {
         Ok(Some(batch)) => {
-            let data = BatchData::copy(&batch);
-            // Without it V8 sees a small object and collects too rarely for the heap behind
-            // it (a no-op under WebAssembly, whose memory is the module's own).
-            let external = i64::try_from(data.size()).unwrap_or(i64::MAX);
-            env.adjust_external_memory(external)?;
-            let batch = Batch {
-                data: Arc::new(data),
-                external,
+            let copy = BatchCopy::of(&batch);
+            let Some(make) = batch_maker(env) else {
+                let held = Held::of(&copy);
+                let BatchCopy { rows, doors, .. } = copy;
+                return success(env, Batch { rows, doors, held }.into_instance(env)?);
             };
-            success(env, batch.into_instance(env)?)
+            let store = js_store(env, &copy)?;
+            let BatchCopy { rows, doors, .. } = copy;
+            let args = [store, js(env, narrow(rows))?, js(env, doors)?];
+            let mut undefined = std::ptr::null_mut();
+            let mut made = std::ptr::null_mut();
+            // SAFETY: `env` is the live environment of the call in progress; `make` and every
+            // argument are values in it.
+            let status = unsafe {
+                sys::napi_get_undefined(env.raw(), &mut undefined);
+                sys::napi_call_function(
+                    env.raw(),
+                    undefined,
+                    make,
+                    args.len(),
+                    args.as_ptr(),
+                    &mut made,
+                )
+            };
+            if status != sys::Status::napi_ok {
+                // `index.js`'s own function throws nothing; an engine out of memory does.
+                clear_pending_exception(env);
+                return Err(napi::Error::from_reason("could not make a batch"));
+            }
+            // SAFETY: `made` was made in `env`.
+            success(env, unsafe { Unknown::from_raw_unchecked(env.raw(), made) })
         }
         Ok(None) => success(env, Null),
-        Err(error) => errored(env, &error),
+        Err(error) => refused(env, error.into()),
     }
 }
 
-fn bound<'env>(env: &'env Env, bind: std::result::Result<(), ht::Error>) -> Result<Object<'env>> {
-    match bind {
-        Ok(()) => success(env, Null),
-        Err(error) => errored(env, &error),
+fn format_out(format: hc::NumFormat) -> SuggestedFormat {
+    SuggestedFormat {
+        packed: Uint8Array::from(hc::RawNumFormat::from(format).to_le_bytes().to_vec()),
     }
+}
+
+/// A suggestion as JavaScript holds it: its plan as `Column`s, ready to bind.
+fn suggestion_outcome<'env>(
+    env: &'env Env,
+    found: std::result::Result<ht::Suggestion, ht::Error>,
+) -> Result<Object<'env>> {
+    let found = match found {
+        Ok(found) => found,
+        Err(error) => return refused(env, error.into()),
+    };
+    let mut plan = Array::from_vec(env, Vec::<bool>::new())?;
+    for column in &found.plan {
+        plan.insert(Column::of(*column).into_instance(env)?)?;
+    }
+    let report: Vec<SuggestedColumn> = found
+        .report
+        .iter()
+        .map(|column| SuggestedColumn {
+            ordinal: narrow(column.ordinal),
+            name: column
+                .name
+                .as_deref()
+                .map(|name| String::from_utf8_lossy(name).into_owned()),
+            door: door_name(column.door),
+            declared: door_param(column.door),
+            format: column.format.map(format_out),
+            candidates: column
+                .candidates
+                .iter()
+                .filter_map(|candidate| match candidate {
+                    ht::Candidate::DateOrder(order) => Some(Candidate {
+                        kind: CandidateKind::DateOrder,
+                        order: Some(*order as u32),
+                        format: None,
+                    }),
+                    ht::Candidate::NumFormat(format) => Some(Candidate {
+                        kind: CandidateKind::NumFormat,
+                        order: None,
+                        format: Some(format_out(*format)),
+                    }),
+                    // A candidate the Rust binding gains later, which nothing here can name.
+                    _ => None,
+                })
+                .collect(),
+            status: match column.status {
+                ht::SuggestStatus::Resolved => SuggestStatus::Resolved,
+                ht::SuggestStatus::Ambiguous => SuggestStatus::Ambiguous,
+                // `Unresolved`, and a status the Rust binding gains later: the plan reads text.
+                _ => SuggestStatus::Unresolved,
+            },
+            matched: column.matched,
+            sampled: column.sampled,
+        })
+        .collect();
+    let value = record(
+        env,
+        &[
+            (c"plan", js(env, plan)?),
+            (c"report", js(env, report)?),
+            (c"truncated", js(env, found.truncated)?),
+        ],
+    )?;
+    success(env, value)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1502,7 +3448,7 @@ fn bound<'env>(env: &'env Env, bind: std::result::Result<(), ht::Error>) -> Resu
 #[napi]
 pub struct DelimitedReader {
     // `None` once closed.
-    inner: Option<ht::DelimitedReader<'static>>,
+    state: RefCell<Option<ht::DelimitedReader<'static>>>,
 }
 
 /// Where a reader's bytes come from.
@@ -1513,17 +3459,17 @@ enum Source {
 
 fn delimited<'env>(
     env: &'env Env,
-    source: std::result::Result<Source, Refusal>,
+    source: Refused<Source>,
     dialect: &Unknown<'_>,
     plan: &Unknown<'_>,
     options: &Unknown<'_>,
 ) -> Result<Object<'env>> {
-    let read = (|| {
+    let opened = (|| {
         let source = source?;
         let dialect = dialect_of(env, dialect)?;
         let plan = plan_of(env, plan)?;
         let options = delimited_options(env, options)?;
-        let opened = match (source, plan) {
+        let reader = match (source, plan) {
             (Source::Bytes(bytes), Some(plan)) => {
                 options.from_reader(std::io::Cursor::new(bytes), dialect, &plan)
             }
@@ -1532,18 +3478,18 @@ fn delimited<'env>(
             }
             (Source::Path(path), Some(plan)) => options.open(path, dialect, &plan),
             (Source::Path(path), None) => options.open_unbound(path, dialect),
-        };
-        Ok(opened)
+        }?;
+        Ok(DelimitedReader {
+            state: RefCell::new(Some(reader)),
+        })
     })();
-    match read {
+    match opened {
+        Ok(reader) => success(env, reader.into_instance(env)?),
         Err(refusal) => refused(env, refusal),
-        Ok(Err(error)) => errored(env, &error),
-        Ok(Ok(inner)) => success(
-            env,
-            DelimitedReader { inner: Some(inner) }.into_instance(env)?,
-        ),
     }
 }
+
+const READER: &str = "reader";
 
 #[napi]
 impl DelimitedReader {
@@ -1570,6 +3516,7 @@ impl DelimitedReader {
     }
 
     /// Opens the file at `path` and reads it a buffer at a time, as `fromBytes` reads memory.
+    /// The core judges the options' sizes before the file is opened.
     #[napi(
         catch_unwind,
         ts_args_type = "path: string, dialect?: Dialect | null, plan?: ReadonlyArray<Column> | null, options?: DelimitedOptions | null",
@@ -1588,6 +3535,61 @@ impl DelimitedReader {
         delimited(env, source, &dialect, &plan, &options)
     }
 
+    /// Samples the file at `path` and suggests a plan for it, never applying it: each column
+    /// tried against the doors, with a report saying how far the sample settles it. A
+    /// starting point to inspect; declaring the number format and date order settles what a
+    /// sample cannot.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "path: string, dialect?: Dialect | null, options?: SuggestOptions | null",
+        ts_return_type = "Outcome<Suggestion>"
+    )]
+    pub fn suggest<'env>(
+        env: &'env Env,
+        path: Unknown<'env>,
+        dialect: Unknown<'env>,
+        options: Unknown<'env>,
+    ) -> Result<Object<'env>> {
+        let asked = (|| {
+            let options = suggest_options(env, &options)?;
+            let path = string_of(&path).ok_or_else(|| argument("the path must be a string"))?;
+            Ok((options, path, dialect_of(env, &dialect)?))
+        })();
+        match asked {
+            Ok((options, path, dialect)) => {
+                suggestion_outcome(env, ht::DelimitedReader::suggest(path, dialect, &options))
+            }
+            Err(refusal) => refused(env, refusal),
+        }
+    }
+
+    /// `suggest`, over delimited text held in memory: a `Uint8Array` or a string.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "bytes: Uint8Array | string, dialect?: Dialect | null, options?: SuggestOptions | null",
+        ts_return_type = "Outcome<Suggestion>"
+    )]
+    pub fn suggest_bytes<'env>(
+        env: &'env Env,
+        bytes: Unknown<'env>,
+        dialect: Unknown<'env>,
+        options: Unknown<'env>,
+    ) -> Result<Object<'env>> {
+        let asked = (|| {
+            let options = suggest_options(env, &options)?;
+            let bytes = bytes_of(&bytes)
+                .ok_or_else(|| argument("the bytes must be a Uint8Array or a string"))?;
+            Ok((options, bytes, dialect_of(env, &dialect)?))
+        })();
+        match asked {
+            Ok((options, bytes, dialect)) => suggestion_outcome(
+                env,
+                ht::DelimitedReader::suggest_slice(&bytes, dialect, &options),
+            ),
+            Err(refusal) => refused(env, refusal),
+        }
+    }
+
     /// Declares the plan a reader opened without one reads through: once, before the first
     /// read.
     #[napi(
@@ -1595,62 +3597,86 @@ impl DelimitedReader {
         ts_args_type = "plan: ReadonlyArray<Column>",
         ts_return_type = "Outcome<null>"
     )]
-    pub fn bind<'env>(&mut self, env: &'env Env, plan: Unknown<'env>) -> Result<Object<'env>> {
-        match plan_of(env, &plan) {
-            Err(refusal) => refused(env, refusal),
-            Ok(None) => refused(env, argument("the plan must be an array of Columns")),
-            Ok(Some(plan)) => match self.inner.as_mut() {
-                Some(inner) => bound(env, inner.bind(&plan)),
-                None => refused(env, closed("reader")),
-            },
-        }
+    pub fn bind<'env>(&self, env: &'env Env, plan: Unknown<'env>) -> Result<Object<'env>> {
+        let answer = exclusive(&self.state, |state| {
+            // The plan is read with the reader held: a getter or a Proxy trap in it that calls
+            // back into this reader is answered `busy`.
+            let plan = plan_of(env, &plan)?
+                .ok_or_else(|| argument("the plan must be an array of Columns"))?;
+            let inner = state.as_mut().ok_or_else(|| closed(READER))?;
+            inner.bind(&plan)?;
+            Ok(Null)
+        })
+        .unwrap_or_else(|| Err(busy(READER)));
+        outcome(env, answer)
     }
 
     /// Reads the next batch: the batch, `null` once the text is exhausted, or the error that
     /// stopped it — a structural failure only after every intact row before it was
     /// delivered, and again on every read after.
     #[napi(catch_unwind, ts_return_type = "Outcome<Batch | null>")]
-    pub fn read<'env>(&mut self, env: &'env Env) -> Result<Object<'env>> {
-        match self.inner.as_mut() {
+    pub fn read<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        exclusive(&self.state, |state| match state.as_mut() {
             Some(inner) => read_outcome(env, inner.read()),
-            None => refused(env, closed("reader")),
-        }
+            None => refused(env, closed(READER)),
+        })
+        .unwrap_or_else(|| refused(env, busy(READER)))
     }
 
     /// Releases the reader's buffers and its file now, rather than when it is collected.
-    /// Batches already read stay valid; a read or bind after it is a `closed` error.
-    #[napi(catch_unwind)]
-    pub fn close(&mut self) {
-        self.inner = None;
+    /// Batches already read stay valid; a read or bind after it is a `closed` error. Closing
+    /// twice is no error.
+    #[napi(catch_unwind, ts_return_type = "Outcome<null>")]
+    pub fn close<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        let answer = exclusive(&self.state, |state| {
+            *state = None;
+            Ok(Null)
+        })
+        .unwrap_or_else(|| Err(busy(READER)));
+        outcome(env, answer)
     }
 
-    /// Whether a plan has been bound.
+    /// Whether a plan has been bound; `false` once closed. Throws the `busy` error from
+    /// inside one of the reader's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn is_bound(&self) -> bool {
-        self.inner.as_ref().is_some_and(|inner| inner.is_bound())
+    pub fn is_bound(&self, env: &Env) -> Result<bool> {
+        shared(&self.state, |state| {
+            state.as_ref().is_some_and(|inner| inner.is_bound())
+        })
+        .map_or_else(|| thrown_busy(env, READER), Ok)
     }
 
-    /// The header record's names, or `null` if the dialect declares no header or the reader
-    /// was closed.
+    /// The header record's names, or `null` if the dialect declares no header, and once
+    /// closed. Throws the `busy` error from inside one of the reader's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn header(&self) -> Option<Header> {
-        self.inner.as_ref()?.header().map(Header::from)
+    pub fn header(&self, env: &Env) -> Result<Option<Header>> {
+        shared(&self.state, |state| {
+            state.as_ref()?.header().map(|header| Header {
+                inner: header.clone(),
+            })
+        })
+        .map_or_else(|| thrown_busy(env, READER), Ok)
     }
 
     /// How many cells a record has: the header's count, or the first record's once it has
-    /// been read; `null` before either, or once closed.
+    /// been read; `null` before either, and once closed. Throws the `busy` error from inside
+    /// one of the reader's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn column_count(&self) -> Option<u32> {
-        self.inner
-            .as_ref()?
-            .column_count()
-            .map(|count| count as u32)
+    pub fn column_count(&self, env: &Env) -> Result<Option<u32>> {
+        shared(&self.state, |state| {
+            state.as_ref()?.column_count().map(narrow)
+        })
+        .map_or_else(|| thrown_busy(env, READER), Ok)
     }
 
-    /// How many records have been read, the header among them; `null` once closed.
+    /// How many records have been read, the header among them; `null` once closed. Throws
+    /// the `busy` error from inside one of the reader's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn records(&self) -> Option<f64> {
-        self.inner.as_ref().map(|inner| inner.records() as f64)
+    pub fn records(&self, env: &Env) -> Result<Option<f64>> {
+        shared(&self.state, |state| {
+            state.as_ref().map(|inner| inner.records() as f64)
+        })
+        .map_or_else(|| thrown_busy(env, READER), Ok)
     }
 }
 
@@ -1677,7 +3703,7 @@ fn workbook_outcome<'env>(
             }
             .into_instance(env)?,
         ),
-        Err(error) => errored(env, &error),
+        Err(error) => refused(env, error.into()),
     }
 }
 
@@ -1778,7 +3804,7 @@ impl Workbook {
             let book = Arc::clone(&self.inner);
             // SAFETY: the sheet borrows the workbook behind the `Arc` it is stored beside,
             // which keeps that workbook at one address, unmoved and unchanged (a sheet only
-            // reads it), for as long as the sheet lives: `Sheet` declares `sheet` before
+            // reads it), for as long as the sheet lives: `Sheet` declares `state` before
             // `book`, so the sheet is dropped first.
             let borrowed: &'static ht::Workbook<'static> = unsafe { &*Arc::as_ptr(&book) };
             let sheet = match (&which, plan) {
@@ -1786,16 +3812,15 @@ impl Workbook {
                 (Which::Index(at), None) => borrowed.sheet_unbound(*at, options),
                 (Which::Name(name), Some(plan)) => borrowed.sheet(name.as_str(), options, &plan),
                 (Which::Name(name), None) => borrowed.sheet_unbound(name.as_str(), options),
-            };
-            Ok(sheet.map(|sheet| Sheet {
-                sheet: Some(sheet),
+            }?;
+            Ok(Sheet {
+                state: RefCell::new(Some(sheet)),
                 book,
-            }))
+            })
         })();
         match opened {
+            Ok(sheet) => success(env, sheet.into_instance(env)?),
             Err(refusal) => refused(env, refusal),
-            Ok(Err(error)) => errored(env, &error),
-            Ok(Ok(sheet)) => success(env, sheet.into_instance(env)?),
         }
     }
 }
@@ -1806,9 +3831,11 @@ impl Workbook {
 pub struct Sheet {
     // Declared first, so dropped first: it borrows `book` (see `Workbook.sheet`).
     // `None` once closed.
-    sheet: Option<ht::Sheet<'static>>,
+    state: RefCell<Option<ht::Sheet<'static>>>,
     book: Arc<ht::Workbook<'static>>,
 }
+
+const SHEET: &str = "sheet";
 
 #[napi]
 impl Sheet {
@@ -1819,45 +3846,86 @@ impl Sheet {
         ts_args_type = "plan: ReadonlyArray<Column>",
         ts_return_type = "Outcome<null>"
     )]
-    pub fn bind<'env>(&mut self, env: &'env Env, plan: Unknown<'env>) -> Result<Object<'env>> {
-        match plan_of(env, &plan) {
-            Err(refusal) => refused(env, refusal),
-            Ok(None) => refused(env, argument("the plan must be an array of Columns")),
-            Ok(Some(plan)) => match self.sheet.as_mut() {
-                Some(sheet) => bound(env, sheet.bind(&plan)),
-                None => refused(env, closed("sheet")),
-            },
-        }
+    pub fn bind<'env>(&self, env: &'env Env, plan: Unknown<'env>) -> Result<Object<'env>> {
+        let answer = exclusive(&self.state, |state| {
+            let plan = plan_of(env, &plan)?
+                .ok_or_else(|| argument("the plan must be an array of Columns"))?;
+            let sheet = state.as_mut().ok_or_else(|| closed(SHEET))?;
+            sheet.bind(&plan)?;
+            Ok(Null)
+        })
+        .unwrap_or_else(|| Err(busy(SHEET)));
+        outcome(env, answer)
     }
 
     /// Reads the next batch, as `DelimitedReader.read` does.
     #[napi(catch_unwind, ts_return_type = "Outcome<Batch | null>")]
-    pub fn read<'env>(&mut self, env: &'env Env) -> Result<Object<'env>> {
-        match self.sheet.as_mut() {
+    pub fn read<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        exclusive(&self.state, |state| match state.as_mut() {
             Some(sheet) => read_outcome(env, sheet.read()),
-            None => refused(env, closed("sheet")),
-        }
+            None => refused(env, closed(SHEET)),
+        })
+        .unwrap_or_else(|| refused(env, busy(SHEET)))
+    }
+
+    /// Samples the sheet from its first row, under the options it was opened with, and
+    /// suggests a plan for it, never applying it: as `DelimitedReader.suggest`. A sheet's
+    /// date column is text, and its typed cells count for every notation. Reads nothing of
+    /// this sheet's own read.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "options?: SuggestOptions | null",
+        ts_return_type = "Outcome<Suggestion>"
+    )]
+    pub fn suggest<'env>(&self, env: &'env Env, options: Unknown<'env>) -> Result<Object<'env>> {
+        shared(&self.state, |state| {
+            // The options are read with the sheet held: a getter that calls back into it to
+            // close or read it is answered `busy`.
+            let found = suggest_options(env, &options).and_then(|options| {
+                let sheet = state.as_ref().ok_or_else(|| closed(SHEET))?;
+                Ok(sheet.suggest(&options))
+            });
+            match found {
+                Ok(found) => suggestion_outcome(env, found),
+                Err(refusal) => refused(env, refusal),
+            }
+        })
+        .unwrap_or_else(|| refused(env, busy(SHEET)))
     }
 
     /// Releases the sheet's buffers now, rather than when it is collected (the workbook's
     /// bytes stay until the workbook and its sheets are). Batches already read stay valid; a
-    /// read or bind after it is a `closed` error.
-    #[napi(catch_unwind)]
-    pub fn close(&mut self) {
-        self.sheet = None;
+    /// read or bind after it is a `closed` error. Closing twice is no error.
+    #[napi(catch_unwind, ts_return_type = "Outcome<null>")]
+    pub fn close<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
+        let answer = exclusive(&self.state, |state| {
+            *state = None;
+            Ok(Null)
+        })
+        .unwrap_or_else(|| Err(busy(SHEET)));
+        outcome(env, answer)
     }
 
-    /// Whether a plan has been bound.
+    /// Whether a plan has been bound; `false` once closed. Throws the `busy` error from
+    /// inside one of the sheet's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn is_bound(&self) -> bool {
-        self.sheet.as_ref().is_some_and(|sheet| sheet.is_bound())
+    pub fn is_bound(&self, env: &Env) -> Result<bool> {
+        shared(&self.state, |state| {
+            state.as_ref().is_some_and(|sheet| sheet.is_bound())
+        })
+        .map_or_else(|| thrown_busy(env, SHEET), Ok)
     }
 
-    /// The header row's names, or `null` if the sheet was opened without a header or was
-    /// closed.
+    /// The header row's names, or `null` if the sheet was opened without a header, and once
+    /// closed. Throws the `busy` error from inside one of the sheet's own calls.
     #[napi(getter, catch_unwind)]
-    pub fn header(&self) -> Option<Header> {
-        self.sheet.as_ref()?.header().map(Header::from)
+    pub fn header(&self, env: &Env) -> Result<Option<Header>> {
+        shared(&self.state, |state| {
+            state.as_ref()?.header().map(|header| Header {
+                inner: header.clone(),
+            })
+        })
+        .map_or_else(|| thrown_busy(env, SHEET), Ok)
     }
 
     /// The workbook's date system, as `Workbook.dateSystem`.

@@ -18,8 +18,10 @@ use std::sync::Arc;
 /// fn closed(error: Error) {
 ///     match error {
 ///         Error::Io(_) | Error::Separator(_) | Error::Plan { .. } |
-///         Error::NoSheet(_) | Error::NoColumn(_) | Error::Unbound |
-///         Error::AlreadyBound | Error::Structure(_) => (),
+///         Error::NoSheet(_) | Error::NoColumn(_) | Error::AmbiguousColumn { .. } |
+///         Error::Range(_) | Error::Unbound | Error::AlreadyBound | Error::Structure(_) |
+///         Error::ZeroBatchRows | Error::ZeroBufferBytes | Error::BatchTooLarge { .. } |
+///         Error::RowTooWide { .. } | Error::NoMemory { .. } => (),
 ///     }
 /// }
 /// ```
@@ -28,11 +30,42 @@ use std::sync::Arc;
 pub enum Error {
     /// The underlying read failed.
     Io(Arc<io::Error>),
+    /// `batch_rows` is `0`, which reads nothing. The core refuses it when a reader or a sheet is
+    /// opened.
+    ZeroBatchRows,
+    /// `buffer_bytes` is `0`, where a stream couldn't read. The core refuses it when a reader is
+    /// opened.
+    ZeroBufferBytes,
+    /// A batch of this size asks for `needed` bytes, past the core's `limit`, before any is
+    /// allocated. `needed` is `u64::MAX` for an ask too big to count.
+    BatchTooLarge {
+        /// The bytes the batch asks for.
+        needed: u64,
+        /// The most a batch may ask for.
+        limit: u64,
+    },
+    /// One row of `width` columns asks for `needed` bytes, past the core's `limit`, at any batch
+    /// size. `needed` is `u64::MAX` for an ask too big to count.
+    RowTooWide {
+        /// The columns one row holds.
+        width: u64,
+        /// The bytes that row asks for.
+        needed: u64,
+        /// The most a batch may ask for.
+        limit: u64,
+    },
+    /// A size the core allows, `bytes` of it, can't be had from the allocator.
+    NoMemory {
+        /// The bytes asked for.
+        bytes: u64,
+    },
     /// The dialect's separator is not one the scanner honours: a tab, or printable ASCII
     /// other than `"`.
     Separator(u8),
     /// Plan column `column` cannot be honoured: its numeric format declares the same
-    /// decimal and group separator (or no decimal separator at all), its ordinal is 2^20
+    /// decimal and group separator (or no decimal separator at all) or flags HyperCast doesn't
+    /// define, among them the retired grouping bit `256` (so the words `351` and `863`), its date
+    /// options or month names are ones HyperCast refuses, its ordinal is 2^20
     /// (1,048,576) or more — past any workbook format's columns — or, in delimited text, at
     /// or past the width a header has given every record, or the row slots its reach takes
     /// cannot be allocated.
@@ -44,6 +77,19 @@ pub enum Error {
     NoSheet(String),
     /// The header has no column by this name ([`crate::Header::require`]).
     NoColumn(String),
+    /// Two columns of the header have this name, so [`crate::Header::require`] won't choose
+    /// between them. [`crate::Header::ordinal`] takes the first, and a plan can name either by
+    /// position.
+    AmbiguousColumn {
+        /// The name, as far as it can be read as UTF-8.
+        name: String,
+        /// The zero-based column that has it first.
+        first: usize,
+        /// The zero-based column that has it next. A later one isn't named.
+        second: usize,
+    },
+    /// This isn't a range: [`crate::Range`] says what one is.
+    Range(String),
     /// A reader opened without a plan was read before one was bound.
     Unbound,
     /// A plan was bound to a reader that already has one: a reader is bound once, before
@@ -69,8 +115,10 @@ pub struct Failure {
     /// Delimited text: the 1-based line the record starts on. A workbook: the sheet row
     /// being read, where there is one.
     pub line: u32,
-    /// Delimited text: the byte offset of the record in the input. A workbook: how far
-    /// into the part's inflated bytes the read had got.
+    /// Delimited text: the byte offset of the record in the input, the decoded text if an
+    /// encoding was declared. That encoding's own failure ([`FailureKind::Encoding`]) gives
+    /// the offending unit's offset in the original input. A workbook: how far into the part's
+    /// inflated bytes the read had got.
     pub byte: u64,
     /// What was expected, for the kinds that say (the first record's cell count; the
     /// length of the shared-string table; the identifier or version an IWA failure names).
@@ -122,6 +170,10 @@ pub enum FailureKind {
     /// (3, `expected` its identifier), cell storage of a version the core does not read
     /// (4, `expected` the version).
     Iwa = 26,
+    /// Text that isn't valid UTF-8 where no cell's verdict can carry it, a header name; or a
+    /// unit that a dialect's declared [`Encoding`](crate::Encoding) has no character for, whose
+    /// `byte` alone counts the original input rather than the decoded text.
+    Encoding = 27,
 }
 
 impl FailureKind {
@@ -142,6 +194,7 @@ impl FailureKind {
             FailureKind::SharedString => "shared_string",
             FailureKind::TooLarge => "too_large",
             FailureKind::Iwa => "iwa",
+            FailureKind::Encoding => "encoding",
         }
     }
 
@@ -160,6 +213,7 @@ impl FailureKind {
             abi::Failure::SHARED_STRING => FailureKind::SharedString,
             abi::Failure::TOO_LARGE => FailureKind::TooLarge,
             abi::Failure::IWA => FailureKind::Iwa,
+            abi::Failure::ENCODING => FailureKind::Encoding,
             // The one code left, and the reading of any the core has yet to be given.
             _ => FailureKind::Container,
         }
@@ -214,6 +268,10 @@ impl fmt::Display for Failure {
                 f,
                 "record {record} (line {line}, byte {byte}) is larger than a reader will buffer"
             ),
+            FailureKind::Encoding => write!(
+                f,
+                "text that isn't valid in its encoding at byte {byte} (record or part {record}, line or row {line})"
+            ),
             FailureKind::NotAZip => f.write_str("the container is not a zip file"),
             FailureKind::NotAWorkbook => {
                 f.write_str("the container is not an XLSX, ODS or Numbers workbook")
@@ -235,16 +293,40 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(error) => write!(f, "read failed: {error}"),
+            Error::ZeroBatchRows => f.write_str("batch_rows must be at least 1"),
+            Error::ZeroBufferBytes => f.write_str("buffer_bytes must be at least 1"),
+            Error::BatchTooLarge { needed, limit } => write!(
+                f,
+                "batch_rows asks for {needed} bytes, past the limit of {limit}"
+            ),
+            Error::RowTooWide {
+                width,
+                needed,
+                limit,
+            } => write!(
+                f,
+                "a row of {width} columns asks for {needed} bytes, past the limit of {limit}"
+            ),
+            Error::NoMemory { bytes } => write!(f, "no memory for {bytes} bytes"),
             Error::Separator(byte) => write!(
                 f,
                 "separator byte 0x{byte:02X} is not tab or printable ASCII other than '\"'"
             ),
             Error::Plan { column } => write!(
                 f,
-                "plan column {column} declares a numeric format or an ordinal that cannot be honoured"
+                "plan column {column} declares a numeric format, date options or an ordinal that cannot be honoured"
             ),
             Error::NoSheet(which) => write!(f, "the workbook has no sheet {which}"),
             Error::NoColumn(name) => write!(f, "the header has no column named {name:?}"),
+            Error::AmbiguousColumn {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "the header names two columns {name:?}, at positions {first} and {second}: say which by position"
+            ),
+            Error::Range(text) => write!(f, "not a range: {text:?}"),
             Error::Unbound => f.write_str("the reader has no plan yet: bind one before reading"),
             Error::AlreadyBound => {
                 f.write_str("the reader already has a plan: a plan is bound once")

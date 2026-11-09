@@ -3,11 +3,13 @@ package io.github.skunkwerkx.hypertabular;
 import io.github.skunkwerkx.hypercast.Verdict;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
@@ -60,11 +63,18 @@ import java.util.function.Consumer;
  * }
  * }
  *
- * <p>A failure of the underlying stream or file is an {@link UncheckedIOException}, from the
- * factory or from {@link #read()}.
+ * <p>The text is UTF-8 unless the dialect declares another {@link Encoding}, which is decoded
+ * ahead of the read: the parameters below say {@code utf8} for what is then that encoding's bytes.
+ * A failure of the underlying stream or file is an {@link UncheckedIOException}, from the factory
+ * or from {@link #read()}.
  *
  * <p>Not thread-safe, and confined: the buffers are a confined {@link Arena}'s, so a reader
  * belongs to the thread that built it, and the runtime refuses a call from any other.
+ *
+ * <p>The caller's stream runs in the middle of a read. A call from it back into the reader — a
+ * read, a bind, a loop over {@link #forEachRow} — is refused with an {@link IllegalStateException};
+ * a {@link #close()} from it closes the reader once the stream returns, and that read ends with an
+ * {@link IllegalStateException} saying so, handing out no batch.
  */
 public final class DelimitedReader implements AutoCloseable {
     /** The row ceiling: a single record larger than this is a {@link TabularFailure#ROW_TOO_LONG}. */
@@ -78,6 +88,8 @@ public final class DelimitedReader implements AutoCloseable {
 
     private static final String CONTRACT_VIOLATION =
             "libhypertabular reported a contract violation — a binding bug, please report it";
+
+    private static final String BUSY = "The reader is in the middle of a read; its stream can't call back into it.";
 
     // One call's input is at most this: a span's offset and length are 31 bits.
     private static final long MAX_WINDOW_BYTES = Integer.MAX_VALUE;
@@ -105,6 +117,11 @@ public final class DelimitedReader implements AutoCloseable {
     /** A file: the channel reads into the native buffer itself, with no copy between. */
     private static final class FileSource implements Source {
         private final FileChannel channel;
+        /**
+         * The interrupt that closed the channel mid-read: every read after it says so, where the
+         * channel alone would only say it is closed.
+         */
+        private ClosedByInterruptException interrupted;
 
         FileSource(FileChannel channel) {
             this.channel = channel;
@@ -112,12 +129,23 @@ public final class DelimitedReader implements AutoCloseable {
 
         @Override
         public int read(MemorySegment target, long at, long room) throws IOException {
+            if (interrupted != null) {
+                InterruptedIOException refused = new InterruptedIOException(
+                        "A thread interrupt closed the file in the middle of a read; the reader can read no more of it.");
+                refused.initCause(interrupted);
+                throw refused;
+            }
             ByteBuffer view =
                     target.asSlice(at, Math.min(room, Integer.MAX_VALUE)).asByteBuffer();
             int read;
-            do {
-                read = channel.read(view);
-            } while (read == 0);
+            try {
+                do {
+                    read = channel.read(view);
+                } while (read == 0);
+            } catch (ClosedByInterruptException e) {
+                interrupted = e;
+                throw e;
+            }
             return read;
         }
 
@@ -132,25 +160,40 @@ public final class DelimitedReader implements AutoCloseable {
      * and is copied to the native buffer — the one copy a stream costs.
      */
     private static final class StreamSource implements Source {
-        private static final int MAX_TRANSFER_BYTES = 1 << 20;
+        private static final int FIRST_TRANSFER_BYTES = 1 << 20;
+        private static final int MAX_TRANSFER_BYTES = 64 << 20;
 
         private final InputStream stream;
-        private final byte[] transfer;
+        private byte[] transfer;
+        private boolean full;
 
         StreamSource(InputStream stream, int bufferBytes) {
             this.stream = stream;
-            this.transfer = new byte[Math.min(bufferBytes, MAX_TRANSFER_BYTES)];
+            this.transfer = new byte[Math.min(bufferBytes, FIRST_TRANSFER_BYTES)];
         }
 
+        /**
+         * One read of the stream, whatever it gives: what's finished in it reaches the caller however
+         * long the stream then blocks. The array grows when a read fills it, because a fill looks at
+         * the buffer from the record's start, so a long record handed over at a fixed size would cost
+         * the square of its length. It stops at a cap, for a heap that's far smaller than a record.
+         */
         @Override
         public int read(MemorySegment target, long at, long room) throws IOException {
-            int want = (int) Math.min(room, transfer.length);
+            if (full && transfer.length < room && transfer.length < MAX_TRANSFER_BYTES) {
+                transfer = new byte[(int) Math.min(Math.min(room, transfer.length * 2L), MAX_TRANSFER_BYTES)];
+            }
+            // The array the stream is handed is the one copied from, whatever the stream's own code
+            // does in between.
+            byte[] into = transfer;
+            int want = (int) Math.min(room, into.length);
             int read;
             do {
-                read = stream.read(transfer, 0, want);
+                read = stream.read(into, 0, want);
             } while (read == 0);
+            full = read == into.length;
             if (read > 0) {
-                MemorySegment.copy(transfer, 0, target, BYTE, at, read);
+                MemorySegment.copy(into, 0, target, BYTE, at, read);
             }
             return read;
         }
@@ -161,7 +204,73 @@ public final class DelimitedReader implements AutoCloseable {
         }
     }
 
+    /**
+     * The step ahead of the fill, for a dialect that declares an encoding: the original bytes,
+     * which go through the core's transcoder into the reader's buffer, where the fill reads them
+     * as it would have read UTF-8.
+     */
+    private static final class Decoder {
+        /**
+         * The most bytes of UTF-8 one character takes: with this much room, a transcode that writes
+         * nothing and does not fail wants more input.
+         */
+        static final int MAX_CHARACTER = 4;
+
+        final int encoding;
+        /** What a source's reads land in, fixed in size: {@code null} over memory. */
+        final Block raw;
+        /** The original bytes over memory: {@code null} over a source. */
+        final MemorySegment memory;
+        /** The original bytes, {@code at} to {@code end} of them not yet decoded. */
+        long at;
+
+        long end;
+        /** Whether the source has ended. */
+        boolean eof;
+        /** The original bytes decoded so far: added to a call's failure, this is the input's offset. */
+        long offset;
+        /** A unit has no character, at {@code failedAt} in the original input: raised when the fill wants more. */
+        boolean failed;
+
+        long failedAt;
+
+        /** A decoder of a source. */
+        Decoder(int encoding, int size) {
+            this.encoding = encoding;
+            this.raw = new Block(Math.clamp(size, MAX_CHARACTER, MAX_ROW_BYTES), 1);
+            this.memory = null;
+        }
+
+        /** A decoder of memory, all there already. */
+        Decoder(int encoding, MemorySegment memory) {
+            this.encoding = encoding;
+            this.raw = null;
+            this.memory = memory;
+            this.end = memory.byteSize();
+            this.eof = true;
+        }
+
+        MemorySegment input() {
+            return raw != null ? raw.segment : memory;
+        }
+
+        /** Puts what is left undecoded at the front. */
+        void compact() {
+            MemorySegment.copy(raw.segment, at, raw.segment, 0, end - at);
+            end -= at;
+            at = 0;
+        }
+
+        void close() {
+            if (raw != null) {
+                raw.close();
+            }
+        }
+    }
+
     private final Dialect dialect;
+    /** The thread that built the reader, whose confined arena holds its buffers. */
+    private final Thread owner = Thread.currentThread();
     /** The plan's columns and the batch they are read into: {@code null} until a plan is bound. */
     private Columns columns;
 
@@ -174,10 +283,10 @@ public final class DelimitedReader implements AutoCloseable {
     private final Arena arena;
     private MemorySegment state;
     private MemorySegment filled;
-    // The fill's cells and arena, as the core takes them: in a buffers block, the workbook
-    // calls' own layout, of which the fill reads those two and nothing else (Mono's
-    // interpreter, .NET's in the browser, passes no more than twelve integer arguments to a
-    // native function, and the ABI is the same for every binding). Allocated zeroed.
+    // The fill's cells, arena, tokens and row widths, as the core takes them: in a buffers block,
+    // of whose workbook fields the fill reads those two and nothing else (Mono's interpreter,
+    // .NET's in the browser, passes no more than twelve integer arguments to a native function,
+    // and the ABI is the same for every binding). Allocated zeroed.
     private MemorySegment buffers;
     private Block cells;
     private Block unescaped;
@@ -189,7 +298,14 @@ public final class DelimitedReader implements AutoCloseable {
     private Block buffer;
     private MemorySegment memory;
     private MemorySegment memoryReadOnly;
+    /** What decodes a declared encoding into {@code buffer}: {@code null} for UTF-8. */
+    private Decoder decoder;
+
+    private MemorySegment transcoded;
     private long maxWindow = MAX_WINDOW_BYTES;
+    /** For the tests: the row ceiling this reader's buffer stops at, so a ceiling test costs megabytes. */
+    int rowCeiling = MAX_ROW_BYTES;
+
     private long start;
     private long end;
     private boolean eof;
@@ -197,6 +313,11 @@ public final class DelimitedReader implements AutoCloseable {
     private Header header;
     private TabularException failure;
     private boolean closed;
+    /** A call is in progress: a read, a bind or the header. The caller's stream runs in the middle of one. */
+    private boolean busy;
+    /** {@link #close()} was called in the middle of a call, and is done when that call ends. */
+    private boolean closeAsked;
+
     private long recordsAtClose;
     private int expectedAtClose;
 
@@ -229,11 +350,11 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the reader, its header already read when the dialect declares one
      * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
      *     (a column reading at or past the width the header gives every record among them), or
-     *     {@code batchRows} is not positive
+     *     {@code batchRows} is {@code 0}, negative or asks for more than the core allows
      * @throws TabularException if the header record is structurally broken
      */
     public static DelimitedReader of(byte[] utf8, Dialect dialect, List<Column> plan, int batchRows) {
-        return ofArray(utf8, dialect, Columns.checked(plan, batchRows), batchRows);
+        return ofArray(utf8, dialect, Columns.checked(plan), batchRows);
     }
 
     /**
@@ -284,7 +405,9 @@ public final class DelimitedReader implements AutoCloseable {
      * Reads UTF-8 delimited text held in a memory segment. A native segment — a mapped
      * file, an arena allocation — is read in place: nothing is copied, and it must stay
      * alive and unchanged for as long as the reader is open. A heap segment is copied into
-     * native memory once, as a byte array is.
+     * native memory once, as a byte array is. So, on JDK 21 to 24, is a segment of a shared
+     * arena (or any other whose arena another thread could close): that path's native calls
+     * can't hold the arena open as an FFM downcall does.
      *
      * @param utf8 the text, of any size
      * @param dialect the declared dialect
@@ -293,7 +416,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the reader, its header already read when the dialect declares one
      * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
      *     (a column reading at or past the width the header gives every record among them), or
-     *     {@code batchRows} is not positive
+     *     {@code batchRows} is {@code 0}, negative or asks for more than the core allows
      * @throws TabularException if the header record is structurally broken
      */
     public static DelimitedReader of(MemorySegment utf8, Dialect dialect, List<Column> plan, int batchRows) {
@@ -325,11 +448,11 @@ public final class DelimitedReader implements AutoCloseable {
     static DelimitedReader windowed(
             MemorySegment utf8, Dialect dialect, List<Column> plan, int batchRows, long windowBytes) {
         Objects.requireNonNull(utf8, "utf8");
-        DelimitedReader reader =
-                new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
+        DelimitedReader reader = new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan), batchRows);
         try {
             MemorySegment text = utf8;
-            if (!utf8.isNative()) {
+            // A heap segment, or on JDK 21 to 24 one another thread could free mid-call, is copied.
+            if (!utf8.isNative() || !Native.holdsInPlace(utf8)) {
                 text = reader.arena.allocate(utf8.byteSize());
                 text.copyFrom(utf8);
             }
@@ -370,7 +493,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the reader, its header already read when the dialect declares one
      * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
      *     (a column reading at or past the width the header gives every record among them), or
-     *     {@code batchRows} or {@code bufferBytes} is not positive
+     *     {@code batchRows} or {@code bufferBytes} is {@code 0} or negative, or {@code batchRows}
+     *     asks for more than the core allows
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the stream fails
      */
@@ -406,7 +530,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @param bufferBytes the initial read buffer; it doubles when a record does not fit
      * @return the reader, its header already read when the dialect declares one, and no plan
      * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
-     *     {@code bufferBytes} is not positive
+     *     {@code bufferBytes} is {@code 0} or negative
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the stream fails
      */
@@ -418,11 +542,10 @@ public final class DelimitedReader implements AutoCloseable {
             InputStream utf8, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
         Objects.requireNonNull(utf8, "utf8");
         DelimitedReader reader;
+        int start;
         try {
-            if (bufferBytes <= 0) {
-                throw new IllegalArgumentException("bufferBytes must be positive; got " + bufferBytes);
-            }
-            reader = new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
+            start = startingBuffer(plan, batchRows, bufferBytes);
+            reader = new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan), batchRows);
         } catch (RuntimeException | Error failure) {
             // No reader came to be, so the stream it would have owned is closed here.
             try {
@@ -432,8 +555,7 @@ public final class DelimitedReader implements AutoCloseable {
             }
             throw failure;
         }
-        return reader.overSource(new StreamSource(utf8, bufferBytes), bufferBytes)
-                .begin(dialect);
+        return reader.overSource(new StreamSource(utf8, start), start).begin(dialect);
     }
 
     /**
@@ -465,7 +587,8 @@ public final class DelimitedReader implements AutoCloseable {
      * @return the reader, its header already read when the dialect declares one
      * @throws IllegalArgumentException if the dialect's separator or a column cannot be honoured
      *     (a column reading at or past the width the header gives every record among them), or
-     *     {@code batchRows} or {@code bufferBytes} is not positive
+     *     {@code batchRows} or {@code bufferBytes} is {@code 0} or negative, or {@code batchRows}
+     *     asks for more than the core allows
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the file cannot be opened or read
      */
@@ -499,7 +622,7 @@ public final class DelimitedReader implements AutoCloseable {
      * @param bufferBytes the initial read buffer; it doubles when a record does not fit
      * @return the reader, its header already read when the dialect declares one, and no plan
      * @throws IllegalArgumentException if the dialect's separator cannot be honoured, or
-     *     {@code bufferBytes} is not positive
+     *     {@code bufferBytes} is {@code 0} or negative
      * @throws TabularException if the header record is structurally broken
      * @throws UncheckedIOException if the file cannot be opened or read
      */
@@ -510,11 +633,8 @@ public final class DelimitedReader implements AutoCloseable {
     private static DelimitedReader openFile(
             Path path, Dialect dialect, List<Column> plan, int batchRows, int bufferBytes) {
         Objects.requireNonNull(path, "path");
-        if (bufferBytes <= 0) {
-            throw new IllegalArgumentException("bufferBytes must be positive; got " + bufferBytes);
-        }
-        DelimitedReader reader =
-                new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan, batchRows), batchRows);
+        int start = startingBuffer(plan, batchRows, bufferBytes);
+        DelimitedReader reader = new DelimitedReader(dialect, plan == null ? null : Columns.checked(plan), batchRows);
         FileChannel channel;
         try {
             channel = FileChannel.open(path, StandardOpenOption.READ);
@@ -525,7 +645,15 @@ public final class DelimitedReader implements AutoCloseable {
             reader.abandon(failure);
             throw failure;
         }
-        return reader.overSource(new FileSource(channel), bufferBytes).begin(dialect);
+        return reader.overSource(new FileSource(channel), start).begin(dialect);
+    }
+
+    /**
+     * The size to start the input buffer at, the core's answer. The batch's own size is judged with
+     * its plan, when that is bound; a zero says so here, ahead of a zero buffer.
+     */
+    private static int startingBuffer(List<Column> plan, int batchRows, int bufferBytes) {
+        return Columns.checkSizes(MemorySegment.NULL, 0, plan == null ? 1 : batchRows, bufferBytes, 0);
     }
 
     /**
@@ -551,15 +679,25 @@ public final class DelimitedReader implements AutoCloseable {
         try {
             state = arena.allocate(stateBytes, 8);
             filled = arena.allocate(Abi.FILLED_BYTES, 8);
-            buffers = arena.allocate(Abi.BUFFERS_BYTES, 8);
+            buffers = arena.allocate(Abi.BUFFERS_WITH_BYTES, 8);
+            buffers.set(INT, 0, (int) Abi.BUFFERS_WITH_BYTES);
+            byte[] tokens = dialect.tokens().packed();
+            if (tokens.length > 0) {
+                buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_TOKENS, Columns.held(tokens, arena));
+                buffers.set(LONG, Abi.BUFFERS_WITH_TOKENS + 8, tokens.length);
+            }
             unescaped = new Block(4096, 1);
 
-            MemorySegment raw = arena.allocate(Abi.DIALECT_BYTES, 1);
-            raw.set(BYTE, 0, (byte) dialect.separator());
-            raw.set(BYTE, 1, (byte) (dialect.quoting() ? 1 : 0));
-            raw.set(BYTE, 2, (byte) (dialect.skipBlankLines() ? 1 : 0));
-            raw.set(BYTE, 3, (byte) 0);
-            if (Native.init(state, raw) != Abi.OK) {
+            MemorySegment raw = arena.allocate(Abi.DELIMITED_OPTIONS_BYTES, 4);
+            raw.set(INT, 0, (int) Abi.DELIMITED_OPTIONS_BYTES);
+            raw.set(BYTE, Abi.DELIMITED_OPTIONS_SEPARATOR, (byte) dialect.separator());
+            raw.set(BYTE, Abi.DELIMITED_OPTIONS_QUOTING, (byte) (dialect.quoting() ? 1 : 0));
+            raw.set(BYTE, Abi.DELIMITED_OPTIONS_SKIP_BLANK_LINES, (byte) (dialect.skipBlankLines() ? 1 : 0));
+            raw.set(INT, Abi.DELIMITED_OPTIONS_SKIP, dialect.skip());
+            raw.set(INT, Abi.DELIMITED_OPTIONS_HEADER_ROW, dialect.headerRow());
+            raw.set(INT, Abi.DELIMITED_OPTIONS_SHORT_ROWS, dialect.shortRows().code());
+            raw.set(INT, Abi.DELIMITED_OPTIONS_LONG_ROWS, dialect.longRows().code());
+            if (Native.initWith(state, raw) != Abi.OK) {
                 throw new IllegalArgumentException(
                         "Separator '" + dialect.separator() + "' is not tab or printable ASCII other than '\"'.");
             }
@@ -580,11 +718,12 @@ public final class DelimitedReader implements AutoCloseable {
         // row, as an ordinal is below 2^20.
         long width = Columns.reach(plan) + 1;
         long bytes = cellRows(width, batchRows) * width * Abi.SPAN_BYTES;
-        Columns bound = new Columns(plan, batchRows, arena);
+        Columns bound =
+                new Columns(plan, batchRows, arena, dialect.notes(), dialect.longRows() == LongRows.REPORT, false);
         Block table = new Block(bytes, 4);
         perRow = width;
         cells = table;
-        batch = new Batch(bound, false);
+        batch = new Batch(bound, false, 0);
         columns = bound;
     }
 
@@ -638,19 +777,60 @@ public final class DelimitedReader implements AutoCloseable {
      *
      * @param plan the output columns, in output order
      * @param batchRows rows per batch
-     * @throws IllegalStateException if the reader already has a plan, or is closed
+     * @throws IllegalStateException if the reader already has a plan, is closed, or is in the
+     *     middle of a read (the call came from its stream)
      * @throws IllegalArgumentException if a column cannot be honoured — a column reading at or
      *     past the width the header gives every record among them — or {@code batchRows} is
-     *     not positive; the reader is left without a plan
+     *     {@code 0}, negative or asks for more than the core allows; the reader is left without a plan
      */
     public void bind(List<Column> plan, int batchRows) {
+        enter();
+        try {
+            if (columns != null) {
+                throw new IllegalStateException("The reader already has a plan; a plan is bound once.");
+            }
+            attach(Columns.checked(plan), batchRows);
+        } finally {
+            busy = false;
+        }
+    }
+
+    /**
+     * Starts a call that reads or changes the reader, refusing one made from inside another: the
+     * caller's stream runs in the middle of a read, and the read has its buffers' offsets in hand.
+     * A call from another thread is refused first, as the confined arena would refuse it, so that it
+     * never touches the flag.
+     */
+    private void enter() {
         if (closed) {
             throw new IllegalStateException("The reader is closed.");
         }
-        if (columns != null) {
-            throw new IllegalStateException("The reader already has a plan; a plan is bound once.");
+        if (Thread.currentThread() != owner) {
+            throw new WrongThreadException("The reader belongs to the thread that built it.");
         }
-        attach(Columns.checked(plan, batchRows), batchRows);
+        if (busy) {
+            throw new IllegalStateException(BUSY);
+        }
+        busy = true;
+    }
+
+    /**
+     * Ends a read: a {@link #close()} asked for in the middle of it is done now that nothing holds
+     * the buffers, and what it throws is kept beside what the read threw.
+     */
+    private void leave(Throwable thrown) {
+        busy = false;
+        if (closeAsked) {
+            closeAsked = false;
+            try {
+                close();
+            } catch (RuntimeException | Error closing) {
+                if (thrown == null) {
+                    throw closing;
+                }
+                thrown.addSuppressed(closing);
+            }
+        }
     }
 
     /**
@@ -666,8 +846,16 @@ public final class DelimitedReader implements AutoCloseable {
         memory = text;
         memoryReadOnly = text.asReadOnly();
         maxWindow = windowBytes;
-        end = text.byteSize();
-        eof = true;
+        if (dialect.encoding() == Encoding.UTF_8) {
+            end = text.byteSize();
+            eof = true;
+            return this;
+        }
+        // Under a declared encoding the memory is the decoder's, and what it decodes to lands in a
+        // buffer.
+        decoder = new Decoder(dialect.encoding().code(), text);
+        buffer = new Block(DEFAULT_BUFFER_BYTES, 1);
+        transcoded = arena.allocate(Abi.TRANSCODED_BYTES, 8);
         return this;
     }
 
@@ -675,7 +863,11 @@ public final class DelimitedReader implements AutoCloseable {
     private DelimitedReader overSource(Source from, int bufferBytes) {
         source = from;
         try {
-            buffer = new Block(Math.min(bufferBytes, MAX_ROW_BYTES), 1);
+            buffer = new Block(bufferBytes, 1);
+            if (dialect.encoding() != Encoding.UTF_8) {
+                decoder = new Decoder(dialect.encoding().code(), bufferBytes);
+                transcoded = arena.allocate(Abi.TRANSCODED_BYTES, 8);
+            }
         } catch (RuntimeException | Error failure) {
             abandon(failure);
             throw failure;
@@ -695,7 +887,12 @@ public final class DelimitedReader implements AutoCloseable {
     private DelimitedReader begin(Dialect dialect) {
         try {
             if (dialect.hasHeader()) {
-                readHeader();
+                enter();
+                try {
+                    readHeader();
+                } finally {
+                    busy = false;
+                }
                 // A plan given at open was bound before the header was read.
                 if (columns != null) {
                     refusePastWidth(columns.plan);
@@ -760,7 +957,7 @@ public final class DelimitedReader implements AutoCloseable {
 
     /** The memory the core reads next from: the caller's, or the read buffer. */
     private MemorySegment base() {
-        return source == null ? memory : buffer.segment;
+        return buffer == null ? memory : buffer.segment;
     }
 
     private TabularException tooLong() {
@@ -773,36 +970,141 @@ public final class DelimitedReader implements AutoCloseable {
                 0);
     }
 
-    /** Puts the unfinished record at the front of the buffer and reads more behind it. */
-    private void refill() {
-        if (source == null) {
-            // Memory is read a window at a time, and a record that does not fit the largest
-            // window there is cannot be read at all.
+    /** One record fills the buffer: it needs a bigger one, up to the ceiling. */
+    private void grow() {
+        if (buffer.bytes() >= rowCeiling) {
             throw tooLong();
         }
+        buffer.resize(Math.min(buffer.bytes() * 2, MAX_ROW_BYTES), end);
+    }
+
+    /**
+     * What every refill does ahead of the source: the unfinished record to the front, room behind
+     * it, and a failure the decoder is holding, now that the fill has had all the text ahead of it.
+     * Returns {@code false} if nothing is to be read: the fill has one more look.
+     */
+    private boolean makeRoom() {
         long pending = end - start;
         if (start > 0) {
             MemorySegment.copy(buffer.segment, start, buffer.segment, 0, pending);
             start = 0;
             end = pending;
         }
-        if (end == buffer.bytes()) {
-            // One record fills the buffer: it needs a bigger one.
-            if (buffer.bytes() >= MAX_ROW_BYTES) {
-                throw tooLong();
+        if (decoder != null && decoder.failed) {
+            // A \r the fill is holding ends a row whatever comes next, and only waits to see if a
+            // \n is part of it; nothing is coming, and this says so. In a quote it ends nothing, and
+            // the record is as cut as it was.
+            if (end == 0 || buffer.segment.get(BYTE, end - 1) != (byte) '\r') {
+                throw failure = new TabularException(
+                        TabularFailure.ENCODING,
+                        state.get(LONG, Abi.STATE_RECORDS),
+                        state.get(INT, Abi.STATE_LINE),
+                        decoder.failedAt,
+                        0,
+                        0);
             }
-            buffer.resize(Math.min(buffer.bytes() * 2, MAX_ROW_BYTES), end);
+            if (end == buffer.bytes()) {
+                grow();
+            }
+            buffer.segment.set(BYTE, end++, (byte) '\n');
+            return false;
         }
-        int read;
+        if (end == buffer.bytes()) {
+            grow();
+        }
+        return true;
+    }
+
+    /** Puts the unfinished record at the front of the buffer and reads more behind it. */
+    private void refill() {
+        if (buffer == null) {
+            // Memory is read a window at a time, and a record that does not fit the largest
+            // window there is cannot be read at all.
+            throw tooLong();
+        }
+        if (!makeRoom()) {
+            return;
+        }
         try {
-            read = source.read(buffer.segment, end, buffer.bytes() - end);
+            if (decoder == null) {
+                int read = returned(source.read(buffer.segment, end, buffer.bytes() - end));
+                if (read < 0) {
+                    eof = true;
+                } else {
+                    end += read;
+                }
+                return;
+            }
+            while (!decode()) {
+                int read = returned(source.read(decoder.raw.segment, decoder.end, decoder.raw.bytes() - decoder.end));
+                if (read < 0) {
+                    decoder.eof = true;
+                } else {
+                    decoder.end += read;
+                }
+            }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        if (read < 0) {
-            eof = true;
-        } else {
-            end += read;
+    }
+
+    /**
+     * What a read of the source brought in, once the source has given control back: a reader its
+     * stream (or anything that ran) closed ends the read here, with no batch, rather than going on.
+     */
+    private int returned(int read) {
+        if (closeAsked) {
+            throw new IllegalStateException("The reader was closed in the middle of a read.");
+        }
+        return read;
+    }
+
+    /**
+     * Decodes what the decoder holds behind what the buffer holds, with whatever that wants first.
+     * Returns {@code true} once the fill has something new to look at: text, the end, or a failure
+     * to raise when it next asks; {@code false} if the source has to bring more first.
+     */
+    private boolean decode() {
+        while (true) {
+            long room = buffer.bytes() - end;
+            long available = decoder.end - decoder.at;
+            int code = Native.transcode(
+                    decoder.encoding,
+                    decoder.input().asSlice(decoder.at, available),
+                    available,
+                    decoder.eof,
+                    buffer.segment.asSlice(end, room),
+                    room,
+                    transcoded);
+            if (code != Abi.OK) {
+                throw new IllegalStateException(CONTRACT_VIOLATION);
+            }
+            if (transcoded.get(INT, Abi.TRANSCODED_FAILED) != 0) {
+                decoder.failed = true;
+                decoder.failedAt = decoder.offset + transcoded.get(LONG, Abi.TRANSCODED_FAILURE_AT);
+            }
+            long consumed = transcoded.get(LONG, Abi.TRANSCODED_CONSUMED);
+            long written = transcoded.get(LONG, Abi.TRANSCODED_WRITTEN);
+            decoder.at += consumed;
+            decoder.offset += consumed;
+            if (written > 0) {
+                end += written;
+                return true;
+            }
+            // The next refill raises it, once the fill has had one more look.
+            if (decoder.failed) {
+                return true;
+            }
+            if (decoder.at < decoder.end && room < Decoder.MAX_CHARACTER) {
+                grow();
+                continue;
+            }
+            if (decoder.eof) {
+                eof = true;
+                return true;
+            }
+            decoder.compact();
+            return false;
         }
     }
 
@@ -882,14 +1184,26 @@ public final class DelimitedReader implements AutoCloseable {
      * @throws TabularException if the input is structurally broken — raised after every
      *     intact row before the break has been delivered, and again, the same exception, on
      *     every later call
-     * @throws UncheckedIOException if the stream or file fails
-     * @throws IllegalStateException if the reader is closed, or no plan has been bound — not
-     *     final: bind one and read
+     * @throws UncheckedIOException if the stream or file fails; a thread interrupt that closes a
+     *     file ends the reader, and every later read says so
+     * @throws IllegalStateException if the reader is closed (its stream's own {@link #close()}
+     *     included), no plan has been bound — not final: bind one and read — or the reader is in
+     *     the middle of a read (the call came from its stream)
      */
     public Batch read() {
-        if (closed) {
-            throw new IllegalStateException("The reader is closed.");
+        enter();
+        Throwable thrown = null;
+        try {
+            return next();
+        } catch (RuntimeException | Error failed) {
+            thrown = failed;
+            throw failed;
+        } finally {
+            leave(thrown);
         }
+    }
+
+    private Batch next() {
         if (columns == null) {
             throw new IllegalStateException("The reader has no plan yet: bind one before reading.");
         }
@@ -915,11 +1229,12 @@ public final class DelimitedReader implements AutoCloseable {
             }
             MemorySegment base = base();
             // The cells and the arena may have moved since the last call.
-            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_CELLS, cells.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_CELLS + 8, cells.bytes() / Abi.SPAN_BYTES);
-            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_ARENA, unescaped.segment);
-            buffers.set(ValueLayout.JAVA_LONG, Abi.BUFFERS_ARENA + 8, unescaped.bytes());
-            int code = Native.fill(
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_FIELDS + Abi.BUFFERS_CELLS, cells.segment);
+            buffers.set(LONG, Abi.BUFFERS_WITH_FIELDS + Abi.BUFFERS_CELLS + 8, cells.bytes() / Abi.SPAN_BYTES);
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_FIELDS + Abi.BUFFERS_ARENA, unescaped.segment);
+            buffers.set(LONG, Abi.BUFFERS_WITH_FIELDS + Abi.BUFFERS_ARENA + 8, unescaped.bytes());
+            buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_ROW_WIDTHS, columns.rowWidths);
+            int code = Native.fillWith(
                     state,
                     base.asSlice(start, length),
                     length,
@@ -942,7 +1257,14 @@ public final class DelimitedReader implements AutoCloseable {
                         // past the budget is short by design.
                         long fits = Math.min(batchRows, cellEntries() / perRow);
                         cramped = rows < fits && filled.get(LONG, Abi.FILLED_ARENA_USED) * 2 >= unescaped.bytes();
-                        return batch.fill(rows, cells.segment, perRow, base, at, unescaped.segment);
+                        return batch.fill(
+                                rows,
+                                cells.segment,
+                                perRow,
+                                base,
+                                at,
+                                unescaped.segment,
+                                state.get(INT, Abi.STATE_EXPECTED));
                     }
                     if (last && (consumed == length || consumed == 0)) {
                         return null;
@@ -1004,18 +1326,30 @@ public final class DelimitedReader implements AutoCloseable {
         if (buffer != null) {
             buffer.close();
         }
+        if (decoder != null) {
+            decoder.close();
+        }
         arena.close();
     }
 
     /**
      * Releases the native memory, and closes the stream or file the reader was built over.
-     * Closing twice is harmless.
+     * Closing twice is harmless. Called from the reader's stream in the middle of a read, it is done
+     * as soon as the stream returns, and that read ends with an {@link IllegalStateException},
+     * handing out no batch.
      *
      * @throws UncheckedIOException if closing the stream or file fails
      */
     @Override
     public void close() {
         if (closed) {
+            return;
+        }
+        if (Thread.currentThread() != owner) {
+            throw new WrongThreadException("The reader belongs to the thread that built it.");
+        }
+        if (busy) {
+            closeAsked = true;
             return;
         }
         recordsAtClose = state.get(LONG, Abi.STATE_RECORDS);
@@ -1028,6 +1362,142 @@ public final class DelimitedReader implements AutoCloseable {
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+        }
+    }
+
+    /**
+     * Reads a sample of a file and says what plan its cells would read through, with
+     * {@link SuggestOptions#DEFAULT}.
+     *
+     * @param path the file
+     * @param dialect the declared dialect
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken
+     * @throws UncheckedIOException if the file cannot be opened, or fails among the sampled rows,
+     *     or a thread interrupt closes it at any point: an interrupt is the caller asking to stop,
+     *     so it never only says the source was truncated
+     * @see #suggest(Path, Dialect, SuggestOptions)
+     */
+    public static Suggestion suggest(Path path, Dialect dialect) {
+        return suggest(path, dialect, SuggestOptions.DEFAULT);
+    }
+
+    /**
+     * Reads a sample of a file through the text door and says what its columns look like: a plan
+     * and why. Nothing here is applied, since a read still takes only what it is told: declare a
+     * format and a date order where you know them, with {@link SuggestOptions}, because nothing
+     * needs inferring then. A suggestion is a starting point for a plan to inspect.
+     *
+     * <p>The width is the header's, or the first record's, and a plan has to name the columns
+     * before that record can be read. So with no header the file is opened twice, once to read the
+     * first record. The dialect is what the sample is read with, its tokens included, and a cell
+     * it says is empty is blank to the suggestion.
+     *
+     * <p>What it says can surprise, so read the report before the plan:
+     *
+     * <ul>
+     *   <li>A column of {@code 0} and {@code 1} is {@link Door#BOOL}, the first door asked, and
+     *       {@code F} or {@code No} read false.
+     *   <li>{@code 1.234} alone is ambiguous, 1.234 or 1234, and reads as text until a format is
+     *       declared or a value settles it, which takes in a column of prices at three decimals.
+     *       Beside {@code 2.5} it is a decimal, and beside {@code 2,5} it is 1234.
+     *   <li>{@code 2,5}, {@code 0,125}, {@code 1.234,5} and {@code 1.234.567} read only with
+     *       {@code ,} as the decimal, so they are resolved in that notation, and
+     *       {@link SuggestedColumn#format()} names it. {@code 2,5} beside {@code 2.5} is
+     *       unresolved.
+     *   <li>{@code 1,23,456}, Indian grouping, reads under neither notation with none declared,
+     *       because nothing says its culture: alone it is text, resolved, and beside {@code 5}
+     *       unresolved. Declaring {@code NumFormat.INVARIANT.withGrouping(Grouping.INDIAN)} for the
+     *       column makes it a number.
+     *   <li>{@code 007} and an integer past {@code long} are text, with no note saying why, so as
+     *       not to lose the zeros or the digits.
+     *   <li>A sheet's date column is text: {@link Sheet#suggest(SuggestOptions)} says why.
+     * </ul>
+     *
+     * @param path the file
+     * @param dialect the declared dialect
+     * @param options how the sample is taken and read
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken: there is no knowing
+     *     what is past them, and a read would stop there too. A failure past them is not met, or
+     *     only says the source was truncated
+     * @throws UncheckedIOException if the file cannot be opened, or fails among the sampled rows,
+     *     or a thread interrupt closes it at any point: an interrupt is the caller asking to stop,
+     *     so it never only says the source was truncated
+     */
+    public static Suggestion suggest(Path path, Dialect dialect, SuggestOptions options) {
+        Objects.requireNonNull(path, "path");
+        return suggest(dialect, options, unnoted -> open(path, unnoted));
+    }
+
+    /**
+     * {@link #suggest(Path, Dialect)} over text in a byte array.
+     *
+     * @param text the text
+     * @param dialect the declared dialect
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken
+     */
+    public static Suggestion suggest(byte[] text, Dialect dialect) {
+        return suggest(text, dialect, SuggestOptions.DEFAULT);
+    }
+
+    /**
+     * {@link #suggest(Path, Dialect, SuggestOptions)} over text in a byte array.
+     *
+     * @param text the text
+     * @param dialect the declared dialect
+     * @param options how the sample is taken and read
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken
+     */
+    public static Suggestion suggest(byte[] text, Dialect dialect, SuggestOptions options) {
+        Objects.requireNonNull(text, "text");
+        return suggest(dialect, options, unnoted -> of(text, unnoted));
+    }
+
+    /**
+     * {@link #suggest(Path, Dialect, SuggestOptions)} over text in a memory segment.
+     *
+     * @param text the text
+     * @param dialect the declared dialect
+     * @param options how the sample is taken and read
+     * @return the suggestion
+     * @throws TabularException if the sampled rows are structurally broken
+     */
+    public static Suggestion suggest(MemorySegment text, Dialect dialect, SuggestOptions options) {
+        Objects.requireNonNull(text, "text");
+        return suggest(dialect, options, unnoted -> of(text, unnoted));
+    }
+
+    private static Suggestion suggest(
+            Dialect dialect, SuggestOptions options, Function<Dialect, DelimitedReader> open) {
+        Objects.requireNonNull(dialect, "dialect");
+        Objects.requireNonNull(options, "options");
+        int limit = options.rowsWithin(DEFAULT_BATCH_ROWS);
+        Dialect unnoted = dialect.withNotes(false);
+        int width = -1;
+        if (!dialect.hasHeader()) {
+            // A headerless source's width is its first record's, which a read says through a plan
+            // of one column.
+            try (DelimitedReader first = open.apply(unnoted)) {
+                first.bind(List.of(Column.text(0)), 1);
+                first.read();
+                width = first.columnCount().orElse(0);
+            }
+        }
+        int flags = unnoted.longRows() == LongRows.REPORT ? Abi.BATCH_WIDTHS : 0;
+        try (DelimitedReader reader = open.apply(unnoted)) {
+            int columns = width < 0 ? reader.header().size() : width;
+            // One row more than the sample, so that a row past it costs no second batch to find, in
+            // as many batches as the core says that takes.
+            Sample sample = Sample.of(
+                    reader::read,
+                    plan -> reader.bind(plan, Columns.sampleRows(plan, limit + 1, flags)),
+                    columns,
+                    limit,
+                    false);
+            return sample.judge(reader.header(), options);
         }
     }
 }

@@ -43,15 +43,29 @@ func (b *Batch) Row(index int) Row {
 // All is the batch's rows, in order:
 //
 //	for row := range batch.All() { … }
+//
+// The rows are the batch's in hand when All is called. Ranged over after the reader has read
+// again or been closed — a Read or a Close in the loop's body included — it panics, as Faults
+// does: it can't answer for the next batch.
 func (b *Batch) All() iter.Seq[Row] {
+	generation := b.generation
 	return func(yield func(Row) bool) {
+		if b.generation != generation {
+			panic(staleRows)
+		}
 		for index := 0; index < b.rows; index++ {
 			if !yield(Row{batch: b, index: index}) {
 				return
 			}
+			if b.generation != generation {
+				panic(staleRows)
+			}
 		}
 	}
 }
+
+// staleRows is what a row iterator says when it's ranged over past its batch.
+const staleRows = "hypertabular: the batch these rows belong to is over: the reader has read on, or was closed"
 
 // Batch is the batch the row is in.
 func (r Row) Batch() *Batch { return r.batch }
@@ -69,6 +83,12 @@ func (r Row) Verdict(column int) CellVerdict { return r.batch.Verdicts(column)[r
 // Fault is the verdict of the row's cell in column as HyperCast's own union, as Batch.Fault
 // says.
 func (r Row) Fault(column int) *hypercast.Fault { return r.batch.Fault(column, r.index) }
+
+// Detail is what failed in the row's cell in column, as Batch.Detail says.
+func (r Row) Detail(column int) hypercast.Detail { return r.batch.Detail(column, r.index) }
+
+// Origin is where the verdict of the row's cell in column came from, as Batch.Origin says.
+func (r Row) Origin(column int) Origin { return r.batch.Origin(column, r.index) }
 
 // Text is the row's cell in a Text column, as Batch.Text says: nil for a cell with no bytes.
 func (r Row) Text(column int) []byte { return r.batch.Text(column)[r.index] }
@@ -108,9 +128,15 @@ func rows(reader reading) iter.Seq2[Row, error] {
 				yield(Row{}, err)
 				return
 			}
+			generation := batch.generation
 			for index := 0; index < batch.rows; index++ {
 				if !yield(Row{batch: batch, index: index}, nil) {
 					return
+				}
+				// A Read or a Close in the loop's body has moved the reader: what is left of this
+				// batch is gone, and the next is the body's, so neither is yielded.
+				if batch.generation != generation {
+					panic(staleRows)
 				}
 			}
 		}
@@ -130,7 +156,8 @@ func rows(reader reading) iter.Seq2[Row, error] {
 //
 // Each row is valid for its own iteration only: the batch it is in is read over when the
 // next is. Breaking out of the loop stops the reading there; a later All goes on with the
-// next batch, so what was left of the batch in hand is not yielded again.
+// next batch, so what was left of the batch in hand is not yielded again. A Read or a Close in
+// the loop's body panics the loop, as Batch.All says: the reader is All's to move while it ranges.
 func (r *DelimitedReader) All() iter.Seq2[Row, error] { return rows(r) }
 
 // All reads the rest of the sheet, batch by batch, and yields every row of it in order, as

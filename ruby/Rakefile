@@ -4,7 +4,8 @@ require "yard"
 GEMSPEC = Bundler.load_gemspec("hypertabular.gemspec")
 
 # The public API surface: the module, the dialect, the plan's columns, the reader and its
-# header, the batch it hands out and its rows, the workbook and its sheets, and the error.
+# header, the batch it hands out and its rows, the workbook and its sheets, a suggestion and
+# the error.
 # runtime*.rb is internal FFI plumbing, the same public/internal boundary hypercast's
 # Rakefile draws.
 PUBLIC_API = %w[
@@ -17,6 +18,7 @@ PUBLIC_API = %w[
   lib/hypertabular/delimited_reader.rb
   lib/hypertabular/batch.rb
   lib/hypertabular/workbook.rb
+  lib/hypertabular/suggest.rb
 ].freeze
 
 # Doc-comment enforcement for that surface. `yard stats`/`YARD::CLI::Stats` always

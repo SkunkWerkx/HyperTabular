@@ -21,10 +21,10 @@ use ext_php_rs::builders::{ClassBuilder, FunctionBuilder};
 use ext_php_rs::class::ClassEntryInfo;
 use ext_php_rs::exception::PhpResult;
 use ext_php_rs::ffi::{
-    _ZEND_TYPE_NAME_BIT, _call_user_function_impl, IS_FALSE, IS_LONG, IS_OBJECT_EX, IS_STRING,
-    IS_TRUE, IS_UNDEF, ZEND_ACC_PROMOTED, ZEND_ACC_PUBLIC, object_properties_init,
-    zend_call_known_function, zend_class_entry, zend_function, zend_object, zend_objects_new,
-    zend_read_property, zend_string, zend_type, zval,
+    _ZEND_TYPE_NAME_BIT, _call_user_function_impl, IS_ARRAY, IS_FALSE, IS_LONG, IS_NULL,
+    IS_OBJECT_EX, IS_RESOURCE, IS_STRING, IS_TRUE, IS_UNDEF, ZEND_ACC_PROMOTED, ZEND_ACC_PUBLIC,
+    object_properties_init, zend_call_known_function, zend_class_entry, zend_function, zend_object,
+    zend_objects_new, zend_read_property, zend_string, zend_type, zval,
 };
 use ext_php_rs::flags::{ClassFlags, ConstantFlags, MethodFlags};
 use ext_php_rs::types::{ZendHashTable, ZendObject, ZendStr, Zval};
@@ -65,16 +65,16 @@ pub(crate) enum Plain {
     SheetInfo = 2,
     SheetOptions = 3,
     TabularException = 4,
+    Range = 5,
+    Problem = 6,
+    SuggestOptions = 7,
+    Suggestion = 8,
+    SuggestedColumn = 9,
+    AmbiguousColumn = 10,
 }
 
 /// The plain classes' entries, written once each, in MINIT.
-static ENTRIES: [AtomicPtr<ClassEntry>; 5] = [
-    AtomicPtr::new(ptr::null_mut()),
-    AtomicPtr::new(ptr::null_mut()),
-    AtomicPtr::new(ptr::null_mut()),
-    AtomicPtr::new(ptr::null_mut()),
-    AtomicPtr::new(ptr::null_mut()),
-];
+static ENTRIES: [AtomicPtr<ClassEntry>; 11] = [const { AtomicPtr::new(ptr::null_mut()) }; 11];
 
 /// A property's declared type.
 #[derive(Clone, Copy)]
@@ -82,7 +82,13 @@ pub(crate) enum Type {
     Int,
     String,
     Bool,
+    Array,
     Class(&'static str),
+    NullableInt,
+    NullableString,
+    NullableArray,
+    NullableClass(&'static str),
+    Mixed,
 }
 
 /// A plain class's declaration: its name, its promoted properties in declaration order, its
@@ -149,11 +155,20 @@ fn declare(ce: &mut ClassEntry, name: &str, ty: Type) {
         Type::Int => 1 << IS_LONG,
         Type::String => 1 << IS_STRING,
         Type::Bool => (1 << IS_FALSE) | (1 << IS_TRUE),
+        Type::Array => 1 << IS_ARRAY,
         Type::Class(_) => _ZEND_TYPE_NAME_BIT,
+        Type::NullableInt => (1 << IS_LONG) | (1 << IS_NULL),
+        Type::NullableString => (1 << IS_STRING) | (1 << IS_NULL),
+        Type::NullableArray => (1 << IS_ARRAY) | (1 << IS_NULL),
+        Type::NullableClass(_) => _ZEND_TYPE_NAME_BIT | (1 << IS_NULL),
+        // `MAY_BE_ANY`: every type from null through resource.
+        Type::Mixed => ((1 << (IS_RESOURCE + 1)) - 1) & !1,
     };
     let type_ptr = match ty {
         // An internal class's type names a persistent interned string, as a stub's does.
-        Type::Class(class) => ZendStr::new_interned(class, true).into_raw().cast(),
+        Type::Class(class) | Type::NullableClass(class) => {
+            ZendStr::new_interned(class, true).into_raw().cast()
+        }
         _ => ptr::null_mut(),
     };
     let name = ZendStr::new_interned(name, true).into_raw();
@@ -297,6 +312,15 @@ pub(crate) fn read(scope: *mut zend_class_entry, object: &Zval, name: &str) -> P
     Ok(copy)
 }
 
+/// Reads `$object->name` in the object's own class, for HyperCast's objects and an enum case.
+pub(crate) fn read_own(object: &Zval, name: &str) -> PhpResult<Zval> {
+    let class = object.object().ok_or_else(|| pending("property read"))?;
+    let scope = ptr::from_ref(class.get_class_entry())
+        .cast_mut()
+        .cast::<zend_class_entry>();
+    read(scope, object, name)
+}
+
 /// The object a zval holds, if it holds one.
 pub(crate) fn object_of(zv: &Zval) -> Option<*mut zend_object> {
     zv.object()
@@ -328,6 +352,11 @@ pub(crate) fn bool_zval(b: bool) -> Zval {
     let mut zv = Zval::new();
     zv.set_bool(b);
     zv
+}
+
+/// An int zval, or null for `None`.
+pub(crate) fn maybe_int_zval(n: Option<i64>) -> Zval {
+    n.map_or_else(Zval::new, int_zval)
 }
 
 /// A float zval.
@@ -408,6 +437,14 @@ pub(crate) unsafe fn call_known(
         return Err(pending("call"));
     }
     Ok(retval)
+}
+
+/// `new $name(...$args)`, for a class of another extension's found by name.
+pub(crate) fn new_named(name: &str, args: &mut [Zval]) -> PhpResult<Zval> {
+    let class = ClassEntry::try_find(name).ok_or_else(|| pending(name))?;
+    let object = new_object(ptr::from_ref(class).cast_mut().cast())?;
+    call(Some(&object), "__construct", args)?;
+    Ok(object)
 }
 
 /// Sets a hand-registered handler's return value, or throws.

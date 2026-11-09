@@ -11,10 +11,11 @@ import XCTest
 extension CorpusTests {
     struct WorkbookCase: Decodable {
         let name: String
+        let note: String?
         let file: String
         let format: String?
         let epoch: Int?
-        let sheets: [Listed]?
+        let sheets: [SheetEntry]?
         /// Absent for a package the core refuses to open.
         let sheet: Int?
         let options: Settings?
@@ -22,10 +23,12 @@ extension CorpusTests {
         let header: [String]?
         let rows: [[Cell]]?
         let numbers: [Int]?
+        let problems: [Listed]?
         let failure: Failure?
+        let suggest: Suggested?
     }
 
-    struct Listed: Decodable {
+    struct SheetEntry: Decodable {
         let name: String
         let hidden: Bool
     }
@@ -33,6 +36,21 @@ extension CorpusTests {
     struct Settings: Decodable {
         let has_header: Bool
         let skip_empty_rows: Bool
+        let skip: UInt32?
+        let header_row: UInt32?
+        let range: String?
+        let tokens: [String]?
+    }
+
+    /// A case's options, as the corpus says them.
+    func sheetOptions(_ settings: Settings, batchRows: Int = DelimitedReader.defaultBatchRows, notes: Bool = true)
+        throws
+        -> SheetOptions
+    {
+        SheetOptions(
+            hasHeader: settings.has_header, skipEmptyRows: settings.skip_empty_rows, batchRows: batchRows,
+            skip: settings.skip ?? 0, headerRow: settings.header_row ?? 0,
+            range: try settings.range.map { try SheetRange(parsing: $0) }, tokens: settings.tokens ?? [], notes: notes)
     }
 
     func workbookCorpus() throws -> [WorkbookCase] {
@@ -65,7 +83,7 @@ extension CorpusTests {
 
     private func replayWorkbookCorpus() throws {
         let corpus = try workbookCorpus()
-        XCTAssertGreaterThanOrEqual(corpus.count, 80)
+        XCTAssertGreaterThanOrEqual(corpus.count, 398)
         var cells = 0
         for vector in corpus {
             let path = Self.corpusDirectory!.appendingPathComponent(vector.file).path
@@ -114,9 +132,7 @@ extension CorpusTests {
                     let byName = book.sheets.firstIndex { $0.name == name } == index
 
                     for batchRows in [1, 2, 1024] {
-                        let options = SheetOptions(
-                            hasHeader: vector.options!.has_header, skipEmptyRows: vector.options!.skip_empty_rows,
-                            batchRows: batchRows)
+                        let options = try sheetOptions(vector.options!, batchRows: batchRows)
                         for named in [false, true] where !named || byName {
                             let label =
                                 "\(vector.name): \(source), \(batchRows) rows a batch\(named ? ", by name" : "")"
@@ -155,22 +171,28 @@ extension CorpusTests {
         XCTAssertThrowsError(try sheet.bind(plan), label) { XCTAssertEqual($0 as? PlanError, .alreadyBound, label) }
     }
 
-    private func replay(_ label: String, _ vector: WorkbookCase, _ sheet: Sheet, batchRows: Int) {
+    private func replay(_ label: String, _ vector: WorkbookCase, _ sheet: Sheet, batchRows: Int, notes: Bool = true) {
         XCTAssertEqual(sheet.header.map(Array.init), vector.header, "\(label): header")
         let rows = vector.rows!
         var seen = 0
+        var problems = [Listed]()
         var failure: TabularError?
         do {
             while let batch = try sheet.read() {
                 XCTAssertTrue((1...batchRows).contains(batch.rows), label)
+                assertRows(label, batch)
+                problems += listed(label, batch, base: seen)
                 for row in 0..<batch.rows {
                     guard seen < rows.count else {
                         XCTFail("\(label): more rows than the corpus lists")
                         return
                     }
                     XCTAssertEqual(batch.line(row), vector.numbers![seen], "\(label), row \(seen)")
+                    XCTAssertEqual(rows[seen].count, batch.columns.count, label)
                     for column in rows[seen].indices {
-                        assertCell("\(label), row \(seen), column \(column)", batch, column, row, rows[seen][column])
+                        assertCell(
+                            "\(label), row \(seen), column \(column)", batch, column, row, rows[seen][column],
+                            notes: notes)
                     }
                     seen += 1
                 }
@@ -184,6 +206,40 @@ extension CorpusTests {
         }
         XCTAssertEqual(seen, rows.count, "\(label): rows delivered")
         XCTAssertEqual(failure, expectedFailure(vector.failure), "\(label): structural failure")
+        XCTAssertEqual(problems, expectedProblems(vector.problems ?? [], notes: notes), "\(label): problems")
+    }
+
+    /// Every case read with notes off, once, from memory: refused cells keep their verdicts and lose
+    /// their details, and the faults list loses uncached formulas.
+    func testWorkbookCorpusWithNotesOff() throws {
+        for vector in try workbookCorpus() {
+            guard let index = vector.sheet else { continue }
+            let book = try Workbook(contentsOfFile: Self.corpusDirectory!.appendingPathComponent(vector.file).path)
+            let options = try sheetOptions(vector.options!, batchRows: 1024, notes: false)
+            let sheet = try book.sheet(index, options: options, plan: vector.plan!.map(column(of:)))
+            replay("\(vector.name), notes off", vector, sheet, batchRows: 1024, notes: false)
+        }
+    }
+
+    /// Every case that says what its sheet suggests: through the sheet itself, whose plan then has to
+    /// read back refusing no cell.
+    func testEveryWorkbookSuggestionIsWhatTheCorpusSays() throws {
+        var seen = 0
+        for vector in try workbookCorpus() {
+            guard let suggest = vector.suggest, let index = vector.sheet else { continue }
+            seen += 1
+            let book = try Workbook(contentsOfFile: Self.corpusDirectory!.appendingPathComponent(vector.file).path)
+            let settings = try sheetOptions(vector.options!)
+            let found = try book.sheet(index, options: settings).suggest(options(of: suggest))
+            assertSuggestion(vector.name, found, suggest)
+            let sheet = try book.sheet(index, options: settings, plan: found.plan)
+            while let batch = try sheet.read() {
+                for problem in batch.faults() where problem.reason == .malformed || problem.reason == .outOfRange {
+                    XCTFail("\(vector.name): read back refused \(problem)")
+                }
+            }
+        }
+        XCTAssertGreaterThanOrEqual(seen, 15)
     }
 
     /// Every package awaited from an asynchronous sequence that suspends between short reads:
@@ -204,8 +260,7 @@ extension CorpusTests {
             }
             let book = try await Workbook(bytes: stream)
             XCTAssertEqual(book.sheets.map(\.name), vector.sheets!.map(\.name), vector.name)
-            let options = SheetOptions(
-                hasHeader: vector.options!.has_header, skipEmptyRows: vector.options!.skip_empty_rows, batchRows: 2)
+            let options = try sheetOptions(vector.options!, batchRows: 2)
             let plan = vector.plan!.map(column(of:))
             let sheet = try book.sheet(index, options: options)
             try bindHeaderFirst("\(vector.name): async", sheet, plan)

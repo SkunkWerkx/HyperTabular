@@ -9,7 +9,9 @@ released, and the event loop is never blocked on the stream. ``DelimitedReader.r
 
 Cancellation is asyncio's own. A step that wants input has already made the room it asks
 for and changes nothing more until it is fed, so a read cancelled while it awaits the stream
-leaves the reader where it was, and the next read asks for the same and goes on.
+leaves the reader where it was, and the next read asks for the same and goes on. A second read
+while one awaits the stream, from another coroutine or another thread, raises ``RuntimeError``:
+``_advance`` refuses it, and only the read that was asked lets go.
 """
 
 from __future__ import annotations
@@ -37,7 +39,14 @@ async def read(reader: DelimitedReader, stream: AsyncReadable | None) -> Batch |
         if not isinstance(step, int):
             return step
         assert stream is not None, "only a reader over a stream asks to be fed"
-        reader._feed(await stream.read(step))
+        try:
+            reader._feed(await stream.read(step))
+        except BaseException:
+            # Cancellation among them: nothing was fed, and the next read asks again, unless what
+            # the stream returned couldn't be fed, which is gone from it and which the next read
+            # raises again.
+            reader._abandon()
+            raise
 
 
 async def next_batch(pending: Awaitable[Batch | None]) -> Batch:
@@ -54,11 +63,12 @@ async def open_reader(
     plan: Iterable[Column] | None,
     batch_rows: int,
     buffer_bytes: int,
+    notes: bool,
 ) -> DelimitedReader:
     """A reader over ``stream``, its header read: ``DelimitedReader.open_async``."""
     from ._native import DelimitedReader
 
-    reader = DelimitedReader._over_async(stream, dialect, plan, batch_rows, buffer_bytes)
+    reader = DelimitedReader._over_async(stream, dialect, plan, batch_rows, buffer_bytes, notes)
     while (wanted := reader._header()) is not None:
         assert not isinstance(stream, bytes)
         reader._feed(await stream.read(wanted))

@@ -10,15 +10,20 @@ import copy
 import io
 import pickle
 import sys
+import threading
+from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from test_corpus import _AsyncDribble, _corpus_dir, _run
 
 from hypertabular import (
+    AmbiguousColumn,
     Column,
     DelimitedReader,
     Dialect,
+    Encoding,
     Fault,
     Header,
     Row,
@@ -48,9 +53,9 @@ def test_the_header_is_still_the_tuple_of_names_it_was():
         assert again == header and again.ordinal(b"name") == 1
 
 
-def test_a_name_is_looked_up_exactly_and_the_first_wins():
-    """Exact, case- and space-sensitive, untrimmed; duplicates resolve to the first."""
-    header = DelimitedReader(b"id,Name, name,name,id\n", Dialect.CSV).header
+def test_a_name_is_looked_up_exactly():
+    """Exact, case- and space-sensitive, untrimmed."""
+    header = DelimitedReader(b"id,Name, name,name\n", Dialect.CSV).header
     assert header is not None
     assert header.ordinal("id") == 0 and header.ordinal("name") == 3
     assert header.ordinal("Name") == 1 and header.ordinal(" name") == 2
@@ -58,6 +63,38 @@ def test_a_name_is_looked_up_exactly_and_the_first_wins():
     for missing in ("ID", "name ", "nom", ""):
         assert header.get(missing) is None and header.get(missing, -1) == -1
     assert header.get("name") == 3 and header.get(b"name", -1) == 3
+
+
+def test_a_name_two_columns_share_is_refused_and_get_keeps_the_first():
+    """``ordinal`` is what a plan is bound from, so it says rather than guess; ``get`` asks for
+    the first."""
+    header = DelimitedReader(b"id,name,id,other,id\n", Dialect.CSV).header
+    assert header is not None
+    for name in ("id", b"id"):
+        with pytest.raises(AmbiguousColumn) as refused:
+            header.ordinal(name)
+        assert refused.value.name == "id"
+        assert (refused.value.first, refused.value.second) == (0, 2)
+        assert str(refused.value) == (
+            'the header names two columns "id", at positions 0 and 2: say which by position'
+        )
+        assert header.get(name) == 0
+    assert isinstance(refused.value, ValueError)
+    assert header.ordinal("name") == 1 and header.ordinal("other") == 3
+    # A built Header, and one whose two names read the same only by their raw bytes.
+    with pytest.raises(AmbiguousColumn):
+        Header(("a", "b", "a")).ordinal("a")
+    raw = Header(("x", "y"), raw=(b"caf\xe9", b"caf\xe9"))
+    with pytest.raises(AmbiguousColumn) as refused:
+        raw.ordinal(b"caf\xe9")
+    assert (refused.value.first, refused.value.second) == (0, 1)
+    assert raw.get(b"caf\xe9") == 0
+    # Two names that read the same as text are not the same name by bytes, and a bytes lookup
+    # of the one that's there says so.
+    apart = Header(("x", "x"), raw=(b"a", b"b"))
+    assert apart.ordinal(b"b") == 1
+    with pytest.raises(AmbiguousColumn):
+        apart.ordinal("x")
 
 
 def test_a_missing_name_is_a_key_error_naming_it():
@@ -73,12 +110,20 @@ def test_a_missing_name_is_a_key_error_naming_it():
 
 
 def test_a_name_that_is_not_utf8_is_found_by_its_own_bytes():
-    """The str has U+FFFD; the bytes are what the file holds, and find the column."""
-    header = DelimitedReader(b"id,caf\xe9\n", Dialect.CSV).header
+    """Declared as Windows-1252, the file's bytes are decoded ahead of the read, and the name is
+    found by what it decodes to. Undeclared, such a name ends the input: the corpus's case."""
+    header = DelimitedReader(b"id,caf\xe9\n", Dialect(",", encoding=Encoding.WINDOWS_1252)).header
+    assert header == ("id", "café")
     assert header is not None
-    assert header[1] == "caf�"
-    assert header.ordinal(b"caf\xe9") == 1 and header.ordinal("caf�") == 1
-    assert header.get(b"caf\xc3\xa9") is None
+    assert header.ordinal("café") == 1 and header.ordinal("café".encode()) == 1
+    assert header.get(b"caf\xe9") is None
+    with pytest.raises(TabularError) as failed:
+        DelimitedReader(b"id,caf\xe9\n", Dialect.CSV)
+    assert failed.value.kind is TabularFailure.ENCODING
+    # A Header made by hand can name its own bytes.
+    made = Header(("id", "caf�"), raw=(b"id", b"caf\xe9"))
+    assert made.ordinal(b"caf\xe9") == 1 and made.ordinal("caf�") == 1
+    assert made.get(b"caf\xc3\xa9") is None
 
 
 def test_a_header_can_be_made_by_hand():
@@ -348,6 +393,226 @@ def test_a_cancelled_read_leaves_the_reader_resumable():
         return values
 
     assert _run(main()) == list(range(20))
+
+
+class _Stalled:
+    """An asynchronous stream that hands over its header, then waits on ``gate`` for the rest, and
+    says how many reads ever overlapped, which only two reads of its reader could make happen."""
+
+    def __init__(self, data: bytes, after: int, wait: Callable[[], Awaitable[None]]) -> None:
+        self._data = data
+        self._at = 0
+        self._after = after
+        self._wait = wait
+        self.inside = 0
+        self.overlaps = 0
+        self.waiting = threading.Event()
+
+    async def read(self, size: int = -1) -> bytes:
+        self.inside += 1
+        self.overlaps += self.inside > 1
+        if self._at >= self._after:
+            self.waiting.set()
+            await self._wait()
+        chunk = self._data[self._at : self._at + max(size, 0)]
+        self._at += len(chunk)
+        self.inside -= 1
+        return chunk
+
+
+_STALLED_DATA = b"n\n" + b"".join(b"%d\n" % index for index in range(40))
+
+
+async def _values(reader: DelimitedReader) -> list[int]:
+    values: list[int] = []
+    while (batch := await reader.read_async()) is not None:
+        values.extend(batch.column(0).values.tolist())
+    return values
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
+def test_a_second_coroutine_is_refused_and_the_first_reads_on():
+    """Two coroutines on one reader: the second raises RuntimeError, and no row moves or repeats."""
+
+    async def main() -> None:
+        gate = asyncio.Event()
+        stream = _Stalled(_STALLED_DATA, 2, gate.wait)
+        reader = await DelimitedReader.open_async(
+            stream, Dialect.CSV, [Column.i32(0)], batch_rows=4, buffer_bytes=8
+        )
+        first = asyncio.ensure_future(_values(reader))
+        while not stream.waiting.is_set():
+            await asyncio.sleep(0)
+
+        async def every_batch() -> None:
+            async for _ in reader:
+                pass
+
+        # Bounded: a read that isn't refused waits on the gate, and only this test opens it.
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="another read"):
+                await asyncio.wait_for(reader.read_async(), 30)
+        with pytest.raises(RuntimeError, match="another read"):
+            await asyncio.wait_for(every_batch(), 30)
+        gate.set()
+        assert await first == list(range(40))
+        assert stream.overlaps == 0
+        assert await reader.read_async() is None
+
+    _run(main())
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide has no threads")
+def test_a_second_thread_is_refused_and_the_first_reads_on():
+    """As with two coroutines, from a second thread with its own event loop."""
+    gate = threading.Event()
+
+    async def stall() -> None:
+        assert gate.wait(60)
+
+    stream = _Stalled(_STALLED_DATA, 2, stall)
+    reader = _run(
+        DelimitedReader.open_async(
+            stream, Dialect.CSV, [Column.i32(0)], batch_rows=4, buffer_bytes=8
+        )
+    )
+    with ThreadPoolExecutor(1) as pool:
+        first = pool.submit(lambda: _run(_values(reader)))
+        assert stream.waiting.wait(60)
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="another read"):
+                _run(reader.read_async())
+        gate.set()
+        assert first.result(60) == list(range(40))
+    assert stream.overlaps == 0
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide has no threads")
+def test_threads_fighting_over_a_reader_deliver_each_row_once_in_order():
+    """Every thread reads until the end, retrying its refusals: each row turns up exactly once, and
+    the stream is never read twice at a time. Without the refusal, the stream overlaps at once."""
+    count = 4000
+    data = b"n\n" + b"".join(b"%d\n" % index for index in range(count))
+    stream = _AsyncDribbleCounting(data)
+    reader = _run(
+        DelimitedReader.open_async(
+            stream, Dialect.CSV, [Column.i32(0)], batch_rows=7, buffer_bytes=16
+        )
+    )
+    finished = threading.Event()
+    seen: list[list[int]] = []
+    start = threading.Barrier(6)
+
+    def work() -> None:
+        mine: list[int] = []
+        seen.append(mine)
+        start.wait(60)
+
+        async def loop() -> None:
+            while not finished.is_set():
+                try:
+                    batch = await reader.read_async()
+                except RuntimeError:
+                    await asyncio.sleep(0)
+                    continue
+                if batch is None:
+                    finished.set()
+                    return
+                mine.extend(batch.column(0).values.tolist())
+
+        _run(loop())
+
+    with ThreadPoolExecutor(6) as pool:
+        for future in [pool.submit(work) for _ in range(6)]:
+            future.result(300)
+    assert stream.overlaps == 0
+    assert sorted(value for mine in seen for value in mine) == list(range(count))
+    for mine in seen:
+        assert mine == sorted(mine)
+
+
+class _AsyncDribbleCounting(_AsyncDribble):
+    """A dribble that says how many reads ever overlapped."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.inside = 0
+        self.overlaps = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        self.inside += 1
+        self.overlaps += self.inside > 1
+        chunk = await super().read(size)
+        self.inside -= 1
+        return chunk
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
+def test_a_read_that_lets_go_can_be_followed():
+    """Every way a read's wait can end hands the reader on: sequential awaits, a cancellation, a
+    stream's own exception, and a coroutine closed where it waits. (A chunk refused is final:
+    test_interruptions.py.)"""
+
+    class Flaky(_AsyncDribble):
+        def __init__(self, data: bytes) -> None:
+            super().__init__(data)
+            self.next: BaseException | None = None
+
+        async def read(self, size: int = -1) -> bytes:
+            if isinstance(self.next, BaseException):
+                failure, self.next = self.next, None
+                raise failure
+            return await super().read(size)
+
+    async def main() -> list[int]:
+        stream = Flaky(_STALLED_DATA)
+        reader = await DelimitedReader.open_async(
+            stream, Dialect.CSV, [Column.i32(0)], batch_rows=4, buffer_bytes=8
+        )
+        values: list[int] = []
+
+        async def one() -> None:
+            batch = await reader.read_async()
+            if batch is not None:
+                values.extend(batch.column(0).values.tolist())
+
+        await one()
+        stream.next = OSError("flaky")
+        with pytest.raises(OSError, match="flaky"):
+            await one()
+        await one()
+        stream.next = KeyboardInterrupt()
+        with pytest.raises(KeyboardInterrupt):
+            await one()
+        await one()
+        return values + await _values(reader)
+
+    assert _run(main()) == list(range(40))
+
+
+@pytest.mark.skipif(sys.platform == "emscripten", reason="Pyodide's loop cannot be run from a test")
+def test_a_coroutine_closed_where_it_waits_lets_go():
+    """A read given up on without a loop to cancel it, which is ``close()``: the next one goes on."""
+    stream = _Stalled(_STALLED_DATA, 2, lambda: asyncio.sleep(0))
+
+    async def main() -> None:
+        reader = await DelimitedReader.open_async(
+            stream, Dialect.CSV, [Column.i32(0)], batch_rows=4, buffer_bytes=8
+        )
+        values: list[int] = []
+        while True:
+            waiting = reader.read_async()
+            try:
+                assert waiting.send(None) is None
+                break
+            except StopIteration as done:
+                values.extend(done.value.column(0).values.tolist())
+        with pytest.raises(RuntimeError, match="another read"):
+            await reader.read_async()
+        waiting.close()
+        assert values + await _values(reader) == list(range(40))
+
+    _run(main())
 
 
 def test_a_structural_failure_is_raised_asynchronously_and_again():

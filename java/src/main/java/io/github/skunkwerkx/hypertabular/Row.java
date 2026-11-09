@@ -1,5 +1,6 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.FaultDetail;
 import io.github.skunkwerkx.hypercast.Verdict;
 import java.lang.foreign.MemorySegment;
 import java.nio.CharBuffer;
@@ -78,6 +79,26 @@ public final class Row {
      */
     public CellVerdict verdict(int column) {
         return batch.verdict(column, index);
+    }
+
+    /**
+     * What failed in the cell in {@code column}: {@link Batch#detail} of this row.
+     *
+     * @param column index into the plan
+     * @return the detail, or {@code null}
+     */
+    public FaultDetail detail(int column) {
+        return batch.detail(column, index);
+    }
+
+    /**
+     * Where the verdict of the cell in {@code column} came from: {@link Batch#origin} of this row.
+     *
+     * @param column index into the plan
+     * @return where it came from
+     */
+    public Origin origin(int column) {
+        return batch.origin(column, index);
     }
 
     /**

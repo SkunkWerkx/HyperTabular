@@ -1,4 +1,4 @@
-// The C ABI of the hypertabular core (https://github.com/SkunkWerkx/HyperTabular): the 14
+// The C ABI of the hypertabular core (https://github.com/SkunkWerkx/HyperTabular): the 23
 // functions the shared and static libraries export, which every binding calls through, and the
 // #[repr(C)] types they read and write. hypertabular_version() is the library's version.
 //
@@ -22,6 +22,13 @@
 // HYPERTABULAR_ERR_STRUCTURE, returned only after every intact row before it was delivered,
 // with the result's `failure` saying what and where.
 //
+// A file in a declared encoding goes through hypertabular_transcode first, on the caller's
+// buffers, and the delimited calls read the UTF-8 it writes. docs/delimited.md says how a reader
+// drives it.
+//
+// hypertabular_suggest tries a sample's columns against the doors and says what it finds. It runs
+// outside any read and is never applied: the caller looks at the answer and declares a plan.
+//
 // A delimited fill that finds a buffer too small consumes nothing and is simply retried with a
 // larger one. A workbook call cannot roll back a deflate stream: on HYPERTABULAR_ERR_WINDOW,
 // HYPERTABULAR_ERR_ARENA or HYPERTABULAR_ERR_CELLS it stops in place and reports the size it
@@ -31,7 +38,12 @@
 // A state block is the caller's memory, hypertabular_delimited_state_size() or
 // hypertabular_workbook_state_size() bytes, 8-byte aligned. The delimited one is a
 // HyperTabularDelimitedState, whose public fields a caller may read; the workbook one is
-// opaque.
+// opaque. A delimited block that only ever meets hypertabular_delimited_init may be its first
+// 64 bytes, all the core reads or writes of one.
+//
+// The structs of hypertabular_delimited_init_with, hypertabular_delimited_fill_with,
+// hypertabular_workbook_sheet_with and hypertabular_workbook_fill_with carry their size first, and a size the core doesn't read is HYPERTABULAR_ERR_CONTRACT. Those that
+// hold pointers have a *_SIZE that is a sizeof, not a number, since it differs by target.
 
 #ifndef HYPERTABULAR_H
 #define HYPERTABULAR_H
@@ -46,6 +58,10 @@
 // caller's memory and opaque to it. One block reads one sheet at a time; a block that has been
 // opened may be copied, bytes and all, to read another.
 typedef struct HyperTabularWorkbookState HyperTabularWorkbookState;
+
+#define HyperTabularColumnSpecWith_SIZE ((uint32_t)sizeof(HyperTabularColumnSpecWith))
+#define HyperTabularColumnBufferWith_SIZE ((uint32_t)sizeof(HyperTabularColumnBufferWith))
+#define HyperTabularBuffersWith_SIZE ((uint32_t)sizeof(HyperTabularBuffersWith))
 
 // The call did what it could; the result says how far it got.
 #define HYPERTABULAR_OK 0
@@ -71,16 +87,22 @@ typedef struct HyperTabularWorkbookState HyperTabularWorkbookState;
 // returns this, [`ERR_ARENA`] or [`ERR_CELLS`] expects next.
 #define HYPERTABULAR_ERR_WINDOW -5
 
+// `hypertabular_batch_check` refused a read's sizes; its [`RawBatchCheck`] says why.
+#define HYPERTABULAR_ERR_BATCH -6
+
 // Why the data could not be read. `code` `0` is no failure.
 typedef struct HyperTabularFailure {
   // `1` the input ended inside a quoted cell; `2` a record's cell count disagrees with
-  // the first record's.
+  // the first record's; `16`–`26` a workbook's ([`Failure::NOT_A_ZIP`] and on); `27` text
+  // that isn't valid UTF-8 where no cell's verdict can carry it, or that a declared encoding
+  // has no character for.
   uint32_t code;
   // One-based line the offending record starts on.
   uint32_t line;
   // Zero-based index of the offending record, header and skipped blank lines included.
   uint64_t record;
-  // Absolute byte offset of the offending record's start.
+  // Absolute byte offset of the offending record's start, in the decoded text if an encoding
+  // was declared, except for [`Failure::ENCODING`]'s there (it says what).
   uint64_t byte;
   // Cells in the first record (code `2`).
   uint32_t expected;
@@ -127,6 +149,13 @@ typedef struct HyperTabularFailure {
 // identifier), `4` for cell storage of a version the core does not read (`expected`
 // is the version). `byte` is the object's offset in the part's decoded stream.
 #define HyperTabularFailure_IWA 26
+// Text that isn't valid UTF-8 where a read can't carry it as a cell's verdict: a header
+// name. `line`, `record` and `byte` locate the record as for any delimited failure, or as
+// for any workbook failure in a workbook; `expected` and `found` are `0`. Or, raised by a
+// binding after `hypertabular_transcode`, a unit a declared encoding has no character for:
+// `line` and `record` locate the record the failure cut, as ever, and `byte` is the unit's
+// offset in the original input, not the decoded text.
+#define HyperTabularFailure_ENCODING 27
 // `_rels/.rels`.
 #define HyperTabularFailure_PART_ROOT_RELS 1
 // The workbook part.
@@ -150,10 +179,13 @@ typedef struct HyperTabularFailure {
 
 // Where one input stands. The caller owns it, zero-initialized or not, and hands it to
 // [`State::init`] once before anything else. Plain integers throughout, so that no value
-// a caller could put in it is one the core cannot survive.
+// a caller could put in it is one the core cannot survive, with one exception: `extended` says
+// how large the block is, so a 64-byte block with that byte set is read and written 16 bytes past
+// its end. A block that came from `init` or `init_with`, and was left alone, says the truth.
 typedef struct HyperTabularDelimitedState {
-  // The dialect, as `init` copied it in. The core's own, as `started` and `reserved`
-  // are: a caller reads the fields that follow and writes none of them.
+  // The dialect, as `init` copied it in. The core's own, as `started`, `extended`,
+  // `reserved` and all that follows `failure` are: a caller reads the other fields and
+  // writes none of them.
   uint8_t separator;
   uint8_t quoting;
   uint8_t skip_blank_lines;
@@ -167,12 +199,25 @@ typedef struct HyperTabularDelimitedState {
   // Cells per record, fixed by the first; `0` before it.
   uint32_t expected;
   uint8_t started;
-  uint8_t reserved[3];
+  // Nonzero when the block has the fields below: it came from [`State::init_with`]. A block
+  // from [`State::init`] may be the 64 bytes the 1.0 surface said a state is, so its reader
+  // never looks past them.
+  uint8_t extended;
+  uint8_t reserved[2];
   // The structural failure that ended this input, if `code` is nonzero.
   struct HyperTabularFailure failure;
+  // Physical lines still to pass over.
+  uint32_t skip;
+  // Records still to discard.
+  uint32_t header_row;
+  // Nonzero when a short record is padded.
+  uint8_t short_rows;
+  // Nonzero when a long record is cut.
+  uint8_t long_rows;
+  uint8_t tail[6];
 } HyperTabularDelimitedState;
 // The layout's size in bytes, which `hypertabular_delimited_state_size` also reports.
-#define HyperTabularDelimitedState_SIZE 64
+#define HyperTabularDelimitedState_SIZE 80
 
 // The dialect as the caller declares it. Nothing is sniffed.
 typedef struct HyperTabularRawDialect {
@@ -188,6 +233,71 @@ typedef struct HyperTabularRawDialect {
 } HyperTabularRawDialect;
 // The layout's size in bytes.
 #define HyperTabularRawDialect_SIZE 4
+
+// The options of `hypertabular_delimited_init_with`: the dialect, and what a read does before
+// and around its rows. `size` first, as every shape of that surface: a size the core doesn't
+// read is [`ERR_CONTRACT`], so a later core can tell a caller built against this one.
+typedef struct HyperTabularRawDelimitedOptions {
+  // The bytes the caller built: [`RawDelimitedOptions::SIZE`].
+  uint32_t size;
+  // The single-byte separator: tab, or any printable ASCII byte except `"`.
+  uint8_t separator;
+  // Nonzero when `"` quotes cells.
+  uint8_t quoting;
+  // Nonzero when a completely empty line is skipped rather than read as a one-cell row.
+  uint8_t skip_blank_lines;
+  // `0` for the best engine this CPU has; otherwise an engine's code.
+  uint8_t engine;
+  // Physical lines to pass over after a byte-order mark. Nothing in them is read, so a quote
+  // in one means nothing.
+  uint32_t skip;
+  // Records to discard after that, ahead of the header if there is one. A blank line the
+  // dialect skips isn't a record.
+  uint32_t header_row;
+  // A record with fewer cells than the width: [`RawDelimitedOptions::SHORT_ROWS_REJECT`] or
+  // [`RawDelimitedOptions::SHORT_ROWS_PAD`].
+  uint32_t short_rows;
+  // A record with more cells than the width: [`RawDelimitedOptions::LONG_ROWS_REJECT`],
+  // [`RawDelimitedOptions::LONG_ROWS_REPORT`] or [`RawDelimitedOptions::LONG_ROWS_TRUNCATE`].
+  uint32_t long_rows;
+} HyperTabularRawDelimitedOptions;
+// The layout's size in bytes, which `size` carries.
+#define HyperTabularRawDelimitedOptions_SIZE 24
+// A short record is a structural failure.
+#define HyperTabularRawDelimitedOptions_SHORT_ROWS_REJECT 0
+// A short record is padded: the cells it lacks are `Empty`, at [`CellNote::ORIGIN_PADDED`].
+#define HyperTabularRawDelimitedOptions_SHORT_ROWS_PAD 1
+// A long record is a structural failure.
+#define HyperTabularRawDelimitedOptions_LONG_ROWS_REJECT 0
+// A long record is cut to the width, and the caller means to say so: `hypertabular_faults`
+// lists the rows `row_widths` shows were cut. To the fill it is
+// [`RawDelimitedOptions::LONG_ROWS_TRUNCATE`].
+#define HyperTabularRawDelimitedOptions_LONG_ROWS_REPORT 1
+// A long record is cut to the width.
+#define HyperTabularRawDelimitedOptions_LONG_ROWS_TRUNCATE 2
+
+// How far `hypertabular_transcode` got. Every field counts this call's input and output, not a
+// whole read's.
+typedef struct HyperTabularRawTranscoded {
+  // Bytes of the input decoded: what the next call starts after.
+  uint64_t consumed;
+  // Bytes of UTF-8 written, whole characters.
+  uint64_t written;
+  // With `failed`, the offset in this call's input of the unit with no character.
+  uint64_t failure_at;
+  // `1` when the input holds a unit with no character at `failure_at`, otherwise `0`.
+  uint32_t failed;
+  // `0`. It keeps the layout one size on every target.
+  uint32_t reserved;
+} HyperTabularRawTranscoded;
+// The layout's size in bytes.
+#define HyperTabularRawTranscoded_SIZE 32
+// `encoding`: Windows-1252, its undefined bytes their C1 controls, as WHATWG has it.
+#define HyperTabularRawTranscoded_WINDOWS_1252 1
+// `encoding`: Latin-1, every byte the code point of its value.
+#define HyperTabularRawTranscoded_LATIN_1 2
+// `encoding`: UTF-16, little-endian.
+#define HyperTabularRawTranscoded_UTF_16LE 3
 
 // A byte range. Where it points is the field's to say; the top bit of `len` is a flag
 // each use defines, and [`Span::len`] is the length without it.
@@ -299,7 +409,7 @@ typedef struct HyperTabularCurrencySymbol {
 typedef struct HyperTabularNumFormat {
   // Bitwise OR of the `GROUPING`/`PARENS`/`EXPONENT`/`RADIX_PREFIX`/`PERCENT`/`CURRENCY`/
   // `TRAILING_SIGN` flags, plus the `SEPARATOR_DETECT` policy and, in bits 8 and 9, the
-  // grouping policy (`GROUPING_LEGACY`, `GROUPING_WESTERN` or `GROUPING_INDIAN`).
+  // grouping policy: no bits for `GROUPING_WESTERN`, `GROUPING_INDIAN` when declared.
   uint32_t flags;
   // Native digits read beside ASCII `0`–`9`. [`NativeDigits::NONE`] declares none.
   HyperTabularNativeDigits digits;
@@ -332,11 +442,10 @@ typedef struct HyperTabularNumFormat {
   // set. [`CurrencySymbol::NONE`] declares nothing.
   struct HyperTabularCurrencySymbol currency;
 } HyperTabularNumFormat;
-// Permit `group_sep` between digits. Under the legacy grouping policy group sizes are not
-// validated — a separator must simply sit between two digits, HyperCast's own
-// deterministic rule where .NET's `AllowThousands` deferred to per-culture quirks; a
-// strict policy ([`GROUPING_WESTERN`](Self::GROUPING_WESTERN),
-// [`GROUPING_INDIAN`](Self::GROUPING_INDIAN)) judges every group.
+// Permit `group_sep` between digits. The grouping policy
+// ([`GROUPING_WESTERN`](Self::GROUPING_WESTERN), the default, or
+// [`GROUPING_INDIAN`](Self::GROUPING_INDIAN)) judges every group, HyperCast's own
+// deterministic rule where .NET's `AllowThousands` deferred to per-culture quirks.
 #define HyperTabularNumFormat_GROUPING (1 << 0)
 // Permit accounting parentheses as negation: `(1,234)` is -1234.
 #define HyperTabularNumFormat_PARENS (1 << 1)
@@ -358,8 +467,10 @@ typedef struct HyperTabularNumFormat {
 // exactly 3 digits right is the decimal only when the integer part is exactly `0`
 // (`0,785` is 0.785 — `0785` would be no number at all). Everything else — `12.185`,
 // `1,000` — is genuinely ambiguous between dialects and comes back `Malformed` at the
-// undecidable separator, never guessed. Covers the `.`/`,` pair only; space/NBSP
-// grouping still needs a declared format.
+// undecidable separator, never guessed. Only the numeral counts: a declared symbol's
+// separator is no separator (`Rs.1,234` is as ambiguous as `1,234`), and declared native
+// digits are digits (`١,٢٣٤` too). Covers the `.`/`,` pair only; space/NBSP grouping still
+// needs a declared format.
 #define HyperTabularNumFormat_SEPARATOR_DETECT (1 << 5)
 // Permit the declared [`currency`](Self::currency) symbol at either edge of the
 // numeric body — leading (`$5`, `-$5`, `$ -5`) or trailing (`5 €`, `1.234,50 kr.`),
@@ -378,27 +489,30 @@ typedef struct HyperTabularNumFormat {
 // is declared from a culture's pattern rather than assumed ([`SEPARATOR_DETECT`](Self::SEPARATOR_DETECT)
 // is a separator *policy*, not a lenience, and is deliberately not included either).
 #define HyperTabularNumFormat_ALL (((((HyperTabularNumFormat_GROUPING | HyperTabularNumFormat_PARENS) | HyperTabularNumFormat_EXPONENT) | HyperTabularNumFormat_RADIX_PREFIX) | HyperTabularNumFormat_PERCENT) | HyperTabularNumFormat_CURRENCY)
-// Grouping policy `00`, legacy: a group separator anywhere between two digits, whatever
-// the group sizes (`12,34` is 1234). What a format declaring no policy has: the C ABI's
-// null format, a 1.0 layout, [`new`](Self::new) with no policy bits, and
-// [`INVARIANT`](Self::INVARIANT).
-#define HyperTabularNumFormat_GROUPING_LEGACY 0
-// Grouping policy `01`, strict Western: once a numeral uses a group separator, its
-// integer part is groups of exactly three digits counted leftward from the decimal
-// separator (or the numeral's end), the leftmost group one to three. An ungrouped
-// numeral stays valid; grouping after the decimal separator or in an exponent never is.
-// Digits are counted as digits, native ones included, never bytes, and the rule holds for
-// the currency group separator and each space-like separator alike. A policy only
-// judges groups: with [`GROUPING`](Self::GROUPING) off, a group separator stays forbidden.
-#define HyperTabularNumFormat_GROUPING_WESTERN (1 << 8)
-// Grouping policy `10`, strict Indian (lakh and crore): as
+// Grouping policy `00`, Western, what a format that records no policy has: the C ABI's
+// null format, a 1.0 layout, a 1.0 serialized payload, [`new`](Self::new) with no policy
+// bits, [`INVARIANT`](Self::INVARIANT) and [`DETECT`](Self::DETECT). Once a numeral uses a
+// group separator, its integer part is groups of exactly three digits counted leftward from
+// the decimal separator (or the numeral's end), the leftmost group one to three and not
+// starting with a zero (`0,125` and `007,000` are `Malformed`). An ungrouped numeral stays
+// valid (`0125`); grouping after the decimal separator or in an exponent never is. Digits
+// are counted as digits, native ones included, never bytes, and the rule holds for the
+// currency group separator and each space-like separator alike. A policy only judges
+// groups: with [`GROUPING`](Self::GROUPING) off, a group separator stays forbidden.
+#define HyperTabularNumFormat_GROUPING_WESTERN 0
+// Grouping policy `10`, Indian (lakh and crore), only when declared: as
 // [`GROUPING_WESTERN`](Self::GROUPING_WESTERN), but the group next to the decimal
 // separator has three digits, every group to its left two, and the leftmost one or two
 // (`12,34,567`).
 #define HyperTabularNumFormat_GROUPING_INDIAN (2 << 8)
-// The two policy bits, 8 and 9, within `flags`. Policy `11` is refused by
-// [`check`](Self::check). Set a policy with [`with_grouping`](Self::with_grouping), which
-// replaces the field.
+// The policy field, bits 8 and 9, within `flags`. Only `00` and `10` are policies. Value 256
+// (bit 8) is retired permanently and never reused, so an old `351` can never gain a meaning:
+// [`check`](Self::check) and [`validate`](Self::validate) refuse `01` and `11`, and a future
+// policy, such as four-digit grouping, takes a new bit from bit 10 up. Set a policy with
+// [`with_grouping`](Self::with_grouping), which can't name a bad one. [`new`](Self::new),
+// [`with_separators`](Self::with_separators) and the public fields can, because 1.0 gave them
+// a plain `u32`: a plain door reads such a format Western, and
+// [`check`](Self::check) and [`validate`](Self::validate) are what refuse it.
 #define HyperTabularNumFormat_GROUPING_POLICY (3 << 8)
 
 // [`NumFormat`] as it crosses the ABI — the size-tagged layout of 0.9.0: a size word, then
@@ -460,7 +574,10 @@ typedef struct HyperTabularColumnSpec {
   uint32_t param;
   // The numeric notation, read by the numeric doors: HyperCast's size-tagged layout,
   // built whole (its `size` is `RawNumFormat::SIZE`, 92). All zeros — a `size` of `0` —
-  // is the invariant notation.
+  // is no format, HyperCast's `NumFormat::INVARIANT`, which groups as Western does.
+  // `hypertabular_delimited_fill` reads only the low 8 bits of its `flags`, as 1.0 did, so it
+  // reads every format as Western; `hypertabular_delimited_fill_with` reads every one, and
+  // refuses a retired grouping bit (`256`, so the words `351` and `863`) before any cell.
   struct HyperTabularRawNumFormat format;
 } HyperTabularColumnSpec;
 // The layout's size in bytes: three words, then HyperCast's 92-byte `RawNumFormat`.
@@ -551,6 +668,180 @@ typedef struct HyperTabularBuffers {
   uintptr_t kinds_len;
 } HyperTabularBuffers;
 
+// The date options as they cross the ABI: a size word, the option bits
+// ([`DateOptions::COMPACT_DATE`](crate::DateOptions::COMPACT_DATE) and the others), and the
+// two-digit-year pivot, 12 bytes with 4-byte alignment.
+//
+// | Offset | Field | Bytes |
+// | --- | --- | --- |
+// | 0 | `size`, a `u32` | 4 |
+// | 4 | `flags`, the option bits | 4 |
+// | 8 | `pivot`, `0` for none, else 100–9999 | 4 |
+//
+// `size` is [`MIN_SIZE`](Self::MIN_SIZE) (the size and flags words; the pivot is then `0`,
+// none) or [`SIZE`](Self::SIZE); any other size, a flag bit this core doesn't define, or a
+// pivot other than `0` or 100–9999 is a contract violation. A null pointer is no options. The
+// core never writes it.
+typedef struct HyperTabularRawDateOptions {
+  // The bytes the caller built: [`RawDateOptions::SIZE`] or [`RawDateOptions::MIN_SIZE`].
+  uint32_t size;
+  // The option bits.
+  uint32_t flags;
+  // The last year of the window a two-digit year is read in; `0` for none.
+  uint32_t pivot;
+} HyperTabularRawDateOptions;
+// The layout's size in bytes, which `size` carries.
+#define HyperTabularRawDateOptions_SIZE 12
+// The smallest `size` the core reads: the size and flags words, with no pivot.
+#define HyperTabularRawDateOptions_MIN_SIZE 8
+
+// One output column as `hypertabular_delimited_fill_with` and `hypertabular_workbook_fill_with`
+// take it: [`ColumnSpec`], with date options, a month vocabulary and tokens.
+typedef struct HyperTabularColumnSpecWith {
+  // The bytes the caller built: [`ColumnSpecWith::SIZE`].
+  uint32_t size;
+  // As [`ColumnSpec::ordinal`].
+  uint32_t ordinal;
+  // As [`ColumnSpec::door`].
+  uint32_t door;
+  // As [`ColumnSpec::param`].
+  uint32_t param;
+  // As [`ColumnSpec::format`], and judged as HyperCast's `NumFormat::validate` judges it: a
+  // flag bit it doesn't define is [`ERR_CONTRACT`] here.
+  struct HyperTabularRawNumFormat format;
+  // What the date doors read: HyperCast's size-tagged layout. All zeros, a `size` of `0`, is
+  // no options.
+  struct HyperTabularRawDateOptions date;
+  // A month vocabulary for the date doors, packed as HyperCast's `MonthNames` packs it; null
+  // for none. Judged on every call.
+  const uint8_t *months;
+  // Bytes at `months`.
+  uintptr_t months_len;
+  // This column's tokens: each a little-endian `u32` length, then its bytes. Null inherits
+  // the list in [`BuffersWith::tokens`]; anything else replaces it, so an empty list means
+  // none.
+  const uint8_t *tokens;
+  // Bytes at `tokens`.
+  uintptr_t tokens_len;
+} HyperTabularColumnSpecWith;
+
+
+// What a verdict doesn't say about one cell: why, in HyperCast's terms, and where the verdict
+// came from.
+typedef struct HyperTabularCellNote {
+  // HyperCast's `Detail` code for the fault; `0` where no door refused the cell: a cell that
+  // cast, one at [`CellNote::ORIGIN_TOKEN`] or [`CellNote::ORIGIN_PADDED`], or a workbook's typed
+  // cell of a kind the door has no twin for, a boolean through an integer door, say.
+  uint16_t detail;
+  // Where the verdict came from: one of the `ORIGIN_` codes.
+  uint16_t origin;
+} HyperTabularCellNote;
+// The layout's size in bytes.
+#define HyperTabularCellNote_SIZE 4
+// A door judged the cell's own text.
+#define HyperTabularCellNote_ORIGIN_CELL 0
+// The cell's exact unquoted bytes are a declared token, so it is `Empty` and no door ran. A
+// workbook's text cells alone can be one: a number whose text would match is a number.
+#define HyperTabularCellNote_ORIGIN_TOKEN 1
+// The row has no such cell: padding for a short row, or an ordinal past the row's end,
+// which in a workbook is past the last cell it holds, every ordinal of an empty row
+// included. It is `Empty` and no door ran.
+#define HyperTabularCellNote_ORIGIN_PADDED 2
+// A workbook's formula cell with no cached value: XLSX's `<f>` with no `<v>`, or an empty one
+// unless the cell is declared a string, and ODS's `table:formula` with no value. It is `Empty`
+// and no door ran, and through the 1.0 fill it's simply `Empty`.
+#define HyperTabularCellNote_ORIGIN_UNCACHED 3
+
+// Where one column's output goes in `hypertabular_delimited_fill_with` and
+// `hypertabular_workbook_fill_with`: [`ColumnBuffer`], with a note per row.
+typedef struct HyperTabularColumnBufferWith {
+  // The bytes the caller built: [`ColumnBufferWith::SIZE`].
+  uint32_t size;
+  // The value array, as [`ColumnBuffer::values`].
+  void *values;
+  // The verdict array.
+  struct HyperTabularCellVerdict *verdicts;
+  // `max_rows` notes, not aligned, or null to write none. In delimited text, a column with no
+  // notes, no tokens and no date options runs the same loop `hypertabular_delimited_fill` does.
+  struct HyperTabularCellNote *notes;
+} HyperTabularColumnBufferWith;
+
+
+// The memory `hypertabular_delimited_fill_with` and `hypertabular_workbook_fill_with` work in:
+// the fields of [`Buffers`], of which the delimited fill reads `cells` and `arena` and the workbook
+// fill all, then what only they read.
+typedef struct HyperTabularBuffersWith {
+  // The bytes the caller built: [`BuffersWith::SIZE`].
+  uint32_t size;
+  // As [`Buffers::window`].
+  uint8_t *window;
+  // As [`Buffers::window_cap`].
+  uintptr_t window_cap;
+  // As [`Buffers::arena`].
+  uint8_t *arena;
+  // As [`Buffers::arena_cap`].
+  uintptr_t arena_cap;
+  // As [`Buffers::cells`].
+  struct HyperTabularSpan *cells;
+  // As [`Buffers::cells_cap`].
+  uintptr_t cells_cap;
+  // As [`Buffers::row`].
+  struct HyperTabularSlot *row;
+  // As [`Buffers::row_cap`].
+  uintptr_t row_cap;
+  // As [`Buffers::strings`].
+  const uint8_t *strings;
+  // As [`Buffers::strings_len`].
+  uintptr_t strings_len;
+  // As [`Buffers::table`].
+  const struct HyperTabularSpan *table;
+  // As [`Buffers::table_len`].
+  uintptr_t table_len;
+  // As [`Buffers::kinds`].
+  const uint8_t *kinds;
+  // As [`Buffers::kinds_len`].
+  uintptr_t kinds_len;
+  // The tokens every column inherits: each a little-endian `u32` length, then its bytes. Null
+  // for none.
+  const uint8_t *tokens;
+  // Bytes at `tokens`.
+  uintptr_t tokens_len;
+  // `max_rows` counts, aligned, of the cells each delivered row had before padding or
+  // cutting; null to write none. A workbook row's count runs to the last column holding a cell
+  // inside the range, whatever the plan reads, and is `0` for an empty row. A cell its row names
+  // again as empty still counts toward it.
+  uint32_t *row_widths;
+} HyperTabularBuffersWith;
+
+
+// One thing `hypertabular_faults` lists: a cell a door refused, a formula with no cached value, or
+// a long row the read declared it would report.
+typedef struct HyperTabularRawProblem {
+  // The row in the batch, from zero.
+  uint32_t row;
+  // The column of the plan, or [`RawProblem::ROW_LEVEL`] for an entry about the row as a whole.
+  uint32_t plan_column;
+  // The verdict's reason, HyperCast's code: `2` malformed, `3` out of range, or `1` empty for
+  // a formula with no cached value. `0` on a row-level entry.
+  uint32_t reason;
+  // The note's [`CellNote::detail`]: `0` on a row-level entry, or where the column had no notes.
+  uint16_t detail;
+  // The note's [`CellNote::origin`]: `0` on a row-level entry, or where the column had no notes.
+  uint16_t origin;
+  // The verdict's span within the cell's text; `0` on a row-level entry.
+  uint32_t offset;
+  // The verdict's span's length; `0` on a row-level entry.
+  uint32_t len;
+  // On a row-level entry, the width the first record fixed; otherwise `0`.
+  uint32_t expected;
+  // On a row-level entry, the cells the row had; otherwise `0`.
+  uint32_t found;
+} HyperTabularRawProblem;
+// The layout's size in bytes.
+#define HyperTabularRawProblem_SIZE 32
+// What [`RawProblem::plan_column`] says for an entry about the row as a whole.
+#define HyperTabularRawProblem_ROW_LEVEL UINT32_MAX
+
 // What `hypertabular_workbook_open` found.
 typedef struct HyperTabularOpened {
   // `1` XLSX, `2` ODS, `3` Numbers.
@@ -573,6 +864,150 @@ typedef struct HyperTabularOpened {
 } HyperTabularOpened;
 // The layout's size in bytes.
 #define HyperTabularOpened_SIZE 64
+
+// How `hypertabular_workbook_sheet_with` reads a sheet: `hypertabular_workbook_sheet`'s two
+// switches, then what's passed over and the range. The order is fixed: the range selects rows and
+// columns, `skip` passes over rows inside it, `header_row` discards rows after those, then comes
+// the header, and the filter holds throughout. See `docs/workbook.md`.
+typedef struct HyperTabularRawSheetOptions {
+  // The bytes the caller built: [`RawSheetOptions::SIZE`].
+  uint32_t size;
+  // Nonzero when the first row delivered is the header.
+  uint32_t has_header;
+  // Nonzero when rows with no cell in them, and the rows a gap in the numbering stands for, are
+  // left out. Such a row still counts toward `skip`, and doesn't toward `header_row`. A row whose
+  // only cells are formulas with nothing spelled where a value goes counts as one, and nothing
+  // says it was left out. That depends on the writer: `<f>` alone or with `<v />` counts as empty,
+  // and with `<v></v>` holds a cell, so a table of nothing but formulas from the first kind of
+  // writer can read as no rows. With this zero those rows are delivered, their cells at
+  // [`CellNote::ORIGIN_UNCACHED`].
+  uint32_t skip_empty_rows;
+  // Rows of the sheet to pass over at the start of the range, empty ones included. Their cells
+  // aren't judged, so a bad cell there doesn't matter; the XML is still tokenized, or for Numbers
+  // stepped over by its offsets.
+  uint32_t skip;
+  // Rows to read and discard after those, as a filtered read delivers them.
+  uint32_t header_row;
+  // The range's first row, 1-based like `A5:F200`; `0` for no limit on that side.
+  uint32_t first_row;
+  // Its first column, 1-based, so `A` is `1`; `0` for no limit. Ordinal `0` of a plan is this
+  // column.
+  uint32_t first_column;
+  // Its last row, 1-based and included; `0` for no limit. A read ends here: no row past it is
+  // read, so a failure in one isn't met. What opening a workbook reads is met whatever the
+  // range: all of an ODS's `content.xml`, and every chunk of a Numbers document's parts.
+  uint32_t last_row;
+  // Its last column, 1-based and included; `0` for no limit.
+  uint32_t last_column;
+} HyperTabularRawSheetOptions;
+// The layout's size in bytes.
+#define HyperTabularRawSheetOptions_SIZE 36
+
+// What `hypertabular_suggest` says of one column of a sample. Nothing reads it but its caller:
+// a suggestion is an answer to look at, and is never applied.
+typedef struct HyperTabularRawSuggestion {
+  // The door, as [`crate::kernel::door::Door::code`] numbers it: bool `1`, `i32` `4`, `i64` `5`,
+  // `f64` `11`, UUID `12`, timestamp `13`, ISO date `15`, text `18` or a date under a declared
+  // order `20`. Under [`RawSuggestion::UNRESOLVED`] it's text. Under
+  // [`RawSuggestion::AMBIGUOUS`] it's the door under the first candidate.
+  uint32_t door;
+  // What the door declares. Under [`RawSuggestion::AMBIGUOUS`] it's a set of candidates to
+  // choose from, bit `n` for code `n`, and no door can read it as it stands; otherwise it's one
+  // code, which says what a column spec for `door` takes.
+  //
+  // - A date under a declared order: the order's code, `1` year-month-day, `2` month-day-year,
+  //   `3` day-month-year. Candidates `12` are the last two.
+  // - A numeric door: resolved, `0` for the format the call declared for the column or else the
+  //   first notation, [`RawSuggestion::NOTATION_COMMA_GROUPS`] where a `,` in the sample proved
+  //   that notation, or [`RawSuggestion::NOTATION_COMMA_DECIMAL`] where only that one reads the
+  //   column, each for the spec's `format` and not its `param`. A binding's own plan reads the
+  //   second where it's named and otherwise, with nothing declared, the first, under
+  //   [`RawSuggestion::NOTATION_FLAGS`], so that a later `1,23,456` is refused. Candidates are
+  //   [`RawSuggestion::NOTATION_COMMA_GROUPS`] and [`RawSuggestion::NOTATION_COMMA_DECIMAL`].
+  // - Any other door: `0`.
+  uint32_t param;
+  // [`RawSuggestion::RESOLVED`], [`RawSuggestion::AMBIGUOUS`] or
+  // [`RawSuggestion::UNRESOLVED`].
+  uint32_t status;
+  // The cells the door took. Resolved or ambiguous, that's every cell `sampled` counts.
+  // Unresolved, it's the most that any one door but the text door took, `0` when none did.
+  uint32_t matched;
+  // The column's cells that aren't blank: a cell with nothing but white space in it is blank.
+  uint32_t sampled;
+} HyperTabularRawSuggestion;
+// The layout's size in bytes.
+#define HyperTabularRawSuggestion_SIZE 20
+// `status`: one door and one declaration take every cell.
+#define HyperTabularRawSuggestion_RESOLVED 1
+// `status`: every cell is read, but the sample can't say which declaration it's written in.
+#define HyperTabularRawSuggestion_AMBIGUOUS 2
+// `status`: there's nothing to go on, or a cell no door took beside cells one did, or a cell
+// that isn't text at all. Read it as text.
+#define HyperTabularRawSuggestion_UNRESOLVED 3
+// A notation in `param`: `,` groups digits in threes and `.` is the decimal separator,
+// HyperCast's `NumFormat::INVARIANT`, the same format as a plan with none.
+#define HyperTabularRawSuggestion_NOTATION_COMMA_GROUPS (1 << 1)
+// A notation in `param`: `,` is the decimal separator and `.` groups digits in threes, every
+// default lenience on.
+#define HyperTabularRawSuggestion_NOTATION_COMMA_DECIMAL (1 << 2)
+// The `flags` of a `RawNumFormat` for either notation, which a binding building one from
+// `param` needs: every default lenience, and Western groups of three, whose policy is no bits.
+#define HyperTabularRawSuggestion_NOTATION_FLAGS 95
+
+// What `hypertabular_range_parse` makes of `A5:F200`: each 1-based, `5`, `1`, `200`, `6`.
+typedef struct HyperTabularRawRange {
+  // The first row.
+  uint32_t first_row;
+  // The first column, `A` being `1`.
+  uint32_t first_column;
+  // The last row, included.
+  uint32_t last_row;
+  // The last column, included.
+  uint32_t last_column;
+} HyperTabularRawRange;
+// The layout's size in bytes.
+#define HyperTabularRawRange_SIZE 16
+
+// What `hypertabular_batch_check` found of a read's sizes. See [`crate::kernel::size`].
+typedef struct HyperTabularRawBatchCheck {
+  // The bytes the batch asks for, or `u64::MAX` for an ask too big to count. `0` for
+  // `batch_rows` of `0`.
+  uint64_t needed;
+  // The most bytes a batch may ask for.
+  uint64_t limit;
+  // The size to start the input buffer at: what was asked, up to the longest record a reader
+  // will buffer. `0` for a sheet, which has no input buffer.
+  uint64_t buffer_bytes;
+  // The rows of a batch for a sampler that wants `batch_rows` rows, however many batches that
+  // then takes. The core works this out so that no binding does. `0` where one row is past
+  // `limit` or `batch_rows` is `0`.
+  uint64_t sample_rows;
+  // The columns one row of the read holds: the source columns the plan reaches, or a sheet's
+  // plan columns where it has more, whichever drives the row's count.
+  uint64_t width;
+  // Why the sizes were refused: one of the `REFUSED_` codes.
+  uint32_t refused;
+  // `0`. It keeps the layout one size on every target.
+  uint32_t reserved;
+} HyperTabularRawBatchCheck;
+// The layout's size in bytes.
+#define HyperTabularRawBatchCheck_SIZE 48
+// Flag: each column holds a note beside each verdict.
+#define HyperTabularRawBatchCheck_NOTES 1
+// Flag: the read keeps each row's width, as a delimited read reporting long rows does.
+#define HyperTabularRawBatchCheck_WIDTHS 2
+// Flag: a sheet, whose cell table is a whole batch and which has no input buffer.
+#define HyperTabularRawBatchCheck_SHEET 4
+// `refused`: nothing was refused.
+#define HyperTabularRawBatchCheck_REFUSED_NONE 0
+// `refused`: `batch_rows` is `0`.
+#define HyperTabularRawBatchCheck_REFUSED_BATCH_ROWS_ZERO 1
+// `refused`: `buffer_bytes` is `0`.
+#define HyperTabularRawBatchCheck_REFUSED_BUFFER_BYTES_ZERO 2
+// `refused`: `needed` is past `limit`.
+#define HyperTabularRawBatchCheck_REFUSED_OVER_LIMIT 3
+// `refused`: one row alone is past `limit`, at any `batch_rows`; `needed` is that row's.
+#define HyperTabularRawBatchCheck_REFUSED_ROW_TOO_WIDE 4
 
 // An exact decimal — a sign, a 96-bit unsigned magnitude, and a base-10 scale — the
 // shape .NET's `decimal` stores natively and Java's `BigDecimal`, Python's `Decimal` and
@@ -674,7 +1109,9 @@ extern "C" {
 uint32_t hypertabular_version(void);
 
 // The size of a delimited state block, for a binding that allocates it as bytes. It
-// wants 8-byte alignment.
+// wants 8-byte alignment. A block only ever given to `hypertabular_delimited_init` may be
+// 64 bytes, all that this function reported before `hypertabular_delimited_init_with`;
+// the core doesn't look past them.
 //
 // # Safety
 // None to uphold.
@@ -689,22 +1126,49 @@ uintptr_t hypertabular_delimited_state_size(void);
 // aligned; `dialect` to a live `RawDialect`.
 int32_t hypertabular_delimited_init(struct HyperTabularDelimitedState *state, const struct HyperTabularRawDialect *dialect);
 
+// Starts a delimited input with options the dialect alone can't say: what to pass over,
+// and what to do about a record of the wrong width. [`ERR_CONTRACT`] for a null, a `size`
+// the core doesn't read, what `hypertabular_delimited_init` refuses, or a policy that
+// isn't one; nothing is written then.
+//
+// # Safety
+// `state` points to `hypertabular_delimited_state_size()` writable bytes, 8-byte
+// aligned; `options` to a live `RawDelimitedOptions`, or at least its `size`.
+int32_t hypertabular_delimited_init_with(struct HyperTabularDelimitedState *state, const struct HyperTabularRawDelimitedOptions *options);
+
+// Decodes a declared encoding to UTF-8, for a binding to run ahead of the fill: `encoding`
+// is [`RawTranscoded::WINDOWS_1252`], [`RawTranscoded::LATIN_1`] or
+// [`RawTranscoded::UTF_16LE`]. Stateless: a code unit the input cuts off stays unconsumed,
+// to hand over again in front of what follows it, until `last` is nonzero. A unit with no
+// character returns [`OK`] with `failed` set in `progress`, and the caller raises
+// `Failure::ENCODING` once every intact row ahead of it is delivered. See
+// [`transcode`], and `docs/delimited.md` for the reader's side.
+// [`ERR_CONTRACT`] for an `encoding` that isn't one, a null `progress`, or a null `input` or
+// `out` with a length; nothing is written then.
+//
+// # Safety
+// `input` is `input_len` bytes; `out` is `cap` writable bytes that don't overlap them;
+// `progress` is writable, at any alignment.
+int32_t hypertabular_transcode(uint32_t encoding, const uint8_t *input, uintptr_t input_len, uint32_t last, uint8_t *out, uintptr_t cap, struct HyperTabularRawTranscoded *progress);
+
 // Reads the next record as a header. See [`fill::header`].
 //
 // # Safety
-// `state` was initialized by `hypertabular_delimited_init`; `input` is `input_len`
-// bytes; `names` has room for `names_cap` spans; `arena` for `arena_cap` bytes;
-// `out` is writable.
+// `state` was initialized by `hypertabular_delimited_init` or
+// `hypertabular_delimited_init_with`; `input` is `input_len` bytes; `names` has room for
+// `names_cap` spans; `arena` for `arena_cap` bytes; `out` is writable.
 int32_t hypertabular_delimited_header(struct HyperTabularDelimitedState *state, const uint8_t *input, uintptr_t input_len, uint32_t last, struct HyperTabularSpan *names, uintptr_t names_cap, uint8_t *arena, uintptr_t arena_cap, struct HyperTabularFilled *out);
 
 // Reads up to `max_rows` whole rows into the caller's column buffers. See
-// [`fill::fill`].
+// [`fill::fill`]; a format's flags are read as 1.0 read them, ignoring every bit from 8 up, so
+// every format
+// reads Western.
 //
 // # Safety
-// `state` was initialized by `hypertabular_delimited_init`; `input` is `input_len`
-// bytes; `specs` and `columns` are `column_count` entries each, and each column's
-// two arrays have room for `max_rows` elements; `buffers` is readable, and its
-// `cells` and `arena` hold `cells_cap` spans and `arena_cap` bytes (the rest of it is
+// `state` was initialized by `hypertabular_delimited_init` or
+// `hypertabular_delimited_init_with`; `input` is `input_len` bytes; `specs` and `columns`
+// are `column_count` entries each, and each column's two arrays have room for `max_rows`
+// elements; `buffers` is readable, and its `cells` and `arena` hold `cells_cap` spans and `arena_cap` bytes (the rest of it is
 // not read); `out` is writable.
 //
 // The two buffers come in a [`Buffers`] rather than as four arguments of their own,
@@ -712,6 +1176,53 @@ int32_t hypertabular_delimited_header(struct HyperTabularDelimitedState *state, 
 // and in an iOS debug build, passes no more than twelve integer arguments to a native
 // function, and this one had thirteen.
 int32_t hypertabular_delimited_fill(struct HyperTabularDelimitedState *state, const uint8_t *input, uintptr_t input_len, uint32_t last, const struct HyperTabularColumnSpec *specs, const struct HyperTabularColumnBuffer *columns, uintptr_t column_count, uintptr_t max_rows, const struct HyperTabularBuffers *buffers, struct HyperTabularFilled *out);
+
+// [`hypertabular_delimited_fill`] with the column options, tokens, notes and row widths the
+// size-tagged shapes hold. See [`fill::fill_with`]. Every `size` is read first and must be
+// the one this core knows; [`ERR_CONTRACT`] writes nothing, `out` and `state` included.
+//
+// # Safety
+// `state` was initialized by `hypertabular_delimited_init` or
+// `hypertabular_delimited_init_with`; `input` is `input_len` bytes; `specs` and `columns`
+// are `column_count` aligned entries each (or as far as the first wrong `size`), and each
+// column's arrays have room for `max_rows` elements; `buffers` is readable, or its `size`
+// is, and its `cells`, `arena` and `tokens` hold what their lengths say, and `row_widths`
+// `max_rows` counts, unless they're null (the rest of it is not read); `out` is writable.
+int32_t hypertabular_delimited_fill_with(struct HyperTabularDelimitedState *state, const uint8_t *input, uintptr_t input_len, uint32_t last, const struct HyperTabularColumnSpecWith *specs, const struct HyperTabularColumnBufferWith *columns, uintptr_t column_count, uintptr_t max_rows, const struct HyperTabularBuffersWith *buffers, struct HyperTabularFilled *out);
+
+// Lists what went wrong in a batch `hypertabular_delimited_fill_with` or
+// `hypertabular_workbook_fill_with` wrote. See [`faults`] for what's listed, and in what order.
+//
+// Resumable: start `cursor` at `0`, and each call writes up to `cap` entries to `out`, says how
+// many in `written`, and moves `cursor` past what it looked at. A call that writes fewer than
+// `cap` has reached the end, and `cursor` is then `rows * (column_count + 1)`. Asked from there,
+// it writes none. A `cap` of `0` looks at nothing: it says `0` and leaves `cursor` where it is,
+// so a loop that waits for fewer than `cap` must not pass one.
+//
+// `long_rows` is the policy the read declared, [`RawDelimitedOptions`]' codes, and a workbook
+// passes [`RawDelimitedOptions::LONG_ROWS_REJECT`]. Under
+// [`RawDelimitedOptions::LONG_ROWS_REPORT`] `row_widths` is required, as the row widths of the
+// fill, and `expected_width` is the width the first record fixed: `expected` in the state block.
+// Otherwise neither is read.
+//
+// [`ERR_CONTRACT`] writes nothing, `cursor` and `written` included, for: a null `cursor` or
+// `written`; a null `columns` with a `column_count`, or a null `out` with a `cap`; any of those
+// misaligned; a column whose `size` this core doesn't know, or whose verdicts are null; a `cursor`
+// past the end; `rows` or `column_count` past `u32::MAX`; a `long_rows` that isn't one of the
+// codes; or, under a report, `row_widths` misaligned, a `rows` no array could hold, or no
+// `row_widths`, which would be a list that leaves out what it was asked to name.
+//
+// A column whose notes are null still lists every refused cell, at `detail` `0`, but can't tell
+// a formula with no cached value from a blank, so lists none. A workbook row that the empty-row
+// filter left out isn't in the batch, so nothing here can name it: `skip_empty_rows` says when
+// that happens.
+//
+// # Safety
+// `columns` is `column_count` aligned entries (or as far as the first wrong `size`), each
+// column's `verdicts` and `notes`, unless they're null, hold `rows` elements; `row_widths`, when
+// required, holds `rows` counts; `out` is `cap` writable entries; `cursor` and `written` are
+// writable and don't overlap them.
+int32_t hypertabular_faults(const struct HyperTabularColumnBufferWith *columns, uintptr_t column_count, uintptr_t rows, const uint32_t *row_widths, uint32_t expected_width, uint32_t long_rows, uint64_t *cursor, struct HyperTabularRawProblem *out, uintptr_t cap, uintptr_t *written);
 
 // Unescapes one quoted cell — a cell-table entry with its flag set names one — into
 // `out`, and returns the bytes written: never more than `len - 1`, and no more than
@@ -772,19 +1283,99 @@ int32_t hypertabular_workbook_sheet(HyperTabularWorkbookState *state, const uint
 // `row`, and the workbook's tables.
 //
 // # Safety
-// `state` was positioned by `hypertabular_workbook_sheet` over these same `container`
-// bytes; `buffers` and `out` as for `hypertabular_workbook_open`.
+// `state` was positioned by `hypertabular_workbook_sheet` or
+// `hypertabular_workbook_sheet_with` over these same `container` bytes; `buffers` and `out` as
+// for `hypertabular_workbook_open`.
 int32_t hypertabular_workbook_header(HyperTabularWorkbookState *state, const uint8_t *container, uintptr_t container_len, const struct HyperTabularBuffers *buffers, struct HyperTabularFilled *out);
 
 // Reads up to `max_rows` rows of the sheet into the caller's column buffers. See
-// [`rows::fill`]. Uses every buffer.
+// [`rows::fill`]; a format's flags are read as 1.0 read them, ignoring every bit from 8 up, so
+// every format
+// reads Western.
+// Uses every buffer.
 //
 // # Safety
-// `state` was positioned by `hypertabular_workbook_sheet` over these same `container`
-// bytes; `specs` and `columns` are `column_count` entries each, and each column's two
-// arrays have room for `max_rows` elements; `buffers` and `out` as for
+// `state` was positioned by `hypertabular_workbook_sheet` or
+// `hypertabular_workbook_sheet_with` over these same `container` bytes; `specs` and `columns`
+// are `column_count` entries each, and each column's two arrays have room for `max_rows` elements; `buffers` and `out` as for
 // `hypertabular_workbook_open`.
 int32_t hypertabular_workbook_fill(HyperTabularWorkbookState *state, const uint8_t *container, uintptr_t container_len, const struct HyperTabularColumnSpec *specs, const struct HyperTabularColumnBuffer *columns, uintptr_t column_count, uintptr_t max_rows, const struct HyperTabularBuffers *buffers, struct HyperTabularFilled *out);
+
+// [`hypertabular_workbook_sheet`] with the skip, header row and range [`RawSheetOptions`]
+// holds. See [`rows::sheet_with`]. [`ERR_CONTRACT`] for a null, a `size` the core doesn't read
+// or an inverted range writes nothing, `out` and `state` included.
+//
+// # Safety
+// As `hypertabular_workbook_sheet`; `options` is readable, or its `size` is, at any alignment.
+int32_t hypertabular_workbook_sheet_with(HyperTabularWorkbookState *state, const uint8_t *container, uintptr_t container_len, const uint8_t *part, uintptr_t part_len, uint32_t index, const struct HyperTabularRawSheetOptions *options, struct HyperTabularFilled *out);
+
+// [`hypertabular_workbook_fill`] with the column options, tokens, notes and row widths the
+// size-tagged shapes hold. See [`rows::fill_with`]. Every `size` is read first and must be
+// the one this core knows; [`ERR_CONTRACT`] writes nothing, `out` and `state` included.
+//
+// # Safety
+// `state` was positioned by `hypertabular_workbook_sheet` or
+// `hypertabular_workbook_sheet_with` over these same `container` bytes; `specs` and `columns`
+// are `column_count` aligned entries each (or as far as the first wrong `size`), and each
+// column's arrays have room for `max_rows` elements; `buffers` is readable, or its `size` is,
+// and each of its pointers holds what its size says, and `row_widths` `max_rows` counts,
+// unless it's null; `out` is writable.
+int32_t hypertabular_workbook_fill_with(HyperTabularWorkbookState *state, const uint8_t *container, uintptr_t container_len, const struct HyperTabularColumnSpecWith *specs, const struct HyperTabularColumnBufferWith *columns, uintptr_t column_count, uintptr_t max_rows, const struct HyperTabularBuffersWith *buffers, struct HyperTabularFilled *out);
+
+// Tries each column of a sample against the doors and says what it finds, in `out`, one entry
+// a column. Nothing here touches a read: a suggestion is an answer, for the caller to look at
+// and pass back in a plan of its own. See [`suggest`] for how a column is judged.
+//
+// `cells` is the sample by column: `rows` spans of the first column, then `rows` of the next,
+// so `rows * columns` in all. A span's flag says its bytes are in `arena` and not in `input`,
+// as a text value's does, and a blank span is a blank cell, the way to pass a cell whose fill
+// verdict said empty: a declared token, padding or a formula with no cached value.
+//
+// `typed` is `rows * columns` bytes in the order of `cells`, or null for none. A byte that
+// isn't `0` says the cell was a workbook's typed cell, which `cells` holds as the text door
+// said it, so a typed number is judged by its value and asks nothing about notation. Delimited
+// text passes null, and so can a workbook's caller who has no way to know, whose typed numbers
+// are then judged as text. A sheet read says which: through a [`Door::Uuid`] beside the text
+// door, with notes, a typed cell is `Malformed` with a detail of `0`.
+//
+// `formats` is `columns` entries, or null. Null, and an entry whose `size` is `0`, declare
+// nothing: the invariant notation is read, with `,` left to [`suggest`]'s two candidates. Any
+// other entry settles that column's notation.
+//
+// [`ERR_CONTRACT`] writes nothing, for: `rows * columns` past what a slice can be; `rows` past
+// `u32::MAX`; a null `cells` or `out` with anything to hold, or a null `input` or `arena` with
+// a length; `cells`, `formats` or `out` misaligned; a format HyperCast's doors would refuse; or
+// a span reaching past the end of what it points into.
+//
+// # Safety
+// `input` is `input_len` bytes and `arena` `arena_len`; `cells` is `rows * columns` spans;
+// `typed`, unless it's null, is `rows * columns` bytes; `formats`, unless it's null, is `columns` formats; `out` is `columns` writable entries that
+// don't overlap any of them.
+int32_t hypertabular_suggest(const uint8_t *input, uintptr_t input_len, const uint8_t *arena, uintptr_t arena_len, const struct HyperTabularSpan *cells, const uint8_t *typed, uintptr_t rows, uintptr_t columns, const struct HyperTabularRawNumFormat *formats, struct HyperTabularRawSuggestion *out);
+
+// Reads `A5:F200` as its four numbers, so a binding doesn't parse a range itself: both corners
+// in capitals, the second no less than the first in either direction. Anything else, `A5`
+// alone, `a5:f200` or `F200:A5`, is [`ERR_CONTRACT`], as is a null, and nothing is written
+// then. See [`rows::parse_range`].
+//
+// # Safety
+// `text` is `len` bytes; `out` is writable, at any alignment.
+int32_t hypertabular_range_parse(const uint8_t *text, uintptr_t len, struct HyperTabularRawRange *out);
+
+// Judges a read's sizes before the caller allocates anything: the bytes `batch_rows` rows of
+// the plan ask for, against the one limit, and `batch_rows` and `buffer_bytes` of `0`. Call
+// it when a reader or a sheet is opened, with `column_count` of `0` when the plan comes later,
+// and again when a plan is bound. It writes `out` and returns [`OK`] or
+// [`crate::kernel::abi::ERR_BATCH`]; `out` names the bytes, the limit and the reason, and
+// says what size to start the input buffer at. See [`check_batch`].
+//
+// [`ERR_CONTRACT`] for a null `out`, a null or misaligned `specs` with a count, flags this core
+// doesn't define, a spec of the wrong `size` or a door that isn't one; nothing is written then.
+//
+// # Safety
+// `specs` is `column_count` aligned entries, or as far as the first wrong `size`; `out` is
+// writable, at any alignment.
+int32_t hypertabular_batch_check(const struct HyperTabularColumnSpecWith *specs, uintptr_t column_count, uint64_t batch_rows, uint64_t buffer_bytes, uint32_t flags, struct HyperTabularRawBatchCheck *out);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -35,6 +35,9 @@ public enum TabularFailure: Int32, Equatable, Sendable {
     /// there (`expected` is its identifier), 4 for cell storage of a version the core does
     /// not read (`expected` is the version).
     case iwa = 26
+    /// Delimited text under a declared ``TextEncoding`` holds a unit with no character there:
+    /// ``TabularError/byte`` is its offset in the original bytes, not in the decoded text.
+    case encoding = 27
 }
 
 /// A structural failure: the input is not rows of cells — a record of the wrong width,
@@ -52,7 +55,8 @@ public struct TabularError: Error, Equatable, Sendable, CustomStringConvertible,
     public let record: Int64
     /// One-based line the offending record starts on.
     public let line: Int
-    /// Absolute byte offset of the offending record's start.
+    /// Absolute byte offset of the offending record's start; for ``TabularFailure/encoding``, of
+    /// the unit that has no character, in the original bytes.
     public let byte: Int64
     /// Cells in the first record, for ``TabularFailure/columnCount``; `0` otherwise.
     public let expected: Int
@@ -111,6 +115,8 @@ public struct TabularError: Error, Equatable, Sendable, CustomStringConvertible,
             "The workbook holds more text than a batch can address."
         case .iwa:
             "Part \(record) of the Numbers document is not what the IWA packaging says (byte \(byte), detail \(found))."
+        case .encoding:
+            "Record \(record) (line \(line)) holds text with no character in its encoding, at byte \(byte)."
         }
     }
 

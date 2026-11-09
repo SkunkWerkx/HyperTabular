@@ -4,6 +4,7 @@
 \alias{header}
 \alias{bind}
 \alias{read_batch}
+\alias{close.hypertabular_reader}
 \title{Reading a batch at a time}
 \usage{
 header(x)
@@ -11,18 +12,22 @@ header(x)
 bind(x, plan)
 
 read_batch(x)
+
+\method{close}{hypertabular_reader}(con, ...)
 }
 \arguments{
-\item{x}{A reader.}
+\item{x, con}{A reader.}
 
 \item{plan}{A list of columns (\code{\link[=col_bool]{col_bool()}} and its siblings), named for the output
 columns.}
+
+\item{...}{Ignored.}
 }
 \value{
-\code{header()} returns the header's names as a character vector (a name holding a NUL
-byte is \code{NA}), \code{character(0)} for an input with no record, or \code{NULL} when no header is
-declared. \code{bind()} returns \code{x} invisibly. \code{read_batch()} returns a \code{hypertabular_batch}
-or \code{NULL}.
+\code{header()} returns the header's names exactly as the source holds them, as a
+character vector (a name holding a NUL byte is \code{NA}), \code{character(0)} for an input with no
+record, or \code{NULL} when no header is declared. \code{bind()} and \code{close()} return \code{x}
+invisibly. \code{read_batch()} returns a \code{hypertabular_batch} or \code{NULL}.
 }
 \description{
 A reader (\code{\link[=delimited_reader]{delimited_reader()}}, \code{\link[=sheet_reader]{sheet_reader()}}) is opened without a plan or with one;
@@ -30,7 +35,24 @@ A reader (\code{\link[=delimited_reader]{delimited_reader()}}, \code{\link[=shee
 plan can name source columns by the header's names. \code{read_batch()} reads the next batch
 of up to the reader's \code{batch_rows} rows, as a \link{hypertabular_batch}, and returns \code{NULL} once
 there are no more: at the end of the input, or at a structural failure, which
-\code{\link[=failure]{failure()}} then holds. A batch is a copy, and stays good after the reader moves on.
+\code{\link[=failure]{failure()}} then holds. A batch is a copy, and stays good after the reader moves on and
+after it is closed.
+}
+\details{
+\code{close()} lets go of the reader's native memory and of a connection it opened, now rather
+than at the next garbage collection. It is safe to call again; a \code{read_batch()} or \code{bind()}
+after it is an R error. A reader is called into once at a time: a \code{read_batch()},
+\code{bind()} or \code{close()} from a handler, a finalizer or a connection's own R code that reaches
+the same reader during one of these is an R error, and the read goes on as it was.
+
+An interrupt during \code{read_batch()} loses nothing: the next \code{read_batch()} hands over the same
+rows, numbered the same, and the read goes on. The one thing no R function can guard is the
+caller's own code: an interrupt landing after \code{read_batch()}'s last interrupt check, before
+the batch is assigned, loses that one batch, and shows as a gap in \code{row} (each batch's first
+\code{row} follows the last one's otherwise). A read from a connection whose read can stop
+part-way (a socket or a URL, not a file or a raw vector) can't resume after an interrupt
+during that read, since the bytes it had may be gone: every later \code{read_batch()} is then an R
+error saying so, and \code{close()} still works.
 }
 \examples{
 reader <- delimited_reader(charToRaw("a,b\n1,x\n2,y\n3,z\n"), batch_rows = 2)
@@ -38,6 +60,7 @@ header(reader)
 bind(reader, list(col_i32("a"), col_text("b")))
 while (!is.null(batch <- read_batch(reader))) print(batch$columns$a$value)
 failure(reader)
+close(reader)
 }
 \seealso{
 Other reads:
@@ -45,6 +68,7 @@ Other reads:
 \code{\link[=delimited_reader]{delimited_reader()}},
 \code{\link{hypertabular_batch}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}},
 \code{\link[=workbook]{workbook()}}
 }

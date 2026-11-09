@@ -1,7 +1,7 @@
 //! The binding's allocation story: it allocates — that is its job, and the core's not to
 //! — but once, not per row and not per batch. A reader's buffers are sized by its first
 //! batches; after them a read allocates nothing, whether the text is a slice, a stream,
-//! or a sheet of a workbook. A counting allocator watches.
+//! decoded or not, or a sheet of a workbook. A counting allocator watches.
 //!
 //! The count is the test thread's own: a reader runs on its caller's thread and starts
 //! none, while the harness's threads allocate as they please (a process-wide count once
@@ -91,6 +91,8 @@ fn a_read_allocates_nothing_once_the_reader_is_warm() {
                 let sum: i64 = batch.i64(0).iter().sum();
                 let _ = batch.get::<f64>(4, 0);
                 assert!(sum >= 0 && batch.text(3, 0).is_ok());
+                // Nor does its list of what went wrong.
+                assert!(batch.faults().count() >= batch.rows() / 7);
                 batch.rows()
             })
         })
@@ -105,6 +107,25 @@ fn a_read_allocates_nothing_once_the_reader_is_warm() {
     let (rows, allocations) = steady(4, || reader.read().map(|b| b.map(|b| b.rows())));
     assert!(rows > 17_000, "{rows} rows of a stream");
     assert_eq!(allocations, 0, "a stream");
+
+    // A declared encoding, over a slice and a stream: decoded through what the reader holds.
+    let dialect = Dialect::CSV.with_encoding(hypertabular::Encoding::Latin1);
+    let mut reader = options
+        .buffer_bytes(4096)
+        .from_slice(&text, dialect, &plan)
+        .unwrap();
+    let (rows, allocations) = steady(4, || reader.read().map(|b| b.map(|b| b.rows())));
+    assert!(rows > 17_000, "{rows} rows of a decoded slice");
+    assert_eq!(allocations, 0, "a decoded slice");
+    let wide: Vec<u8> = text.iter().flat_map(|&byte| [byte, 0]).collect();
+    let dialect = Dialect::CSV.with_encoding(hypertabular::Encoding::Utf16Le);
+    let mut reader = options
+        .buffer_bytes(4096)
+        .from_reader(&wide[..], dialect, &plan)
+        .unwrap();
+    let (rows, allocations) = steady(4, || reader.read().map(|b| b.map(|b| b.rows())));
+    assert!(rows > 17_000, "{rows} rows of a decoded stream");
+    assert_eq!(allocations, 0, "a decoded stream");
 
     let data = packages::xlsx_sheet(31, 6_000, 6);
     for deflate in [true, false] {

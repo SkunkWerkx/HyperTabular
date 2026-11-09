@@ -7,6 +7,7 @@ namespace HyperTabular\Tests;
 use HyperCast\CastFailure;
 use HyperCast\Fault;
 use HyperCast\Success;
+use HyperTabular\AmbiguousColumn;
 use HyperTabular\Batch;
 use HyperTabular\Column;
 use HyperTabular\DelimitedReader;
@@ -55,11 +56,25 @@ final class HeaderFirstTest extends TestCase
         $this->assertNull($reader->read());
     }
 
-    public function testANameIsMatchedExactlyAndAtItsFirstColumn(): void
+    public function testANameIsMatchedExactlyAndTwiceIsRefusedByTheStrictLookup(): void
     {
         $reader = DelimitedReader::fromString("a,Name, name,a,7\n", Dialect::csv());
         $header = $reader->headerIndex();
-        $this->assertSame(0, $header->ordinal('a'));
+        // Strict: a name two columns have is neither, and the refusal names both.
+        try {
+            $header->ordinal('a');
+            $this->fail('a name two columns have was resolved');
+        } catch (AmbiguousColumn $twice) {
+            $this->assertInstanceOf(\InvalidArgumentException::class, $twice);
+            $this->assertSame(['a', 0, 3], [$twice->name, $twice->first, $twice->second]);
+            $this->assertSame(
+                'the header names two columns "a", at positions 0 and 3: say which by position',
+                $twice->getMessage()
+            );
+        }
+        // Optional: the first, as its caller asked; a plan by position reads either.
+        $this->assertSame(0, $header->find('a'));
+        $this->assertSame(1, $header->ordinal('Name'));
         $this->assertSame(1, $header->find('Name'));
         $this->assertSame(2, $header->find(' name'));
         $this->assertSame(4, $header->ordinal('7'));

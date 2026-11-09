@@ -68,7 +68,6 @@ const REWRITES = [
     ["    class Header implements", "    final class Header implements", 1],
     ["    class Row {", "    final class Row {", 1],
     ["    class RowIterator implements", "    final class RowIterator implements", 1],
-    ["    class Scratch {", "    final class Scratch {", 1],
     ["    class Sheet {", "    final class Sheet {", 1],
     ["    class Tabular {", "    final class Tabular {", 1],
     ["    class Workbook {", "    final class Workbook {", 1],
@@ -79,8 +78,10 @@ const VALUE_CLASSES = <<<'PHP'
 
     namespace HyperTabular {
         /**
-         * How delimited text is split: the separator, whether quotes are honoured, whether the
-         * first record is a header, whether blank lines are skipped.
+         * How delimited text is split: the separator, whether quotes are honoured, whether a
+         * record is a header and which, whether blank lines are skipped, how many lines come
+         * before anything is read, what a short or long record is, the text's encoding, and the
+         * texts every column reads as an empty cell.
          */
         final readonly class Dialect {
             public function __construct(
@@ -88,6 +89,12 @@ const VALUE_CLASSES = <<<'PHP'
                 public bool $quoting = true,
                 public bool $hasHeader = true,
                 public bool $skipBlankLines = true,
+                public int $skip = 0,
+                public int $headerRow = 0,
+                public \HyperTabular\ShortRows $shortRows = \HyperTabular\ShortRows::Reject,
+                public \HyperTabular\LongRows $longRows = \HyperTabular\LongRows::Reject,
+                public \HyperTabular\Encoding $encoding = \HyperTabular\Encoding::Utf8,
+                public array $tokens = [],
             ) {}
 
             /**
@@ -116,7 +123,24 @@ const VALUE_CLASSES = <<<'PHP'
                 public \HyperTabular\Door $door,
                 public \HyperCast\NumFormat $format,
                 public int $declared = 0,
+                public ?array $tokens = null,
+                public ?\HyperCast\DateOptions $dateOptions = null,
+                public ?\HyperCast\MonthNames $months = null,
             ) {}
+
+            /**
+             * This column, reading each of `$tokens` (and only those) as an empty cell, in place
+             * of the dialect's or the sheet's.
+             */
+            public function withTokens(array $tokens): \HyperTabular\Column {}
+
+            /**
+             * This column, reading its dates with `$options` and, when given, `$months`.
+             */
+            public function withDateOptions(
+                \HyperCast\DateOptions $options,
+                ?\HyperCast\MonthNames $months = null,
+            ): \HyperTabular\Column {}
 
             /**
              * A boolean column: HyperCast's boolean lexicon, as `bool`.
@@ -249,6 +273,102 @@ const VALUE_CLASSES = <<<'PHP'
                 public readonly bool $hasHeader = true,
                 public readonly bool $skipEmptyRows = true,
                 public readonly int $batchRows = \HyperTabular\DelimitedReader::DEFAULT_BATCH_ROWS,
+                public readonly int $skip = 0,
+                public readonly int $headerRow = 0,
+                public readonly ?\HyperTabular\Range $range = null,
+                public readonly array $tokens = [],
+                public readonly bool $notes = true,
+            ) {}
+        }
+
+        /**
+         * A rectangle of a sheet, its corners 1-based and inclusive, 0 for no limit on a side.
+         */
+        final readonly class Range {
+            public function __construct(
+                public int $firstRow = 0,
+                public int $firstColumn = 0,
+                public int $lastRow = 0,
+                public int $lastColumn = 0,
+            ) {}
+
+            /**
+             * A range in A1 notation: `B2:D10`, `B:D`, `2:10`, or one cell.
+             */
+            public static function parse(string $text): \HyperTabular\Range {}
+        }
+
+        /**
+         * One entry of a batch's faults: a cell that did not cast, or a record of the wrong width.
+         */
+        final readonly class Problem {
+            public function __construct(
+                public int $row,
+                public int $line,
+                public ?int $planColumn,
+                public ?int $sourceColumn,
+                public ?\HyperCast\CastFailure $reason,
+                public ?\HyperCast\FaultDetail $detail,
+                public int $detailCode,
+                public \HyperTabular\Origin $origin,
+                public int $offset,
+                public int $length,
+                public int $expected,
+                public int $found,
+            ) {}
+        }
+
+        /**
+         * What a suggestion samples and what the caller has already declared.
+         */
+        final readonly class SuggestOptions {
+            public const DEFAULT_SAMPLE_ROWS = 1000;
+
+            public function __construct(
+                public int $sampleRows = self::DEFAULT_SAMPLE_ROWS,
+                public ?\HyperCast\NumFormat $format = null,
+                public array $columnFormats = [],
+                public ?\HyperCast\DateOrder $dateOrder = null,
+                public array $columnDateOrders = [],
+            ) {}
+        }
+
+        /**
+         * A suggested plan and the report that says how each column was chosen.
+         */
+        final readonly class Suggestion {
+            public function __construct(
+                public array $plan,
+                public array $report,
+                public bool $truncated,
+            ) {}
+        }
+
+        /**
+         * How a suggestion chose one column.
+         */
+        final readonly class SuggestedColumn {
+            public function __construct(
+                public int $ordinal,
+                public ?string $name,
+                public \HyperTabular\Door $door,
+                public mixed $declared,
+                public ?\HyperCast\NumFormat $format,
+                public array $candidates,
+                public \HyperTabular\SuggestStatus $status,
+                public int $matched,
+                public int $sampled,
+            ) {}
+        }
+
+        /**
+         * A header name two columns have, refused by the strict lookup.
+         */
+        final class AmbiguousColumn extends \InvalidArgumentException {
+            public function __construct(
+                public readonly string $name,
+                public readonly int $first,
+                public readonly int $second,
             ) {}
         }
 

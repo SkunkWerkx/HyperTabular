@@ -9,10 +9,7 @@
 //! a number as Rust does; and that containers that are broken, lying or hostile each come
 //! back as a code.
 
-#[path = "support/packages.rs"]
-mod packages;
-#[path = "support/workbook.rs"]
-mod support;
+use super::{packages, support};
 
 use hypertabular::kernel::abi::{ColumnSpec, Failure};
 use hypertabular::kernel::workbook::iwa::{BROKEN_CHUNK, MISSING_OBJECT, STORAGE_VERSION};
@@ -1514,4 +1511,211 @@ fn throughput() {
         inflated / theirs,
         ROWS as f64 / theirs / 1e6
     );
+}
+
+/// A package with `bad` where `PLACEHOLDER` was: the parts are stored, so the bytes land as they
+/// are, whatever the format's own builder would let a string hold.
+const PLACEHOLDER: &str = "Q1W2E3R4";
+
+fn planted(mut package: Vec<u8>, bad: &[u8; 8]) -> Vec<u8> {
+    let mut found = 0;
+    for at in 0..package.len().saturating_sub(8) {
+        if &package[at..at + 8] == PLACEHOLDER.as_bytes() {
+            package[at..at + 8].copy_from_slice(bad);
+            found += 1;
+        }
+    }
+    assert!(found > 0, "the placeholder is in the package");
+    package
+}
+
+/// One text cell where the placeholder was, and a good one beside it, in each format.
+fn each_format(top: &[&str], bottom: &[&str], bad: &[u8; 8]) -> Vec<(&'static str, Vec<u8>)> {
+    let shape = NumbersShape::default();
+    let row = |cells: &[&str]| -> Vec<NCell> {
+        cells
+            .iter()
+            .map(|&cell| NCell::Text(cell.to_string()))
+            .collect()
+    };
+    let sheets = vec![NSheet {
+        name: "S".to_string(),
+        hidden: false,
+        tables: vec![NTable {
+            name: "T".to_string(),
+            header_rows: 1,
+            rows: vec![row(top), row(bottom)],
+        }],
+    }];
+    let xlsx_row = |cells: &[&str], number: usize| -> String {
+        let cells: String = cells
+            .iter()
+            .map(|cell| format!("<c t=\"inlineStr\"><is><t>{cell}</t></is></c>"))
+            .collect();
+        format!("<row r=\"{number}\">{cells}</row>")
+    };
+    let ods_row = |cells: &[&str]| -> String {
+        let cells: String = cells
+            .iter()
+            .map(|cell| {
+                format!(
+                    "<table:table-cell office:value-type=\"string\"><text:p>{cell}</text:p></table:table-cell>"
+                )
+            })
+            .collect();
+        format!("<table:table-row>{cells}</table:table-row>")
+    };
+    let sheet = format!("{}{}", xlsx_row(top, 1), xlsx_row(bottom, 2));
+    let table = format!(
+        "<table:table table:name=\"S\">{}{}</table:table>",
+        ods_row(top),
+        ods_row(bottom)
+    );
+    vec![
+        (
+            "xlsx",
+            planted(xlsx(&[("S", &sheet)], "", false, false), bad),
+        ),
+        ("ods", planted(ods(&table, false), bad)),
+        ("numbers", planted(numbers(&sheets, &shape), bad)),
+    ]
+}
+
+#[test]
+fn invalid_utf8_in_a_workbook_cell_is_malformed() {
+    let specs = [ColumnSpec::new(0, 18, 0), ColumnSpec::new(1, 18, 0)];
+    let package = each_format(&["a", "b"], &[PLACEHOLDER, "fine"], b"ok\xe9okkkk");
+    assert_eq!(package.len(), 3);
+    for (format, package) in package {
+        for sizing in [Sizing::Stingy, Sizing::Roomy] {
+            let mut harness = Harness::new(&package, sizing);
+            harness.open().unwrap();
+            let sheets = harness.sheets().unwrap();
+            harness.load().unwrap();
+            let read = harness.read(&sheets[0], SheetOptions::default(), &specs, 4);
+            assert!(!read.failed, "{format}, {sizing:?}");
+            assert_eq!(read.rows.len(), 1, "{format}, {sizing:?}");
+            assert_eq!(
+                read.rows[0].1,
+                [
+                    format!("fault 2 @2+1 {:?}", String::from_utf8_lossy(b"ok\xe9okkkk")),
+                    "ok \"fine\"".to_string(),
+                ],
+                "{format}, {sizing:?}"
+            );
+        }
+    }
+    // Through a shared string too, deflated, which is XLSX's own way of holding text.
+    let package = xlsx_around(
+        b"<worksheet><sheetData><row><c t=\"s\"><v>0</v></c></row></sheetData></worksheet>",
+        b"<sst><si><t>\xc3</t></si></sst>",
+        true,
+    );
+    let mut harness = Harness::new(&package, Sizing::Stingy);
+    harness.open().unwrap();
+    let sheets = harness.sheets().unwrap();
+    harness.load().unwrap();
+    let options = SheetOptions::default().with_header(false);
+    let read = harness.read(&sheets[0], options, &specs[..1], 4);
+    assert_eq!(read.rows[0].1[0], format!("fault 2 @0+1 {:?}", "\u{FFFD}"));
+}
+
+#[test]
+fn invalid_utf8_in_a_workbook_header_is_a_failure() {
+    let specs = [ColumnSpec::new(0, 18, 0)];
+    for (format, package) in each_format(&["a", PLACEHOLDER], &["1", "2"], b"\xffokkkkkk") {
+        for sizing in [Sizing::Stingy, Sizing::Roomy] {
+            let mut harness = Harness::new(&package, sizing);
+            harness.open().unwrap();
+            let sheets = harness.sheets().unwrap();
+            harness.load().unwrap();
+            let read = harness.read(&sheets[0], SheetOptions::default(), &specs, 4);
+            assert!(read.failed, "{format}, {sizing:?}");
+            assert_eq!(
+                (read.header, read.rows.len()),
+                (None, 0),
+                "{format}, {sizing:?}"
+            );
+            assert_eq!(
+                harness.last_failure.code,
+                Failure::ENCODING,
+                "{format}, {sizing:?}"
+            );
+            assert_eq!(harness.last_failure.line, 1, "{format}, {sizing:?}");
+            // A sheet opened without a header reads the same cell as a verdict.
+            let options = SheetOptions::default().with_header(false);
+            let two = [ColumnSpec::new(1, 18, 0)];
+            let read = harness.read(&sheets[0], options, &two, 4);
+            assert!(!read.failed, "{format}, {sizing:?}");
+            assert!(
+                read.rows[0].1[0].starts_with("fault 2 @0+1"),
+                "{format}, {sizing:?}"
+            );
+        }
+    }
+    // Judged once the row is whole: a cell a later one overwrites was never the name.
+    let package = xlsx_around(
+        b"<worksheet><sheetData><row>\
+<c r=\"A1\" t=\"inlineStr\"><is><t>a</t></is></c>\
+<c r=\"B1\" t=\"inlineStr\"><is><t>\xff</t></is></c><c r=\"B1\"/>\
+</row></sheetData></worksheet>",
+        b"<sst/>",
+        false,
+    );
+    let mut harness = Harness::new(&package, Sizing::Stingy);
+    harness.open().unwrap();
+    let sheets = harness.sheets().unwrap();
+    harness.load().unwrap();
+    let read = harness.read(&sheets[0], SheetOptions::default(), &specs, 4);
+    assert!(!read.failed);
+    assert_eq!(read.header, Some(vec![b"a".to_vec()]));
+    // Through the Rust binding's error.
+    let package = each_format(&[PLACEHOLDER], &["1"], b"\xffokkkkkk")
+        .remove(0)
+        .1;
+    let book = hypertabular::Workbook::from_vec(package).unwrap();
+    let plan = [hypertabular::Column::text(0)];
+    let error = book
+        .sheet("S", SheetOptions::default(), &plan)
+        .map(|_| ())
+        .unwrap_err();
+    let hypertabular::Error::Structure(failure) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(failure.kind, hypertabular::FailureKind::Encoding);
+    assert_eq!(failure.line, 1);
+}
+
+/// A headerless sheet's width is its first row's, and no name is asked of that row: a cell in it
+/// that isn't text is the verdict a read has for it, in each format.
+#[test]
+fn suggesting_asks_no_name_of_a_headerless_first_row() {
+    use hypertabular::{Column, Door, Error, SuggestOptions, SuggestStatus, Workbook};
+    for (format, package) in each_format(&[PLACEHOLDER, "7"], &["ab", "8"], b"\xffokkkkkk") {
+        let book = Workbook::from_slice(&package).unwrap();
+        let options = SheetOptions::default().with_header(false);
+        // A read goes through it, with the verdict.
+        let mut read = book.sheet(0, options, &[Column::text(0)]).unwrap();
+        assert!(read.read().unwrap().is_some(), "{format}");
+        let found = book
+            .sheet_unbound(0, options)
+            .unwrap()
+            .suggest(&SuggestOptions::new())
+            .unwrap();
+        assert_eq!(found.plan.len(), 2, "{format}");
+        assert_eq!(
+            found.report[0].status,
+            SuggestStatus::Unresolved,
+            "{format}"
+        );
+        assert_eq!(found.report[1].door, Door::I32, "{format}");
+        // Declared a header, it's structural, as a read says.
+        assert!(
+            matches!(
+                book.sheet_unbound(0, SheetOptions::default()),
+                Err(Error::Structure(_))
+            ),
+            "{format}"
+        );
+    }
 }

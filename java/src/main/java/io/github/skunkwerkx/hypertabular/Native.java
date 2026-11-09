@@ -4,6 +4,7 @@ import io.github.skunkwerkx.hypercast.interop.NativePlatform;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -26,6 +27,15 @@ import java.nio.file.StandardCopyOption;
  * pinned or copied on the way across. What an FFM downcall checks of a segment before it
  * passes the address, this does too ({@link #at}): that the segment is native, that its
  * arena is still open, and that it belongs to the calling thread.
+ *
+ * <p>What it can't do is what a downcall does next: hold the segment's arena open until the
+ * call returns, so that a close from another thread is refused meanwhile. Here the call has
+ * only an address, and a shared arena closed mid-call would leave the core reading freed
+ * memory. The reader's own buffers come from confined arenas, which no other thread can close.
+ * A caller's segment is read in place only when the same holds of it ({@link #holdsInPlace}):
+ * the global arena's, an automatic arena's (the reader keeps it reachable), or one confined to
+ * the calling thread. Any other — a shared arena's — is copied into the reader's own memory
+ * when the reader or workbook is opened.
  */
 final class Native {
     private Native() {}
@@ -106,6 +116,66 @@ final class Native {
             long buffers,
             long out);
 
+    private static native int hypertabularDelimitedInitWith(long state, long options);
+
+    private static native int hypertabularDelimitedFillWith(
+            long state,
+            long input,
+            long inputLen,
+            int last,
+            long specs,
+            long columns,
+            long columnCount,
+            long maxRows,
+            long buffers,
+            long out);
+
+    private static native int hypertabularTranscode(
+            int encoding, long input, long inputLen, int last, long out, long cap, long progress);
+
+    private static native int hypertabularFaults(
+            long columns,
+            long columnCount,
+            long rows,
+            long rowWidths,
+            int expectedWidth,
+            int longRows,
+            long cursor,
+            long out,
+            long cap,
+            long written);
+
+    private static native int hypertabularSuggest(
+            long input,
+            long inputLen,
+            long arena,
+            long arenaLen,
+            long cells,
+            long typed,
+            long rows,
+            long columns,
+            long formats,
+            long out);
+
+    private static native int hypertabularWorkbookSheetWith(
+            long state, long container, long containerLen, long part, long partLen, int index, long options, long out);
+
+    private static native int hypertabularWorkbookFillWith(
+            long state,
+            long container,
+            long containerLen,
+            long specs,
+            long columns,
+            long columnCount,
+            long maxRows,
+            long buffers,
+            long out);
+
+    private static native int hypertabularRangeParse(long text, long len, long out);
+
+    private static native int hypertabularBatchCheck(
+            long specs, long columnCount, long batchRows, long bufferBytes, int flags, long out);
+
     private static native int jniNatives();
 
     /**
@@ -180,6 +250,27 @@ final class Native {
     /** Which path reached the core, for the diagnostics; loads nothing. */
     static String backend() {
         return "jni";
+    }
+
+    /** A thread that is never started: a segment it can reach is one any thread can, and close. */
+    private static final Thread STRANGER = new Thread(() -> {});
+
+    private static final MemorySegment.Scope GLOBAL = Arena.global().scope();
+
+    /** An automatic arena's scope, by its kind: freed only once nothing reaches it. */
+    private static final Class<?> AUTOMATIC = Arena.ofAuto().scope().getClass();
+
+    /**
+     * Whether a caller's native segment can be read in place by every call a reader or workbook
+     * makes over it: whether no other thread can free it in the middle of one. A segment confined
+     * to a thread can be closed only by that thread, which is inside the call; the global arena
+     * never closes; an automatic arena's memory lives while the reader, which holds the segment,
+     * does. Anything else, a shared arena's first, has to be copied, as an FFM downcall would
+     * otherwise hold it.
+     */
+    static boolean holdsInPlace(MemorySegment segment) {
+        MemorySegment.Scope scope = segment.scope();
+        return !segment.isAccessibleBy(STRANGER) || scope.equals(GLOBAL) || scope.getClass() == AUTOMATIC;
     }
 
     /** The loaded library's version, packed {@code major << 16 | minor << 8 | patch}. */
@@ -308,5 +399,133 @@ final class Native {
                 maxRows,
                 at(buffers),
                 at(out));
+    }
+
+    static int initWith(MemorySegment state, MemorySegment options) {
+        Library.ensure();
+        return hypertabularDelimitedInitWith(at(state), at(options));
+    }
+
+    static int fillWith(
+            MemorySegment state,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment buffers,
+            MemorySegment out) {
+        Library.ensure();
+        return hypertabularDelimitedFillWith(
+                at(state),
+                at(input),
+                inputLen,
+                last ? 1 : 0,
+                at(specs),
+                at(columns),
+                columnCount,
+                maxRows,
+                at(buffers),
+                at(out));
+    }
+
+    static int transcode(
+            int encoding,
+            MemorySegment input,
+            long inputLen,
+            boolean last,
+            MemorySegment out,
+            long cap,
+            MemorySegment progress) {
+        Library.ensure();
+        return hypertabularTranscode(encoding, at(input), inputLen, last ? 1 : 0, at(out), cap, at(progress));
+    }
+
+    static int faults(
+            MemorySegment columns,
+            long columnCount,
+            long rows,
+            MemorySegment rowWidths,
+            int expectedWidth,
+            int longRows,
+            MemorySegment cursor,
+            MemorySegment out,
+            long cap,
+            MemorySegment written) {
+        Library.ensure();
+        return hypertabularFaults(
+                at(columns),
+                columnCount,
+                rows,
+                at(rowWidths),
+                expectedWidth,
+                longRows,
+                at(cursor),
+                at(out),
+                cap,
+                at(written));
+    }
+
+    static int suggest(
+            MemorySegment input,
+            long inputLen,
+            MemorySegment arena,
+            long arenaLen,
+            MemorySegment cells,
+            MemorySegment typed,
+            long rows,
+            long columns,
+            MemorySegment formats,
+            MemorySegment out) {
+        Library.ensure();
+        return hypertabularSuggest(
+                at(input), inputLen, at(arena), arenaLen, at(cells), at(typed), rows, columns, at(formats), at(out));
+    }
+
+    static int sheetWith(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment part,
+            int index,
+            MemorySegment options,
+            MemorySegment out) {
+        Library.ensure();
+        return hypertabularWorkbookSheetWith(
+                at(state), at(container), container.byteSize(), at(part), part.byteSize(), index, at(options), at(out));
+    }
+
+    static int bookFillWith(
+            MemorySegment state,
+            MemorySegment container,
+            MemorySegment specs,
+            MemorySegment columns,
+            long columnCount,
+            long maxRows,
+            MemorySegment buffers,
+            MemorySegment out) {
+        Library.ensure();
+        return hypertabularWorkbookFillWith(
+                at(state),
+                at(container),
+                container.byteSize(),
+                at(specs),
+                at(columns),
+                columnCount,
+                maxRows,
+                at(buffers),
+                at(out));
+    }
+
+    static int rangeParse(MemorySegment text, long len, MemorySegment out) {
+        Library.ensure();
+        return hypertabularRangeParse(at(text), len, at(out));
+    }
+
+    static int batchCheck(
+            MemorySegment specs, long columnCount, long batchRows, long bufferBytes, int flags, MemorySegment out) {
+        Library.ensure();
+        return hypertabularBatchCheck(at(specs), columnCount, batchRows, bufferBytes, flags, at(out));
     }
 }

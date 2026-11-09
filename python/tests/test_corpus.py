@@ -8,12 +8,15 @@ asynchronously, from an asyncio stream that hands back a few bytes a read.
 
 Every cell is held to the corpus three ways: as the verdict ``column[row]`` gives, as the
 whole-column views (``values``, ``verdicts``, ``faults()``) give it, and — HyperCast being
-the judge — as ``hypercast.cast_*`` gives it for the cell's own text.
+the judge — as ``hypercast.cast_*`` gives it for the cell's own text. Each batch's faults list is
+held to the case's ``problems``, and a case's ``suggest`` to what a suggestion says. A key this
+replay doesn't know fails it: ``test_every_corpus_key_is_read``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import io
 import json
@@ -31,16 +34,26 @@ import pytest
 from hypertabular import (
     CastFailure,
     Column,
+    DateOptions,
     DateOrder,
     Batch,
     DelimitedReader,
     Dialect,
     Door,
+    Encoding,
     ExcelEpoch,
     Fault,
     Header,
+    LongRows,
+    MonthNames,
     NumFormat,
+    Origin,
+    Problem,
+    ShortRows,
     Success,
+    SuggestOptions,
+    SuggestStatus,
+    Suggestion,
     TabularError,
     TabularFailure,
     UnixPrecision,
@@ -73,27 +86,235 @@ _REASON = {
 _EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 
 
+_DATE_FLAGS = {
+    "compact_date": DateOptions.COMPACT_DATE,
+    "space_separator": DateOptions.SPACE_SEPARATOR,
+    "hour_offset": DateOptions.HOUR_OFFSET,
+}
+
+_ENCODINGS = {
+    "windows-1252": Encoding.WINDOWS_1252,
+    "latin-1": Encoding.LATIN_1,
+    "utf-16le": Encoding.UTF_16LE,
+}
+
+# Every key the replays read, by where it is: what isn't here fails `_unknown_keys`, so a key
+# added to the corpus can't be passed over. A cell, a problem and a failure compare whole.
+_CELL_KEYS = {
+    "expect",
+    "value",
+    "text",
+    "seconds",
+    "nanos",
+    "year",
+    "month",
+    "day",
+    "nanos_of_day",
+    "magnitude",
+    "scale",
+    "negative",
+    "fault",
+    "raw",
+    "raw_hex",
+    "detail",
+    "origin",
+}
+_PROBLEM_KEYS = {
+    "row",
+    "line",
+    "plan_column",
+    "source_column",
+    "reason",
+    "fault",
+    "detail",
+    "origin",
+    "expected",
+    "found",
+}
+_FAILURE_KEYS = {"kind", "record", "line", "byte", "expected", "found"}
+_PLAN_KEYS = {"door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"}
+_FORMAT_KEYS = {"decimal_sep", "group_sep", "flags", "currency"}
+_DATE_OPTION_KEYS = {"flags", "pivot", "months"}
+_DELIMITED_KEYS = {
+    "name",
+    "input",
+    "input_hex",
+    "dialect",
+    "plan",
+    "header",
+    "rows",
+    "problems",
+    "failure",
+    "suggest",
+}
+_DIALECT_KEYS = {
+    "separator",
+    "quoting",
+    "has_header",
+    "skip_blank_lines",
+    "skip",
+    "header_row",
+    "short_rows",
+    "long_rows",
+    "tokens",
+    "encoding",
+}
+_SUGGEST_KEYS = {"columns", "truncated", "sample_rows", "format"}
+_SUGGESTED_KEYS = {"door", "param", "status", "matched", "sampled"}
+_WORKBOOK_KEYS = {
+    "name",
+    "file",
+    "format",
+    "epoch",
+    "sheets",
+    "sheet",
+    "options",
+    "plan",
+    "header",
+    "numbers",
+    "rows",
+    "problems",
+    "failure",
+    "note",
+    "suggest",
+}
+_SHEET_OPTION_KEYS = {"has_header", "skip_empty_rows", "range", "skip", "header_row", "tokens"}
+_SHEET_KEYS = {"name", "hidden"}
+
+
+def _unknown_keys(case: dict[str, Any], workbook: bool = False) -> list[str]:
+    """Every key of a case no replay here reads, as a path."""
+    name = case.get("name", "a case with no name")
+    unknown: list[str] = []
+
+    def check(value: Any, path: str, known: set[str]) -> None:
+        if isinstance(value, dict):
+            unknown.extend(f"{path}.{key}" for key in value if key not in known)
+
+    check(case, name, _WORKBOOK_KEYS if workbook else _DELIMITED_KEYS)
+    if workbook:
+        check(case.get("options"), f"{name}.options", _SHEET_OPTION_KEYS)
+        for sheet in case.get("sheets", []):
+            check(sheet, f"{name}.sheets[]", _SHEET_KEYS)
+    else:
+        check(case.get("dialect"), f"{name}.dialect", _DIALECT_KEYS)
+    for column in case.get("plan", []):
+        check(column, f"{name}.plan[]", _PLAN_KEYS)
+        check(column.get("format"), f"{name}.plan[].format", _FORMAT_KEYS)
+        check(column.get("options"), f"{name}.plan[].options", _DATE_OPTION_KEYS)
+    for row in case.get("rows", []):
+        for cell in row:
+            check(cell, f"{name}.rows[][]", _CELL_KEYS)
+    for problem in case.get("problems", []):
+        check(problem, f"{name}.problems[]", _PROBLEM_KEYS)
+    check(case.get("failure"), f"{name}.failure", _FAILURE_KEYS)
+    suggest = case.get("suggest")
+    if suggest is not None:
+        check(suggest, f"{name}.suggest", _SUGGEST_KEYS)
+        check(suggest.get("format"), f"{name}.suggest.format", _FORMAT_KEYS)
+        for column in suggest["columns"]:
+            check(column, f"{name}.suggest.columns[]", _SUGGESTED_KEYS)
+    return unknown
+
+
+def _key_places(value: Any, path: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    """Every object in ``value``, first of each list only."""
+    if isinstance(value, dict):
+        places = [path]
+        for key, inner in value.items():
+            places += _key_places(inner, (*path, key))
+        return places
+    if isinstance(value, list) and value:
+        return _key_places(value[0], (*path, 0))
+    return []
+
+
+def _assert_keys_are_known(cases: list[dict[str, Any]], workbook: bool) -> None:
+    """Nothing in the corpus is passed over, and the check notices a key added anywhere."""
+    assert [path for case in cases for path in _unknown_keys(case, workbook)] == []
+    for case in cases:
+        for place in _key_places(case):
+            edited = json.loads(json.dumps(case))
+            at = edited
+            for step in place:
+                at = at[step]
+            at["junk"] = True
+            unknown = _unknown_keys(edited, workbook)
+            assert len(unknown) == 1 and unknown[0].endswith(".junk"), (place, unknown)
+
+
 def _format_of(entry: dict[str, Any]) -> NumFormat:
+    """The format an entry names, its flags split as HyperCast's constructor takes them: the
+    lenience flags, and the grouping policy above them."""
     fmt = entry.get("format")
     if fmt is None:
         return NumFormat.INVARIANT
-    return NumFormat(fmt["decimal_sep"], fmt["group_sep"], fmt["flags"], fmt.get("currency", ""))
+    return NumFormat(
+        fmt["decimal_sep"],
+        fmt["group_sep"],
+        fmt["flags"] & 0xFF,
+        fmt.get("currency", ""),
+        grouping=fmt["flags"] & ~0xFF,
+    )
+
+
+def _declared_options(column: Column, entry: dict[str, Any]) -> Column:
+    """A plan entry's ``tokens`` and date ``options``."""
+    if "tokens" in entry:
+        column = column.with_tokens(entry["tokens"])
+    options = entry.get("options")
+    if options is not None:
+        flags = 0
+        for name in options["flags"]:
+            flags |= _DATE_FLAGS[name]
+        months = None
+        if "months" in options:
+            months = MonthNames([tuple(month) for month in options["months"]])
+        column = column.with_date_options(DateOptions(flags, options.get("pivot", 0)), months)
+    return column
 
 
 def _column_of(entry: dict[str, Any]) -> Column:
     # A plan entry names its door as HyperCast's corpus names its types, and Column's
-    # factories carry the same names.
+    # factories carry the same names. An entry with no format builds a column given none, so that
+    # the vector says what a column with no format reads.
     door, ordinal = entry["door"], entry["ordinal"]
     factory = getattr(Column, door)
     if door == "unix":
-        return factory(ordinal, UnixPrecision(entry["precision"]))
-    if door == "excel_serial":
-        return factory(ordinal, ExcelEpoch(entry["epoch"]))
-    if door in ("date_ordered", "datetime"):
-        return factory(ordinal, DateOrder(entry["order"]))
+        column = factory(ordinal, UnixPrecision(entry["precision"]))
+    elif door == "excel_serial":
+        column = factory(ordinal, ExcelEpoch(entry["epoch"]))
+    elif door in ("date_ordered", "datetime"):
+        column = factory(ordinal, DateOrder(entry["order"]))
+    else:
+        column = factory(ordinal)
+    # Any door takes a format, as a suggested plan's do: only a number's reads it.
     if "format" in entry:
-        return factory(ordinal, _format_of(entry))
-    return factory(ordinal)
+        column = dataclasses.replace(column, format=_format_of(entry))
+    return _declared_options(column, entry)
+
+
+def _input_of(case: dict[str, Any]) -> bytes:
+    if "input_hex" in case:
+        return bytes.fromhex(case["input_hex"])
+    return case["input"].encode("utf-8")
+
+
+def _dialect_of(entry: dict[str, Any]) -> Dialect:
+    declared = dict(entry)
+    if "short_rows" in declared:
+        declared["short_rows"] = ShortRows[declared["short_rows"].upper()]
+    if "long_rows" in declared:
+        declared["long_rows"] = LongRows[declared["long_rows"].upper()]
+    if "encoding" in declared:
+        declared["encoding"] = _ENCODINGS[declared["encoding"]]
+    return Dialect(**declared)
+
+
+def _plain_verdict(column: Column) -> bool:
+    """Whether HyperCast's plain door says what this column's says, with nothing declared beside
+    it that ``_judge`` doesn't pass."""
+    return column.date_options is None and column.months is None
 
 
 def _time_of(nanos: int) -> tuple[int, int, int, int]:
@@ -149,6 +370,11 @@ def _judge(column: Column, raw: bytes) -> Any:
             return getattr(hypercast, f"cast_{column.door.name.lower()}")(raw, column.format)
 
 
+def _detail_name(fault: Fault) -> str | None:
+    """A fault's detail by the corpus's name for it: the member's, in lower case."""
+    return None if fault.detail is None else fault.detail.name.lower()
+
+
 def _assert_cell(
     label: str,
     column: Column,
@@ -156,6 +382,7 @@ def _assert_cell(
     row: int,
     expected: dict[str, Any],
     judged: bool = True,
+    notes: bool = True,
 ) -> None:
     """Holds one cell of a batch's column to what the corpus says of it — and, when
     ``judged``, to what HyperCast's own package says of its raw text (a typed workbook cell
@@ -188,14 +415,25 @@ def _assert_cell(
             if "fault" in expected:
                 assert [at, span] == expected["fault"], f"{label}: fault span"
                 # The cell's own text is still to hand, for the diagnostic a fault deserves.
-                assert raw.decode("utf-8") == expected["raw"], label
-            if expect == "empty":
+                if "raw_hex" in expected:
+                    assert raw == bytes.fromhex(expected["raw_hex"]), label
+                else:
+                    assert raw.decode("utf-8") == expected["raw"], label
+            # What failed, and where the verdict came from: on the fault, and the batch's own.
+            said = expected.get("detail") if notes else None
+            assert _detail_name(verdict) == said, f"{label}: detail {verdict.detail}"
+            if expect == "empty" and "origin" not in expected:
                 assert raw == b"", label
         case other:  # pragma: no cover - the union is closed
             raise AssertionError(f"{label}: produced no case: {other!r}")
 
-    # HyperCast is the judge: the cell is what its own package makes of the same text.
-    if judged and column.door is not Door.TEXT:
+    # Where the verdict came from, whatever it is.
+    origin = expected.get("origin", "cell") if notes else "cell"
+    assert data.origin(row) is Origin[origin.upper()], f"{label}: {data.origin(row)}"
+
+    # HyperCast is the judge: the cell is what its own package makes of the same text. A cell no
+    # door was asked about is the read's word, not HyperCast's.
+    if judged and column.door is not Door.TEXT and "origin" not in expected:
         assert verdict == _judge(column, raw), f"{label}: disagrees with hypercast on {raw!r}"
 
 
@@ -233,15 +471,51 @@ def _assert_failure(label: str, actual: TabularError | None, case: dict[str, Any
         assert actual is None, f"{label}: {actual}"
         return
     assert actual is not None, f"{label}: no failure raised"
-    # The corpus names a kind as the core does: the member's name, in lower case.
+    # The corpus names a kind as the core does: the member's name, in lower case. The whole
+    # failure is held to it, an absent `expected` and `found` being 0.
     assert actual.kind is TabularFailure[expected["kind"].upper()], label
-    assert (actual.record, actual.line, actual.byte) == (
+    assert (actual.record, actual.line, actual.byte, actual.expected, actual.found) == (
         expected["record"],
         expected["line"],
         expected["byte"],
+        expected.get("expected", 0),
+        expected.get("found", 0),
     ), label
-    if "expected" in expected:
-        assert (actual.expected, actual.found) == (expected["expected"], expected["found"]), label
+
+
+def _problem_json(problem: Problem, base: int) -> dict[str, Any]:
+    """An entry of a batch's faults list in the corpus's shape, its row counted across the read."""
+    entry: dict[str, Any] = {"row": base + problem.row, "line": problem.line}
+    if problem.plan_column is None:
+        assert problem.source_column is None and problem.reason is None
+        assert (problem.offset, problem.length) == (0, 0)
+        entry["expected"], entry["found"] = problem.expected, problem.found
+    else:
+        assert problem.source_column is not None and problem.reason is not None
+        assert (problem.expected, problem.found) == (0, 0)
+        entry["plan_column"] = problem.plan_column
+        entry["source_column"] = problem.source_column
+        entry["reason"] = problem.reason.name.lower()
+        if problem.reason is not CastFailure.EMPTY:
+            entry["fault"] = [problem.offset, problem.length]
+        else:
+            assert (problem.offset, problem.length) == (0, 0)
+    if problem.detail is not None:
+        assert problem.detail_code == int(problem.detail)
+        entry["detail"] = problem.detail.name.lower()
+    if problem.origin is not Origin.CELL:
+        entry["origin"] = problem.origin.name.lower()
+    return entry
+
+
+def _problems_without_notes(problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What a read with notes off lists of ``problems``: no formula with no cached value, and no
+    detail or origin on the rest."""
+    return [
+        {key: value for key, value in problem.items() if key not in ("detail", "origin")}
+        for problem in problems
+        if problem.get("origin") != "uncached"
+    ]
 
 
 def _assert_rows(label: str, plan: list[Column], batch: Batch) -> None:
@@ -258,6 +532,8 @@ def _assert_rows(label: str, plan: list[Column], batch: Batch) -> None:
             assert row.get(index) == batch.get(index, row.index), label
             assert row.get(index) == batch.column(index)[row.index], label
             assert row.raw(index) == batch.raw(index, row.index), label
+            assert row.origin(index) is batch.origin(index, row.index), label
+            assert row.origin(index) is batch.column(index).origin(row.index), label
             if column.door is Door.TEXT:
                 assert row.text(index) == batch.text(index, row.index), label
                 assert row.text(index) == batch.column(index).values[row.index], label
@@ -270,16 +546,31 @@ def _assert_batch(
     seen: int,
     batch: Batch,
     batch_rows: int,
+    problems: list[dict[str, Any]],
+    notes: bool = True,
 ) -> int:
-    """Holds one batch to the corpus rows from ``seen`` on; returns the rows seen after it."""
+    """Holds one batch to the corpus rows from ``seen`` on, and adds its faults list to
+    ``problems``; returns the rows seen after it."""
     assert 1 <= batch.rows <= batch_rows and len(batch) == batch.rows, label
     assert seen + batch.rows <= len(rows), f"{label}: more rows than the corpus lists"
     columns = batch.columns
     assert len(columns) == len(plan), label
+    problems += [_problem_json(problem, seen) for problem in batch.faults()]
+    for row in rows[seen : seen + batch.rows]:
+        assert len(row) == len(plan), f"{label}: a corpus row of another width"
     for index, (column, data) in enumerate(zip(plan, columns)):
         expected = [row[index] for row in rows[seen : seen + batch.rows]]
+        judged = notes and _plain_verdict(column)
         for row, cell in enumerate(expected):
-            _assert_cell(f"{label}, row {seen + row}, column {index}", column, data, row, cell)
+            _assert_cell(
+                f"{label}, row {seen + row}, column {index}",
+                column,
+                data,
+                row,
+                cell,
+                judged=judged,
+                notes=notes,
+            )
             assert batch.raw(index, row) == data.raw(row), label
         _assert_column(f"{label}, column {index}", column, data, expected)
     _assert_rows(label, plan, batch)
@@ -322,20 +613,29 @@ def _replay(
     case: dict[str, Any],
     batch_rows: int,
     open_reader: Callable[[Dialect, list[Column]], DelimitedReader],
+    notes: bool = True,
 ) -> None:
-    dialect = Dialect(**case["dialect"])
+    assert _unknown_keys(case) == [], label
+    dialect = _dialect_of(case["dialect"])
     plan = [_column_of(entry) for entry in case["plan"]]
     rows = case["rows"]
 
-    reader = open_reader(dialect, plan)
+    try:
+        reader = open_reader(dialect, plan)
+    except TabularError as error:
+        # A failure in the header record itself comes from opening, with no rows.
+        assert rows == [] and case["problems"] == [], label
+        _assert_failure(label, error, case)
+        return
     assert reader.header == (None if case["header"] is None else tuple(case["header"])), label
     assert reader.plan == tuple(plan), label
 
     seen = 0
     failure = None
+    problems: list[dict[str, Any]] = []
     try:
         for batch in reader:
-            seen = _assert_batch(label, plan, rows, seen, batch, batch_rows)
+            seen = _assert_batch(label, plan, rows, seen, batch, batch_rows, problems, notes)
     except TabularError as error:
         failure = error
         # A structural failure is final: the same one, again.
@@ -348,6 +648,8 @@ def _replay(
         # Lets go of the file a path was opened as, pass or fail.
         reader.close()
     assert seen == len(rows), f"{label}: {seen} rows, the corpus lists {len(rows)}"
+    wanted = case["problems"] if notes else _problems_without_notes(case["problems"])
+    assert problems == wanted, f"{label}: problems"
     _assert_failure(label, failure, case)
 
 
@@ -378,11 +680,34 @@ def test_the_corpus_is_the_whole_contract():
     assert doors == {door.name.lower() for door in Door}, "a door the corpus never opens"
 
 
+def test_every_corpus_key_is_read():
+    """A key this replay doesn't know fails it, wherever in a case it is."""
+    assert len(CORPUS) == 123
+    _assert_keys_are_known(CORPUS, workbook=False)
+
+
+@pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
+@pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
+def test_corpus_with_notes_off(case: dict[str, Any], batch_rows: int) -> None:
+    """Notes off, every cell reads the same with no detail or origin, and the faults list the
+    same less a formula with no cached value."""
+    data = _input_of(case)
+    _replay(
+        f"{case['name']} (notes off, {batch_rows} rows a batch)",
+        case,
+        batch_rows,
+        lambda dialect, plan: DelimitedReader(
+            data, dialect, plan, batch_rows=batch_rows, notes=False
+        ),
+        notes=False,
+    )
+
+
 @pytest.mark.parametrize("batch_rows", _BATCH_ROWS)
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_from_memory(case: dict[str, Any], batch_rows: int) -> None:
     """Every corpus case reads the same from bytes in memory, at every batch size."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
     _replay(
         f"{case['name']} (memory, {batch_rows} rows a batch)",
         case,
@@ -398,7 +723,7 @@ def test_corpus_from_a_file_object(
     case: dict[str, Any], batch_rows: int, buffer_bytes: int
 ) -> None:
     """Every corpus case reads the same streamed from a file object through a small buffer."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
     _replay(
         f"{case['name']} (stream through {buffer_bytes} bytes, {batch_rows} rows a batch)",
         case,
@@ -414,7 +739,7 @@ def test_corpus_from_a_file_object(
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_from_short_reads(case: dict[str, Any], batch_rows: int, buffer_bytes: int) -> None:
     """Every corpus case reads the same from a stream that returns a few bytes per read."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
     _replay(
         f"{case['name']} (short reads into {buffer_bytes} bytes, {batch_rows} rows a batch)",
         case,
@@ -433,7 +758,7 @@ def test_corpus_from_a_path(
 ) -> None:
     """Every corpus case reads the same from a path on disk."""
     path = tmp_path / "case.csv"
-    path.write_bytes(case["input"].encode("utf-8"))
+    path.write_bytes(_input_of(case))
     _replay(
         f"{case['name']} (file through {buffer_bytes} bytes, {batch_rows} rows a batch)",
         case,
@@ -448,7 +773,7 @@ def test_corpus_from_a_path(
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_header_first_from_memory(case: dict[str, Any], batch_rows: int) -> None:
     """Every corpus case reads the same opened without a plan and bound after the header."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
     _replay(
         f"{case['name']} (header first, memory, {batch_rows} rows a batch)",
         case,
@@ -464,7 +789,7 @@ def test_corpus_header_first_from_memory(case: dict[str, Any], batch_rows: int) 
 @pytest.mark.parametrize("case", CORPUS, ids=lambda case: case["name"])
 def test_corpus_header_first_from_short_reads(case: dict[str, Any], batch_rows: int) -> None:
     """Header first, from a stream that returns a few bytes per read into a tiny buffer."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
     _replay(
         f"{case['name']} (header first, short reads, {batch_rows} rows a batch)",
         case,
@@ -485,7 +810,7 @@ def test_corpus_header_first_from_a_path(
 ) -> None:
     """Header first, from a path on disk."""
     path = tmp_path / "case.csv"
-    path.write_bytes(case["input"].encode("utf-8"))
+    path.write_bytes(_input_of(case))
     _replay(
         f"{case['name']} (header first, file, {batch_rows} rows a batch)",
         case,
@@ -544,26 +869,33 @@ async def _replay_async(
     open_reader: Callable[[Dialect, list[Column] | None], Awaitable[DelimitedReader]],
     header_first: bool,
 ) -> None:
-    dialect = Dialect(**case["dialect"])
+    dialect = _dialect_of(case["dialect"])
     plan = [_column_of(entry) for entry in case["plan"]]
     rows = case["rows"]
 
-    if header_first:
-        reader = await open_reader(dialect, None)
-        _assert_unbound(label, case, reader)
-        reader.bind(plan)
-    else:
-        reader = await open_reader(dialect, plan)
+    try:
+        if header_first:
+            reader = await open_reader(dialect, None)
+            _assert_unbound(label, case, reader)
+            reader.bind(plan)
+        else:
+            reader = await open_reader(dialect, plan)
+    except TabularError as error:
+        # A failure in the header record itself comes from opening, with no rows.
+        assert rows == [] and case["problems"] == [], label
+        _assert_failure(label, error, case)
+        return
     assert reader.header == (None if case["header"] is None else tuple(case["header"])), label
 
     seen = 0
     failure = None
+    problems: list[dict[str, Any]] = []
     try:
         first = await reader.read_async()
         if first is not None:
-            seen = _assert_batch(label, plan, rows, seen, first, batch_rows)
+            seen = _assert_batch(label, plan, rows, seen, first, batch_rows, problems)
             async for batch in reader:
-                seen = _assert_batch(label, plan, rows, seen, batch, batch_rows)
+                seen = _assert_batch(label, plan, rows, seen, batch, batch_rows, problems)
     except TabularError as error:
         failure = error
         with pytest.raises(TabularError) as again:
@@ -572,6 +904,7 @@ async def _replay_async(
     else:
         assert await reader.read_async() is None, label
     assert seen == len(rows), f"{label}: {seen} rows, the corpus lists {len(rows)}"
+    assert problems == case["problems"], f"{label}: problems"
     _assert_failure(label, failure, case)
 
 
@@ -583,7 +916,7 @@ def test_corpus_asynchronously(
     case: dict[str, Any], batch_rows: int, buffer_bytes: int, header_first: bool
 ) -> None:
     """Every corpus case reads the same from an asyncio stream of short reads."""
-    data = case["input"].encode("utf-8")
+    data = _input_of(case)
 
     async def open_reader(dialect: Dialect, plan: list[Column] | None) -> DelimitedReader:
         return await DelimitedReader.open_async(
@@ -599,3 +932,150 @@ def test_corpus_asynchronously(
             header_first,
         )
     )
+
+
+def _suggestion_json(found: Suggestion) -> list[dict[str, Any]]:
+    """A report in the corpus's shape. An ambiguous column's ``param`` is the set of its
+    candidates, which this surface gives as a list, and a resolved number's is left at 0, since a
+    report names the format the plan uses and can't say what ``param`` was."""
+    columns = []
+    for column in found.report:
+        param = 0
+        if column.candidates:
+            for candidate in column.candidates:
+                if isinstance(candidate, DateOrder):
+                    param |= 1 << int(candidate)
+                else:
+                    param |= 2 if candidate.decimal_sep == "." else 4
+        elif column.door in (Door.DATE_ORDERED, Door.DATETIME):
+            assert isinstance(column.declared, DateOrder)
+            param = int(column.declared)
+        columns.append(
+            {
+                "door": column.door.name.lower(),
+                "param": param,
+                "status": column.status.name.lower(),
+                "matched": column.matched,
+                "sampled": column.sampled,
+            }
+        )
+    return columns
+
+
+def _reported(columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What a report should say of the corpus's ``columns``: see ``_suggestion_json``."""
+    made = []
+    for column in columns:
+        column = dict(column)
+        dated = column["door"] in ("date_ordered", "datetime")
+        if column["status"] == "resolved" and not dated:
+            column["param"] = 0
+        made.append(column)
+    return made
+
+
+def _assert_notation(
+    label: str, found: Suggestion, columns: list[dict[str, Any]], declared: NumFormat | None
+) -> None:
+    """Each resolved number is planned and reported in the format the corpus's ``param`` says, or
+    the one declared; anything else reports none."""
+    for reported, planned, want in zip(found.report, found.plan, columns):
+        numeric = reported.door in _NUMERIC_DOORS
+        if reported.status is SuggestStatus.RESOLVED and numeric:
+            notation = NumFormat(",", ".", NumFormat.ALL) if want["param"] == 4 else None
+            wanted = declared or notation or NumFormat.INVARIANT
+            assert reported.format is not None, label
+            assert reported.format.packed == wanted.packed, label
+            assert planned.format.packed == wanted.packed, label
+        else:
+            assert reported.format is None, label
+
+
+_NUMERIC_DOORS = {
+    Door.I8,
+    Door.I16,
+    Door.I32,
+    Door.I64,
+    Door.U8,
+    Door.U16,
+    Door.U32,
+    Door.U64,
+    Door.F32,
+    Door.F64,
+    Door.DECIMAL,
+}
+
+
+def _suggesting() -> list[dict[str, Any]]:
+    return [case for case in CORPUS if "suggest" in case]
+
+
+def test_the_corpus_says_what_to_suggest():
+    """The corpus says what to suggest."""
+    assert len(_suggesting()) >= 12
+
+
+@pytest.mark.parametrize("case", _suggesting(), ids=lambda case: case["name"])
+def test_every_suggestion_is_what_the_corpus_says(case: dict[str, Any], tmp_path: Path) -> None:
+    """A suggestion from bytes and from a file says what the corpus does, and its plan reads back
+    refusing nothing it resolved, from memory and asynchronously."""
+    label = case["name"]
+    expected = case["suggest"]
+    data = _input_of(case)
+    dialect = _dialect_of(case["dialect"])
+    declared = _format_of(expected) if "format" in expected else None
+    asked = SuggestOptions(sample_rows=expected.get("sample_rows", 1000), format=declared)
+    found = DelimitedReader.suggest_bytes(data, dialect, asked)
+    columns = expected["columns"]
+    assert _suggestion_json(found) == _reported(columns), label
+    assert found.truncated is expected["truncated"], label
+    _assert_notation(label, found, columns, declared)
+    path = tmp_path / "case.csv"
+    path.write_bytes(data)
+    assert DelimitedReader.suggest(path, dialect, asked) == found, label
+
+    sample = expected.get("sample_rows", len(case["rows"]))
+
+    def refused(batch: Batch, base: int) -> list[Problem]:
+        return [
+            problem
+            for problem in batch.faults()
+            if problem.plan_column is not None
+            and found.report[problem.plan_column].status is SuggestStatus.RESOLVED
+            and found.report[problem.plan_column].door is not Door.TEXT
+            and problem.row + base < sample
+        ]
+
+    read = 0
+    with DelimitedReader(data, dialect, found.plan) as reader:
+        try:
+            for batch in reader:
+                assert refused(batch, read) == [], label
+                read += batch.rows
+        except TabularError:
+            assert read >= sample, label
+
+    async def main() -> None:
+        reader = await DelimitedReader.open_async(_AsyncDribble(data), dialect, found.plan)
+        read = 0
+        try:
+            async for batch in reader:
+                assert refused(batch, read) == [], label
+                read += batch.rows
+        except TabularError:
+            assert read >= sample, label
+
+    _run(main())
+
+
+def test_suggest_fails_only_where_a_read_of_the_case_fails() -> None:
+    """Every case the corpus has, whether it says what to suggest or not."""
+    planned = failed = 0
+    for case in CORPUS:
+        try:
+            DelimitedReader.suggest_bytes(_input_of(case), _dialect_of(case["dialect"]))
+            planned += 1
+        except TabularError:
+            failed += 1
+            assert "failure" in case, case["name"]
+    assert planned > 80 and failed > 0, (planned, failed)

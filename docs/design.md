@@ -55,11 +55,11 @@ library it becomes:
 | No allocation | The crate never declares the `alloc` crate, so `Vec`, `Box` and `String` do not exist to be named, and there is no allocator for anything to call. The proof is on the artifact: the shared library's import list is compared against an allow-list (`memcpy`, `memset`, `memcmp`/`bcmp`, `memmove`, `abort`, and `getauxval` on arm64 Linux to ask which CPU it is) and a `malloc` on it fails the check. The static library's one object is held to the same list. And a counting allocator watches a whole input go through the core in the test suite: the count is zero, not "zero once warm". |
 | No panic | Every export is declared through one macro (`export!`, `kernel/exports.rs`), which is the only place a symbol can be made and which puts the function under dtolnay's `no-panic`: the link fails, naming the export, if the optimizer leaves any panic path in it. The library's export list is compared whole against the macro's uses, so an export outside the proof is not an export. And the proof is shown a function it has to reject — a canary export that can panic, compiled only for that check — because a proof that has never refused anything has not been shown to check anything. |
 | The same code everywhere | No `cfg(feature)` under `kernel` except the macro's two. What the checks say of the shipped library they say of the core in every build that links it. |
-| Nothing else linked in | The core's dependency closure is `hypercast` and nothing else, asserted. HyperCast holds itself to the same three properties, float parsing included. |
+| Nothing else linked in | The core's dependency closure is `hypercast` and the one crate it depends on, `simdutf8`, and nothing else, asserted. HyperCast holds itself to the same three properties, float parsing included. |
 
 What follows from "no allocation" is the shape of every call: memory is an argument. The
-caller brings the input, a state block (64 bytes for delimited text, about 27 KiB for a
-workbook), the column buffers, and any scratch the core needs, sized by rules the core
+caller brings the input, a state block (80 bytes for delimited text, or the 64 a 1.0 caller of
+`_init` gives, and about 27 KiB for a workbook), the column buffers, and any scratch the core needs, sized by rules the core
 states; where a size cannot be known up front the core says how much it needs and takes
 nothing until it has it. The binding allocates all of it once, in whatever its language
 does best, and the core is crossed once per chunk.
@@ -90,7 +90,7 @@ does best, and the core is crossed once per chunk.
 
 Measured on linux-x64 (a 66 MB, million-row file; six columns cast to `i64`, `f64`, text,
 a timestamp, a boolean and `i32`): about 575 MB/s through the core into the caller's
-buffers, against 900 MB/s for the `csv` crate splitting records without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB).
+buffers, against 900 MB/s for the `csv` crate splitting records without casting anything. Chunk size makes no difference (560 MB/s at 64 KiB). Those are receipts from before 1.0 and predate the quote rule, UTF-8 validation and notes; `docs/delimited.md`, "Numbers", has this release against 1.0.
 
 ### Workbooks in the core
 
@@ -115,8 +115,8 @@ block of plain integers, the output buffer doubling as the dictionary, and every
 either completing or leaving the state as it found it, which is what makes it resumable
 at any byte of input or output. It is held to zlib's deflate at every level, fed a byte
 at a time into a window barely larger than the dictionary, and to thousands of damaged
-streams. On sheet XML, linux-x64: 703 MB/s, against 1,051 for zlib-rs with its run-time
-SIMD and 599 for miniz_oxide. The proof shapes it: the table builder takes the symbol
+streams. On sheet XML, linux-x64, on 2026-10-03, before 1.0 and not run again since: 703
+MB/s, against 1,051 for zlib-rs with its run-time SIMD and 599 for miniz_oxide. The proof shapes it: the table builder takes the symbol
 mapping as a value to match on, not a function pointer, because a call through a pointer
 is one the compiler must assume can unwind, and the proof would refuse the whole inflate.
 The workbook's casts have a constraint of their own: converting a double to a
@@ -173,7 +173,7 @@ doors. A workbook has typed cells: the workbook core reads each into one of thes
 | Variant | Produced by | Meaning |
 | --- | --- | --- |
 | `Empty` | all | no value (missing cell, sparse-row gap) |
-| `Text(&[u8])` | string cells (shared, inline, formula-string); Numbers text and rich-text cells | UTF-8 bytes, untrimmed — the HyperCast doors trim |
+| `Text(&[u8])` | string cells (shared, inline, formula-string); Numbers text and rich-text cells | the part's bytes, untrimmed — the HyperCast doors trim, and judge whether they are UTF-8 |
 | `Number(f64)` | workbook numeric cells with a non-temporal number format; Numbers decimals and currencies | the IEEE double the file stores (the double nearest a Numbers decimal) |
 | `Bool(bool)` | workbook `t="b"` / `office:boolean-value`; Numbers booleans | |
 | `Wall { date, nanos }` | date-formatted Excel serials ≥ 1; ODS `office:date-value`; XLSX `t="d"`; Numbers dates | a zoneless wall-clock instant: calendar date + nanoseconds since midnight |
@@ -198,8 +198,8 @@ exactly as in HyperCast — `NumFormat` is declared per column.
 ### The cast matrix
 
 Every `(Cell, Door)` pair has one defined outcome. `Empty` is `Reason::Empty` for every
-door. `Text` goes through the HyperCast door verbatim (the `Text` door copies bytes; empty
-text is `Empty`). The typed cells:
+door. `Text` goes through the HyperCast door verbatim (the `Text` door gives back the bytes;
+empty text is `Empty`, and bytes that aren't UTF-8 are `Malformed`). The typed cells:
 
 | Cell → Door | integers | reals | Decimal | Bool | Uuid | Timestamp | Unix | Date | Time | Duration | Text |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -255,6 +255,163 @@ per cell saying where the cell's text is, and `Batch::raw` reads it — for any 
 delimited text, and for a workbook's text cells and its typed cells that did not cast.
 `Empty` has no text and no span.
 
+### Problems — the verdicts read across
+
+`hypertabular_faults` lists what went wrong in a batch, into a caller's array of `RawProblem`
+(32 bytes): row, plan column (`u32::MAX` for a row-level entry), reason, detail, origin, span, and
+the expected and found widths. It reads what the fill already wrote, so a read pays nothing for it
+until it's called. It runs by row, then a row's own entry first, then by plan column, and it holds a
+cell a door refused (`Malformed`, `OutOfRange`), a formula with no cached value (`Empty` at origin
+`uncached`), and a row longer than the width under `long_rows = report`. A blank, a declared token,
+padding and a row cut under `truncate` were all asked for or are nothing wrong, so they aren't
+listed.
+
+It's resumable: the caller holds a `u64` cursor, starts it at `0` and calls until a call writes
+fewer entries than its `cap`. A list isn't built anywhere, so it needs no allocation and can't run
+out of room. A cursor past the end, a null it needs, or a report with no `row_widths` is a contract
+error that writes nothing; a `cap` of `0` writes nothing and moves nothing. Both are the choices
+`hypertabular_delimited_fill_with` and `hypertabular_transcode` make. Without notes it still lists
+refused cells and long rows, at `detail` `0`, and leaves out uncached formulas, which nothing kept
+apart from blanks. It can't name a row that isn't in the batch: by default a sheet's row holding
+only uncached formulas is left out as empty (`docs/workbook.md`, "Cells").
+
+Rust's `Batch::faults` is this with `line` and `source_column` added from what the batch holds, and
+each binding offers the same view. `source_column` is a source column from zero: a plan column's
+ordinal, and in a sheet its own column, `A` being `0`, wherever a range starts.
+
+A binding whose batch outlives the read copies it, and the list is still the core's to work out, at
+no cost until it's asked for: Rust's `KeptBatch` takes the copies a binding keeps, in memory it owns
+(each column's `Batch::verdicts` and `Batch::notes`, its `Batch::source_column`, each row's
+`Batch::line`, and `Batch::reported_widths`), and its `faults` is the same list `Batch::faults`
+gave. TypeScript takes its list that way; Python and PHP still reach the crate's own seams for theirs.
+
+### Suggesting a plan — a question, not a read
+
+Nothing is sniffed in a read. Declaring the locale, a number format and a date order, is the
+recommended route, and then nothing needs inferring. `hypertabular_suggest` is a separate call a caller
+makes on a sample it read through `Text`, a starting point for a plan to inspect: the answer is for
+the caller to look at and declare back. No read takes anything from it.
+
+It takes the sample by column, `rows * columns` spans over an input and an arena, with a byte a cell
+saying which were a workbook's typed cells or null for none, and writes one `RawSuggestion` (20 bytes)
+to a column: door, `param`, status, `matched`, `sampled`. A blank cell, one with nothing but white
+space in it, doesn't count. A binding passes a blank span for a cell the read called empty: a declared
+token, padding or an uncached formula. So a column of tokens is a column of blanks.
+
+The first door in this order that takes every other cell wins: bool, `i32`, `i64`, `f64`, an ISO
+date, a date under a declared order, a timestamp, a UUID. Each is HyperCast's own door, so its
+leniences come along: `0` and `1` are bool, as are `TRUE`, `y` and `out`, and `1e3` and `+1` are
+`i32`. The sampled values read back through the plan as the door says. A column of `0` and `1`
+meant as counts is the plain cost of that order, and it's why the plan is there to change.
+
+Two things a door would take aren't taken, because the value holds less than the cell:
+
+| Cell | Goes to | Why |
+|---|---|---|
+| `007`, `-01.5`: a digit after a leading zero, in ASCII or the format's native digits (`٠٠٧`) | no numeric door | The zeros would be lost, and they're how an identifier reads. |
+| `99999999999999999999`: an integer past `i64`, with no exponent | no `f64` | Digits would be lost. `1e30` is a float by what it says; an `E` in a declared symbol (`EUR`) is no exponent. |
+
+The status follows from what the doors took:
+
+| Status | When | Door | `matched` | `param` |
+|---|---|---|---|---|
+| Resolved | One door and one declaration take every cell. | That door. | `sampled` | A date order's code; for a numeric door, the notation it was left with: `NOTATION_COMMA_DECIMAL` where only that reads the column, `NOTATION_COMMA_GROUPS` where only that does and a `,` proved it, and otherwise `0`; `0` for any other door. |
+| Resolved, as text | No door took any cell, and all are valid UTF-8. | Text. | `sampled` | `0` |
+| Ambiguous | Every cell is read, and the sample can't say under which declaration. | The door under the first candidate. | `sampled` | A set of candidates, bit `n` for code `n`. |
+| Unresolved | Nothing but blanks; or a door took some, none took all; or a cell isn't UTF-8. | Text. | The most that any one door but text took, or `0`. | `0` |
+
+There are two ways to be ambiguous. Date orders: `01/02/2026` fits month-day-year and day-month-year,
+so `param` is `12`, until a field over 12 rules one out. A column whose cells all start with a year
+reads alike under all three and is year-month-day.
+
+Notations, per D11: with no format declared, each of two is a Western candidate that has to read the
+whole column through HyperCast's own door, `,` grouping digits in threes (`NOTATION_COMMA_GROUPS`, `2`)
+or `,` as the decimal separator (`NOTATION_COMMA_DECIMAL`, `4`). A column is resolved when exactly one
+reads it, ambiguous when both do and a separator means they'd read different values, and no numeric
+door when neither does: text, resolved if no door took any cell and unresolved if one took some. That's
+the delimiter rule, and each shape falls out of it:
+
+| Shape | Examples | Reads under | Answer, alone |
+|---|---|---|---|
+| Two of one delimiter: thousands | `1,234,567`; `1.234.567` | Commas group; comma decimal | Resolved, `i32`, `param` `2`; resolved, `i32`, `param` `4` |
+| One of each: the left groups, the right is the decimal | `1,234.5`; `1.234,5` | Commas group; comma decimal | Resolved, `f64`, `param` `2`; resolved, `f64`, `param` `4` |
+| One with 1, 2 or more than 3 digits to its right: a decimal | `2.5`, `2.50`, `2.5000`; `2,5`, `2,50`, `2,5000` | Commas group; comma decimal | Resolved, `f64`, `param` `0`; resolved, `f64`, `param` `4` |
+| One with exactly 3 digits to its right | `1,234`; `1.234`, `12.345`, `123.456`, `-1.234` | Both | Ambiguous, `param` `6`, `i32`; ambiguous, `param` `6`, `f64` |
+| The same, where the left is `0`, since no thousands group starts with a zero | `0.125`; `0,125` | Commas group; comma decimal | Resolved, `f64`, `param` `0`; resolved, `f64`, `param` `4` |
+| The same, where the left has more than three digits | `1234.567`; `1234,567` | Commas group; comma decimal | Resolved, `f64`, `param` `0`; resolved, `f64`, `param` `4` |
+| No delimiter | `5` | Both, reading the same value | Resolved, `i32`, `param` `0` |
+| Indian grouping | `1,23,456`, `12,34,567` | Neither: each is Western, and nothing here says the culture | Text, resolved; beside `5`, unresolved with `matched` `1` |
+
+Other cells settle or conflict, because the same candidate has to read them all. `1,234` beside `2,5`
+is a comma decimal, `param` `4`. `1,234` beside `2.5` groups, `param` `2`. `1.234` beside `2.5` is a
+decimal, `param` `0`. `1,234` beside `1.234` is still ambiguous, each read under its own notation. `2,5`
+beside `2.5` is unresolved, with `matched` `1`: no one notation reads both.
+
+The suggestion and a read can't differ on a shape: there's no rule of the suggester's about a group,
+just the door's. HyperCast refuses `0,125` in both grouping policies, so `NumFormat::INVARIANT` declared
+suggests text for it and a read of it is `Malformed`, and only under a comma decimal is it 0.125.
+
+A binding's plan reads a resolved number with no format declared in the notation `param` names, and
+with `param` `0` in `NumFormat::INVARIANT`, flags `95`, and names that format in its report, so a later `1,23,456` is
+`Malformed`, a sample with no `,` in it being no proof that the file has none. Declaring a format per
+column settles the notation and asks nothing about it: that format is all that's read, and a cell it
+refuses is a cell no door took. So Indian grouping declared makes `1,23,456` a number, resolved, with
+`1,234,567` text, the reverse of what the same cells suggest with none declared. A date order is a declaration of its own, and `01/02/2026` stays
+ambiguous under any format. A binding's `SuggestOptions` takes one, for every column or for one: where
+the core's answer offers that order, the binding resolves the column in it, and an order the cells
+rule out, or that the answer doesn't offer, changes nothing. The core isn't told, since it's a choice
+among the answers it gave.
+
+The order and these rules make answers a caller can find surprising, each one held on purpose:
+
+| Cells | Suggested | What it costs if the file means otherwise |
+|---|---|---|
+| `0` and `1` | bool | Counts come back as `false` and `true`: change the plan. |
+| `F`, `No`, `off` | bool, reading `false` | A column of initials or answers that are all lexemes becomes booleans. |
+| `1.234` alone, or prices at three decimals, as text | ambiguous, read as text | The loss is ours: more columns come back as text, with candidates, until a format is declared or a value settles them. A typed number holding the same digits has no such question. |
+| `1,23,456`, Indian grouping, with no format declared | text, resolved; beside `5`, unresolved | The text is all there, and declaring Indian grouping for the column makes it 123456. A third candidate is parked (`docs/delimited.md`). |
+| A workbook's dates | text | A date cell reads `2023-03-15T00:00:00`, which no door here takes. A plan that wants dates names the door. |
+| `007`, an integer past `i64` | text, with no note saying why | None: the text is all there, and `matched` is what a door took. |
+
+A workbook's sample goes through `Text` the same way, so what's judged is a typed cell's canonical
+text. A typed number has no notation: `1.234` in a number cell is that double in every locale, always
+written with `.`, and the plan's format never meets it. So its text can't be judged as a person's, or
+every three-decimal column of a workbook would ask a false question, and under a declared comma decimal
+would read as 1234 and be refused by the door. The sample says which cells were typed, and the core
+counts a typed number for every notation, declared or candidate, by its value through the door's own
+`f64` twin, noting no separator. A column of them resolves numeric under any declaration, with `param`
+`0`, and its plan reads every one. A text cell holding `1.234` is judged as text whatever is beside it:
+beside a typed `1.5` it's still ambiguous, and with a comma decimal declared the column is `f64`,
+reading 1234 and 1.5.
+
+The sheet read already knows which cells are typed, with nothing sniffed. A binding binds a `Uuid` door
+beside each column's `Text` door, with notes on: `Uuid` takes a text cell or nothing, so a typed cell is
+`Malformed` with a detail of `0`, where a text cell it refuses has a detail. Delimited text passes null.
+Booleans come through as themselves and read back through their door. A date is
+`2023-03-15T00:00:00` and a time `15:04:05`, in XLSX, ODS and Numbers alike, which have no door in the
+order above, so a column of them suggests text and reads what the text door says. The cast matrix
+above has what a typed cell is through each door.
+
+Every door is asked of every cell once, so the work is the sample's size times a fixed number of
+doors. A span past what it points into, `rows * columns` past a slice or `rows` past `u32::MAX`, a
+format the doors would refuse, a null it needs or a misaligned pointer is a contract error that
+writes nothing.
+
+Rust's `suggest` reads a path, bytes or a sheet (D10), never a stream, which would lose what it
+sampled. It samples 1,000 rows, at most 4,096 of delimited text or the sheet's own batch size, and always
+at least one, so an explicit 0 is 1. Nobody set the size of the batches a sample is read in, so that
+size is never why a suggestion is refused: the core says the most rows that fit its own budget of
+64 MiB (`sample_rows`, from the same `hypertabular_batch_check`), and the sampler reads as many of
+those batches as the sample takes, with the same answer one batch would give. Go's `SampleRows` of 0 is not set, so 1,000:
+a Go struct can't tell a field left out from an explicit 0. It returns a `Suggestion`: `plan`, one column per source column, `report`, and `truncated`,
+which says rows lie past the sample, so a source of exactly the sample's size isn't. In the plan,
+only a resolved column reads through its door, and the others read as text, which refuses nothing and
+guesses nothing. A failure among the sampled rows is the error a read would raise, and a failure past
+them isn't met or only sets `truncated`. `Sheet::suggest` is its own read from the sheet's first row,
+so it says the same of a bound sheet or one part of the way through, and leaves that sheet where it
+is. The width is the header's or else the first record's, and a sheet's row wider than that isn't
+sampled past it.
+
 ### `Batch` — column-major, crossing-friendly
 
 Per plan column, an array of the door's own values (`i32`, `f64`, `[u8; 16]`,
@@ -273,14 +430,32 @@ points into; `batch.line(row)` the line or the sheet row the row came from.
 
 ### Errors
 
-One type. `Error::Io` is the read; `Error::Separator`, `Error::Plan`, `Error::NoSheet` and
-`Error::NoColumn` are the caller's own declarations, refused before any read, and
-`Error::Unbound` and `Error::AlreadyBound` a plan bound out of turn; `Error::Structure` is data
+One type. `Error::Io` is the read; `Error::Separator`, `Error::Plan`, `Error::NoSheet`,
+`Error::NoColumn`, `Error::AmbiguousColumn` and `Error::Range` are the caller's own declarations,
+refused before any read, and
+`Error::Unbound` and `Error::AlreadyBound` a plan bound out of turn; `Error::ZeroBatchRows`,
+`Error::ZeroBufferBytes` and `Error::BatchTooLarge` are the core's answer on the sizes, and
+`Error::NoMemory` is a size the core allowed and the machine couldn't give. `Error::Structure` is data
 that is broken — a `Failure` with a `kind` (one enum over the delimited and the workbook
 failures, numbered as the core numbers them), and `record`, `line`, `byte`, `expected`,
 `found`. A structural failure is returned once every intact row before it has been
 delivered, and again on every read after: forward-only means there is no recovery point.
 A cell that does not cast is never an error.
+
+The core decides how much memory a batch may ask for, in one function, `kernel/size.rs`'s
+`check_batch`, and no binding holds a size rule of its own. It counts each column's values and
+verdicts, its notes when they're on, each row's width when a read reports long rows, and the cell
+table, in checked `u64` arithmetic, and allocates nothing, so any size can be asked about. A batch
+past 4 GiB is refused, as is a `batch_rows` or a `buffer_bytes` of `0`, at open and again when a plan
+is bound, before anything is allocated. The limit is fixed: there is no way to raise it. 4 GiB holds
+214 million rows of one `i32` column with notes, or 1.8 million rows of 100 text columns. A plan
+that can't be honoured stays the plan's own error, at bind. A delimited read with no plan and no row
+widths has no arrays and a cell table the budget stops, so it reads at any `batch_rows`; a sheet's
+cell table is a whole batch, so a sheet with no plan stops at 2^29 rows. A `buffer_bytes` past the
+longest record a reader buffers (1 GiB) starts there, and the core says so. A row so wide that it
+alone is past the limit is refused at any batch size, in its own words, `RowTooWide`, which names
+the width and the limit. The cap on a plan's ordinals keeps every plan a binding takes today short of
+it, so only a direct ask of `hypertabular_batch_check` meets it.
 
 ## Delimited text
 
@@ -288,24 +463,32 @@ Design lineage: Sep's mask fast paths and packed col-end arrays; zsv/Polars/simd
 carry-less-multiply quote mask; zsv's zero-copy cell delivery with a quoted flag. The
 decisions specific to it are in `docs/delimited.md`.
 
-- **Bytes, not chars.** The input is UTF-8 bytes; the separator is one ASCII byte (tab or
+- **Bytes, not chars.** The input is UTF-8 bytes, a declared encoding having been decoded to
+  them by then; the separator is one ASCII byte (tab or
   `0x20..=0x7E`, never `"`). Non-ASCII bytes can never collide with a structural byte, so
   no narrowing or saturation step is needed — the one place a byte core is strictly
-  simpler than Sep's UTF-16 core.
+  simpler than Sep's UTF-16 core. The scanner doesn't validate them: the text door does, so
+  a bad cell is a `Malformed` verdict and a bad header name a structural failure
+  (`FailureKind::Encoding`). `docs/delimited.md` has how, and what it costs.
 - **One pass, 64 bytes at a time.** Four compare masks per block — separator, `\n`, `\r`,
-  `"` — from NEON, AVX2, SSE2, or a SWAR fallback. Quote parity is a prefix-XOR of the
-  quote mask (PMULL on aarch64, PCLMULQDQ on x86-64, six shift-XOR rounds otherwise)
-  carried across blocks in one bit. Structural bits are `(sep | lf | cr) & !inside_quotes`;
-  a CR immediately followed by LF is one row ending, carried across the block edge in a
-  second bit. The walker pops bits with `trailing_zeros` and `x & (x - 1)` and writes cell
-  ends into a packed `u32` array with Sep's `[row start, end₀, end₁, …]` layout, plus a
-  per-cell quote count from a popcount of the quote mask between ends — that count is the
-  whole "does this cell need unescaping" decision.
-- **Quoting is parity, and only parity.** A `"` toggles; `""` toggles twice. A cell whose
-  first and last bytes are quotes with exactly two quotes is delivered as the inner slice,
-  zero-copy. A cell that starts with a quote and holds more is unescaped once, at row end,
-  into the caller's arena. Anything else is delivered raw, and the HyperCast door
-  will say `Malformed` at the exact byte. `quoting: false` turns the quote class off.
+  `"` — from NEON, AVX2, SSE2, or a SWAR fallback. A prefix-XOR of the quote mask (PMULL on
+  aarch64, PCLMULQDQ on x86-64, six shift-XOR rounds otherwise) says which bytes quoted cells
+  hide, and an open cell carries its state across blocks. Structural bits are
+  `(sep | lf | cr) & !hidden`; a CR immediately followed by LF is one row ending, carried
+  across the block edge in a second bit. The walker pops bits with `trailing_zeros` and
+  `x & (x - 1)` and writes cell ends into a packed `u32` array with Sep's `[row start, end₀,
+  end₁, …]` layout, plus a per-cell quote count from a popcount of the quote mask between
+  ends — that count is the whole "does this cell need unescaping" decision.
+- **A quote opens a cell only as its first byte.** Inside, `""` is a literal quote and a lone
+  `"` closes it; after that, and in a cell that never opened, quotes are ordinary bytes until
+  a separator or a line ending. So a stray quote can't hide a separator or a row. Parity alone
+  gives that answer for a well-formed block, and a few bit operations check that it does; a
+  block with a stray quote walks its cells in order. Boundaries are all this decides. A cell
+  whose first and last bytes are quotes with exactly two quotes is delivered as the inner
+  slice, zero-copy. A cell that starts with a quote and holds more is unescaped once, at row
+  end, into the caller's arena, keeping any lone quote. Anything else is delivered raw, and
+  the HyperCast door will say `Malformed` at the exact byte. `quoting: false` turns the quote
+  class off.
 - **Buffer model.** A slice source scans in place with no copy. A `Read` source owns one
   growable buffer; the unfinished row is moved to the front and re-scanned from its start
   (a row start is always a clean scanner state), so nothing is rebased. Rows longer than
@@ -381,17 +564,24 @@ reading of the format and benchmarked against it. The decisions specific to it a
 
 ## FFI shape
 
-Fourteen exports, every one declared through the one macro in `kernel/exports.rs`, over
+Twenty-three exports, every one declared through the one macro in `kernel/exports.rs`, over
 the `#[repr(C)]` shapes in `kernel/abi.rs`:
 
 - `hypertabular_version`
-- `hypertabular_delimited_state_size`, `_init`, `_header`, `_fill`, `_unescape`
+- `hypertabular_delimited_state_size`, `_init`, `_init_with`, `_header`, `_fill`, `_fill_with`,
+  `_unescape`
+- `hypertabular_transcode`
 - `hypertabular_workbook_state_size`, `_open`, `_sheets`, `_strings`, `_styles`, `_sheet`,
-  `_header`, `_fill`
+  `_sheet_with`, `_header`, `_fill`, `_fill_with`
+- `hypertabular_range_parse`
+- `hypertabular_faults`
+- `hypertabular_suggest`
+- `hypertabular_batch_check`
 
 Return codes: `0` done; `-1` a contract violation (a caller bug); `-2` a structural
 failure, described in the result; `-3`, `-4` and `-5` an arena, a cell table or a window
-too small, with the size that would do. For delimited text nothing was consumed and the
+too small, with the size that would do; `-6` sizes `hypertabular_batch_check` refuses, with the bytes,
+the limit and the reason in its `RawBatchCheck`. For delimited text nothing was consumed and the
 call is made again from the same input; for a workbook the read stopped where it was and
 the call resumes once the buffer has been grown with its contents kept.
 
@@ -401,18 +591,35 @@ that can panic, is compiled only for the proof's negative control and is in no s
 library.) The C header, `include/hypertabular.h`, is generated from those exports and the
 types they take by cbindgen, with every layout pinned by an assert and carried as a `*_SIZE`
 constant; `.github/scripts/check_exports.py` holds every binding that calls the C ABI to
-exactly these fourteen.
+exactly these twenty-three.
+
+The `_with` exports came after 1.0, beside what they extend, whose layouts don't move: a 1.0
+caller's 64-byte delimited state is all the core reads or writes of a block from `_init`, and a 1.0
+fill still masks a format's flags to the low 8 bits. What a door answers isn't part of that promise:
+it's HyperCast's, and a 1.0 export's answer on `12,34` and `0,125` moved with it, from 1234 and 125 to
+`Malformed`. Their structs carry their size first, and a size the core doesn't read is a contract violation before
+anything is written, so a later core can tell which caller it has.
 
 ### The bindings, side by side
 
 Every binding mirrors the Rust API — one `Batch` from `read()`, a per-cell getter, `line`,
 `raw`, `Workbook`/`Sheet` — in its own language's grain: C#, Java, Go, Swift, Python, Ruby,
 PHP, TypeScript, R and C++ (`include/hypertabular.hpp`), with C itself driving the exports
-directly. Three things differ on purpose.
+directly. Four things differ on purpose.
+
+**A size of 0 in Go's `SheetOptions`.** A Go struct can't tell a field set to 0 from one left out,
+so `SheetOptions{BatchRows: 0}` is the default 4,096, as `SuggestOptions{SampleRows: 0}` is the default
+1,000. The `BatchRows(0)` option can tell, and the core refuses it, as it refuses an explicit 0 in every
+other binding. A sample of 0 is one row everywhere else.
 
 **How long a batch lives.** C#, Java, Go, Swift and C++ hand out a batch as a view of the
 reader's buffers, valid until the next `read()`: no copy per batch, and a language that can
-say "valid until" says it. Python, Ruby, PHP, TypeScript and R copy what the core wrote into
+say "valid until" says it. A batch that outlives its reader never reads freed memory where the
+language can prevent it. Closing a C#, Java or Go reader ends its batch, which then has no rows. A
+C# batch whose reader is merely forgotten, a Go batch and a Swift batch, whose reader has no close,
+hold what they point into and stay readable. A Java cell in a workbook closed under an open sheet
+refuses, through the closed segment. A C++ batch is a view like any other in C++, and must not
+outlive its reader or sheet. Python, Ruby, PHP, TypeScript and R copy what the core wrote into
 the batch as it is made, so a batch outlives the reader's next read: a garbage-collected
 dynamic language has no way to hold a caller to "until the next read", and `list(reader)` is
 the first thing anyone writes.
@@ -463,6 +670,26 @@ first in every binding, and `generated-a.ods` is the case that fails without it.
 | R | a plan column named by its header (`col_i32("id")`) | `plan = NULL` | — (`as.data.frame`) | — | — |
 | C++ | `require` / `ordinal` | overloads | range-`for` over `Batch`, `for_each_row` | `text` (`std::string_view`) | — |
 
+A header lookup comes in two kinds, strict and optional, written in that order above. A header can
+name a column twice, since names are kept exactly as the source wrote them. Rust's strict `require`
+refuses such a name with `Error::AmbiguousColumn`, Go's `Ordinal` and `OrdinalBytes` with
+`*AmbiguousColumnError`, C++'s `require` with `ErrorKind::ambiguous_column`, C#'s `Ordinal` with
+`DuplicateColumnException`, Java's `ordinal` with `AmbiguousColumnException`, Swift's `ordinal(of:)`
+with `AmbiguousColumn`, Python's `ordinal` with `AmbiguousColumn`, a `ValueError`, Ruby's `ordinal`
+with `AmbiguousColumn`, an `ArgumentError` (its block answers a missing name only, never a duplicate),
+PHP's `ordinal` with `AmbiguousColumn`, an `InvalidArgumentException`, TypeScript's `require` with an
+outcome whose error is `'ambiguousColumn'`, and R's plan column named by its header with an R error,
+because a plan built from names mustn't silently read the wrong column. Each names the positions,
+counted as the binding's plan counts: `the header names two columns "id", at positions 0 and 2: say
+which by position` in every binding but R, whose words are its own and count from 1, naming every
+column that holds the name (`plan column 1 names its source "id", which the header holds at
+columns 1 and 3: name it by position`).
+The optional `ordinal` in Rust, C++ and TypeScript, `Find` and `FindBytes` in Go,
+`TryOrdinal` in C#, `findOrdinal` in Java, `firstIndex(of:)` in Swift, `get` in Python, `find_ordinal`
+in Ruby and `find` in PHP keep the first match: they can't carry an error, and their caller asked for
+the first. R has no optional lookup. A plan by position reads either column. 1.0's strict lookups took
+the first match; the refusal is a change of behaviour, and the CHANGELOG says so.
+
 A dash is a decision, not a gap. Swift, Python, Ruby, PHP, TypeScript and R strings are
 their own allocations, and their text accessors already hand out the native string or a
 byte view. R reads a whole batch as columns, so a row view would be a data frame row, which
@@ -472,6 +699,39 @@ blocking read is the idiom. Ruby's IO reads yield under a Fiber scheduler alread
 no event loop, every TypeScript call is synchronous, and C++ reads from a source function
 the caller can block in. Where there is async, the core still never waits: only the binding's refill is
 awaited, and each one counts its bytes as they land, so a cancelled read loses nothing.
+
+**A call back in.** A caller's stream, source or callback runs in the middle of a read, and may
+call back into the same reader or sheet. In Rust a reader owns its source, which can't reach the
+reader but through a `RefCell`, whose own borrow check refuses it. Every other binding refuses it in
+its own idiom, and the outer call goes on whole: C#'s `InvalidOperationException`, Java's
+`IllegalStateException`, Go's `ErrBusy`, Swift's `PlanError.busy`, C++'s `ErrorKind::busy`,
+Python's and Ruby's `RuntimeError`, PHP's `LogicException`, TypeScript's `busy` error and an R
+error, each saying the reader or sheet is in the middle of a read or a call. A close from there
+differs: Go, Ruby, PHP and TypeScript refuse it, as a read; C#'s `Dispose` disposes at once, since
+.NET's `Dispose` mustn't throw, Java's `close()` is done when the read ends, so try-with-resources
+still closes, and Python's closes, and each of those three ends the read in hand with an error and
+no further batch; a C++ reader or sheet destroyed or moved from there ends the program.
+
+**A view past the next read.** Where a batch is a view, walking on with its rows or its faults past
+the next read is a caller's bug that each binding stops, rather than answer for the next batch's
+cells: C# throws `InvalidOperationException` and Java `ConcurrentModificationException`, Go panics,
+Swift stops with a precondition failure (a kept `Row` or slice of rows too), and C++ calls
+`std::abort()`. Rust refuses it at compile time. The batch itself, in C#, Java, Go and Swift, is the
+reader's one batch, so one kept past a read shows the rows just read; a C++ batch mustn't be used
+then. Python, Ruby, PHP, TypeScript and R hand out copies, which a read doesn't touch.
+
+**A source that raises.** A broken record is final in every binding. An I/O error from the
+source isn't, across them, since I/O is the binding's own: in Rust and Go it's final, every
+later read failing the same way; in Ruby it's final, every later read raising `RuntimeError`
+naming it, since Ruby can't tell an IO's own error from an exception that landed in its read (a
+`Timeout`, `Thread#raise`, Ctrl-C) and may have taken bytes Ruby had already read with it; and
+so it is through Python's `DelimitedReader.open(path)`, whose file Rust reads; there a
+`KeyboardInterrupt` from a signal that cut the read short isn't final, as CPython's own reads
+raise it. In C#, Java, Swift, PHP (a stream's, and the file `open()` opens through PHP's own
+streams) and through Python's stream objects it goes to the caller and isn't final: the reader
+stays where it was, and the next read asks the source again. What a stream hands over that can't
+be read (more than was asked for, or not bytes) is final in Python, since it is gone from the
+stream.
 
 **A whole column, as the core wrote it.** Rust lends every door but text as a typed slice,
 and Go every door, converting its three date-time doors once per batch. C# lends the
@@ -487,8 +747,8 @@ Python, Ruby, PHP, TypeScript and R copy a column into the batch, as their own v
 `hypercast_verdict` data frame in R).
 
 Each binding also replays `corpus/workbook.json` with every buffer a workbook call works in
-starting at one element (C#, Java, Go, Swift, Ruby, PHP, R and C++ behind a test-only
-switch; Python and TypeScript read through the Rust `Sheet`, whose buffers are `Vec`s grown
+starting at one element (C#, Java, Go, Swift, Ruby, R and C++ behind a test-only
+switch; Python, PHP and TypeScript read through the Rust `Sheet`, whose buffers are `Vec`s grown
 by `resize`), so the grow-and-keep path above runs mid-part thousands of times against the
 corpus.
 
@@ -498,7 +758,9 @@ corpus.
   [`prior-art-tabular-parsers.md` §12](prior-art-tabular-parsers.md#12-xls-biff8-read-only));
   the CONTINUE-aware string cursor is the one tricky piece. It waits on a decision
   that has not been taken.
-- **Parallel chunked scanning.** The scanner is sequential by construction (quote parity
-  is a global carry). Polars' two-state chunk analysis is the cheapest known way to
-  parallelise on top of the same mask code; it is a later round, not a design constraint.
+- **Parallel chunked scanning.** The scanner is sequential by construction: whether a block
+  starts inside quotes depends on where the cells before it began, not only on how many quotes
+  came before, so Polars' two-state chunk analysis no longer applies as it stands. A chunk
+  scanner has to start each chunk at a known row boundary, or validate its guess against the
+  walker's rules. It is a later round, not a design constraint.
 - **Writing.** Out of scope for this version, as stated up front.

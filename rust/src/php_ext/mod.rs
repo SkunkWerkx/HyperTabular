@@ -2,14 +2,16 @@
 //! same native-extension pattern as the Python (PyO3) and Ruby (Magnus) bindings, and as
 //! HyperCast's own PHP extension, which judges every cell. The whole `HyperTabular\` API is
 //! defined here, 1.0's userland classes rebuilt with the same names, signatures, defaults and
-//! messages over the kernel; the Composer package ships no PHP.
+//! messages over the crate's Rust API (`crate::DelimitedReader`, `crate::Workbook`, `crate::Sheet`),
+//! which owns every buffer and every rule; the Composer package ships no PHP.
 //!
 //! Three kinds of class. The readers and what they hand out — `DelimitedReader`, `Workbook`,
 //! `Sheet`, `Batch`, `Row`, `RowIterator`, `Header` — hold Rust state and are `#[php_class]`es,
-//! as are `Tabular` and the test hook `Scratch`. `Dialect`, `Column`, `SheetInfo`,
-//! `SheetOptions` and `TabularException` are plain values with public readonly promoted
-//! properties, as 1.0 declared them, so they are registered as plain PHP classes (`values.rs`,
-//! `classes.rs`). `Door`, `TabularFailure` and `WorkbookFormat` are int-backed enums.
+//! as is `Tabular`. `Dialect`, `Column`, `SheetInfo`, `SheetOptions`, `TabularException`, `Range`,
+//! `Problem`, `SuggestOptions`, `Suggestion`, `SuggestedColumn` and `AmbiguousColumn` are plain
+//! values with public readonly promoted properties, so they are registered as plain PHP classes
+//! (`values.rs`, `results.rs`, `classes.rs`). `Door`, `TabularFailure`, `WorkbookFormat`,
+//! `ShortRows`, `LongRows`, `Encoding`, `Origin` and `SuggestStatus` are int-backed enums.
 //!
 //! Every verdict is HyperCast's own object, made through HyperCast's PHP API at runtime
 //! (`hypercast.rs`): the extensions load in either order and are released apart.
@@ -25,6 +27,7 @@ use ext_php_rs::types::Zval;
 mod args;
 mod batch;
 mod classes;
+mod convert;
 mod delimited;
 mod enums;
 mod errors;
@@ -32,6 +35,7 @@ mod header;
 mod hypercast;
 mod plan;
 mod registration;
+mod results;
 mod streams;
 mod tabular;
 mod values;
@@ -146,8 +150,12 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .enumeration::<enums::Door>()
         .enumeration::<enums::TabularFailure>()
         .enumeration::<enums::WorkbookFormat>()
+        .enumeration::<enums::ShortRows>()
+        .enumeration::<enums::LongRows>()
+        .enumeration::<enums::Encoding>()
+        .enumeration::<enums::Origin>()
+        .enumeration::<enums::SuggestStatus>()
         .class::<tabular::Tabular>()
-        .class::<tabular::Scratch>()
         .class::<header::Header>()
         .class::<batch::Batch>()
         .class::<batch::Row>()

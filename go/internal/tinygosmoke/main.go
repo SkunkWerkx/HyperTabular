@@ -5,11 +5,12 @@
 // hyper-build-wasm.yml fails the run on any FAIL or a missing DONE, which is also what a
 // panic part-way through looks like.
 //
-// Every export crosses at least once: the version, the delimited reader's five (unescape by
-// a doubled quote), and the workbook's eight, through an XLSX written here in memory with
-// archive/zip — deflated, so the core's inflate runs too, and with shared strings and a
-// styles part, so opening it reads both. A browser holds bytes, not paths, so everything is
-// read from memory, and a cell's fault and a torn file's error cross as well.
+// Every export a read takes crosses at least once: the version, the delimited reader's, the
+// transcoder, the suggester and a batch's faults (unescape by a doubled quote), and the
+// workbook's and the range parser, through an XLSX written here in memory with archive/zip — deflated, so the core's
+// inflate runs too, and with shared strings and a styles part, so opening it reads both. A
+// browser holds bytes, not paths, so everything is read from memory, and a cell's fault and a
+// torn file's error cross as well.
 //
 // The expected core version comes from rust/Cargo.toml at build time
 // (`-ldflags "-X main.wantVersion=..."`), so the page proves the core compiled in is the one
@@ -112,6 +113,45 @@ func main() {
 		check(reader.Close() == nil, "delimited close")
 	}
 
+	// A read with notes off.
+	plain, err := hypertabular.NewDelimitedReaderBytes(csv, hypertabular.CSV, []hypertabular.Column{hypertabular.Text(1)},
+		hypertabular.Notes(false))
+	check(err == nil, "a reader with notes off")
+	if err == nil {
+		batch, err := plain.Read()
+		check(err == nil && string(batch.Text(0)[1]) == "bob" && batch.Origin(0, 1) == hypertabular.OriginCell, "a read with notes off")
+	}
+
+	// Declared: a skipped line, a token, a short row, latin-1, and what a batch says of them.
+	declared := hypertabular.CSV
+	declared.Skip = 1
+	declared.ShortRows = hypertabular.ShortRowsPad
+	declared.Encoding = hypertabular.Latin1
+	declared.Tokens = hypertabular.NewTokens("NA")
+	coded, err := hypertabular.NewDelimitedReaderBytes([]byte("a title\nn\xe9,v\nx,NA\ny\nz,12q\n"), declared, []hypertabular.Column{
+		hypertabular.Text(0), hypertabular.I32(1, hypercast.Invariant),
+	})
+	check(err == nil, "a reader that declares its dialect")
+	if err == nil {
+		check(fmt.Sprint(coded.Header()) == "[n\u00e9 v]", "a decoded header")
+		batch, err := coded.Read()
+		check(err == nil && batch.Rows() == 3, "a declared read")
+		if err == nil {
+			check(batch.Origin(1, 0) == hypertabular.OriginToken && batch.Origin(1, 1) == hypertabular.OriginPadded, "a cell's origin")
+			check(batch.Detail(1, 2).String() == "unexpected_character", "a cell's detail")
+			listed := 0
+			for problem := range batch.Faults() {
+				listed++
+				check(problem.Row == 2 && problem.SourceColumn == 1 && problem.Offset == 2, "a batch's fault")
+			}
+			check(listed == 1, "a batch's faults")
+		}
+	}
+
+	found, err := hypertabular.SuggestDelimitedBytes([]byte("id,name\n7,bob\n"), hypertabular.CSV, hypertabular.SuggestOptions{})
+	check(err == nil && len(found.Plan) == 2 && found.Report[1].Door == hypertabular.DoorText && found.Report[1].Status == hypertabular.SuggestResolved,
+		"a suggested plan")
+
 	torn, err := hypertabular.NewDelimitedReaderBytes([]byte("a,b\n1,\"open"), hypertabular.CSV,
 		[]hypertabular.Column{hypertabular.Text(0)})
 	if err == nil {
@@ -145,6 +185,29 @@ func main() {
 			}
 			_, err = sheet.Read()
 			check(err == io.EOF, "sheet end")
+		}
+
+		// A sheet with notes off, and one that declares a range.
+		plainSheet, err := book.Sheet(0, hypertabular.DefaultSheetOptions, []hypertabular.Column{hypertabular.Text(1)}, hypertabular.Notes(false))
+		check(err == nil, "a sheet with notes off")
+		if err == nil {
+			batch, err := plainSheet.Read()
+			check(err == nil && string(batch.Text(0)[0]) == "bob, jr", "a read of a sheet with notes off")
+		}
+		cut, err := hypertabular.ParseRange("B1:C2")
+		check(err == nil && cut.FirstColumn() == 2 && cut.LastRow() == 2, "a range")
+		_, err = hypertabular.ParseRange("c2:b1")
+		check(err != nil, "what is not a range")
+		options := hypertabular.DefaultSheetOptions
+		options.Range = cut
+		ranged, err := book.Sheet(0, options, []hypertabular.Column{hypertabular.Text(0)})
+		check(err == nil, "a sheet read through a range")
+		if err == nil {
+			check(fmt.Sprint(ranged.Header()) == "[name day]", "a range's header")
+			batch, err := ranged.Read()
+			check(err == nil && string(batch.Text(0)[0]) == "bob, jr", "a range's first column")
+			suggested, err := ranged.Suggest(hypertabular.SuggestOptions{})
+			check(err == nil && len(suggested.Plan) == 2 && *suggested.Report[0].Name == "name", "a sheet's suggestion")
 		}
 	}
 

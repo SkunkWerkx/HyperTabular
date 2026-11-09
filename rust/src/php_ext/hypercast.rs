@@ -21,7 +21,8 @@ use ext_php_rs::types::Zval;
 use ext_php_rs::zend::ClassEntry;
 
 use super::classes::{
-    bool_zval, bytes_zval, call, call_known, int_zval, new_object, object_of, object_zval,
+    bool_zval, bytes_zval, call, call_known, int_zval, new_named, new_object, object_of,
+    object_zval, read_own,
 };
 use super::errors::{pending, runtime};
 
@@ -233,6 +234,12 @@ pub(crate) fn invariant_format() -> PhpResult<Zval> {
 /// `$format->packed()`: the core's 92-byte size-tagged `RawNumFormat`, as HyperCast writes it
 /// for its own doors.
 pub(crate) fn packed_format(format: &Zval) -> PhpResult<hypercast::RawNumFormat> {
+    // A method is called only on what is one: anything else isn't a format to pack.
+    if !super::args::instance_of(format, b"HyperCast\\NumFormat") {
+        return Err(super::errors::invalid_argument(
+            "A numeric format must be a HyperCast\\NumFormat",
+        ));
+    }
     let packed = call(Some(format), "packed", &mut [])?;
     let bytes: [u8; 92] = packed
         .zend_str()
@@ -251,13 +258,49 @@ pub(crate) fn excel_epoch(code: u32) -> PhpResult<Zval> {
     )
 }
 
+/// `new DetailedFault(CastFailure::from($reason), $offset, $length, $code)`.
+pub(crate) fn detailed_fault(reason: u32, offset: u32, length: u32, code: u32) -> PhpResult<Zval> {
+    class("HyperCast\\DetailedFault")?;
+    let reason = hypercast_enum("CastFailure", reason)?;
+    new_named(
+        "HyperCast\\DetailedFault",
+        &mut [
+            reason,
+            int_zval(i64::from(offset)),
+            int_zval(i64::from(length)),
+            int_zval(i64::from(code)),
+        ],
+    )
+}
+
+/// `\HyperCast\<name>::from($code)`.
+pub(crate) fn hypercast_enum(name: &str, code: u32) -> PhpResult<Zval> {
+    let class_name = format!("HyperCast\\{name}");
+    class(&class_name)?;
+    call(
+        None,
+        &format!("{class_name}::from"),
+        &mut [int_zval(i64::from(code))],
+    )
+}
+
+/// The notation HyperTabular's suggest calls the comma decimal, HyperCast's own object:
+/// `new NumFormat(',', '.', NumFormat::ALL)`.
+pub(crate) fn comma_decimal_format() -> PhpResult<Zval> {
+    let all = call(
+        None,
+        "constant",
+        &mut [bytes_zval(b"HyperCast\\NumFormat::ALL")],
+    )?;
+    new_named(
+        "HyperCast\\NumFormat",
+        &mut [bytes_zval(b","), bytes_zval(b"."), all],
+    )
+}
+
 /// The backing value of one of HyperCast's enum cases (or this binding's own).
 pub(crate) fn enum_value(case: &Zval) -> Option<i64> {
-    let object = case.object()?;
     // Read for reading (`zend_read_property`), in the case's own scope: `get_property` reads for
     // writing, which an enum's readonly `value` refuses.
-    let scope = ptr::from_ref(object.get_class_entry())
-        .cast_mut()
-        .cast::<zend_class_entry>();
-    super::classes::read(scope, case, "value").ok()?.long()
+    read_own(case, "value").ok()?.long()
 }

@@ -45,6 +45,8 @@ package hypertabular
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"unsafe"
@@ -66,26 +68,56 @@ const errGuestMemory = -101
 
 // The fixed block at the start of every instance's own memory, at offsets from its start:
 // the out-shape a call reports through (a Filled or an Opened, 64 bytes each), the Buffers
-// block (fourteen 32-bit words on wasm32), the dialect, the delimited state and the copy of
-// it nativeFill restores when it re-reads a batch.
+// or BuffersWith block, the declaration a state is made from (a RawDialect, a
+// RawDelimitedOptions or a RawSheetOptions), the delimited state and the copy of it nativeFill
+// restores when it re-reads a batch.
 const (
 	fixedOut      = 0
 	fixedBuffers  = 64
-	fixedDialect  = 120
-	fixedState    = 128
-	fixedSnapshot = 192
-	fixedSize     = 256
+	fixedDialect  = fixedBuffers + buffersWithSize
+	fixedState    = fixedDialect + 40
+	fixedSnapshot = fixedState + stateRoom
+	fixedSize     = fixedSnapshot + stateRoom
 )
 
-// buffersSize is the core's Buffers block on wasm32: a pointer and a length for each of its
-// seven buffers.
-const buffersSize = 14 * 4
+// The shapes that cross as bytes, with wasm32's 4-byte pointers: each is written field by field,
+// and those that carry their size carry these.
+const (
+	// buffersSize is the core's Buffers block: a pointer and a length for each of its seven
+	// buffers.
+	buffersSize = 14 * 4
+	// buffersWithSize is a BuffersWith: its size word, those seven, the tokens and row_widths.
+	buffersWithSize = 18 * 4
+	// specWithSize is a ColumnSpecWith: 120 bytes, then two pointers each with its length.
+	specWithSize = 120 + 4*4
+	// bufferWithSize is a ColumnBufferWith.
+	bufferWithSize = 4 * 4
+	// delimitedOptionsSize and sheetOptionsSize are a RawDelimitedOptions and a RawSheetOptions.
+	delimitedOptionsSize = 24
+	sheetOptionsSize     = 36
+	// problemSize, suggestionSize and transcodedSize are a RawProblem, a RawSuggestion and a
+	// RawTranscoded.
+	problemSize    = 32
+	suggestionSize = 20
+	transcodedSize = 32
+	// batchCheckSize is a RawBatchCheck, and these what its refused field says of a zero and of a
+	// row past the limit at any batch size.
+	batchCheckSize         = 48
+	refusedBatchRowsZero   = 1
+	refusedBufferBytesZero = 2
+	refusedRowTooWide      = 4
+)
 
-// specSize is a ColumnSpec: three words and HyperCast's 92-byte RawNumFormat.
-const specSize = 104
+// problemsHeld is the entries of hypertabular_faults' list a call asks for at a time.
+const problemsHeld = 16
 
-// stateSize is the delimited state block, which tabular.go's rawState mirrors.
-const stateSize = 64
+// statePrefix is the part of the delimited state block that tabular.go's rawState mirrors, and
+// stateRoom the block's room in the fixed area: the library says how large a block is, and a later
+// one may say more than the block it first asked for.
+const (
+	statePrefix = 64
+	stateRoom   = 128
+)
 
 // littleEndian is whether the host stores a word's low byte first, as the guest does.
 var littleEndian = binary.NativeEndian.Uint16([]byte{1, 0}) == 1
@@ -260,6 +292,42 @@ func decodeState(b []byte) rawState {
 	}
 }
 
+// decodeProblem is a RawProblem read out of the guest's memory, on any host.
+func decodeProblem(b []byte) rawProblem {
+	return rawProblem{
+		row:        le.Uint32(b[0:]),
+		planColumn: le.Uint32(b[4:]),
+		reason:     le.Uint32(b[8:]),
+		detail:     le.Uint16(b[12:]),
+		origin:     le.Uint16(b[14:]),
+		offset:     le.Uint32(b[16:]),
+		len:        le.Uint32(b[20:]),
+		expected:   le.Uint32(b[24:]),
+		found:      le.Uint32(b[28:]),
+	}
+}
+
+// decodeSuggestion is a RawSuggestion read out of the guest's memory, on any host.
+func decodeSuggestion(b []byte) rawSuggestion {
+	return rawSuggestion{
+		door:    le.Uint32(b[0:]),
+		param:   le.Uint32(b[4:]),
+		status:  le.Uint32(b[8:]),
+		matched: le.Uint32(b[12:]),
+		sampled: le.Uint32(b[16:]),
+	}
+}
+
+// decodeTranscoded is a RawTranscoded read out of the guest's memory, on any host.
+func decodeTranscoded(b []byte) rawTranscoded {
+	return rawTranscoded{
+		consumed:  le.Uint64(b[0:]),
+		written:   le.Uint64(b[8:]),
+		failureAt: le.Uint64(b[16:]),
+		failed:    le.Uint32(b[24:]),
+	}
+}
+
 // spansAt is n spans of guest memory b: a view when it can be one, else decoded into *buf.
 func spansAt(b []byte, n int, buf *[]rawSpan) []rawSpan {
 	if n == 0 {
@@ -322,6 +390,7 @@ var (
 	fieldsSeconds  = []uint8{8, 4, 4}
 	fieldsDuration = []uint8{8, 4, 1, 1, 1, 1}
 	fieldsVerdict  = []uint8{4, 4, 4}
+	fieldsNote     = []uint8{2, 2}
 )
 
 // decodeFields writes src, values of the given fields in the guest's little-endian order,
@@ -375,10 +444,17 @@ type native struct {
 	// What both fill: the arena, the cell table, a workbook's window and row slots.
 	arena, cells, bookWindow, row region
 
-	// The plan the specs, column table and block below were laid out for.
+	// tokens is the dialect's or sheet's list of tokens.
+	tokens region
+
+	// The plan the regions below were laid out for: the specs and the column table a fill and
+	// hypertabular_faults read, the block of values, verdicts and notes, the columns' own lists,
+	// the row widths and the room for a faults list.
 	planned        *columns
 	specs, colBufs region
 	block          region
+	lists, widths  region
+	problems       region
 }
 
 // newNative creates an instance with its fixed block.
@@ -420,6 +496,47 @@ func (n *native) putBuffers(window region, windowCap int, arena region, arenaCap
 	}
 }
 
+// putBuffersWith writes the BuffersWith block a size-tagged fill reads: what putBuffers writes
+// behind a size word, then the list of tokens and, when the plan asks, where the row widths go.
+func (n *native) putBuffersWith(window region, windowCap int, arena region, arenaCap int, cells region, cellsCap int,
+	row region, rowCap int, tables bool, set *columns) {
+	b := n.fixedBytes(fixedBuffers, buffersWithSize)
+	le.PutUint32(b[0:], buffersWithSize)
+	putBuffer(b[4:], window, windowCap)
+	putBuffer(b[12:], arena, arenaCap)
+	putBuffer(b[20:], cells, cellsCap)
+	putBuffer(b[28:], row, rowCap)
+	if tables {
+		putBuffer(b[36:], n.strings, int(n.strings.size))
+		putBuffer(b[44:], n.table, int(n.table.size/8))
+		putBuffer(b[52:], n.kinds, int(n.kinds.size))
+	} else {
+		putBuffer(b[36:], region{}, 0)
+		putBuffer(b[44:], region{}, 0)
+		putBuffer(b[52:], region{}, 0)
+	}
+	putBuffer(b[60:], n.tokens, int(n.tokens.size))
+	var widths uint32
+	if set.widths {
+		widths = n.widths.off
+	}
+	le.PutUint32(b[68:], widths)
+}
+
+// putTokens puts a dialect's or a sheet's list of tokens in the instance, for every fill to read.
+// It reports false when the memory cannot hold them.
+func (n *native) putTokens(tokens Tokens) bool {
+	if tokens.packed == "" {
+		return true
+	}
+	var ok bool
+	if n.tokens, ok = n.in.alloc(uint64(len(tokens.packed))); !ok {
+		return false
+	}
+	copy(n.in.mem()[n.tokens.off:], tokens.packed)
+	return true
+}
+
 // putBuffer writes one buffer of a Buffers block: its address, or null when it holds
 // nothing, and its length.
 func putBuffer(b []byte, r region, length int) {
@@ -431,48 +548,94 @@ func putBuffer(b []byte, r region, length int) {
 	le.PutUint32(b[4:], uint32(length))
 }
 
-// attach lays a plan out in the instance, once: its specs and the column table the core
-// reads, each column's values and verdicts in one block at the offsets columns.go gave
-// them. It reports false when the memory cannot hold them.
+// attach lays a plan out in the instance, once: its specs and the column tables the core
+// reads, each column's values, verdicts and notes in one block at the offsets columns.go gave
+// them, the lists its columns declare, and room for what a batch can be asked after. It reports
+// false when the memory cannot hold them.
 func (n *native) attach(set *columns) bool {
 	if set == nil || n.planned == set {
 		return true
 	}
 	count := uint64(len(set.specs))
-	specs, ok := n.in.alloc(count * specSize)
-	if !ok {
-		return false
+	listBytes := uint64(0)
+	for index := range set.extras {
+		listBytes += uint64(len(set.extras[index].months)) + uint64(len(set.extras[index].tokens))
 	}
-	colBufs, ok := n.in.alloc(count * 8)
-	if !ok {
-		return false
+	widthBytes := uint64(0)
+	if set.widths {
+		widthBytes = 4 * uint64(set.batchRows)
 	}
-	block, ok := n.in.alloc(uint64(set.blockBytes))
-	if !ok {
-		return false
+	var regions [6]region
+	for index, size := range [...]uint64{
+		count * specWithSize, count * bufferWithSize, uint64(set.blockBytes),
+		listBytes, widthBytes, problemsHeld * problemSize,
+	} {
+		var ok bool
+		if regions[index], ok = n.in.alloc(size); !ok {
+			return false
+		}
 	}
+	n.specs, n.colBufs, n.block = regions[0], regions[1], regions[2]
+	n.lists, n.widths, n.problems = regions[3], regions[4], regions[5]
 	mem := n.in.mem()
+	lists := n.lists.off
 	for index := range set.specs {
-		putSpec(mem[specs.off+uint32(index)*specSize:], &set.specs[index])
-		at := colBufs.off + uint32(index)*8
-		le.PutUint32(mem[at:], block.off+uint32(set.offsets[2*index]))
-		le.PutUint32(mem[at+4:], block.off+uint32(set.offsets[2*index+1]))
+		values := n.block.off + uint32(set.offsets[3*index])
+		verdicts := n.block.off + uint32(set.offsets[3*index+1])
+		var notes uint32
+		if set.notes {
+			notes = n.block.off + uint32(set.offsets[3*index+2])
+		}
+		buffer := mem[n.colBufs.off+uint32(index)*bufferWithSize:]
+		le.PutUint32(buffer[0:], bufferWithSize)
+		le.PutUint32(buffer[4:], values)
+		le.PutUint32(buffer[8:], verdicts)
+		le.PutUint32(buffer[12:], notes)
+		extra := &set.extras[index]
+		dst := mem[n.specs.off+uint32(index)*specWithSize:]
+		putSpecWith(dst, &set.specs[index], extra)
+		if extra.months != "" {
+			copy(mem[lists:], extra.months)
+			le.PutUint32(dst[120:], lists)
+			le.PutUint32(dst[124:], uint32(len(extra.months)))
+			lists += uint32(len(extra.months))
+		}
+		if extra.hasTokens {
+			// Any address but null says the list is the column's own, an empty one included.
+			at := n.fixed.off
+			if extra.tokens != "" {
+				at = lists
+				copy(mem[lists:], extra.tokens)
+				lists += uint32(len(extra.tokens))
+			}
+			le.PutUint32(dst[128:], at)
+			le.PutUint32(dst[132:], uint32(len(extra.tokens)))
+		}
 	}
-	n.specs, n.colBufs, n.block = specs, colBufs, block
 	n.planned = set
 	set.point(n, 0)
 	return true
 }
 
-// putSpec writes a ColumnSpec as the core reads it: the three words, then HyperCast's
-// RawNumFormat field by field — its three words in the guest's order, then each symbol's
-// bytes and length.
-func putSpec(dst []byte, spec *rawSpec) {
-	le.PutUint32(dst[0:], spec.ordinal)
-	le.PutUint32(dst[4:], spec.door)
-	le.PutUint32(dst[8:], spec.param)
-	format := &spec.format
-	f := dst[12 : 12+92]
+// putSpecWith writes a ColumnSpecWith as the core reads it, its lists left null for attach to fill
+// in: its size, the three words, HyperCast's RawNumFormat and its RawDateOptions.
+func putSpecWith(dst []byte, spec *rawSpec, extra *specExtra) {
+	le.PutUint32(dst[0:], specWithSize)
+	le.PutUint32(dst[4:], spec.ordinal)
+	le.PutUint32(dst[8:], spec.door)
+	le.PutUint32(dst[12:], spec.param)
+	putFormat(dst[16:16+rawFormatSize], &spec.format)
+	le.PutUint32(dst[108:], extra.date.Size)
+	le.PutUint32(dst[112:], extra.date.Flags)
+	le.PutUint32(dst[116:], extra.date.Pivot)
+}
+
+// rawFormatSize is HyperCast's RawNumFormat.
+const rawFormatSize = 92
+
+// putFormat writes HyperCast's RawNumFormat field by field: its three words in the guest's order,
+// then each symbol's bytes and length.
+func putFormat(f []byte, format *hypercast.RawNumFormat) {
 	le.PutUint32(f[0:], format.Size)
 	le.PutUint32(f[4:], format.Flags)
 	le.PutUint32(f[8:], format.DigitZero)
@@ -488,36 +651,42 @@ func putSpec(dst []byte, spec *rawSpec) {
 	f[91] = format.Currency.Len
 }
 
-// point makes every column's values and verdicts the rows the core just wrote: views of the
-// block in the guest's memory, or decoded into the plan's Go block.
+// point makes every column's values, verdicts and notes the rows the core just wrote: views of
+// the block in the guest's memory, or decoded into the plan's Go block.
 func (set *columns) point(n *native, rows int) {
 	block := n.block.bytes(n.in)
 	if canView(block) {
-		base := unsafe.Pointer(unsafe.SliceData(block))
-		for index := range set.columns {
-			c := &set.columns[index]
-			c.values = unsafe.Add(base, set.offsets[2*index])
-			c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, set.offsets[2*index+1])), set.batchRows)
-		}
+		set.pointAt(unsafe.Pointer(unsafe.SliceData(block)))
 		return
 	}
 	if set.block == nil {
 		set.block = make([]uint64, set.blockBytes/8)
-		base := unsafe.Pointer(unsafe.SliceData(set.block))
-		for index := range set.columns {
-			c := &set.columns[index]
-			c.values = unsafe.Add(base, set.offsets[2*index])
-			c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, set.offsets[2*index+1])), set.batchRows)
-		}
+		set.pointAt(unsafe.Pointer(unsafe.SliceData(set.block)))
 	}
 	host := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(set.block))), set.blockBytes)
 	for index := range set.columns {
 		c := &set.columns[index]
-		values, verdicts := set.offsets[2*index], set.offsets[2*index+1]
+		values, verdicts, notes := set.offsets[3*index], set.offsets[3*index+1], set.offsets[3*index+2]
 		size := uintptr(rows) * c.plan.door.valueSize()
 		decodeFields(host[values:values+size], block[values:values+size], c.plan.door.layout(), binary.NativeEndian)
 		size = uintptr(rows) * unsafe.Sizeof(CellVerdict{})
 		decodeFields(host[verdicts:verdicts+size], block[verdicts:verdicts+size], fieldsVerdict, binary.NativeEndian)
+		if set.notes {
+			size = uintptr(rows) * unsafe.Sizeof(rawNote{})
+			decodeFields(host[notes:notes+size], block[notes:notes+size], fieldsNote, binary.NativeEndian)
+		}
+	}
+}
+
+// pointAt makes every column's arrays the ones at their offsets from base.
+func (set *columns) pointAt(base unsafe.Pointer) {
+	for index := range set.columns {
+		c := &set.columns[index]
+		c.values = unsafe.Add(base, set.offsets[3*index])
+		c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, set.offsets[3*index+1])), set.batchRows)
+		if set.notes {
+			c.notes = unsafe.Slice((*rawNote)(unsafe.Add(base, set.offsets[3*index+2])), set.batchRows)
+		}
 	}
 }
 
@@ -530,15 +699,23 @@ const chunkMin = 64 * 1024
 func (r *DelimitedReader) nativeInit(dialect Dialect) int32 {
 	n := newNative()
 	r.core = n
-	if size := sizes().delimitedState; size != stateSize {
+	if size := sizes().delimitedState; size < statePrefix || size > stateRoom {
 		return errStateSize
 	}
-	d := n.fixedBytes(fixedDialect, 4)
-	d[0], d[1], d[2], d[3] = dialect.Separator, flag(dialect.Quoting), flag(dialect.SkipBlankLines), 0
+	if !n.putTokens(dialect.Tokens) {
+		return errGuestMemory
+	}
+	d := n.fixedBytes(fixedDialect, delimitedOptionsSize)
+	le.PutUint32(d[0:], delimitedOptionsSize)
+	d[4], d[5], d[6], d[7] = dialect.Separator, flag(dialect.Quoting), flag(dialect.SkipBlankLines), 0
+	le.PutUint32(d[8:], dialect.Skip)
+	le.PutUint32(d[12:], dialect.HeaderRow)
+	le.PutUint32(d[16:], uint32(dialect.ShortRows))
+	le.PutUint32(d[20:], uint32(dialect.LongRows))
 	n.in.enter()
-	code := n.in.m.Xhypertabular_delimited_init(n.at(fixedState), n.at(fixedDialect))
+	code := n.in.m.Xhypertabular_delimited_init_with(n.at(fixedState), n.at(fixedDialect))
 	n.in.leave()
-	n.state = decodeState(n.fixedBytes(fixedState, stateSize))
+	n.state = decodeState(n.fixedBytes(fixedState, statePrefix))
 	return code
 }
 
@@ -633,7 +810,7 @@ func (r *DelimitedReader) nativeHeader(window []byte, last bool, namesCap int) (
 		}
 		break
 	}
-	n.state = decodeState(n.fixedBytes(fixedState, stateSize))
+	n.state = decodeState(n.fixedBytes(fixedState, statePrefix))
 	r.arena = n.arena.bytes(n.in)[:r.arenaCap]
 	if code != codeOK {
 		return code, nil
@@ -650,13 +827,13 @@ func (n *native) chunkOf(window []byte) (int, bool) {
 func (n *native) snapshot() {
 	mem := n.in.mem()
 	at := n.fixed.off
-	copy(mem[at+fixedSnapshot:at+fixedSnapshot+stateSize], mem[at+fixedState:at+fixedState+stateSize])
+	copy(mem[at+fixedSnapshot:at+fixedSnapshot+stateRoom], mem[at+fixedState:at+fixedState+stateRoom])
 }
 
 func (n *native) restore() {
 	mem := n.in.mem()
 	at := n.fixed.off
-	copy(mem[at+fixedState:at+fixedState+stateSize], mem[at+fixedSnapshot:at+fixedSnapshot+stateSize])
+	copy(mem[at+fixedState:at+fixedState+stateRoom], mem[at+fixedSnapshot:at+fixedSnapshot+stateRoom])
 }
 
 // nativeFill reads up to maxRows whole rows of window into the plan's columns — the one
@@ -667,8 +844,9 @@ func (r *DelimitedReader) nativeFill(window []byte, last bool, maxRows int) int3
 	if !n.attach(r.set) || !n.in.ensure(&n.cells, 8*uint64(r.cellsCap), false) || !n.in.ensure(&n.arena, uint64(r.arenaCap), false) {
 		return errGuestMemory
 	}
-	n.putBuffers(region{}, 0, n.arena, r.arenaCap, n.cells, r.cellsCap, region{}, 0, false)
-	count := len(r.set.specs)
+	set := r.set
+	n.putBuffersWith(region{}, 0, n.arena, r.arenaCap, n.cells, r.cellsCap, region{}, 0, false, set)
+	count := len(set.specs)
 	var specs, colBufs int32
 	if count > 0 {
 		specs, colBufs = n.specs.at(), n.colBufs.at()
@@ -682,8 +860,8 @@ func (r *DelimitedReader) nativeFill(window []byte, last bool, maxRows int) int3
 		}
 		n.snapshot()
 		n.in.enter()
-		code = n.in.m.Xhypertabular_delimited_fill(n.at(fixedState), input, int32(size), int32(flag(last && !partial)),
-			specs, colBufs, int32(count), int32(maxRows), n.at(fixedBuffers), n.at(fixedOut))
+		code = n.in.m.Xhypertabular_delimited_fill_with(n.at(fixedState), input, int32(size), int32(flag(last && !partial)),
+			specs, colBufs, int32(count), rowsToCore(maxRows), n.at(fixedBuffers), n.at(fixedOut))
 		n.in.leave()
 		n.filled = decodeFilled(n.fixedBytes(fixedOut, 64))
 		rows := int(n.filled.rows)
@@ -694,12 +872,12 @@ func (r *DelimitedReader) nativeFill(window []byte, last bool, maxRows int) int3
 		}
 		break
 	}
-	n.state = decodeState(n.fixedBytes(fixedState, stateSize))
+	n.state = decodeState(n.fixedBytes(fixedState, statePrefix))
 	r.arena = n.arena.bytes(n.in)[:r.arenaCap]
 	if code == codeOK {
 		rows := int(n.filled.rows)
 		r.cells = spansAt(n.cells.bytes(n.in), rows*r.perRow, &n.cellsBuf)
-		r.set.point(n, rows)
+		set.point(n, rows)
 	}
 	return code
 }
@@ -716,6 +894,272 @@ func (n *native) unescape(cell, out []byte) int {
 	n.in.leave()
 	copy(out[:written], n.rawOut.bytes(n.in))
 	return written
+}
+
+// transcode decodes as much of raw as out holds whole characters of: hypertabular_transcode, in the
+// instance, with out handed back in Go memory. It reports false when the memory cannot hold them.
+func (n *native) transcode(encoding uint32, raw []byte, last bool, out []byte) (rawTranscoded, bool) {
+	if !n.in.ensure(&n.rawIn, uint64(len(raw)), false) || !n.in.ensure(&n.rawOut, uint64(len(out)), false) {
+		return rawTranscoded{}, false
+	}
+	n.rawIn.put(n.in, raw)
+	n.in.enter()
+	code := n.in.m.Xhypertabular_transcode(int32(encoding), n.rawIn.at(), int32(len(raw)), int32(flag(last)),
+		n.rawOut.at(), int32(len(out)), n.at(fixedOut))
+	n.in.leave()
+	if code != codeOK {
+		panic(contractViolation)
+	}
+	done := decodeTranscoded(n.fixedBytes(fixedOut, transcodedSize))
+	copy(out, n.rawOut.bytes(n.in)[:done.written])
+	return done, true
+}
+
+// faults asks for the next entries of a batch's list from cursor: hypertabular_faults over the
+// columns as the last fill wrote them, into out. It says the cursor to go on from, and how many
+// entries out now holds; fewer than out holds means the list is over.
+func (n *native) faults(set *columns, rows int, expected, longRows uint32, cursor uint64, out []rawProblem) (uint64, int) {
+	var colBufs, widths int32
+	if len(set.specs) > 0 {
+		colBufs = n.colBufs.at()
+	}
+	if longRows == uint32(LongRowsReport) {
+		widths = n.widths.at()
+	}
+	mem := n.fixedBytes(fixedOut, 12)
+	le.PutUint64(mem[0:], cursor)
+	n.in.enter()
+	code := n.in.m.Xhypertabular_faults(colBufs, int32(len(set.specs)), int32(rows), widths, int32(expected), int32(longRows),
+		n.at(fixedOut), n.problems.at(), int32(len(out)), n.at(fixedOut+8))
+	n.in.leave()
+	if code != codeOK {
+		panic(contractViolation)
+	}
+	mem = n.fixedBytes(fixedOut, 12)
+	cursor, written := le.Uint64(mem[0:]), int(le.Uint32(mem[8:]))
+	list := n.problems.bytes(n.in)
+	for index := range out[:written] {
+		out[index] = decodeProblem(list[problemSize*index:])
+	}
+	return cursor, written
+}
+
+// nativeSuggest is hypertabular_suggest over a sample, in an instance made for the call: text is the
+// sample's bytes, cells its spans, a column's after the column before it, typed a byte for each cell or
+// nil for none, formats a format for each column, a Size of 0 declaring none. It reports false when the
+// memory cannot hold them.
+func nativeSuggest(text []byte, cells []rawSpan, typed []byte, rows int, formats []hypercast.RawNumFormat) ([]rawSuggestion, bool) {
+	n := newNative()
+	columns := len(formats)
+	var regions [5]region
+	for index, size := range [...]uint64{
+		uint64(len(text)), 8 * uint64(len(cells)), rawFormatSize * uint64(columns), suggestionSize * uint64(columns), uint64(len(typed)),
+	} {
+		var ok bool
+		if regions[index], ok = n.in.alloc(size); !ok {
+			return nil, false
+		}
+	}
+	input, spans, declared, out, marks := regions[0], regions[1], regions[2], regions[3], regions[4]
+	input.put(n.in, text)
+	marked := int32(0)
+	if typed != nil {
+		marks.put(n.in, typed)
+		marked = marks.at()
+	}
+	mem := n.in.mem()
+	for index, cell := range cells {
+		at := spans.off + uint32(8*index)
+		le.PutUint32(mem[at:], cell.offset)
+		le.PutUint32(mem[at+4:], cell.len)
+	}
+	for index := range formats {
+		at := declared.off + uint32(rawFormatSize*index)
+		putFormat(mem[at:at+rawFormatSize], &formats[index])
+	}
+	n.in.enter()
+	code := n.in.m.Xhypertabular_suggest(input.at(), int32(len(text)), 0, 0, spans.at(), marked, int32(rows), int32(columns),
+		declared.at(), out.at())
+	n.in.leave()
+	if code != codeOK {
+		panic(contractViolation)
+	}
+	found := make([]rawSuggestion, columns)
+	list := out.bytes(n.in)
+	for index := range found {
+		found[index] = decodeSuggestion(list[suggestionSize*index:])
+	}
+	return found, true
+}
+
+// The flags of hypertabular_batch_check.
+const (
+	batchNotes  uint32 = 1
+	batchWidths uint32 = 2
+	batchSheet  uint32 = 4
+)
+
+// sizeChecker is an instance kept for hypertabular_batch_check, which holds nothing between calls:
+// a size is judged ahead of everything a read allocates, the read's own instance among them.
+type sizeChecker struct {
+	n     *native
+	specs region
+}
+
+var sizeCheckers = sync.Pool{New: func() any { return &sizeChecker{n: newNative()} }}
+
+// askSizes asks the core about a read's sizes: its code and the RawBatchCheck it wrote.
+func askSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int32, [batchCheckSize]byte, error) {
+	var found [batchCheckSize]byte
+	checker := sizeCheckers.Get().(*sizeChecker)
+	defer sizeCheckers.Put(checker)
+	n := checker.n
+	if !n.in.ensure(&checker.specs, uint64(len(specs))*specWithSize, false) {
+		return 0, found, guestMemory(len(specs))
+	}
+	if len(specs) > 0 {
+		mem := n.in.mem()
+		for index := range specs {
+			putSpecWith(mem[checker.specs.off+uint32(index)*specWithSize:], &specs[index], &specExtra{})
+		}
+	}
+	n.in.enter()
+	code := n.in.m.Xhypertabular_batch_check(checker.specs.at(), int32(len(specs)), int64(batchRows), int64(bufferBytes), int32(flags), n.at(fixedOut))
+	n.in.leave()
+	copy(found[:], n.fixedBytes(fixedOut, batchCheckSize))
+	return code, found, nil
+}
+
+// checkSizes is the core's answer on a read's sizes: the size to start an input buffer at, or an
+// error naming what was refused, with the bytes and the limit the core gave.
+func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int, error) {
+	// The core takes an unsigned count, which a negative one isn't.
+	if batchRows < 0 {
+		return 0, fmt.Errorf("hypertabular: BatchRows must not be negative, not %d", batchRows)
+	}
+	if bufferBytes < 0 {
+		return 0, fmt.Errorf("hypertabular: BufferBytes must not be negative, not %d", bufferBytes)
+	}
+	code, b, err := askSizes(specs, batchRows, bufferBytes, flags)
+	if err != nil {
+		return 0, err
+	}
+	switch code {
+	case codeOK:
+		return int(le.Uint64(b[16:])), nil
+	case errBatch:
+	default:
+		return 0, errors.New("hypertabular: the core refused the plan: a column's door or declared parameter is not one it can honour")
+	}
+	switch le.Uint32(b[40:]) {
+	case refusedBatchRowsZero:
+		return 0, errors.New("hypertabular: BatchRows must be at least 1")
+	case refusedBufferBytesZero:
+		return 0, errors.New("hypertabular: BufferBytes must be at least 1")
+	case refusedRowTooWide:
+		return 0, fmt.Errorf("hypertabular: a row of %d columns asks for %d bytes, past the limit of %d", le.Uint64(b[32:]), le.Uint64(b[0:]), le.Uint64(b[8:]))
+	}
+	return 0, fmt.Errorf("hypertabular: BatchRows asks for %d bytes, past the limit of %d", le.Uint64(b[0:]), le.Uint64(b[8:]))
+}
+
+// sampleRows is the rows of a sampler's batch for a sampler wanting wanted rows: the core's answer,
+// however many batches that takes. Only a row past the limit is refused, in its words.
+func sampleRows(plan []Column, wanted int, flags uint32) (int, error) {
+	specs := sizeSpecs(plan)
+	_, found, err := askSizes(specs, wanted, 1, flags)
+	if err != nil {
+		return 0, err
+	}
+	rows := le.Uint64(found[24:])
+	if rows == 0 {
+		_, err := checkSizes(specs, wanted, 1, flags)
+		return 0, err
+	}
+	return int(rows), nil
+}
+
+// sizeSpecs is what the core is told of a plan for its sizes alone. A plan that can't be honoured
+// says so where it always has, so its size is judged without it.
+func sizeSpecs(plan []Column) []rawSpec {
+	specs := make([]rawSpec, len(plan))
+	for index, planned := range plan {
+		spec, _, err := planned.spec()
+		if err != nil {
+			return nil
+		}
+		specs[index] = spec
+	}
+	return specs
+}
+
+// rowsToCore is a batch's rows as the core's 32-bit count takes them. A size past it passes the check
+// only with no columns, whose cell table stops the batch long before this.
+func rowsToCore(rows int) int32 {
+	return int32(min(rows, math.MaxInt32))
+}
+
+// nativeRangeParse is hypertabular_range_parse, in an instance made for the call: a range is parsed
+// once a read, if that.
+func nativeRangeParse(text string) (first, firstColumn, last, lastColumn uint32, ok bool) {
+	n := newNative()
+	input, fits := n.in.alloc(uint64(len(text)))
+	if !fits {
+		return 0, 0, 0, 0, false
+	}
+	copy(n.in.mem()[input.off:], text)
+	n.in.enter()
+	code := n.in.m.Xhypertabular_range_parse(input.at(), int32(len(text)), n.at(fixedOut))
+	n.in.leave()
+	if code != codeOK {
+		return 0, 0, 0, 0, false
+	}
+	b := n.fixedBytes(fixedOut, 16)
+	return le.Uint32(b[0:]), le.Uint32(b[4:]), le.Uint32(b[8:]), le.Uint32(b[12:]), true
+}
+
+// ---- The 1.0 exports ---------------------------------------------------------------------
+//
+// No read takes these four: every one goes through the size-tagged exports. They stay in the ABI
+// for what was built against 1.0, and through these wrappers, which only core_1_0_test.go calls,
+// this binding still exercises them.
+
+// init1Dot0 is hypertabular_delimited_init, over a dialect of 1.0's fields.
+func (n *native) init1Dot0(dialect Dialect) int32 {
+	d := n.fixedBytes(fixedDialect, 4)
+	d[0], d[1], d[2], d[3] = dialect.Separator, flag(dialect.Quoting), flag(dialect.SkipBlankLines), 0
+	n.in.enter()
+	defer n.in.leave()
+	return n.in.m.Xhypertabular_delimited_init(n.at(fixedState), n.at(fixedDialect))
+}
+
+// fill1Dot0 is hypertabular_delimited_fill, reporting through the fixed block.
+func (n *native) fill1Dot0(input region, last bool, specs, colBufs region, columns, maxRows int) int32 {
+	n.in.enter()
+	defer n.in.leave()
+	return n.in.m.Xhypertabular_delimited_fill(n.at(fixedState), input.at(), int32(input.size), int32(flag(last)),
+		specs.at(), colBufs.at(), int32(columns), rowsToCore(maxRows), n.at(fixedBuffers), n.at(fixedOut))
+}
+
+// sheet1Dot0 is hypertabular_workbook_sheet, with a sheet's part already in n.part.
+func (n *native) sheet1Dot0(info *SheetInfo, options SheetOptions) int32 {
+	container, length := n.containerArgs()
+	var part int32
+	if len(info.part) > 0 {
+		part = n.part.at()
+	}
+	n.in.enter()
+	defer n.in.leave()
+	return n.in.m.Xhypertabular_workbook_sheet(n.book.at(), container, length, part, int32(len(info.part)),
+		int32(info.index), int32(flag(options.HasHeader)), int32(flag(options.SkipEmptyRows)), n.at(fixedOut))
+}
+
+// bookFill1Dot0 is hypertabular_workbook_fill, reporting through the fixed block.
+func (n *native) bookFill1Dot0(specs, colBufs region, columns, maxRows int) int32 {
+	container, length := n.containerArgs()
+	n.in.enter()
+	defer n.in.leave()
+	return n.in.m.Xhypertabular_workbook_fill(n.book.at(), container, length, specs.at(), colBufs.at(), int32(columns),
+		rowsToCore(maxRows), n.at(fixedBuffers), n.at(fixedOut))
 }
 
 // ---- Workbooks --------------------------------------------------------------------------
@@ -805,7 +1249,11 @@ func (s *scratch) book(call bookCall, set *columns, opened *rawOpened, stride in
 		s.filled = rawFilled{}
 		return errGuestMemory
 	}
-	n.putBuffers(n.bookWindow, s.window, n.arena, s.arenaCap, n.cells, s.cellsCap, n.row, s.row, call == bookHeader || call == bookFill)
+	if call == bookFill {
+		n.putBuffersWith(n.bookWindow, s.window, n.arena, s.arenaCap, n.cells, s.cellsCap, n.row, s.row, true, set)
+	} else {
+		n.putBuffers(n.bookWindow, s.window, n.arena, s.arenaCap, n.cells, s.cellsCap, n.row, s.row, call == bookHeader || call == bookFill)
+	}
 	container, length := n.containerArgs()
 	state, buffers, out := n.book.at(), n.at(fixedBuffers), n.at(fixedOut)
 	in.enter()
@@ -826,8 +1274,8 @@ func (s *scratch) book(call bookCall, set *columns, opened *rawOpened, stride in
 		if len(set.specs) > 0 {
 			specs, colBufs = n.specs.at(), n.colBufs.at()
 		}
-		code = in.m.Xhypertabular_workbook_fill(state, container, length, specs, colBufs, int32(len(set.specs)),
-			int32(set.batchRows), buffers, out)
+		code = in.m.Xhypertabular_workbook_fill_with(state, container, length, specs, colBufs, int32(len(set.specs)),
+			rowsToCore(set.batchRows), buffers, out)
 	}
 	in.leave()
 	if call == bookOpen {
@@ -858,9 +1306,16 @@ func (s *scratch) sheet(info *SheetInfo, options SheetOptions) int32 {
 		part = n.part.at()
 	}
 	container, length := n.containerArgs()
+	d := n.fixedBytes(fixedDialect, sheetOptionsSize)
+	for index, word := range [...]uint32{
+		sheetOptionsSize, uint32(flag(options.HasHeader)), uint32(flag(options.SkipEmptyRows)), options.Skip, options.HeaderRow,
+		options.Range.firstRow, options.Range.firstColumn, options.Range.lastRow, options.Range.lastColumn,
+	} {
+		le.PutUint32(d[4*index:], word)
+	}
 	n.in.enter()
-	code := n.in.m.Xhypertabular_workbook_sheet(n.book.at(), container, length, part, int32(len(info.part)),
-		int32(info.index), int32(flag(options.HasHeader)), int32(flag(options.SkipEmptyRows)), n.at(fixedOut))
+	code := n.in.m.Xhypertabular_workbook_sheet_with(n.book.at(), container, length, part, int32(len(info.part)),
+		int32(info.index), n.at(fixedDialect), n.at(fixedOut))
 	n.in.leave()
 	s.filled = decodeFilled(n.fixedBytes(fixedOut, 64))
 	return code

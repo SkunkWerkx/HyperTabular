@@ -53,6 +53,11 @@ module HyperTabular
       @batch.raw(column, @index)
     end
 
+    # Where the cell's verdict came from — Batch#origin.
+    def origin(column)
+      @batch.origin(column, @index)
+    end
+
     # How many cells the row has: one per plan column.
     def size
       @batch.columns.size

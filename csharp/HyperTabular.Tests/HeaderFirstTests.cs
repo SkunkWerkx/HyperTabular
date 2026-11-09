@@ -18,16 +18,23 @@ public sealed class HeaderFirstTests
 	static string Basic(string extension) => Path.Combine(CorpusTests._corpusDirectory, "workbook", $"basic.{extension}");
 
 	[Fact]
-	void A_header_resolves_names_to_ordinals_first_match_exact()
+	void A_header_resolves_names_to_ordinals_exactly_and_refuses_a_duplicate()
 	{
 		using var reader = new DelimitedReader(_countries.AsMemory(), Dialect.Csv);
 		var header = reader.Header.ShouldNotBeNull();
 		header.ShouldBe(["Region Code", "ISO-alpha2 Code", "M49 Code", "Region Code"]);
 		header.Ordinal("M49 Code").ShouldBe(2);
 		header.Ordinal("ISO-alpha2 Code"u8).ShouldBe(1);
-		// A name that appears twice is the first.
-		header.Ordinal("Region Code").ShouldBe(0);
-		header.Ordinal("Region Code"u8).ShouldBe(0);
+		// A name that appears twice: the strict lookup will not choose, and the optional one says the first.
+		var duplicate = Should.Throw<DuplicateColumnException>(() => header.Ordinal("Region Code"));
+		(duplicate.Name, duplicate.First, duplicate.Second).ShouldBe(("Region Code", 0, 3));
+		duplicate.Message.ShouldBe("The header names two columns \"Region Code\", at positions 0 and 3: say which by position.");
+		Should.Throw<DuplicateColumnException>(() => header.Ordinal("Region Code"u8)).Second.ShouldBe(3);
+		Should.Throw<KeyNotFoundException>(() => header.Ordinal("Region Code"));
+		header.TryOrdinal("Region Code", out var firstMatch).ShouldBeTrue();
+		firstMatch.ShouldBe(0);
+		header.TryOrdinal("Region Code"u8, out firstMatch).ShouldBeTrue();
+		firstMatch.ShouldBe(0);
 		// Exact: case, and space, count.
 		header.TryOrdinal("m49 code", out var missing).ShouldBeFalse();
 		missing.ShouldBe(-1);
@@ -487,5 +494,40 @@ public sealed class HeaderFirstTests
 		var kept = new ShortReadStream(Numbers(3));
 		await (await DelimitedReader.OpenAsync(kept, Dialect.Csv, leaveOpen: true, cancellationToken: TestContext.Current.CancellationToken)).DisposeAsync();
 		kept.Disposed.ShouldBeFalse();
+	}
+
+	[Fact]
+	void A_walk_of_rows_stays_its_batchs()
+	{
+		var input = "a\n1\n2\n3\n4\n5\n6\n"u8.ToArray();
+		using (var reader = new DelimitedReader(input.AsMemory(), Dialect.Csv, [Column.Text(0)], batchRows: 2))
+		{
+			var batch = reader.Read()!;
+			var walk = batch.GetEnumerator();
+			walk.MoveNext().ShouldBeTrue();
+			walk.Current.GetString(0).ShouldBe("1");
+			reader.Read().ShouldBeSameAs(batch);
+			// The object goes on to the next batch; the walk says so rather than following it.
+			var (moved, current) = (false, false);
+			try { walk.MoveNext(); } catch (InvalidOperationException) { moved = true; }
+			try { _ = walk.Current; } catch (InvalidOperationException) { current = true; }
+			moved.ShouldBeTrue();
+			current.ShouldBeTrue();
+			// The batch asked again walks what it now holds.
+			var again = batch.GetEnumerator();
+			again.MoveNext().ShouldBeTrue();
+			again.Current.GetString(0).ShouldBe("3");
+			while (reader.Read() is not null) { }
+			var ended = false;
+			try { again.MoveNext(); } catch (InvalidOperationException) { ended = true; }
+			ended.ShouldBeTrue();
+		}
+		using var book = Workbook.Open(Basic("xlsx"));
+		var sheet = book.Sheet(0, SheetOptions.Default with { BatchRows = 1 }, [Column.Text(0)]);
+		var first = sheet.Read()!.GetEnumerator();
+		sheet.Read().ShouldNotBeNull();
+		var refused = false;
+		try { first.MoveNext(); } catch (InvalidOperationException) { refused = true; }
+		refused.ShouldBeTrue();
 	}
 }

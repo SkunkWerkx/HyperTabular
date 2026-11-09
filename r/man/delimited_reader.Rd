@@ -9,16 +9,28 @@ delimited_reader(
   source,
   dialect = delimited_dialect(),
   plan = NULL,
-  batch_rows = 4096L,
-  buffer_bytes = 262144L
+  batch_rows = 4096,
+  buffer_bytes = 262144,
+  skip = dialect$skip,
+  header_row = dialect$header_row,
+  fill = dialect$fill,
+  long_rows = dialect$long_rows,
+  na = dialect$na,
+  encoding = dialect$encoding
 )
 
 read_delimited(
   source,
   plan = NULL,
   dialect = delimited_dialect(),
-  batch_rows = 4096L,
-  buffer_bytes = 262144L
+  batch_rows = 4096,
+  buffer_bytes = 262144,
+  skip = dialect$skip,
+  header_row = dialect$header_row,
+  fill = dialect$fill,
+  long_rows = dialect$long_rows,
+  na = dialect$na,
+  encoding = dialect$encoding
 )
 }
 \arguments{
@@ -33,6 +45,9 @@ column through \code{\link[=col_text]{col_text()}}.}
 \item{batch_rows}{The most rows a batch holds.}
 
 \item{buffer_bytes}{The bytes read from a file or connection at a time.}
+
+\item{skip, header_row, fill, long_rows, na, encoding}{As for \code{\link[=delimited_dialect]{delimited_dialect()}}, in place of
+the dialect's own.}
 }
 \value{
 \code{delimited_reader()} returns a \code{hypertabular_delimited_reader};
@@ -44,21 +59,27 @@ column through \code{\link[=col_text]{col_text()}}.}
 With a header declared, the header is read as the reader opens (\code{\link[=header]{header()}}); the plan, given
 here or later through \code{\link[=bind]{bind()}}, may then name its source columns by header name.
 \code{read_delimited()} reads the whole input through a plan and returns it as one
-\code{hypertabular_table}.
+\code{hypertabular_table}. \link[=close.hypertabular_reader]{close()} lets go of a reader early.
 }
 \details{
-The input is bytes, read as UTF-8 and never re-encoded: a raw vector, a file path, or a
-connection (opened in binary if it is not open; a connection the reader opens it also
-closes, once the read ends). It is read through \code{buffer_bytes} at a time; a record longer
-than the buffer grows it, up to a 1 GiB ceiling past which the record is a
-\code{"row_too_long"} failure. Nothing about the input is sniffed: dialect, plan, number formats
-and date orders are all declared.
+The input is bytes: a raw vector, a file path, or a connection (opened in binary if it is
+not open; a connection the reader opens it also closes, once the read ends or the reader is
+closed). It is read as UTF-8 unless the dialect declares another encoding, and is read
+through \code{buffer_bytes} at a time; a record longer than the buffer grows it, up to a 1 GiB
+ceiling past which the record is a \code{"row_too_long"} failure. Nothing about the input is
+sniffed: dialect, plan, number formats and date orders are all declared.
 
 Every cell is a HyperCast verdict, and a file that is structurally broken is a
 \link{hypertabular_failure} handed back as a value, after every intact row before it: no read
 signals an R error for anything in its data. R errors are reserved for the caller's own
-declarations: a dialect, a plan or a size that cannot be, a source column the header does
-not have, a plan bound twice or a read before one is bound.
+declarations (a dialect, a plan or a size that cannot be, a source column the header does
+not have or has twice, a plan bound twice or a read before one is bound), for a read of a
+closed reader, for a read from inside one already under way on the same reader (from an
+interrupt or condition handler, say), and for errors the connection itself raises.
+
+The sizes are the core's to judge: \code{batch_rows} or \code{buffer_bytes} of 0, or a batch whose
+arrays would pass what the platform can address, is an R error in its words, before anything
+is allocated.
 }
 \examples{
 csv <- charToRaw("id,when,amount\n1,7/1/2026,\"1,234.5\"\n2,13/1/2026,12x\n")
@@ -70,8 +91,11 @@ batch <- read_batch(reader)
 batch$columns$when
 read_batch(reader)
 failure(reader)
+close(reader)
 
 read_delimited(csv, list(col_i32(1), col_text(3)))$columns
+read_delimited(charToRaw("exported by a tool\nid\n1\nNA\n"), list(col_i32("id")),
+               skip = 1, na = "NA")$columns
 }
 \seealso{
 Other reads:
@@ -79,6 +103,7 @@ Other reads:
 \code{\link[=header]{header()}},
 \code{\link{hypertabular_batch}},
 \code{\link{hypertabular_failure}},
+\code{\link[=problems]{problems()}},
 \code{\link[=sheet_reader]{sheet_reader()}},
 \code{\link[=workbook]{workbook()}}
 }

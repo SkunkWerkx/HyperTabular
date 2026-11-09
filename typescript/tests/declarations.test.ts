@@ -40,7 +40,6 @@ test('a column reports its door and ordinal, and whether the core can honour it'
   for (const bad of [
     Column.i32(-1),
     Column.i32(1.5),
-    Column.i32(2 ** 20),
     Column.unix(0, 9),
     Column.datetime(0, 0),
     Column.excelSerial(0, 3),
@@ -62,6 +61,12 @@ test('a plan the core cannot honour is refused with the column it names', () => 
     assert.equal(error.kind, 'plan')
     assert.ok(error.column === 1 || error.column === 2)
   }
+  // An ordinal the core cannot address is a valid column, refused by the core at bind.
+  const far = refusal(
+    DelimitedReader.fromBytes('a\n1\n', null, [Column.text(0), Column.i32(2 ** 20)]),
+  )
+  assert.deepEqual([far.kind, far.column], ['plan', 1])
+  assert.equal(Column.i32(2 ** 20).valid, true)
   // Past the width a header gives every record: the Rust binding's own refusal.
   const error = refusal(DelimitedReader.fromBytes('a,b\n1,2\n', null, [Column.i32(2)]))
   assert.deepEqual([error.kind, error.column], ['plan', 0])

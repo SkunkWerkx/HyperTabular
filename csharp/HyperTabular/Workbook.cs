@@ -56,6 +56,87 @@ public readonly record struct SheetOptions(bool HasHeader = true, bool SkipEmpty
 {
 	/// <summary>A header, empty rows skipped, 4096 rows a batch. (<c>default(SheetOptions)</c> is not this: its batch size is zero.)</summary>
 	public static readonly SheetOptions Default = new(true, true, 4096);
+
+	/// <summary>The rows of the sheet to pass over at the start of the range, empty ones included. Their cells are not judged, so a bad cell there does not matter.</summary>
+	public uint Skip { get; init; }
+
+	/// <summary>The rows to read and discard after those, as <see cref="SkipEmptyRows"/> delivers them, so with it on an empty row does not count.</summary>
+	public uint HeaderRow { get; init; }
+
+	/// <summary>The part of the sheet to read; <c>default</c> is all of it.</summary>
+	public SheetRange Range { get; init; }
+
+	/// <summary>What stands for no value in every column without tokens of its own: text cells alone can be one.</summary>
+	public Tokens Tokens { get; init; }
+
+	/// <summary>
+	/// Whether a batch keeps what <see cref="Batch.Origin"/>, <see cref="Batch.Fault"/>'s detail and
+	/// <see cref="Batch.Faults"/> read: on unless this turns it off, as <see cref="Dialect.Notes"/> says.
+	/// </summary>
+	public bool Notes { get; init; } = true;
+}
+
+/// <summary>
+/// The part of a sheet a read keeps: its corners, 1-based like the <c>A5:F200</c> they are written as,
+/// and included, a 0 meaning no limit on that side; <c>default</c> is all of the sheet. The first column
+/// is ordinal 0 of a plan, while <see cref="Batch.Line"/> and <see cref="Problem.SourceColumn"/> stay the
+/// sheet's own. A range that runs past the sheet's end reads what is there, and adds no rows of its own.
+/// (Not <c>Range</c>, which every C# file that uses <c>System</c> already means by the name.)
+/// </summary>
+public readonly record struct SheetRange
+{
+	/// <summary>A range from its four numbers, each 1-based, with 0 for no limit on that side: how to say what <c>A5:F200</c> cannot, every row from the fifth, or columns B to D of all of them.</summary>
+	/// <param name="firstRow">The first row, or 0 for no limit.</param>
+	/// <param name="firstColumn">The first column, <c>A</c> being 1, or 0 for no limit.</param>
+	/// <param name="lastRow">The last row, included, or 0 for no limit.</param>
+	/// <param name="lastColumn">The last column, included, or 0 for no limit.</param>
+	/// <exception cref="ArgumentException">A last comes before its first.</exception>
+	public SheetRange(uint firstRow, uint firstColumn, uint lastRow, uint lastColumn)
+	{
+		if ((firstRow != 0 && lastRow != 0 && firstRow > lastRow) || (firstColumn != 0 && lastColumn != 0 && firstColumn > lastColumn))
+			throw new ArgumentException($"Rows {firstRow} to {lastRow}, columns {firstColumn} to {lastColumn} is not a range.");
+		FirstRow = firstRow;
+		FirstColumn = firstColumn;
+		LastRow = lastRow;
+		LastColumn = lastColumn;
+	}
+
+	/// <summary>The first row, or 0 for no limit.</summary>
+	public uint FirstRow { get; }
+
+	/// <summary>The first column, <c>A</c> being 1, or 0 for no limit.</summary>
+	public uint FirstColumn { get; }
+
+	/// <summary>The last row, or 0 for no limit.</summary>
+	public uint LastRow { get; }
+
+	/// <summary>The last column, or 0 for no limit.</summary>
+	public uint LastColumn { get; }
+
+	/// <summary>
+	/// Reads <c>A5:F200</c>: both corners, in capitals, the second no less than the first in either
+	/// direction. The core reads it, so every binding agrees on what one is.
+	/// </summary>
+	/// <param name="text">The range.</param>
+	/// <exception cref="FormatException">It is not one: <c>A5</c> alone, <c>a5:f200</c> or <c>F200:A5</c>.</exception>
+	public static SheetRange Parse(string text) =>
+		TryParse(text, out var range) ? range : throw new FormatException($"\"{text}\" is not a range.");
+
+	/// <summary>Reads <c>A5:F200</c> as <see cref="Parse"/> does.</summary>
+	/// <param name="text">The range.</param>
+	/// <param name="range">What it reads, or <c>default</c>.</param>
+	/// <returns><see langword="false"/> if it is not one.</returns>
+	public static unsafe bool TryParse(string text, out SheetRange range)
+	{
+		ArgumentNullException.ThrowIfNull(text);
+		var utf8 = Encoding.UTF8.GetBytes(text);
+		Native.RawRange raw;
+		int code;
+		fixed (byte* bytes = utf8)
+			code = Native.hypertabular_range_parse(bytes, (nuint)utf8.Length, &raw);
+		range = code == Native.Ok ? new SheetRange(raw.FirstRow, raw.FirstColumn, raw.LastRow, raw.LastColumn) : default;
+		return code == Native.Ok;
+	}
 }
 
 /// <summary>
@@ -457,6 +538,35 @@ public sealed unsafe class Workbook : IDisposable
 		public byte[] Arena = GC.AllocateUninitializedArray<byte>(arena, pinned: true);
 		public Native.RawSpan[] Cells = GC.AllocateUninitializedArray<Native.RawSpan>(cells, pinned: true);
 		public Native.RawSlot[] Row = GC.AllocateUninitializedArray<Native.RawSlot>(row, pinned: true);
+		/// <summary>The sheet's tokens as the core reads them: <see langword="null"/> for none.</summary>
+		public byte[]? Tokens;
+
+		/// <summary>This scratch as the <c>_with</c> fill takes it.</summary>
+		Native.RawBuffersWith BuffersWith(Workbook book, Columns columns)
+		{
+			var buffers = Buffers(book);
+			return new Native.RawBuffersWith
+			{
+				Size = (uint)sizeof(Native.RawBuffersWith),
+				Window = buffers.Window,
+				WindowCap = buffers.WindowCap,
+				Arena = buffers.Arena,
+				ArenaCap = buffers.ArenaCap,
+				Cells = buffers.Cells,
+				CellsCap = buffers.CellsCap,
+				Row = buffers.Row,
+				RowCap = buffers.RowCap,
+				Strings = buffers.Strings,
+				StringsLen = buffers.StringsLen,
+				Table = buffers.Table,
+				TableLen = buffers.TableLen,
+				Kinds = buffers.Kinds,
+				KindsLen = buffers.KindsLen,
+				Tokens = Tokens is null ? null : Columns.Address(Tokens),
+				TokensLen = Tokens is null ? 0 : (nuint)Tokens.Length,
+				RowWidths = columns.RowWidths is null ? null : Columns.Address(columns.RowWidths),
+			};
+		}
 
 		/// <summary>This scratch as the core takes it, with the workbook's tables when a sheet is being read.</summary>
 		public Native.RawBuffers Buffers(Workbook? book)
@@ -496,15 +606,16 @@ public sealed unsafe class Workbook : IDisposable
 			{
 				Native.RawFilled filled;
 				var buffers = Buffers(tables ? book : null);
+				var with = call == Call.Fill ? BuffersWith(book, columns!) : default;
 				var code = call switch
 				{
 					Call.Sheets => Native.hypertabular_workbook_sheets(Columns.Address(state), book.Container, book.Length, &buffers, &filled),
 					Call.Strings => Native.hypertabular_workbook_strings(Columns.Address(state), book.Container, book.Length, &buffers, &filled),
 					Call.Styles => Native.hypertabular_workbook_styles(Columns.Address(state), book.Container, book.Length, &buffers, &filled),
 					Call.Header => Native.hypertabular_workbook_header(Columns.Address(state), book.Container, book.Length, &buffers, &filled),
-					_ => Native.hypertabular_workbook_fill(Columns.Address(state), book.Container, book.Length,
+					_ => Native.hypertabular_workbook_fill_with(Columns.Address(state), book.Container, book.Length,
 						Columns.Address(columns!.Specs), Columns.Address(columns.Buffers), (nuint)columns.Plan.Length,
-						(nuint)columns.BatchRows, &buffers, &filled),
+						(nuint)columns.BatchRows, &with, &filled),
 				};
 				switch (code)
 				{

@@ -1,9 +1,9 @@
-//! The doors a column can be cast through: HyperCast's, plus [`Door::Text`] for the
-//! bytes themselves.
+//! The doors a column can be cast through: HyperCast's, with [`Door::Text`] for the bytes
+//! themselves.
 
 use hypercast::{DateOrder, ExcelEpoch, UnixPrecision};
 
-/// One HyperCast door, plus [`Door::Text`] for the bytes themselves.
+/// One HyperCast door, with [`Door::Text`] for the bytes themselves.
 ///
 /// New doors may be added in a minor release. Matches outside this crate need a
 /// wildcard arm.
@@ -28,7 +28,8 @@ pub enum Door {
     Date,
     Time,
     Duration,
-    /// The cell's bytes (or a typed cell's canonical rendering) — no cast.
+    /// The cell's bytes, validated as UTF-8 by HyperCast's text door and not copied (or a
+    /// typed cell's canonical rendering).
     Text,
     /// An exact decimal: sign, 96-bit magnitude, base-10 scale. Never a float.
     Decimal,

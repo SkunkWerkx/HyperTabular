@@ -2,7 +2,6 @@ package io.github.skunkwerkx.hypertabular;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -20,7 +19,6 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.function.Supplier;
@@ -36,22 +34,24 @@ import org.junit.jupiter.api.Test;
 final class WorkbookCorpusTest {
     private static final int[] BATCH_ROWS = {1, 2, 1024};
 
-    private static void assertFailure(String label, TabularException actual, JsonObject vector) {
-        if (!vector.has("failure") || vector.get("failure").isJsonNull()) {
-            assertNull(actual, label);
-            return;
+    private static SheetOptions optionsOf(JsonObject settings, int batchRows) {
+        SheetOptions options = new SheetOptions(
+                settings.get("has_header").getAsBoolean(),
+                settings.get("skip_empty_rows").getAsBoolean(),
+                batchRows);
+        if (settings.has("skip")) {
+            options = options.withSkip(settings.get("skip").getAsInt());
         }
-        assertNotNull(actual, label);
-        JsonObject expected = vector.getAsJsonObject("failure");
-        // The corpus names a failure as the core does: the constant's name, in snake case.
-        assertEquals(expected.get("kind").getAsString(), actual.failure().name().toLowerCase(Locale.ROOT), label);
-        assertEquals(expected.get("record").getAsLong(), actual.record(), label);
-        assertEquals(expected.get("line").getAsInt(), actual.line(), label);
-        assertEquals(expected.get("byte").getAsLong(), actual.byteOffset(), label);
-        if (expected.has("expected")) {
-            assertEquals(expected.get("expected").getAsInt(), actual.expected(), label);
-            assertEquals(expected.get("found").getAsInt(), actual.found(), label);
+        if (settings.has("header_row")) {
+            options = options.withHeaderRow(settings.get("header_row").getAsInt());
         }
+        if (settings.has("range")) {
+            options = options.withRange(Range.parse(settings.get("range").getAsString()));
+        }
+        if (settings.has("tokens")) {
+            options = options.withTokens(CorpusTest.tokensOf(settings.getAsJsonArray("tokens")));
+        }
+        return options;
     }
 
     @Test
@@ -89,7 +89,8 @@ final class WorkbookCorpusTest {
 
     private static void replay() throws Exception {
         JsonArray corpus = CorpusTest.load("workbook.json");
-        assertTrue(corpus.size() >= 80, "the corpus has " + corpus.size() + " cases");
+        assertTrue(corpus.size() >= 398, "the corpus has " + corpus.size() + " cases");
+        assertEquals(List.of(), CorpusKeys.unknownWorkbook(corpus));
         int cells = 0;
         for (JsonElement element : corpus) {
             JsonObject vector = element.getAsJsonObject();
@@ -107,7 +108,7 @@ final class WorkbookCorpusTest {
             // A package the core refuses: every way of opening it gives the one failure.
             if (!vector.has("sheet")) {
                 for (Map.Entry<String, Supplier<Workbook>> opening : openings.entrySet()) {
-                    assertFailure(
+                    CorpusTest.assertFailure(
                             name + " (" + opening.getKey() + ")",
                             assertThrows(
                                     TabularException.class,
@@ -156,10 +157,7 @@ final class WorkbookCorpusTest {
                             book.sheets().stream().map(SheetInfo::name).toList().indexOf(sheetName) == index;
 
                     for (int batchRows : BATCH_ROWS) {
-                        SheetOptions options = new SheetOptions(
-                                settings.get("has_header").getAsBoolean(),
-                                settings.get("skip_empty_rows").getAsBoolean(),
-                                batchRows);
+                        SheetOptions options = optionsOf(settings, batchRows);
                         for (boolean named : new boolean[] {false, true}) {
                             if (named && !byName) {
                                 continue;
@@ -206,15 +204,18 @@ final class WorkbookCorpusTest {
         assertEquals(plan, sheet.plan(), label);
 
         int seen = 0;
+        List<String> problems = new ArrayList<>();
         TabularException failure = null;
         try {
             for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
                 assertTrue(batch.rows() >= 1 && batch.rows() <= batchRows, label);
                 CorpusTest.assertRows(label, batch);
+                CorpusTest.appendProblems(label, problems, batch, seen);
                 for (int row = 0; row < batch.rows(); row++, seen++) {
                     assertTrue(seen < rows.size(), label + ": more rows than the corpus lists");
                     assertEquals(numbers.get(seen).getAsInt(), batch.line(row), label + ", row " + seen);
                     JsonArray cells = rows.get(seen).getAsJsonArray();
+                    assertEquals(plan.size(), cells.size(), label + ", row " + seen);
                     for (int column = 0; column < plan.size(); column++) {
                         CorpusTest.assertCell(
                                 label + ", row " + seen + ", column " + column,
@@ -231,7 +232,86 @@ final class WorkbookCorpusTest {
             assertSame(e, assertThrows(TabularException.class, sheet::read), label);
         }
         assertEquals(rows.size(), seen, label);
-        assertFailure(label, failure, vector);
+        CorpusTest.assertFailure(label, failure, vector);
+        CorpusTest.assertProblems(label, problems, vector, true);
+    }
+
+    /**
+     * Every case read with notes off, once, from memory: refused cells keep their verdicts and lose
+     * what they say of why.
+     */
+    @Test
+    void theWorkbookCorpusWithNotesOff() throws Exception {
+        for (JsonElement element : CorpusTest.load("workbook.json")) {
+            JsonObject vector = element.getAsJsonObject();
+            if (!vector.has("sheet")) {
+                continue;
+            }
+            String name = vector.get("name").getAsString();
+            List<Column> plan = new ArrayList<>();
+            for (JsonElement entry : vector.getAsJsonArray("plan")) {
+                plan.add(CorpusTest.columnOf(entry.getAsJsonObject()));
+            }
+            JsonArray rows = vector.getAsJsonArray("rows");
+            Path path = CorpusTest.CORPUS_DIRECTORY.resolve(vector.get("file").getAsString());
+            SheetOptions options = optionsOf(vector.getAsJsonObject("options"), DelimitedReader.DEFAULT_BATCH_ROWS)
+                    .withNotes(false);
+            try (Workbook book = Workbook.of(Files.readAllBytes(path));
+                    Sheet sheet = book.sheet(vector.get("sheet").getAsInt(), options, plan)) {
+                int seen = 0;
+                List<String> problems = new ArrayList<>();
+                TabularException failure = null;
+                try {
+                    for (Batch batch = sheet.read(); batch != null; batch = sheet.read()) {
+                        CorpusTest.appendProblems(name, problems, batch, seen);
+                        for (int row = 0; row < batch.rows(); row++, seen++) {
+                            JsonArray cells = rows.get(seen).getAsJsonArray();
+                            for (int column = 0; column < plan.size(); column++) {
+                                CorpusTest.assertCell(
+                                        name + ", row " + seen + ", column " + column,
+                                        batch,
+                                        column,
+                                        row,
+                                        cells.get(column).getAsJsonObject(),
+                                        false);
+                            }
+                        }
+                    }
+                } catch (TabularException e) {
+                    failure = e;
+                }
+                assertEquals(rows.size(), seen, name);
+                CorpusTest.assertFailure(name, failure, vector);
+                CorpusTest.assertProblems(name, problems, vector, false);
+            }
+        }
+    }
+
+    @Test
+    void everyWorkbookCorpusKeyIsRead() throws Exception {
+        CorpusKeys.aJunkKeyIsSeenEverywhere("workbook.json", CorpusKeys::unknownWorkbook);
+    }
+
+    /** Every case that says what to suggest, from its own sheet under its own options. */
+    @Test
+    void everySheetSuggestionIsWhatTheCorpusSays() throws Exception {
+        int seen = 0;
+        for (JsonElement element : CorpusTest.load("workbook.json")) {
+            JsonObject vector = element.getAsJsonObject();
+            if (!vector.has("suggest")) {
+                continue;
+            }
+            seen++;
+            String name = vector.get("name").getAsString();
+            JsonObject suggest = vector.getAsJsonObject("suggest");
+            Path path = CorpusTest.CORPUS_DIRECTORY.resolve(vector.get("file").getAsString());
+            SheetOptions options = optionsOf(vector.getAsJsonObject("options"), DelimitedReader.DEFAULT_BATCH_ROWS);
+            try (Workbook book = Workbook.of(Files.readAllBytes(path));
+                    Sheet sheet = book.sheet(vector.get("sheet").getAsInt(), options)) {
+                CorpusTest.assertSuggestion(name, sheet.suggest(CorpusTest.suggestOptionsOf(suggest)), suggest);
+            }
+        }
+        assertTrue(seen >= 15, seen + " cases say what to suggest");
     }
 
     @Test
@@ -241,7 +321,8 @@ final class WorkbookCorpusTest {
         try (Workbook book = Workbook.open(basic)) {
             assertThrows(NoSuchElementException.class, () -> book.sheet("No such sheet", SheetOptions.DEFAULT, plan));
             assertThrows(IndexOutOfBoundsException.class, () -> book.sheet(99, SheetOptions.DEFAULT, plan));
-            assertThrows(IllegalArgumentException.class, () -> SheetOptions.DEFAULT.withBatchRows(0));
+            assertThrows(
+                    IllegalArgumentException.class, () -> book.sheet(0, SheetOptions.DEFAULT.withBatchRows(0), plan));
 
             // Two sheets read at once, each with its own buffers, over one workbook.
             Sheet first = book.sheet(0, SheetOptions.DEFAULT, plan);

@@ -9,7 +9,11 @@ test_that("each plan column is a hypercast verdict, read by hypercast's own help
   v <- t$columns$amount
   expect_s3_class(v, c("hypercast_verdict", "data.frame"), exact = TRUE)
   expect_identical(attr(v, "door"), "col_f64")
-  expect_identical(names(v), c("value", "ok", "reason", "offset", "length", "raw"))
+  expect_identical(names(v), c("value", "ok", "reason", "offset", "length", "detail",
+                               "detail_code", "raw", "origin"))
+  expect_identical(as.character(v$detail), c(NA, "unexpected_character", "blank"))
+  expect_identical(v$detail_code, c(NA, 2L, 1L))
+  expect_identical(as.character(v$origin), c("cell", "cell", "cell"))
   expect_identical(hypercast::is_ok(v), c(TRUE, FALSE, FALSE))
   expect_identical(as.character(v$reason), c(NA, "malformed", "empty"))
   expect_identical(v$raw, c(NA, "x", ""))
@@ -41,14 +45,22 @@ test_that("a fault's span indexes raw in the units substr() counts", {
   expect_identical(Encoding(v$raw), "bytes")
   expect_identical(charToRaw(v$raw), as.raw(c(0x31, 0xff)))
   expect_identical(c(v$offset, v$length), c(1L, 1L))
-  # A NUL: raw is NA, the span in bytes, and text refuses the cell at the NUL.
-  t <- read_delimited(as.raw(c(0x61, 0x00, 0x62, 0x0a)), list(col_text(1), col_i32(1)),
+  # A NUL: text the core accepted that R can't hold is ok with an NA value, raw = TRUE gives its
+  # bytes, and a fault on it has raw NA and a span in bytes.
+  t <- read_delimited(as.raw(c(0x61, 0x00, 0x62, 0x0a)),
+                      list(col_text(1), col_i32(1), col_text(1, raw = TRUE)),
                       delimited_dialect(has_header = FALSE))
   text <- t$columns[[1]]
-  expect_identical(as.character(text$reason), "out_of_range")
-  expect_identical(c(text$offset, text$length), c(1L, 1L))
-  expect_identical(text$raw, NA_character_)
-  expect_identical(as.character(t$columns[[2]]$reason), "malformed")
+  expect_identical(text$ok, TRUE)
+  expect_identical(text$value, NA_character_)
+  expect_identical(t$columns[[3]]$value, list(as.raw(c(0x61, 0x00, 0x62))))
+  number <- t$columns[[2]]
+  expect_identical(as.character(number$reason), "malformed")
+  expect_identical(number$raw, NA_character_)
+  expect_identical(c(number$offset, number$length), c(0L, 1L))
+  p <- problems(t)
+  expect_identical(as.character(p$kind), c("host_conversion", "cell"))
+  expect_identical(p$column, c("V1", "V1_1"))
 })
 
 test_that("values come out typed as hypercast types them", {
@@ -101,8 +113,10 @@ test_that("a plan resolves names against the header, and is bound once", {
   expect_error(bind(reader, list(col_i32(4))), "past the 3 columns")
   expect_error(bind(reader, list(1)), "plan column 1 is not a column")
   expect_error(bind(reader, "x"), "plan must be a list")
-  # The first of equal names; an unnamed column is named for its source's header name.
-  bind(reader, list(first = col_i32("a"), col_i32(3)))
+  # A name the header holds twice is refused, naming both; a position reads either.
+  expect_error(bind(reader, list(col_i32("a"))), "columns 1 and 3")
+  # An unnamed column is named for its source's header name.
+  bind(reader, list(first = col_i32(1), col_i32(3)))
   expect_error(bind(reader, list(col_i32(1))), "bound once")
   batch <- read_batch(reader)
   expect_identical(names(batch$columns), c("first", "a"))

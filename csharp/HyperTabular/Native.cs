@@ -27,6 +27,7 @@ static unsafe partial class Native
 	internal const int ErrArena = -3;
 	internal const int ErrCells = -4;
 	internal const int ErrWindow = -5;
+	internal const int ErrBatch = -6;
 
 	/// <summary>The flag in the top bit of a span's length; its meaning is the field's.</summary>
 	internal const uint SpanFlag = 1u << 31;
@@ -87,7 +88,10 @@ static unsafe partial class Native
 		public byte Engine;
 	}
 
-	/// <summary>The core's state block: 64 bytes it defines and this assembly only keeps.</summary>
+	/// <summary>
+	/// The first 64 bytes of the core's state block, which it defines and this assembly only keeps.
+	/// The block's own size is <see cref="hypertabular_delimited_state_size"/>'s to say.
+	/// </summary>
 	[StructLayout(LayoutKind.Sequential, Size = 64)]
 	internal struct State
 	{
@@ -138,6 +142,157 @@ static unsafe partial class Native
 		public ulong StringsCount;
 		public ulong Needed;
 		public RawFailure Failure;
+	}
+
+	/// <summary>The dialect as <c>hypertabular_delimited_init_with</c> takes it.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawDelimitedOptions
+	{
+		public uint Size;
+		public byte Separator;
+		public byte Quoting;
+		public byte SkipBlankLines;
+		public byte Engine;
+		public uint Skip;
+		public uint HeaderRow;
+		public uint ShortRows;
+		public uint LongRows;
+	}
+
+	/// <summary>A sheet's options as <c>hypertabular_workbook_sheet_with</c> takes them.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawSheetOptions
+	{
+		public uint Size;
+		public uint HasHeader;
+		public uint SkipEmptyRows;
+		public uint Skip;
+		public uint HeaderRow;
+		public uint FirstRow;
+		public uint FirstColumn;
+		public uint LastRow;
+		public uint LastColumn;
+	}
+
+	/// <summary>What <c>hypertabular_range_parse</c> makes of <c>A5:F200</c>.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawRange
+	{
+		public uint FirstRow;
+		public uint FirstColumn;
+		public uint LastRow;
+		public uint LastColumn;
+	}
+
+	/// <summary>One plan column as the <c>_with</c> fills take it: <see cref="RawColumnSpec"/>, with date options, a month vocabulary and tokens.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawColumnSpecWith
+	{
+		public uint Size;
+		public uint Ordinal;
+		public uint Door;
+		public uint Param;
+		public RawNumFormat Format;
+		public RawDateOptions Date;
+		public byte* Months;
+		public nuint MonthsLen;
+		public byte* Tokens;
+		public nuint TokensLen;
+	}
+
+	/// <summary>What a verdict does not say about a cell: HyperCast's detail code, and where the verdict came from.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawCellNote
+	{
+		public ushort Detail;
+		public ushort Origin;
+	}
+
+	/// <summary>Where one column's output goes in the <c>_with</c> fills and what <c>hypertabular_faults</c> reads back.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawColumnBufferWith
+	{
+		public uint Size;
+		public void* Values;
+		public CellVerdict* Verdicts;
+		public RawCellNote* Notes;
+	}
+
+	/// <summary>The memory the <c>_with</c> fills work in: <see cref="RawBuffers"/>'s fields, tokens and the row widths.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawBuffersWith
+	{
+		public uint Size;
+		public byte* Window;
+		public nuint WindowCap;
+		public byte* Arena;
+		public nuint ArenaCap;
+		public RawSpan* Cells;
+		public nuint CellsCap;
+		public RawSlot* Row;
+		public nuint RowCap;
+		public byte* Strings;
+		public nuint StringsLen;
+		public RawSpan* Table;
+		public nuint TableLen;
+		public byte* Kinds;
+		public nuint KindsLen;
+		public byte* Tokens;
+		public nuint TokensLen;
+		public uint* RowWidths;
+	}
+
+	/// <summary>One thing <c>hypertabular_faults</c> lists.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawProblem
+	{
+		/// <summary><see cref="PlanColumn"/> of an entry about the row as a whole.</summary>
+		public const uint RowLevel = uint.MaxValue;
+
+		public uint Row;
+		public uint PlanColumn;
+		public uint Reason;
+		public ushort Detail;
+		public ushort Origin;
+		public uint Offset;
+		public uint Len;
+		public uint Expected;
+		public uint Found;
+	}
+
+	/// <summary>What <c>hypertabular_suggest</c> says of one column of a sample.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawSuggestion
+	{
+		public uint Door;
+		public uint Param;
+		public uint Status;
+		public uint Matched;
+		public uint Sampled;
+	}
+
+	/// <summary>How far <c>hypertabular_transcode</c> got: every field counts this call's input and output.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawTranscoded
+	{
+		public ulong Consumed;
+		public ulong Written;
+		public ulong FailureAt;
+		public uint Failed;
+		public uint Reserved;
+	}
+
+	/// <summary>What <c>hypertabular_batch_check</c> found of a read's sizes.</summary>
+	[StructLayout(LayoutKind.Sequential)]
+	internal struct RawBatchCheck
+	{
+		public ulong Needed;
+		public ulong Limit;
+		public ulong BufferBytes;
+		public ulong SampleRows;
+		public ulong Width;
+		public uint Refused;
+		public uint Reserved;
 	}
 
 	[LibraryImport("hypertabular", EntryPoint = "hypertabular_version")]
@@ -349,4 +504,139 @@ static unsafe partial class Native
 		OperatingSystem.IsBrowser() ? hypertabular_workbook_fill_browser(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled)
 			: OperatingSystem.IsIOS() ? hypertabular_workbook_fill_internal(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled)
 			: hypertabular_workbook_fill_native(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_delimited_init_with")]
+	private static partial int hypertabular_delimited_init_with_native(
+		State* state, RawDelimitedOptions* options);
+	[LibraryImport("*", EntryPoint = "hypertabular_delimited_init_with")]
+	private static partial int hypertabular_delimited_init_with_browser(
+		State* state, RawDelimitedOptions* options);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_delimited_init_with")]
+	private static partial int hypertabular_delimited_init_with_internal(
+		State* state, RawDelimitedOptions* options);
+	internal static int hypertabular_delimited_init_with(
+		State* state, RawDelimitedOptions* options) =>
+		OperatingSystem.IsBrowser() ? hypertabular_delimited_init_with_browser(state, options)
+			: OperatingSystem.IsIOS() ? hypertabular_delimited_init_with_internal(state, options)
+			: hypertabular_delimited_init_with_native(state, options);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_delimited_fill_with")]
+	private static partial int hypertabular_delimited_fill_with_native(
+		State* state, byte* input, nuint inputLen, uint last, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	[LibraryImport("*", EntryPoint = "hypertabular_delimited_fill_with")]
+	private static partial int hypertabular_delimited_fill_with_browser(
+		State* state, byte* input, nuint inputLen, uint last, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_delimited_fill_with")]
+	private static partial int hypertabular_delimited_fill_with_internal(
+		State* state, byte* input, nuint inputLen, uint last, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	internal static int hypertabular_delimited_fill_with(
+		State* state, byte* input, nuint inputLen, uint last, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled) =>
+		OperatingSystem.IsBrowser() ? hypertabular_delimited_fill_with_browser(state, input, inputLen, last, specs, columns, columnCount, maxRows, buffers, filled)
+			: OperatingSystem.IsIOS() ? hypertabular_delimited_fill_with_internal(state, input, inputLen, last, specs, columns, columnCount, maxRows, buffers, filled)
+			: hypertabular_delimited_fill_with_native(state, input, inputLen, last, specs, columns, columnCount, maxRows, buffers, filled);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_transcode")]
+	private static partial int hypertabular_transcode_native(
+		uint encoding, byte* input, nuint inputLen, uint last, byte* output, nuint cap, RawTranscoded* progress);
+	[LibraryImport("*", EntryPoint = "hypertabular_transcode")]
+	private static partial int hypertabular_transcode_browser(
+		uint encoding, byte* input, nuint inputLen, uint last, byte* output, nuint cap, RawTranscoded* progress);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_transcode")]
+	private static partial int hypertabular_transcode_internal(
+		uint encoding, byte* input, nuint inputLen, uint last, byte* output, nuint cap, RawTranscoded* progress);
+	internal static int hypertabular_transcode(
+		uint encoding, byte* input, nuint inputLen, uint last, byte* output, nuint cap, RawTranscoded* progress) =>
+		OperatingSystem.IsBrowser() ? hypertabular_transcode_browser(encoding, input, inputLen, last, output, cap, progress)
+			: OperatingSystem.IsIOS() ? hypertabular_transcode_internal(encoding, input, inputLen, last, output, cap, progress)
+			: hypertabular_transcode_native(encoding, input, inputLen, last, output, cap, progress);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_faults")]
+	private static partial int hypertabular_faults_native(
+		RawColumnBufferWith* columns, nuint columnCount, nuint rows, uint* rowWidths, uint expectedWidth, uint longRows, ulong* cursor, RawProblem* output, nuint cap, nuint* written);
+	[LibraryImport("*", EntryPoint = "hypertabular_faults")]
+	private static partial int hypertabular_faults_browser(
+		RawColumnBufferWith* columns, nuint columnCount, nuint rows, uint* rowWidths, uint expectedWidth, uint longRows, ulong* cursor, RawProblem* output, nuint cap, nuint* written);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_faults")]
+	private static partial int hypertabular_faults_internal(
+		RawColumnBufferWith* columns, nuint columnCount, nuint rows, uint* rowWidths, uint expectedWidth, uint longRows, ulong* cursor, RawProblem* output, nuint cap, nuint* written);
+	internal static int hypertabular_faults(
+		RawColumnBufferWith* columns, nuint columnCount, nuint rows, uint* rowWidths, uint expectedWidth, uint longRows, ulong* cursor, RawProblem* output, nuint cap, nuint* written) =>
+		OperatingSystem.IsBrowser() ? hypertabular_faults_browser(columns, columnCount, rows, rowWidths, expectedWidth, longRows, cursor, output, cap, written)
+			: OperatingSystem.IsIOS() ? hypertabular_faults_internal(columns, columnCount, rows, rowWidths, expectedWidth, longRows, cursor, output, cap, written)
+			: hypertabular_faults_native(columns, columnCount, rows, rowWidths, expectedWidth, longRows, cursor, output, cap, written);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_suggest")]
+	private static partial int hypertabular_suggest_native(
+		byte* input, nuint inputLen, byte* arena, nuint arenaLen, RawSpan* cells, byte* typed, nuint rows, nuint columns, RawNumFormat* formats, RawSuggestion* output);
+	[LibraryImport("*", EntryPoint = "hypertabular_suggest")]
+	private static partial int hypertabular_suggest_browser(
+		byte* input, nuint inputLen, byte* arena, nuint arenaLen, RawSpan* cells, byte* typed, nuint rows, nuint columns, RawNumFormat* formats, RawSuggestion* output);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_suggest")]
+	private static partial int hypertabular_suggest_internal(
+		byte* input, nuint inputLen, byte* arena, nuint arenaLen, RawSpan* cells, byte* typed, nuint rows, nuint columns, RawNumFormat* formats, RawSuggestion* output);
+	internal static int hypertabular_suggest(
+		byte* input, nuint inputLen, byte* arena, nuint arenaLen, RawSpan* cells, byte* typed, nuint rows, nuint columns, RawNumFormat* formats, RawSuggestion* output) =>
+		OperatingSystem.IsBrowser() ? hypertabular_suggest_browser(input, inputLen, arena, arenaLen, cells, typed, rows, columns, formats, output)
+			: OperatingSystem.IsIOS() ? hypertabular_suggest_internal(input, inputLen, arena, arenaLen, cells, typed, rows, columns, formats, output)
+			: hypertabular_suggest_native(input, inputLen, arena, arenaLen, cells, typed, rows, columns, formats, output);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_workbook_sheet_with")]
+	private static partial int hypertabular_workbook_sheet_with_native(
+		void* state, byte* container, nuint containerLen, byte* part, nuint partLen, uint index, RawSheetOptions* options, RawFilled* filled);
+	[LibraryImport("*", EntryPoint = "hypertabular_workbook_sheet_with")]
+	private static partial int hypertabular_workbook_sheet_with_browser(
+		void* state, byte* container, nuint containerLen, byte* part, nuint partLen, uint index, RawSheetOptions* options, RawFilled* filled);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_workbook_sheet_with")]
+	private static partial int hypertabular_workbook_sheet_with_internal(
+		void* state, byte* container, nuint containerLen, byte* part, nuint partLen, uint index, RawSheetOptions* options, RawFilled* filled);
+	internal static int hypertabular_workbook_sheet_with(
+		void* state, byte* container, nuint containerLen, byte* part, nuint partLen, uint index, RawSheetOptions* options, RawFilled* filled) =>
+		OperatingSystem.IsBrowser() ? hypertabular_workbook_sheet_with_browser(state, container, containerLen, part, partLen, index, options, filled)
+			: OperatingSystem.IsIOS() ? hypertabular_workbook_sheet_with_internal(state, container, containerLen, part, partLen, index, options, filled)
+			: hypertabular_workbook_sheet_with_native(state, container, containerLen, part, partLen, index, options, filled);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_workbook_fill_with")]
+	private static partial int hypertabular_workbook_fill_with_native(
+		void* state, byte* container, nuint containerLen, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	[LibraryImport("*", EntryPoint = "hypertabular_workbook_fill_with")]
+	private static partial int hypertabular_workbook_fill_with_browser(
+		void* state, byte* container, nuint containerLen, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_workbook_fill_with")]
+	private static partial int hypertabular_workbook_fill_with_internal(
+		void* state, byte* container, nuint containerLen, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled);
+	internal static int hypertabular_workbook_fill_with(
+		void* state, byte* container, nuint containerLen, RawColumnSpecWith* specs, RawColumnBufferWith* columns, nuint columnCount, nuint maxRows, RawBuffersWith* buffers, RawFilled* filled) =>
+		OperatingSystem.IsBrowser() ? hypertabular_workbook_fill_with_browser(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled)
+			: OperatingSystem.IsIOS() ? hypertabular_workbook_fill_with_internal(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled)
+			: hypertabular_workbook_fill_with_native(state, container, containerLen, specs, columns, columnCount, maxRows, buffers, filled);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_range_parse")]
+	private static partial int hypertabular_range_parse_native(
+		byte* text, nuint length, RawRange* output);
+	[LibraryImport("*", EntryPoint = "hypertabular_range_parse")]
+	private static partial int hypertabular_range_parse_browser(
+		byte* text, nuint length, RawRange* output);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_range_parse")]
+	private static partial int hypertabular_range_parse_internal(
+		byte* text, nuint length, RawRange* output);
+	internal static int hypertabular_range_parse(
+		byte* text, nuint length, RawRange* output) =>
+		OperatingSystem.IsBrowser() ? hypertabular_range_parse_browser(text, length, output)
+			: OperatingSystem.IsIOS() ? hypertabular_range_parse_internal(text, length, output)
+			: hypertabular_range_parse_native(text, length, output);
+
+	[LibraryImport("hypertabular", EntryPoint = "hypertabular_batch_check")]
+	private static partial int hypertabular_batch_check_native(
+		RawColumnSpecWith* specs, nuint columnCount, ulong batchRows, ulong bufferBytes, uint flags, RawBatchCheck* output);
+	[LibraryImport("*", EntryPoint = "hypertabular_batch_check")]
+	private static partial int hypertabular_batch_check_browser(
+		RawColumnSpecWith* specs, nuint columnCount, ulong batchRows, ulong bufferBytes, uint flags, RawBatchCheck* output);
+	[LibraryImport("__Internal", EntryPoint = "hypertabular_batch_check")]
+	private static partial int hypertabular_batch_check_internal(
+		RawColumnSpecWith* specs, nuint columnCount, ulong batchRows, ulong bufferBytes, uint flags, RawBatchCheck* output);
+	internal static int hypertabular_batch_check(
+		RawColumnSpecWith* specs, nuint columnCount, ulong batchRows, ulong bufferBytes, uint flags, RawBatchCheck* output) =>
+		OperatingSystem.IsBrowser() ? hypertabular_batch_check_browser(specs, columnCount, batchRows, bufferBytes, flags, output)
+			: OperatingSystem.IsIOS() ? hypertabular_batch_check_internal(specs, columnCount, batchRows, bufferBytes, flags, output)
+			: hypertabular_batch_check_native(specs, columnCount, batchRows, bufferBytes, flags, output);
 }

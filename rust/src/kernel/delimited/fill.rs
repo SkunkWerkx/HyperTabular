@@ -12,9 +12,12 @@
 //! - **the input** — any chunk that starts on a row boundary, which is where every
 //!   `consumed` count ends. A row that does not fit a chunk is the caller's to make room
 //!   for; the core only says it took nothing.
-//! - **the state block** ([`State`]) — 64 bytes: where the input stands (line, record,
-//!   byte offset), the width the first record fixed, and a failure once there is one.
-//! - **the columns** — per plan column, `max_rows` values and `max_rows` verdicts.
+//! - **the state block** ([`State`]): where the input stands (line, record, byte offset), the
+//!   width the first record fixed, and a failure once there is one, in the first 64 bytes; what
+//!   [`State::init_with`] was asked for in the rest. A block from [`State::init`] is the 64 bytes
+//!   alone, which is all the 1.0 surface ever said it was.
+//! - **the columns** — per plan column, `max_rows` values and `max_rows` verdicts, and with
+//!   [`fill_with`] optionally `max_rows` notes.
 //! - **the cell table** — `max_rows * (widest ordinal + 2)` [`Span`]s. Row `r`'s entry for
 //!   source column `c` is at `r * (width + 1) + c` and locates that cell in the input
 //!   (flagged when the cell has `""` inside and must be unescaped to be read); the entry
@@ -23,20 +26,26 @@
 //!   cell, one that failed to cast included, is the input at that span.
 //! - **the arena** — where an escaped cell is unescaped. A `Text` value is a span into
 //!   the input, and flagged when it is a span into the arena instead. A file with no `""`
-//!   in it never touches the arena.
+//!   in it never touches the arena. The bytes a `Text` value names are valid UTF-8: the text
+//!   door gives anything else a `Malformed` verdict, without copying.
 //!
 //! Nothing is retained between calls except what the state block holds, and nothing here
 //! allocates, blocks, or reads a clock.
 
 use crate::kernel::abi::{
-    CellVerdict, ColumnBuffer, ColumnSpec, ERR_ARENA, ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE,
-    Failure, Filled, OK, Span,
+    CellNote, CellVerdict, ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, ERR_ARENA,
+    ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE, Failure, Filled, OK, RawDelimitedOptions, Span,
+    no_format,
 };
 use crate::kernel::delimited::engine::{self, Kind};
 use crate::kernel::delimited::scan::{Flow, Scanner, Sink};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
-use hypercast::{CivilDateTime, Date, Decimal, Duration, Fault, Reason, Timestamp};
+use hypercast::detailed;
+use hypercast::{
+    CivilDateTime, Date, DateOptions, Decimal, Duration, Fault, MonthNames, NumFormat,
+    RawDateOptions, Reason, Timestamp, ValidDateOptions, ValidNumFormat,
+};
 
 /// The dialect as the caller declares it. Nothing is sniffed.
 #[repr(C)]
@@ -63,12 +72,15 @@ impl RawDialect {
 
 /// Where one input stands. The caller owns it, zero-initialized or not, and hands it to
 /// [`State::init`] once before anything else. Plain integers throughout, so that no value
-/// a caller could put in it is one the core cannot survive.
+/// a caller could put in it is one the core cannot survive, with one exception: `extended` says
+/// how large the block is, so a 64-byte block with that byte set is read and written 16 bytes past
+/// its end. A block that came from `init` or `init_with`, and was left alone, says the truth.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
-    /// The dialect, as `init` copied it in. The core's own, as `started` and `reserved`
-    /// are: a caller reads the fields that follow and writes none of them.
+    /// The dialect, as `init` copied it in. The core's own, as `started`, `extended`,
+    /// `reserved` and all that follows `failure` are: a caller reads the other fields and
+    /// writes none of them.
     separator: u8,
     quoting: u8,
     skip_blank_lines: u8,
@@ -82,9 +94,22 @@ pub struct State {
     /// Cells per record, fixed by the first; `0` before it.
     pub expected: u32,
     started: u8,
-    reserved: [u8; 3],
+    /// Nonzero when the block has the fields below: it came from [`State::init_with`]. A block
+    /// from [`State::init`] may be the 64 bytes the 1.0 surface said a state is, so its reader
+    /// never looks past them.
+    extended: u8,
+    reserved: [u8; 2],
     /// The structural failure that ended this input, if `code` is nonzero.
     pub failure: Failure,
+    /// Physical lines still to pass over.
+    skip: u32,
+    /// Records still to discard.
+    header_row: u32,
+    /// Nonzero when a short record is padded.
+    short_rows: u8,
+    /// Nonzero when a long record is cut.
+    long_rows: u8,
+    tail: [u8; 6],
 }
 
 impl RawDialect {
@@ -94,7 +119,38 @@ impl RawDialect {
 
 impl State {
     /// The layout's size in bytes, which `hypertabular_delimited_state_size` also reports.
-    pub const SIZE: u32 = 64;
+    pub const SIZE: u32 = 80;
+
+    /// What a block from [`State::init`] is, and all the 1.0 surface reads and writes of one.
+    const FIRST_SIZE: usize = 64;
+
+    /// Every field zero.
+    const ZERO: State = State {
+        separator: 0,
+        quoting: 0,
+        skip_blank_lines: 0,
+        engine: 0,
+        line: 0,
+        records: 0,
+        offset: 0,
+        expected: 0,
+        started: 0,
+        extended: 0,
+        reserved: [0; 2],
+        failure: Failure {
+            code: 0,
+            line: 0,
+            record: 0,
+            byte: 0,
+            expected: 0,
+            found: 0,
+        },
+        skip: 0,
+        header_row: 0,
+        short_rows: 0,
+        long_rows: 0,
+        tail: [0; 6],
+    };
 }
 
 // The two layouts pinned as crate::kernel::abi pins the rest, here because the state's
@@ -119,19 +175,19 @@ const _: () = {
     assert!(offset_of!(State, offset) == 16);
     assert!(offset_of!(State, expected) == 24);
     assert!(offset_of!(State, started) == 28);
-    assert!(offset_of!(State, reserved) == 29);
+    assert!(offset_of!(State, extended) == 29);
+    assert!(offset_of!(State, reserved) == 30);
     assert!(offset_of!(State, failure) == 32);
+    assert!(offset_of!(State, skip) == State::FIRST_SIZE);
+    assert!(offset_of!(State, header_row) == 68);
+    assert!(offset_of!(State, short_rows) == 72);
+    assert!(offset_of!(State, long_rows) == 73);
+    assert!(offset_of!(State, tail) == 74);
 };
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// Offsets are 31 bits: a [`Span`]'s length keeps its top bit for a flag.
 const LIMIT: usize = i32::MAX as usize;
-
-const EMPTY: Fault = Fault {
-    reason: Reason::Empty,
-    offset: 0,
-    len: 0,
-};
 
 impl State {
     /// A state at the start of an input, or `None` when the dialect is one the scanner
@@ -149,20 +205,71 @@ impl State {
             skip_blank_lines: dialect.skip_blank_lines,
             engine: dialect.engine,
             line: 1,
-            records: 0,
-            offset: 0,
-            expected: 0,
-            started: 0,
-            reserved: [0; 3],
-            failure: Failure {
-                code: 0,
-                line: 0,
-                record: 0,
-                byte: 0,
-                expected: 0,
-                found: 0,
-            },
+            ..State::ZERO
         })
+    }
+
+    /// A state at the start of an input with these options, or `None` for a size the core
+    /// doesn't read, what [`State::init`] refuses, or a policy that isn't one.
+    pub fn init_with(options: &RawDelimitedOptions) -> Option<State> {
+        if options.size != RawDelimitedOptions::SIZE
+            || options.short_rows > RawDelimitedOptions::SHORT_ROWS_PAD
+            || options.long_rows > RawDelimitedOptions::LONG_ROWS_TRUNCATE
+        {
+            return None;
+        }
+        let mut state = State::init(RawDialect {
+            separator: options.separator,
+            quoting: options.quoting,
+            skip_blank_lines: options.skip_blank_lines,
+            engine: options.engine,
+        })?;
+        state.extended = 1;
+        state.skip = options.skip;
+        state.header_row = options.header_row;
+        state.short_rows = options.short_rows as u8;
+        state.long_rows = options.long_rows as u8;
+        Some(state)
+    }
+
+    /// The caller's block as a whole state: its fields past the first 64 bytes default when it
+    /// didn't come from [`State::init_with`], and aren't read.
+    ///
+    /// # Safety
+    /// `block` points to a readable state, 8-byte aligned, of 64 bytes at least, and of
+    /// [`State::SIZE`] when it came from [`State::init_with`].
+    pub(crate) unsafe fn load(block: *const State) -> State {
+        let mut state = State::ZERO;
+        let into = (&raw mut state).cast::<u8>();
+        // SAFETY: per the function contract, and every field is a plain integer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(block.cast::<u8>(), into, State::FIRST_SIZE);
+            if state.extended != 0 {
+                core::ptr::copy_nonoverlapping(block.cast::<u8>(), into, size_of::<State>());
+            }
+        }
+        state
+    }
+
+    /// Writes this state back to a block [`State::load`] could read, or to a new one: all of it
+    /// when it came from [`State::init_with`], the first 64 bytes otherwise.
+    ///
+    /// # Safety
+    /// `block` points to a writable state, 8-byte aligned, of as many bytes.
+    pub(crate) unsafe fn store(&self, block: *mut State) {
+        let bytes = if self.extended != 0 {
+            size_of::<State>()
+        } else {
+            State::FIRST_SIZE
+        };
+        // SAFETY: per the function contract.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::from_ref(self).cast::<u8>(),
+                block.cast::<u8>(),
+                bytes,
+            );
+        }
     }
 
     /// The scanner this state asks for — checked again on every call, because the block
@@ -180,6 +287,26 @@ impl State {
             self.quoting != 0,
             kind,
         ))
+    }
+
+    /// The physical lines of `input` from `first`, up to what's left to pass over: where they
+    /// end, the line there, and how many are still to come. Lines, so a scanner that doesn't
+    /// know a quote from any other byte; committed only with the rest of the call.
+    fn past_skipped(
+        &self,
+        scanner: &Scanner,
+        input: &[u8],
+        first: usize,
+        last: bool,
+    ) -> (usize, u32, u32) {
+        if self.skip == 0 {
+            return (first, self.line, 0);
+        }
+        let mut sink = SkipLines { left: self.skip };
+        let stop = scanner
+            .lines()
+            .scan_into(input, first, self.line, last, &mut sink);
+        (stop.next, stop.line, sink.left)
     }
 
     /// Where the scan starts in the first chunk: past a UTF-8 byte-order mark if there is
@@ -233,11 +360,52 @@ fn locate(data: &[u8], start: usize, end: usize, quotes: u32) -> Span {
     }
 }
 
+/// The sink of the lines a read passes over: it counts them.
+struct SkipLines {
+    left: u32,
+}
+
+impl Sink for SkipLines {
+    #[inline(always)]
+    fn cell(&mut self, _start: usize, _end: usize, _quotes: u32) {}
+
+    fn discard(&mut self) {}
+
+    #[inline(always)]
+    fn row(&mut self, _start: usize, _next: usize, _line: u32, _terminator: u8) -> Flow {
+        self.left = self.left.saturating_sub(1);
+        if self.left == 0 {
+            Flow::Full
+        } else {
+            Flow::More
+        }
+    }
+}
+
+/// What the scan needs of a plan's column.
+trait Planned {
+    fn ordinal(&self) -> u32;
+}
+
+impl Planned for ColumnSpec {
+    #[inline(always)]
+    fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+}
+
+impl Planned for ColumnSpecWith {
+    #[inline(always)]
+    fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+}
+
 /// The sink of a fill: writes each row's cells into the caller's table.
-struct Rows<'a> {
+struct Rows<'a, 'c, P> {
     data: &'a [u8],
-    specs: &'a [ColumnSpec],
-    cells: &'a mut [Span],
+    specs: &'a [P],
+    cells: &'c mut [Span],
     width: usize,
     per_row: usize,
     capacity: usize,
@@ -257,9 +425,17 @@ struct Rows<'a> {
     failure: Failure,
     /// Absolute offset of `data[0]`.
     offset: u64,
+    /// Records still to discard.
+    header_row: u32,
+    /// Whether a short record is padded.
+    pad: bool,
+    /// Whether a long record is cut.
+    cut: bool,
+    /// The cells each delivered row had, when the caller asked; empty otherwise.
+    widths: &'a mut [u32],
 }
 
-impl Sink for Rows<'_> {
+impl<P: Planned> Sink for Rows<'_, '_, P> {
     #[inline(always)]
     fn cell(&mut self, start: usize, end: usize, quotes: u32) {
         if self.seen == 0 {
@@ -290,12 +466,18 @@ impl Sink for Rows<'_> {
             self.records += 1;
             return Flow::More;
         }
+        if self.header_row > 0 {
+            self.header_row -= 1;
+            self.records += 1;
+            return Flow::More;
+        }
         let expected = if self.expected == 0 {
             found as u32
         } else {
             self.expected
         };
-        if found as u32 != expected {
+        let width = found as u32;
+        if width != expected && !(if width < expected { self.pad } else { self.cut }) {
             // Every intact row before it is delivered first; the failure is raised by the
             // call that finds it at the front.
             if self.rows == 0 {
@@ -311,8 +493,9 @@ impl Sink for Rows<'_> {
             return Flow::Refused;
         }
         let base = self.rows * self.per_row;
-        // Source columns the plan reads past this record's last cell are empty.
-        for ordinal in found..self.width {
+        // Source columns the plan reads past this record's last cell are empty, as are those
+        // past the width in a row that's cut.
+        for ordinal in found.min(expected as usize)..self.width {
             if let Some(slot) = self.cells.get_mut(base + ordinal) {
                 *slot = Span::default();
             }
@@ -320,7 +503,7 @@ impl Sink for Rows<'_> {
         if escaped {
             let mut need = 0usize;
             for spec in self.specs {
-                if let Some(cell) = self.cells.get(base + spec.ordinal as usize)
+                if let Some(cell) = self.cells.get(base + spec.ordinal() as usize)
                     && cell.flagged()
                 {
                     need += cell.len();
@@ -339,6 +522,9 @@ impl Sink for Rows<'_> {
                 offset: start as u32,
                 len: line,
             };
+        }
+        if let Some(slot) = self.widths.get_mut(self.rows) {
+            *slot = width;
         }
         self.expected = expected;
         self.records += 1;
@@ -414,6 +600,524 @@ unsafe fn column<T: Copy>(
     }
 }
 
+/// One column as `hypertabular_delimited_fill` has always cast it: HyperCast's doors, a fault
+/// and nothing more. `valid` says the rows' whole region is valid UTF-8.
+///
+/// # Safety
+/// `buffer`'s two arrays each have room for `run.rows` elements of the door's types.
+#[inline(always)]
+unsafe fn cast_plain(
+    run: &mut Run<'_>,
+    door: Door,
+    ordinal: usize,
+    format: &NumFormat,
+    valid: bool,
+    buffer: &ColumnBuffer,
+) {
+    const INSTANT: Timestamp = Timestamp {
+        seconds: 0,
+        nanos: 0,
+    };
+    const DAY: Date = Date {
+        year: 0,
+        month: 0,
+        day: 0,
+    };
+    // SAFETY: the caller's contract, passed on a column at a time.
+    unsafe {
+        match door {
+            Door::Bool => column(run, ordinal, buffer, 0u8, |text, _| {
+                hypercast::cast_bool(text).map(u8::from)
+            }),
+            Door::I8 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_i8(text, format)
+            }),
+            Door::I16 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_i16(text, format)
+            }),
+            Door::I32 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_i32(text, format)
+            }),
+            Door::I64 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_i64(text, format)
+            }),
+            Door::U8 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_u8(text, format)
+            }),
+            Door::U16 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_u16(text, format)
+            }),
+            Door::U32 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_u32(text, format)
+            }),
+            Door::U64 => column(run, ordinal, buffer, 0, |text, _| {
+                hypercast::cast_u64(text, format)
+            }),
+            Door::F32 => column(run, ordinal, buffer, 0.0, |text, _| {
+                hypercast::cast_f32(text, format)
+            }),
+            Door::F64 => column(run, ordinal, buffer, 0.0, |text, _| {
+                hypercast::cast_f64(text, format)
+            }),
+            Door::Decimal => {
+                let zero = Decimal {
+                    lo: 0,
+                    hi: 0,
+                    scale: 0,
+                    negative: false,
+                };
+                column(run, ordinal, buffer, zero, |text, _| {
+                    hypercast::cast_decimal(text, format)
+                })
+            }
+            Door::Uuid => column(run, ordinal, buffer, [0u8; 16], |text, _| {
+                hypercast::cast_uuid(text)
+            }),
+            Door::Timestamp => column(run, ordinal, buffer, INSTANT, |text, _| {
+                hypercast::cast_timestamp(text)
+            }),
+            Door::Unix(precision) => column(run, ordinal, buffer, INSTANT, |text, _| {
+                hypercast::cast_unix(text, precision)
+            }),
+            Door::ExcelSerial(epoch) => column(run, ordinal, buffer, INSTANT, |text, _| {
+                hypercast::cast_excel_serial(text, epoch)
+            }),
+            Door::Date => column(run, ordinal, buffer, DAY, |text, _| {
+                hypercast::cast_date(text)
+            }),
+            Door::DateOrdered(order) => column(run, ordinal, buffer, DAY, |text, _| {
+                hypercast::cast_date_ordered(text, order)
+            }),
+            Door::DateTime(order) => {
+                let zero = CivilDateTime {
+                    date: DAY,
+                    nanos_of_day: 0,
+                };
+                column(run, ordinal, buffer, zero, |text, _| {
+                    hypercast::cast_datetime(text, order)
+                })
+            }
+            Door::Time => column(run, ordinal, buffer, 0u64, |text, _| {
+                hypercast::cast_time(text)
+            }),
+            Door::Duration => {
+                let zero = Duration {
+                    seconds: 0,
+                    nanos: 0,
+                };
+                column(run, ordinal, buffer, zero, |text, _| {
+                    hypercast::cast_duration(text)
+                })
+            }
+            // The bytes themselves, untrimmed, as HyperCast's door judges them: no bytes at
+            // all is `Empty`, and bytes that aren't UTF-8 are `Malformed`. A region already
+            // found valid leaves only the first of those to ask.
+            Door::Text => column(run, ordinal, buffer, Span::default(), |text, span| {
+                if valid && !text.is_empty() {
+                    Ok(span)
+                } else {
+                    hypercast::cast_text(text).map(|_| span)
+                }
+            }),
+        }
+    }
+}
+
+/// The verdict no door gave: what a padded cell or a token is.
+const EMPTY: CellVerdict = CellVerdict {
+    offset: 0,
+    len: 0,
+    reason: Reason::Empty as u32,
+};
+
+/// Whether `list` is whole: a little-endian `u32` length and that many bytes, to its end.
+pub(crate) fn tokens_are_whole(mut list: &[u8]) -> bool {
+    while !list.is_empty() {
+        match next_token(list) {
+            Some((_, rest)) => list = rest,
+            None => return false,
+        }
+    }
+    true
+}
+
+fn next_token(list: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (head, rest) = list.split_first_chunk::<4>()?;
+    rest.split_at_checked(u32::from_le_bytes(*head) as usize)
+}
+
+/// Whether `text` is, byte for byte, one of a whole list's tokens.
+#[inline]
+pub(crate) fn is_token(mut list: &[u8], text: &[u8]) -> bool {
+    while let Some((token, rest)) = next_token(list) {
+        if token == text {
+            return true;
+        }
+        list = rest;
+    }
+    false
+}
+
+/// One column with what a verdict doesn't say: `door` over every row's cell, but a cell the row
+/// doesn't have and a cell that's a token are `Empty` without asking it. A note goes beside each
+/// verdict when `buffer` has somewhere for it.
+///
+/// # Safety
+/// `buffer`'s arrays each have room for `run.rows` elements, its notes unless they're null.
+#[inline(always)]
+unsafe fn noted_column<T: Copy>(
+    run: &mut Run<'_>,
+    ordinal: usize,
+    buffer: &ColumnBufferWith,
+    tokens: &[u8],
+    zero: T,
+    door: impl Fn(&[u8], Span) -> Result<T, hypercast::Failure>,
+) {
+    let values = buffer.values.cast::<T>();
+    let notes = buffer.notes;
+    // Most cells have nothing to note: every note starts as the default, a zero, and only the rest
+    // are written. Asked of each cell, this is most of what notes cost.
+    if !notes.is_null() {
+        // SAFETY: per the function contract; as bytes, since the array need not be aligned.
+        unsafe {
+            notes
+                .cast::<u8>()
+                .write_bytes(0, run.rows * size_of::<CellNote>());
+        }
+    }
+    let note_at = |row: usize, detail: u16, origin: u16| {
+        if !notes.is_null() {
+            // SAFETY: per the function contract; the array need not be aligned.
+            unsafe { notes.add(row).write_unaligned(CellNote { detail, origin }) };
+        }
+    };
+    for row in 0..run.rows {
+        let cell = run
+            .cells
+            .get(row * run.per_row + ordinal)
+            .copied()
+            .unwrap_or_default();
+        // A cell the row has, past its first, starts after the separator before it, so only a
+        // blanked table entry says offset 0 there.
+        let (value, verdict) = if ordinal > 0 && cell == Span::default() {
+            note_at(row, 0, CellNote::ORIGIN_PADDED);
+            (zero, EMPTY)
+        } else {
+            // The byte before an unquoted cell is a separator or a line ending, or there is none.
+            let quoted = !tokens.is_empty()
+                && (cell.flagged()
+                    || (cell.offset as usize)
+                        .checked_sub(1)
+                        .and_then(|before| run.data.get(before))
+                        == Some(&b'"'));
+            let (text, span) = text(run.data, &mut *run.arena, &mut run.used, cell);
+            if !tokens.is_empty() && !quoted && is_token(tokens, text) {
+                note_at(row, 0, CellNote::ORIGIN_TOKEN);
+                (zero, EMPTY)
+            } else {
+                match door(text, span) {
+                    Ok(value) => (value, CellVerdict::OK),
+                    Err(failure) => {
+                        note_at(row, failure.detail.code() as u16, CellNote::ORIGIN_CELL);
+                        (zero, CellVerdict::from_fault(failure.fault()))
+                    }
+                }
+            }
+        };
+        // SAFETY: per the function contract; neither array need be aligned.
+        unsafe {
+            values.add(row).write_unaligned(value);
+            buffer.verdicts.add(row).write_unaligned(verdict);
+        }
+    }
+}
+
+/// [`cast_plain`] through HyperCast's detailed doors, with options, tokens and notes.
+///
+/// # Safety
+/// `buffer`'s arrays each have room for `run.rows` elements of the door's types, its notes
+/// unless they're null.
+#[inline(always)]
+unsafe fn cast_noted(
+    run: &mut Run<'_>,
+    door: Door,
+    ordinal: usize,
+    column: &Resolved<'_>,
+    valid: bool,
+    buffer: &ColumnBufferWith,
+) {
+    const INSTANT: Timestamp = Timestamp {
+        seconds: 0,
+        nanos: 0,
+    };
+    const DAY: Date = Date {
+        year: 0,
+        month: 0,
+        day: 0,
+    };
+    let format = &column.format;
+    let date = column.date.as_ref();
+    let tokens = column.tokens;
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        match door {
+            Door::Bool => noted_column(run, ordinal, buffer, tokens, 0u8, |text, _| {
+                detailed::cast_bool(text).map(u8::from)
+            }),
+            Door::I8 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_i8(text, format)
+            }),
+            Door::I16 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_i16(text, format)
+            }),
+            Door::I32 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_i32(text, format)
+            }),
+            Door::I64 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_i64(text, format)
+            }),
+            Door::U8 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_u8(text, format)
+            }),
+            Door::U16 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_u16(text, format)
+            }),
+            Door::U32 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_u32(text, format)
+            }),
+            Door::U64 => noted_column(run, ordinal, buffer, tokens, 0, |text, _| {
+                detailed::cast_u64(text, format)
+            }),
+            Door::F32 => noted_column(run, ordinal, buffer, tokens, 0.0, |text, _| {
+                detailed::cast_f32(text, format)
+            }),
+            Door::F64 => noted_column(run, ordinal, buffer, tokens, 0.0, |text, _| {
+                detailed::cast_f64(text, format)
+            }),
+            Door::Decimal => {
+                let zero = Decimal {
+                    lo: 0,
+                    hi: 0,
+                    scale: 0,
+                    negative: false,
+                };
+                noted_column(run, ordinal, buffer, tokens, zero, |text, _| {
+                    detailed::cast_decimal(text, format)
+                })
+            }
+            Door::Uuid => noted_column(run, ordinal, buffer, tokens, [0u8; 16], |text, _| {
+                detailed::cast_uuid(text)
+            }),
+            Door::Timestamp => noted_column(run, ordinal, buffer, tokens, INSTANT, |text, _| {
+                detailed::cast_timestamp(text, date)
+            }),
+            Door::Unix(precision) => {
+                noted_column(run, ordinal, buffer, tokens, INSTANT, |text, _| {
+                    detailed::cast_unix(text, precision)
+                })
+            }
+            Door::ExcelSerial(epoch) => {
+                noted_column(run, ordinal, buffer, tokens, INSTANT, |text, _| {
+                    detailed::cast_excel_serial(text, epoch)
+                })
+            }
+            Door::Date => noted_column(run, ordinal, buffer, tokens, DAY, |text, _| {
+                detailed::cast_date(text, date)
+            }),
+            Door::DateOrdered(order) => {
+                noted_column(run, ordinal, buffer, tokens, DAY, |text, _| {
+                    detailed::cast_date_ordered(text, order, date)
+                })
+            }
+            Door::DateTime(order) => {
+                let zero = CivilDateTime {
+                    date: DAY,
+                    nanos_of_day: 0,
+                };
+                noted_column(run, ordinal, buffer, tokens, zero, |text, _| {
+                    detailed::cast_datetime(text, order, date)
+                })
+            }
+            Door::Time => noted_column(run, ordinal, buffer, tokens, 0u64, |text, _| {
+                detailed::cast_time(text)
+            }),
+            Door::Duration => {
+                let zero = Duration {
+                    seconds: 0,
+                    nanos: 0,
+                };
+                noted_column(run, ordinal, buffer, tokens, zero, |text, _| {
+                    detailed::cast_duration(text)
+                })
+            }
+            // As `cast_plain`'s text door, tokens having had their turn on the bytes.
+            Door::Text => noted_column(
+                run,
+                ordinal,
+                buffer,
+                tokens,
+                Span::default(),
+                |text, span| {
+                    if valid && !text.is_empty() {
+                        Ok(span)
+                    } else {
+                        detailed::cast_text(text).map(|_| span)
+                    }
+                },
+            ),
+        }
+    }
+}
+
+/// What the scan of a call found, for its columns to be cast from and the state moved to.
+struct Walked<'c> {
+    cells: &'c [Span],
+    per_row: usize,
+    rows: usize,
+    expected: u32,
+    records: u64,
+    header_row: u32,
+    next: usize,
+    line: u32,
+}
+
+/// The part of a fill the plan's types don't enter: past what's skipped, then rows into the cell
+/// table. `Err` holds what the call returns, its work done: no rows came of it.
+#[allow(clippy::too_many_arguments)]
+fn walk<'c, P: Planned>(
+    state: &mut State,
+    scanner: &Scanner,
+    input: &[u8],
+    last: bool,
+    specs: &[P],
+    width: usize,
+    max_rows: usize,
+    cells: &'c mut [Span],
+    arena_cap: usize,
+    widths: &mut [u32],
+    out: &mut Filled,
+) -> Result<Walked<'c>, i32> {
+    if max_rows == 0 {
+        return Err(OK);
+    }
+    let Some(per_row) = width.checked_add(1) else {
+        return Err(ERR_CONTRACT);
+    };
+    let capacity = max_rows.min(cells.len() / per_row);
+    if capacity == 0 {
+        out.needed = per_row as u64;
+        return Err(ERR_CELLS);
+    }
+    let Some(first) = state.first_byte(input, last) else {
+        return Err(OK);
+    };
+    let (first, line, skip) = state.past_skipped(scanner, input, first, last);
+    if skip != 0 {
+        state.skip = skip;
+        state.advance(first, line, state.records);
+        out.consumed = first as u64;
+        return Err(OK);
+    }
+
+    let mut sink = Rows {
+        data: input,
+        specs,
+        cells,
+        width,
+        per_row,
+        capacity,
+        rows: 0,
+        seen: 0,
+        first_empty: false,
+        escaped: false,
+        skip_blank: state.skip_blank_lines != 0,
+        expected: state.expected,
+        records: state.records,
+        arena_free: arena_cap,
+        arena_needed: 0,
+        failure: state.failure,
+        offset: state.offset,
+        header_row: state.header_row,
+        pad: state.short_rows != 0,
+        cut: state.long_rows != 0,
+        widths,
+    };
+    let stop = scanner.scan_into(input, first, line, last, &mut sink);
+    let Rows {
+        cells,
+        rows,
+        expected,
+        records,
+        arena_needed,
+        failure,
+        header_row,
+        ..
+    } = sink;
+
+    if rows == 0 {
+        if arena_needed != 0 {
+            out.needed = arena_needed as u64;
+            return Err(ERR_ARENA);
+        }
+        state.skip = 0;
+        state.header_row = header_row;
+        state.advance(stop.next, stop.line, records);
+        out.consumed = stop.next as u64;
+        if failure.code != 0 {
+            return Err(state.fail(failure, out));
+        }
+        if stop.unclosed {
+            let failure = Failure {
+                code: Failure::UNCLOSED_QUOTE,
+                line: stop.line,
+                record: records,
+                byte: state.offset,
+                expected: 0,
+                found: 0,
+            };
+            return Err(state.fail(failure, out));
+        }
+        return Err(OK);
+    }
+    Ok(Walked {
+        cells,
+        per_row,
+        rows,
+        expected,
+        records,
+        header_row,
+        next: stop.next,
+        line: stop.line,
+    })
+}
+
+/// Whether the rows found are all valid UTF-8, asked of the whole region they came from: from the
+/// first row's start, so what was passed over or discarded is no part of it, to where the scan
+/// stopped. If it is, so is every cell of it: a cell is cut out at ASCII bytes, which no
+/// multi-byte character holds, and unescaping only takes ASCII quotes out. Asked once, this is
+/// most of what validating costs. A region the door refuses says nothing about any one cell, so
+/// each is then asked for itself; a bad byte in a cell a cut row dropped does no more than that.
+fn region_is_valid(input: &[u8], walked: &Walked<'_>) -> bool {
+    let from = walked
+        .cells
+        .get(walked.per_row - 1)
+        .map_or(0, |start| start.offset as usize);
+    hypercast::cast_text(input.get(from..walked.next).unwrap_or_default()).is_ok()
+}
+
+impl State {
+    /// A fill's rows delivered: the state moves past them, and `out` says so.
+    fn deliver(&mut self, walked: &Walked<'_>, arena_used: usize, out: &mut Filled) {
+        self.expected = walked.expected;
+        self.skip = 0;
+        self.header_row = walked.header_row;
+        self.advance(walked.next, walked.line, walked.records);
+        out.rows = walked.rows as u64;
+        out.consumed = walked.next as u64;
+        out.arena_used = arena_used as u64;
+    }
+}
+
 /// Reads up to `max_rows` whole rows of `input` through `specs` into `columns`.
 ///
 /// `input` starts where the last call's `consumed` ended (or at the start of the data);
@@ -441,6 +1145,77 @@ pub unsafe fn fill(
     arena: &mut [u8],
     out: &mut Filled,
 ) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        fill_read(
+            state,
+            input,
+            last,
+            specs,
+            columns,
+            max_rows,
+            cells,
+            arena,
+            out,
+            ColumnSpec::num_format,
+        )
+    }
+}
+
+/// [`fill`] as `hypertabular_delimited_fill` promises it: a format's flags as 1.0 read them
+/// ([`ColumnSpec::num_format_1_0`]), so a stale policy bit is ignored and the column reads Western.
+/// The extensions and the Rust API, whose callers can only have meant the flags they set
+/// in this version's terms, call [`fill`].
+///
+/// # Safety
+/// As [`fill`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn fill_1_0(
+    state: &mut State,
+    input: &[u8],
+    last: bool,
+    specs: &[ColumnSpec],
+    columns: &[ColumnBuffer],
+    max_rows: usize,
+    cells: &mut [Span],
+    arena: &mut [u8],
+    out: &mut Filled,
+) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        fill_read(
+            state,
+            input,
+            last,
+            specs,
+            columns,
+            max_rows,
+            cells,
+            arena,
+            out,
+            ColumnSpec::num_format_1_0,
+        )
+    }
+}
+
+/// [`fill`], with what a column's format is taken to be.
+///
+/// # Safety
+/// As [`fill`].
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn fill_read(
+    state: &mut State,
+    input: &[u8],
+    last: bool,
+    specs: &[ColumnSpec],
+    columns: &[ColumnBuffer],
+    max_rows: usize,
+    cells: &mut [Span],
+    arena: &mut [u8],
+    out: &mut Filled,
+    format_of: impl Fn(&ColumnSpec) -> Option<NumFormat>,
+) -> i32 {
     *out = Filled::default();
     if state.failure.code != 0 {
         out.failure = state.failure;
@@ -455,7 +1230,7 @@ pub unsafe fn fill(
     let mut width = 0usize;
     for (spec, buffer) in specs.iter().zip(columns) {
         if Door::from_code(spec.door, spec.param).is_none()
-            || spec.num_format().is_none()
+            || format_of(spec).is_none()
             || buffer.values.is_null()
             || buffer.verdicts.is_null()
         {
@@ -466,204 +1241,274 @@ pub unsafe fn fill(
         };
         width = width.max(reach);
     }
-    if max_rows == 0 {
-        return OK;
-    }
-    let Some(per_row) = width.checked_add(1) else {
-        return ERR_CONTRACT;
-    };
-    let capacity = max_rows.min(cells.len() / per_row);
-    if capacity == 0 {
-        out.needed = per_row as u64;
-        return ERR_CELLS;
-    }
-    let Some(first) = state.first_byte(input, last) else {
-        return OK;
-    };
-
-    let mut sink = Rows {
-        data: input,
+    let walked = match walk(
+        state,
+        &scanner,
+        input,
+        last,
         specs,
-        cells,
         width,
-        per_row,
-        capacity,
-        rows: 0,
-        seen: 0,
-        first_empty: false,
-        escaped: false,
-        skip_blank: state.skip_blank_lines != 0,
-        expected: state.expected,
-        records: state.records,
-        arena_free: arena.len(),
-        arena_needed: 0,
-        failure: state.failure,
-        offset: state.offset,
-    };
-    let stop = scanner.scan_into(input, first, state.line, last, &mut sink);
-    let Rows {
+        max_rows,
         cells,
-        rows,
-        expected,
-        records,
-        arena_needed,
-        failure,
-        ..
-    } = sink;
+        arena.len(),
+        &mut [],
+        out,
+    ) {
+        Ok(walked) => walked,
+        Err(code) => return code,
+    };
 
-    if rows == 0 {
-        if arena_needed != 0 {
-            out.needed = arena_needed as u64;
-            return ERR_ARENA;
-        }
-        state.advance(stop.next, stop.line, records);
-        out.consumed = stop.next as u64;
-        if failure.code != 0 {
-            return state.fail(failure, out);
-        }
-        if stop.unclosed {
-            let failure = Failure {
-                code: Failure::UNCLOSED_QUOTE,
-                line: stop.line,
-                record: records,
-                byte: state.offset,
-                expected: 0,
-                found: 0,
-            };
-            return state.fail(failure, out);
-        }
-        return OK;
-    }
-
+    let valid =
+        specs.iter().any(|spec| spec.door == Door::Text.code()) && region_is_valid(input, &walked);
     let mut run = Run {
         data: input,
-        cells,
-        per_row,
-        rows,
+        cells: walked.cells,
+        per_row: walked.per_row,
+        rows: walked.rows,
         arena,
         used: 0,
     };
     for (spec, buffer) in specs.iter().zip(columns) {
-        let (Some(door), Some(format)) =
-            (Door::from_code(spec.door, spec.param), spec.num_format())
+        let (Some(door), Some(format)) = (Door::from_code(spec.door, spec.param), format_of(spec))
         else {
             return ERR_CONTRACT;
         };
-        let format = &format;
-        let ordinal = spec.ordinal as usize;
-        let run = &mut run;
-        const INSTANT: Timestamp = Timestamp {
-            seconds: 0,
-            nanos: 0,
-        };
-        const DAY: Date = Date {
-            year: 0,
-            month: 0,
-            day: 0,
-        };
         // SAFETY: the caller's contract, passed on a column at a time.
         unsafe {
-            match door {
-                Door::Bool => column(run, ordinal, buffer, 0u8, |text, _| {
-                    hypercast::cast_bool(text).map(u8::from)
-                }),
-                Door::I8 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_i8(text, format)
-                }),
-                Door::I16 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_i16(text, format)
-                }),
-                Door::I32 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_i32(text, format)
-                }),
-                Door::I64 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_i64(text, format)
-                }),
-                Door::U8 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_u8(text, format)
-                }),
-                Door::U16 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_u16(text, format)
-                }),
-                Door::U32 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_u32(text, format)
-                }),
-                Door::U64 => column(run, ordinal, buffer, 0, |text, _| {
-                    hypercast::cast_u64(text, format)
-                }),
-                Door::F32 => column(run, ordinal, buffer, 0.0, |text, _| {
-                    hypercast::cast_f32(text, format)
-                }),
-                Door::F64 => column(run, ordinal, buffer, 0.0, |text, _| {
-                    hypercast::cast_f64(text, format)
-                }),
-                Door::Decimal => {
-                    let zero = Decimal {
-                        lo: 0,
-                        hi: 0,
-                        scale: 0,
-                        negative: false,
-                    };
-                    column(run, ordinal, buffer, zero, |text, _| {
-                        hypercast::cast_decimal(text, format)
-                    })
-                }
-                Door::Uuid => column(run, ordinal, buffer, [0u8; 16], |text, _| {
-                    hypercast::cast_uuid(text)
-                }),
-                Door::Timestamp => column(run, ordinal, buffer, INSTANT, |text, _| {
-                    hypercast::cast_timestamp(text)
-                }),
-                Door::Unix(precision) => column(run, ordinal, buffer, INSTANT, |text, _| {
-                    hypercast::cast_unix(text, precision)
-                }),
-                Door::ExcelSerial(epoch) => column(run, ordinal, buffer, INSTANT, |text, _| {
-                    hypercast::cast_excel_serial(text, epoch)
-                }),
-                Door::Date => column(run, ordinal, buffer, DAY, |text, _| {
-                    hypercast::cast_date(text)
-                }),
-                Door::DateOrdered(order) => column(run, ordinal, buffer, DAY, |text, _| {
-                    hypercast::cast_date_ordered(text, order)
-                }),
-                Door::DateTime(order) => {
-                    let zero = CivilDateTime {
-                        date: DAY,
-                        nanos_of_day: 0,
-                    };
-                    column(run, ordinal, buffer, zero, |text, _| {
-                        hypercast::cast_datetime(text, order)
-                    })
-                }
-                Door::Time => column(run, ordinal, buffer, 0u64, |text, _| {
-                    hypercast::cast_time(text)
-                }),
-                Door::Duration => {
-                    let zero = Duration {
-                        seconds: 0,
-                        nanos: 0,
-                    };
-                    column(run, ordinal, buffer, zero, |text, _| {
-                        hypercast::cast_duration(text)
-                    })
-                }
-                // The bytes themselves, untrimmed; no bytes at all is the one way to fail.
-                Door::Text => column(run, ordinal, buffer, Span::default(), |text, span| {
-                    if text.is_empty() {
-                        Err(EMPTY)
-                    } else {
-                        Ok(span)
-                    }
-                }),
+            cast_plain(
+                &mut run,
+                door,
+                spec.ordinal as usize,
+                &format,
+                valid,
+                buffer,
+            )
+        };
+    }
+
+    let used = run.used;
+    state.deliver(&walked, used, out);
+    OK
+}
+
+/// A [`ColumnSpecWith`], judged: what a fill reads of it, or `None` for what it can't honour.
+struct Resolved<'a> {
+    door: Door,
+    format: ValidNumFormat,
+    /// The options and vocabulary, when the column declared either.
+    date: Option<ValidDateOptions<'a>>,
+    /// The tokens this column answers to; empty for none.
+    tokens: &'a [u8],
+}
+
+/// A column's format, judged.
+pub(crate) fn resolved_format(spec: &ColumnSpecWith) -> Option<ValidNumFormat> {
+    match spec.format.size {
+        0 => no_format(&spec.format).then_some(ValidNumFormat::INVARIANT),
+        _ => spec.format.resolve().copied()?.validate().ok(),
+    }
+}
+
+/// A column's date options and vocabulary, judged: `Some(None)` when it declared neither.
+///
+/// # Safety
+/// `spec`'s `months` points to as many live bytes as the length beside it says, unless it's null.
+pub(crate) unsafe fn resolved_date(spec: &ColumnSpecWith) -> Option<Option<ValidDateOptions<'_>>> {
+    let months = match (spec.months.is_null(), spec.months_len) {
+        (true, 0) => None,
+        (true, _) => return None,
+        // SAFETY: per the function contract.
+        (false, len) => Some(
+            MonthNames::from_packed(unsafe { core::slice::from_raw_parts(spec.months, len) })
+                .ok()?,
+        ),
+    };
+    let raw = spec.date;
+    let declared = raw.size != 0;
+    if declared
+        && ((raw.size != RawDateOptions::SIZE && raw.size != RawDateOptions::MIN_SIZE)
+            || raw.pivot > 9999)
+    {
+        return None;
+    }
+    let pivot = if raw.size == RawDateOptions::SIZE {
+        raw.pivot as u16
+    } else {
+        0
+    };
+    let flags = if declared { raw.flags } else { 0 };
+    if flags != 0 || pivot != 0 || months.is_some() {
+        Some(Some(
+            DateOptions::from_flags(flags)
+                .with_pivot(pivot)
+                .validate(months)
+                .ok()?,
+        ))
+    } else {
+        Some(None)
+    }
+}
+
+/// The tokens a column answers to: `inherited` unless it has its own, whole, or `None` for a list
+/// that isn't.
+///
+/// # Safety
+/// `spec`'s `tokens` points to as many live bytes as the length beside it says, unless it's null.
+pub(crate) unsafe fn resolved_tokens<'a>(
+    spec: &'a ColumnSpecWith,
+    inherited: &'a [u8],
+) -> Option<&'a [u8]> {
+    match (spec.tokens.is_null(), spec.tokens_len) {
+        (true, 0) => Some(inherited),
+        (true, _) => None,
+        (false, 0) => Some(&[]),
+        // SAFETY: per the function contract.
+        (false, len) => {
+            let list = unsafe { core::slice::from_raw_parts(spec.tokens, len) };
+            tokens_are_whole(list).then_some(list)
+        }
+    }
+}
+
+impl<'a> Resolved<'a> {
+    /// # Safety
+    /// `spec`'s `months` and `tokens` point to as many live bytes as the length beside each says,
+    /// when they aren't null. `inherited` is a list [`tokens_are_whole`] accepted.
+    unsafe fn of(spec: &'a ColumnSpecWith, inherited: &'a [u8]) -> Option<Resolved<'a>> {
+        Some(Resolved {
+            door: Door::from_code(spec.door, spec.param)?,
+            format: resolved_format(spec)?,
+            // SAFETY: per the function contract.
+            date: unsafe { resolved_date(spec) }?,
+            // SAFETY: per the function contract.
+            tokens: unsafe { resolved_tokens(spec, inherited) }?,
+        })
+    }
+}
+
+/// Whether [`fill_with`] would take this column, given no list of its dialect's to inherit: what
+/// a caller can ask before any read.
+///
+/// # Safety
+/// `spec`'s `months` and `tokens` point to as many live bytes as the length beside each says, when
+/// they aren't null.
+pub unsafe fn honours(spec: &ColumnSpecWith) -> bool {
+    // SAFETY: per the function contract, and an empty list is whole.
+    unsafe { Resolved::of(spec, &[]) }.is_some()
+}
+
+/// [`fill`], with the column options [`ColumnSpecWith`] declares and the notes
+/// [`ColumnBufferWith`] takes: `tokens` is the list a column without its own inherits, and
+/// `row_widths`, unless it's empty, gets the cells each delivered row had.
+///
+/// Everything is judged before anything is written: [`ERR_CONTRACT`] leaves `state`, `out` and
+/// every buffer as they were. A column asking for nothing new runs [`fill`]'s loop, and asks no
+/// door why.
+///
+/// # Safety
+/// As [`fill`], `notes` as `verdicts` unless it's null, and `specs`' pointers as
+/// [`ColumnSpecWith`] says.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn fill_with(
+    state: &mut State,
+    input: &[u8],
+    last: bool,
+    specs: &[ColumnSpecWith],
+    columns: &[ColumnBufferWith],
+    max_rows: usize,
+    cells: &mut [Span],
+    arena: &mut [u8],
+    tokens: &[u8],
+    row_widths: &mut [u32],
+    out: &mut Filled,
+) -> i32 {
+    if specs.len() != columns.len()
+        || input.len() > LIMIT
+        || arena.len() > LIMIT
+        || !tokens_are_whole(tokens)
+    {
+        return ERR_CONTRACT;
+    }
+    let Some(scanner) = state.scanner() else {
+        return ERR_CONTRACT;
+    };
+    let mut width = 0usize;
+    for (spec, buffer) in specs.iter().zip(columns) {
+        // SAFETY: the caller's contract, and the inherited list was judged above.
+        if unsafe { Resolved::of(spec, tokens) }.is_none()
+            || buffer.values.is_null()
+            || buffer.verdicts.is_null()
+        {
+            return ERR_CONTRACT;
+        }
+        let Some(reach) = (spec.ordinal as usize).checked_add(1) else {
+            return ERR_CONTRACT;
+        };
+        width = width.max(reach);
+    }
+
+    *out = Filled::default();
+    if state.failure.code != 0 {
+        out.failure = state.failure;
+        return ERR_STRUCTURE;
+    }
+    let widths = row_widths;
+    let walked = match walk(
+        state,
+        &scanner,
+        input,
+        last,
+        specs,
+        width,
+        max_rows,
+        cells,
+        arena.len(),
+        widths,
+        out,
+    ) {
+        Ok(walked) => walked,
+        Err(code) => return code,
+    };
+
+    let valid =
+        specs.iter().any(|spec| spec.door == Door::Text.code()) && region_is_valid(input, &walked);
+    let mut run = Run {
+        data: input,
+        cells: walked.cells,
+        per_row: walked.per_row,
+        rows: walked.rows,
+        arena,
+        used: 0,
+    };
+    for (spec, buffer) in specs.iter().zip(columns) {
+        // SAFETY: as above.
+        let Some(column) = (unsafe { Resolved::of(spec, tokens) }) else {
+            return ERR_CONTRACT;
+        };
+        let ordinal = spec.ordinal as usize;
+        // SAFETY: the caller's contract, passed on a column at a time.
+        unsafe {
+            if buffer.notes.is_null() && column.tokens.is_empty() && column.date.is_none() {
+                let plain = ColumnBuffer {
+                    values: buffer.values,
+                    verdicts: buffer.verdicts,
+                };
+                cast_plain(
+                    &mut run,
+                    column.door,
+                    ordinal,
+                    column.format.format(),
+                    valid,
+                    &plain,
+                );
+            } else {
+                cast_noted(&mut run, column.door, ordinal, &column, valid, buffer);
             }
         }
     }
 
-    state.expected = expected;
-    state.advance(stop.next, stop.line, records);
-    out.rows = rows as u64;
-    out.consumed = stop.next as u64;
-    out.arena_used = run.used as u64;
+    let used = run.used;
+    state.deliver(&walked, used, out);
     OK
 }
 
@@ -679,6 +1524,8 @@ struct Names<'a> {
     /// Where the record that was taken starts, and its line.
     start: usize,
     line: u32,
+    /// Records still to discard.
+    header_row: u32,
 }
 
 impl Sink for Names<'_> {
@@ -702,6 +1549,11 @@ impl Sink for Names<'_> {
             self.seen = 0;
             return Flow::More;
         }
+        if self.header_row > 0 {
+            self.header_row -= 1;
+            self.seen = 0;
+            return Flow::More;
+        }
         self.taken = true;
         self.start = start;
         self.line = line;
@@ -717,7 +1569,8 @@ impl Sink for Names<'_> {
 /// Returns [`OK`]; [`ERR_CELLS`] when the record has more cells than `names` holds
 /// (`out.needed` says how many) and [`ERR_ARENA`] when its escaped names need more arena
 /// than there is — nothing consumed either way; [`ERR_STRUCTURE`] or [`ERR_CONTRACT`] as
-/// [`fill`].
+/// [`fill`], and [`ERR_STRUCTURE`] with [`Failure::ENCODING`] for a name that isn't valid
+/// UTF-8.
 pub fn header(
     state: &mut State,
     input: &[u8],
@@ -740,6 +1593,13 @@ pub fn header(
     let Some(first) = state.first_byte(input, last) else {
         return OK;
     };
+    let (first, at_line, skip) = state.past_skipped(&scanner, input, first, last);
+    if skip != 0 {
+        state.skip = skip;
+        state.advance(first, at_line, state.records);
+        out.consumed = first as u64;
+        return OK;
+    }
     let mut sink = Names {
         data: input,
         names,
@@ -750,8 +1610,9 @@ pub fn header(
         taken: false,
         start: 0,
         line: 0,
+        header_row: state.header_row,
     };
-    let stop = scanner.scan_into(input, first, state.line, last, &mut sink);
+    let stop = scanner.scan_into(input, first, at_line, last, &mut sink);
     let Names {
         names,
         seen,
@@ -759,10 +1620,13 @@ pub fn header(
         taken,
         start,
         line,
+        header_row,
         ..
     } = sink;
 
     if !taken {
+        state.skip = 0;
+        state.header_row = header_row;
         state.advance(stop.next, stop.line, records);
         out.consumed = stop.next as u64;
         if stop.unclosed {
@@ -805,10 +1669,25 @@ pub fn header(
     }
     let mut used = 0usize;
     for name in names {
-        let (_, span) = text(input, &mut *arena, &mut used, *name);
+        let (bytes, span) = text(input, &mut *arena, &mut used, *name);
+        // A name has no verdict to carry its fault, and a name the door refuses can't be
+        // asked for. An empty name is a name.
+        if matches!(hypercast::cast_text(bytes), Err(fault) if fault.reason == Reason::Malformed) {
+            let failure = Failure {
+                code: Failure::ENCODING,
+                line,
+                record: records - 1,
+                byte: state.offset + start as u64,
+                expected: 0,
+                found: 0,
+            };
+            return state.fail(failure, out);
+        }
         *name = span;
     }
     state.expected = seen as u32;
+    state.skip = 0;
+    state.header_row = header_row;
     state.advance(stop.next, stop.line, records);
     out.rows = seen as u64;
     out.consumed = stop.next as u64;

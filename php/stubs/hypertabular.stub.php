@@ -25,7 +25,7 @@ namespace HyperTabular {
      * ```
      *
      * Or read across, a `Row` at a time: a batch iterates its rows in order. A batch owns what it
-     * shows — the arrays the core wrote are copied out of the reader's buffers as it is made — so
+     * shows — the arrays the core wrote are copied out of the reader's as it is made — so
      * it stays good after the reader has moved on. A value is the PHP carrier HyperCast's `Cast`
      * returns for the column's door (`Door` lists them).
      */
@@ -43,13 +43,31 @@ namespace HyperTabular {
         public function columns(): array {}
 
         /**
-         * The cells of a column that did not cast: HyperCast's `Fault` for each, keyed by row. Empty
-         * when every cell cast.
+         * What failed in the cell at (`$column`, `$row`), as HyperCast's `DetailedFault`: its `Fault`'s
+         * reason and span, and the `FaultDetail`. Null where the cell cast, where nothing failed in it
+         * (a declared token, padding), and with notes off.
          *
          * @param int $column
+         * @param int $row
+         * @return \HyperCast\DetailedFault|null
+         */
+        public function detail(int $column, int $row): ?\HyperCast\DetailedFault {}
+
+        /**
+         * With no column, everything wrong in this batch, by row and then by column, a row's own entry
+         * first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, a workbook's
+         * formulas with no cached value, and rows a `LongRows::Report` dialect cut. Blanks, declared
+         * tokens, padding and a row cut under `LongRows::Truncate` aren't. With notes off a refused
+         * cell has no detail and a formula with no cached value isn't listed. A row the empty-row
+         * filter dropped isn't in the batch to be named. Made the first time it is asked for.
+         *
+         * With a column, that column's cells that did not cast: HyperCast's `Fault` for each, keyed by
+         * row, empty when every cell cast.
+         *
+         * @param int|null $column
          * @return array
          */
-        public function faults(int $column): array {}
+        public function faults(?int $column = null): array {}
 
         /**
          * The cell at (`$column`, `$row`) as HyperCast judged it: its `Success` around the value —
@@ -78,6 +96,17 @@ namespace HyperTabular {
          * @return int
          */
         public function line(int $row): int {}
+
+        /**
+         * Where the verdict of the cell at (`$column`, `$row`) came from: a door, a declared token,
+         * padding, or a workbook's formula with no cached value. With notes off a token or a padded
+         * cell answers `Origin::Cell`: its verdict is still `Empty`, and nothing was kept of why.
+         *
+         * @param int $column
+         * @param int $row
+         * @return \HyperTabular\Origin
+         */
+        public function origin(int $column, int $row): \HyperTabular\Origin {}
 
         /**
          * The text a cell was cast from, whatever its door and whatever its verdict — what a fault's
@@ -122,12 +151,8 @@ namespace HyperTabular {
      * Delimited text — CSV, TSV, any single-byte ASCII separator — read a batch at a time into
      * typed columns, every cell a HyperCast `Success|Fault` verdict.
      *
-     * The core owns no memory and reads no files. It is handed a chunk of input and the buffers
-     * to fill, casts each plan column in one loop, and says how many rows it wrote and how many
-     * bytes it is finished with. This class allocates the input buffer, one value array and one
-     * verdict array per column, the table that locates each cell and the arena for the rare
-     * escaped cell — once, reused for every batch — and puts what the core did not consume back
-     * in front of it. `read()` returns the rows as a `Batch`.
+     * The Rust reader underneath owns every buffer: it casts each plan column in one loop, and `read()`
+     * returns a copy of the rows it read as a `Batch`.
      *
      * A value that does not cast is that cell's verdict, and the read goes on. Input that is not
      * rows of cells at all — a record of the wrong width, a quote never closed — is a
@@ -193,6 +218,8 @@ namespace HyperTabular {
         /**
          * Lets go of the input, closing the file `open()` opened. A closed reader reads no more.
          *
+         * @throws \LogicException when the reader's own stream, mid-read, calls this.
+         *
          * @return void
          */
         public function close(): void {}
@@ -213,8 +240,10 @@ namespace HyperTabular {
         public function dialect(): \HyperTabular\Dialect {}
 
         /**
-         * A reader over an open stream, read a buffer at a time. The stream stays the caller's: the
-         * reader never closes it.
+         * A reader over an open stream, read a buffer at a time, one `fread()` for as many complete
+         * records as a read wants, so a pipe's records aren't held back for more. The stream stays the
+         * caller's: the reader never closes it. A stream that fails goes to the caller and isn't final:
+         * the next `read()` reads on from where it was.
          *
          * @throws \InvalidArgumentException as `fromString()`, and for anything but an open stream.
          * @throws \RuntimeException when reading the stream fails.
@@ -225,16 +254,19 @@ namespace HyperTabular {
          * @param array|null $plan
          * @param int $batchRows
          * @param int $bufferBytes
+         * @param bool $notes
          * @return \HyperTabular\DelimitedReader
          */
-        public static function fromStream(mixed $stream, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES): \HyperTabular\DelimitedReader {}
+        public static function fromStream(mixed $stream, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES, bool $notes = true): \HyperTabular\DelimitedReader {}
 
         /**
-         * A reader over `$utf8`, held in memory and handed to the core a buffer at a time.
+         * A reader over `$utf8`, held in memory and read in place: `$bufferBytes` matters only under a
+         * declared encoding, which decodes ahead of the read.
          *
-         * @throws \InvalidArgumentException for a batch or buffer of no rows or bytes, a plan entry
-         *                                   that is not a `Column`, a separator the core refuses or
-         *                                   a plan column past the header's width.
+         * @throws \InvalidArgumentException for a batch or buffer of no rows or bytes or one past what
+         *                                   the core allows, a plan entry that is not a `Column`, a
+         *                                   separator the core refuses or a plan column past the
+         *                                   header's width.
          * @throws TabularException when the header itself is broken.
          *
          * @param string $utf8
@@ -242,9 +274,10 @@ namespace HyperTabular {
          * @param array|null $plan
          * @param int $batchRows
          * @param int $bufferBytes
+         * @param bool $notes
          * @return \HyperTabular\DelimitedReader
          */
-        public static function fromString(string $utf8, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES): \HyperTabular\DelimitedReader {}
+        public static function fromString(string $utf8, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES, bool $notes = true): \HyperTabular\DelimitedReader {}
 
         /**
          * The header's names, as the source wrote them; an empty list for an empty input; null when
@@ -270,7 +303,8 @@ namespace HyperTabular {
 
         /**
          * A reader over the file at `$path`, opened with `fopen($path, 'rb')` — any stream wrapper
-         * PHP knows — and closed by `close()` or when the reader is destroyed.
+         * PHP knows — and closed by `close()` or when the reader is destroyed. The arguments are judged
+         * before the file is opened: a size the core refuses says so ahead of a missing file.
          *
          * @throws \RuntimeException when the file cannot be opened or read.
          * @throws \InvalidArgumentException as `fromString()`.
@@ -281,9 +315,10 @@ namespace HyperTabular {
          * @param array|null $plan
          * @param int $batchRows
          * @param int $bufferBytes
+         * @param bool $notes
          * @return \HyperTabular\DelimitedReader
          */
-        public static function open(string $path, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES): \HyperTabular\DelimitedReader {}
+        public static function open(string $path, \HyperTabular\Dialect $dialect, ?array $plan = null, int $batchRows = self::DEFAULT_BATCH_ROWS, int $bufferBytes = self::DEFAULT_BUFFER_BYTES, bool $notes = true): \HyperTabular\DelimitedReader {}
 
         /**
          * The plan, as bound; an empty list before one is.
@@ -299,6 +334,7 @@ namespace HyperTabular {
          * @throws TabularException at a structural failure, once every intact row before it has
          *                          been delivered — and again at every read after.
          * @throws \RuntimeException when reading the stream fails.
+         * @throws \LogicException as well when its own stream, mid-read, calls back into the reader.
          *
          * @return \HyperTabular\Batch|null
          */
@@ -318,6 +354,43 @@ namespace HyperTabular {
          * @return \Iterator
          */
         public function rows(): \Iterator {}
+
+        /**
+         * What a sample of the file at `$path`, opened as `open()` opens it, says the columns are: a
+         * plan to change or to pass to a read, and why. It starts you off, and it's yours to inspect:
+         * nothing is applied, and a read never sniffs.
+         *
+         * Every format `$options` holds is judged first, before anything is opened. Then what opening
+         * the file can throw, and `TabularException` for a failure among the sampled rows. A failure
+         * past them isn't met, or, when the stream's `fread()` returns `false`, only says the source was
+         * truncated. An exception the stream's own PHP throws is the caller's, and is rethrown wherever
+         * it comes. A sample of no header reads the file's first record alone and then opens it again.
+         *
+         * @throws \InvalidArgumentException for a format the core refuses, or too many columns.
+         * @throws \RuntimeException when the file cannot be opened, or reading it fails among the
+         *                           sampled rows.
+         * @throws \Throwable whatever the stream's own PHP throws.
+         * @throws TabularException at a broken record among the sampled rows.
+         *
+         * @param string $path
+         * @param \HyperTabular\Dialect $dialect
+         * @param \HyperTabular\SuggestOptions|null $options
+         * @return \HyperTabular\Suggestion
+         */
+        public static function suggest(string $path, \HyperTabular\Dialect $dialect, ?\HyperTabular\SuggestOptions $options = null): \HyperTabular\Suggestion {}
+
+        /**
+         * `suggest()`, over a string.
+         *
+         * @throws \InvalidArgumentException for a format the core refuses, or too many columns.
+         * @throws TabularException at a broken record among the sampled rows.
+         *
+         * @param string $utf8
+         * @param \HyperTabular\Dialect $dialect
+         * @param \HyperTabular\SuggestOptions|null $options
+         * @return \HyperTabular\Suggestion
+         */
+        public static function suggestString(string $utf8, \HyperTabular\Dialect $dialect, ?\HyperTabular\SuggestOptions $options = null): \HyperTabular\Suggestion {}
     }
 
     /**
@@ -357,6 +430,30 @@ namespace HyperTabular {
     }
 
     /**
+     * What a delimited file's bytes are, declared and never sniffed. A workbook declares its own.
+     */
+    enum Encoding: int {
+    /**
+     * UTF-8, read in place. A cell that isn't valid is that cell's `Malformed` verdict.
+     */
+      case Utf8 = 0;
+    /**
+     * Windows-1252. The five bytes the code page leaves undefined are their C1 controls, as WHATWG
+     * has them. `EF BB BF` is three characters here, not a byte-order mark.
+     */
+      case Windows1252 = 1;
+    /**
+     * Latin-1 (ISO-8859-1): every byte the code point of its value.
+     */
+      case Latin1 = 2;
+    /**
+     * UTF-16, little-endian, with or without a byte-order mark. A lone surrogate, or half a code
+     * unit at the end of the input, is `TabularFailure::Encoding`.
+     */
+      case Utf16Le = 3;
+    }
+
+    /**
      * The names a source's header row declared, and the ordinal each is at: what a plan is built
      * from when the columns are known by name.
      *
@@ -366,9 +463,12 @@ namespace HyperTabular {
      * $reader->bind($plan);
      * ```
      *
-     * A name is matched exactly, byte for byte; where a name repeats, the first column of that
-     * name is the one found. A header is read-only: it counts, iterates and indexes as the list of
-     * its names, and serializes to JSON as that list.
+     * A name is matched exactly, byte for byte. `ordinal()` is strict: a name no column has is an
+     * `\OutOfBoundsException`, and one that two columns have is an `AmbiguousColumn` naming both, because
+     * a plan built from names mustn't silently read the wrong column. `find()` is the optional lookup:
+     * it can't carry an error and its caller asked for the first, so it keeps the first match, and a
+     * plan by position reads either. A header is read-only: it counts, iterates and indexes as the list
+     * of its names, and serializes to JSON as that list.
      */
     final class Header implements \ArrayAccess, \Countable, \IteratorAggregate, \JsonSerializable {
         /**
@@ -450,14 +550,56 @@ namespace HyperTabular {
         public function offsetUnset(mixed $offset): void {}
 
         /**
-         * The ordinal of the first column named `$name` exactly — what `Column`'s factories take.
+         * The ordinal of the column named `$name` exactly — what `Column`'s factories take.
          *
          * @throws \OutOfBoundsException when no column has that name.
+         * @throws AmbiguousColumn when two columns have it: `find()` keeps the first, and a plan can
+         *                         name either by position.
          *
          * @param string $name
          * @return int
          */
         public function ordinal(string $name): int {}
+    }
+
+    /**
+     * What a record with more cells than the width is.
+     */
+    enum LongRows: int {
+    /**
+     * A structural failure.
+     */
+      case Reject = 0;
+    /**
+     * A row cut to the width, and listed by `Batch::faults()` with the width it had.
+     */
+      case Report = 1;
+    /**
+     * A row cut to the width, and nothing said.
+     */
+      case Truncate = 2;
+    }
+
+    /**
+     * Where a cell's verdict came from: `Batch::origin()`.
+     */
+    enum Origin: int {
+    /**
+     * A door judged the cell's own text.
+     */
+      case Cell = 0;
+    /**
+     * The cell's exact unquoted bytes are a declared token, so it is `Empty` and no door ran.
+     */
+      case Token = 1;
+    /**
+     * The row has no such cell: padding for a short row, or an ordinal past the row's end.
+     */
+      case Padded = 2;
+    /**
+     * A workbook's formula cell with no cached value. It is `Empty` and no door ran.
+     */
+      case Uncached = 3;
     }
 
     /**
@@ -492,6 +634,14 @@ namespace HyperTabular {
         public function batch(): \HyperTabular\Batch {}
 
         /**
+         * What failed in the cell in `$column`: `Batch::detail()`.
+         *
+         * @param int $column
+         * @return \HyperCast\DetailedFault|null
+         */
+        public function detail(int $column): ?\HyperCast\DetailedFault {}
+
+        /**
          * Why the cell in `$column` did not cast, or null when it did: the row's entry of
          * `Batch::faults()`.
          *
@@ -521,6 +671,14 @@ namespace HyperTabular {
          * @return int
          */
         public function line(): int {}
+
+        /**
+         * Where the verdict of the cell in `$column` came from: `Batch::origin()`.
+         *
+         * @param int $column
+         * @return \HyperTabular\Origin
+         */
+        public function origin(int $column): \HyperTabular\Origin {}
 
         /**
          * The text the cell in `$column` was cast from: `Batch::raw()`.
@@ -587,32 +745,6 @@ namespace HyperTabular {
          * @return bool
          */
         public function valid(): bool {}
-    }
-
-    /**
-     * The test suite's hook into a workbook's buffers: with `$stingy` set, every buffer a workbook
-     * or a sheet is opened with starts with room for one element, so each read proves the core's
-     * grow-and-repeat protocol; `$grown` counts the buffers grown — window, arena, cells.
-     *
-     * @internal
-     */
-    final class Scratch {
-        /**
-         * How many times a workbook call grew its window, its arena and its cell table.
-         *
-         * @var array{int, int, int}|null
-         */
-        public static $grown;
-
-        /**
-         * Whether every workbook buffer starts with room for one element.
-         */
-        public static $stingy = false;
-
-        /**
-         * A test hook; not constructible.
-         */
-        private function __construct() {}
     }
 
     /**
@@ -694,6 +826,55 @@ namespace HyperTabular {
          * @return \Iterator
          */
         public function rows(): \Iterator {}
+
+        /**
+         * What a sample of the sheet says its columns are: a plan to change or to pass to a read, and
+         * why. It starts you off, and it's yours to inspect: nothing is applied, and a read never
+         * sniffs. The sample reads the sheet from its start, whatever this sheet has read, with notes
+         * on, and takes one batch of this sheet's size at most. A date column is text: nothing in a
+         * sheet's cells says which order a date string is in unless it's declared.
+         *
+         * @throws \InvalidArgumentException for a format the core refuses, or too many columns.
+         * @throws TabularException at a broken part among the sampled rows.
+         *
+         * @param \HyperTabular\SuggestOptions|null $options
+         * @return \HyperTabular\Suggestion
+         */
+        public function suggest(?\HyperTabular\SuggestOptions $options = null): \HyperTabular\Suggestion {}
+    }
+
+    /**
+     * What a record with fewer cells than the width is.
+     */
+    enum ShortRows: int {
+    /**
+     * A structural failure.
+     */
+      case Reject = 0;
+    /**
+     * A row whose missing cells are `Empty`, at `Origin::Padded`.
+     */
+      case Pad = 1;
+    }
+
+    /**
+     * What a sample says of a column.
+     */
+    enum SuggestStatus: int {
+    /**
+     * One door and one declaration take every cell, and the plan reads the column through them.
+     */
+      case Resolved = 1;
+    /**
+     * Every cell is read, but the sample can't say which declaration it's written in, as `1,234`
+     * can't: `SuggestedColumn::$candidates` are the choices. The plan reads it as text.
+     */
+      case Ambiguous = 2;
+    /**
+     * There's nothing to go on, or a cell no door took beside cells one did. The plan reads it as
+     * text.
+     */
+      case Unresolved = 3;
     }
 
     /**
@@ -786,6 +967,12 @@ namespace HyperTabular {
      * read (expected is the version).
      */
       case Iwa = 26;
+    /**
+     * Text that isn't valid UTF-8 where no cell's verdict can carry it, a header name; or a unit
+     * that a dialect's declared `Encoding` has no character for, whose `byte` alone counts the
+     * original input rather than the decoded text.
+     */
+      case Encoding = 27;
     }
 
     /**
@@ -904,8 +1091,10 @@ namespace HyperTabular {
 
 namespace HyperTabular {
     /**
-     * How delimited text is split: the separator, whether quotes are honoured, whether the
-     * first record is a header, whether blank lines are skipped.
+     * How delimited text is split: the separator, whether quotes are honoured, whether a
+     * record is a header and which, whether blank lines are skipped, how many lines come
+     * before anything is read, what a short or long record is, the text's encoding, and the
+     * texts every column reads as an empty cell.
      */
     final readonly class Dialect {
         public function __construct(
@@ -913,6 +1102,12 @@ namespace HyperTabular {
             public bool $quoting = true,
             public bool $hasHeader = true,
             public bool $skipBlankLines = true,
+            public int $skip = 0,
+            public int $headerRow = 0,
+            public \HyperTabular\ShortRows $shortRows = \HyperTabular\ShortRows::Reject,
+            public \HyperTabular\LongRows $longRows = \HyperTabular\LongRows::Reject,
+            public \HyperTabular\Encoding $encoding = \HyperTabular\Encoding::Utf8,
+            public array $tokens = [],
         ) {}
 
         /**
@@ -941,7 +1136,24 @@ namespace HyperTabular {
             public \HyperTabular\Door $door,
             public \HyperCast\NumFormat $format,
             public int $declared = 0,
+            public ?array $tokens = null,
+            public ?\HyperCast\DateOptions $dateOptions = null,
+            public ?\HyperCast\MonthNames $months = null,
         ) {}
+
+        /**
+         * This column, reading each of `$tokens` (and only those) as an empty cell, in place
+         * of the dialect's or the sheet's.
+         */
+        public function withTokens(array $tokens): \HyperTabular\Column {}
+
+        /**
+         * This column, reading its dates with `$options` and, when given, `$months`.
+         */
+        public function withDateOptions(
+            \HyperCast\DateOptions $options,
+            ?\HyperCast\MonthNames $months = null,
+        ): \HyperTabular\Column {}
 
         /**
          * A boolean column: HyperCast's boolean lexicon, as `bool`.
@@ -1074,6 +1286,102 @@ namespace HyperTabular {
             public readonly bool $hasHeader = true,
             public readonly bool $skipEmptyRows = true,
             public readonly int $batchRows = \HyperTabular\DelimitedReader::DEFAULT_BATCH_ROWS,
+            public readonly int $skip = 0,
+            public readonly int $headerRow = 0,
+            public readonly ?\HyperTabular\Range $range = null,
+            public readonly array $tokens = [],
+            public readonly bool $notes = true,
+        ) {}
+    }
+
+    /**
+     * A rectangle of a sheet, its corners 1-based and inclusive, 0 for no limit on a side.
+     */
+    final readonly class Range {
+        public function __construct(
+            public int $firstRow = 0,
+            public int $firstColumn = 0,
+            public int $lastRow = 0,
+            public int $lastColumn = 0,
+        ) {}
+
+        /**
+         * A range in A1 notation: `B2:D10`, `B:D`, `2:10`, or one cell.
+         */
+        public static function parse(string $text): \HyperTabular\Range {}
+    }
+
+    /**
+     * One entry of a batch's faults: a cell that did not cast, or a record of the wrong width.
+     */
+    final readonly class Problem {
+        public function __construct(
+            public int $row,
+            public int $line,
+            public ?int $planColumn,
+            public ?int $sourceColumn,
+            public ?\HyperCast\CastFailure $reason,
+            public ?\HyperCast\FaultDetail $detail,
+            public int $detailCode,
+            public \HyperTabular\Origin $origin,
+            public int $offset,
+            public int $length,
+            public int $expected,
+            public int $found,
+        ) {}
+    }
+
+    /**
+     * What a suggestion samples and what the caller has already declared.
+     */
+    final readonly class SuggestOptions {
+        public const DEFAULT_SAMPLE_ROWS = 1000;
+
+        public function __construct(
+            public int $sampleRows = self::DEFAULT_SAMPLE_ROWS,
+            public ?\HyperCast\NumFormat $format = null,
+            public array $columnFormats = [],
+            public ?\HyperCast\DateOrder $dateOrder = null,
+            public array $columnDateOrders = [],
+        ) {}
+    }
+
+    /**
+     * A suggested plan and the report that says how each column was chosen.
+     */
+    final readonly class Suggestion {
+        public function __construct(
+            public array $plan,
+            public array $report,
+            public bool $truncated,
+        ) {}
+    }
+
+    /**
+     * How a suggestion chose one column.
+     */
+    final readonly class SuggestedColumn {
+        public function __construct(
+            public int $ordinal,
+            public ?string $name,
+            public \HyperTabular\Door $door,
+            public mixed $declared,
+            public ?\HyperCast\NumFormat $format,
+            public array $candidates,
+            public \HyperTabular\SuggestStatus $status,
+            public int $matched,
+            public int $sampled,
+        ) {}
+    }
+
+    /**
+     * A header name two columns have, refused by the strict lookup.
+     */
+    final class AmbiguousColumn extends \InvalidArgumentException {
+        public function __construct(
+            public readonly string $name,
+            public readonly int $first,
+            public readonly int $second,
         ) {}
     }
 

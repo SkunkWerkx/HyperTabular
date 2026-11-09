@@ -94,6 +94,124 @@ public class Main {
 }
 ```
 
+## A messier file
+
+Everything about a file is still declared, on the `Dialect` and on the `SheetOptions`, whose defaults
+read as before: lines to pass over, records to discard, what a record of the wrong width is, the
+encoding, and what stands for no value.
+
+```java
+import io.github.skunkwerkx.hypercast.*;
+import io.github.skunkwerkx.hypertabular.*;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class Messier {
+    public static void main(String[] args) {
+        // Windows-1252, with a title line above the table, NA for nothing and rows that stop short.
+        Dialect dialect = Dialect.CSV
+                .withSkip(1)
+                .withShortRows(ShortRows.PAD)
+                .withEncoding(Encoding.WINDOWS_1252)
+                .withTokens("NA");
+
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes("Exported by hand\nname,amount\ncaf".getBytes(StandardCharsets.UTF_8));
+        input.write(0xE9);
+        input.writeBytes(",NA\ntea\nmilk,12x4\n".getBytes(StandardCharsets.UTF_8));
+        try (DelimitedReader reader = DelimitedReader.of(input.toByteArray(), dialect, List.of(
+                Column.text(0),
+                Column.f64(1).withTokens("NA", "-")))) { // in place of the dialect's
+            Batch batch = reader.read();
+            for (Row row : batch) {
+                System.out.println(row.string(0) + " " + row.verdict(1).reason() + " " + row.origin(1) + " " + row.detail(1));
+            }
+            // What went wrong, and only that: a blank, a token and a padded cell aren't problems.
+            for (Problem problem : batch.faults()) {
+                System.out.println("line " + problem.line() + " column " + problem.sourceColumn().getAsInt() + " "
+                        + problem.reason() + " " + problem.detail());
+            }
+        }
+
+        // A plan to look at, from a sample of the text. It reads nothing until it's handed to a read.
+        Suggestion found = DelimitedReader.suggest(
+                "id,total,day\n1,\"1,234.50\",2026-01-07\n2,12.00,2026-01-08\n".getBytes(StandardCharsets.UTF_8),
+                Dialect.CSV);
+        for (SuggestedColumn column : found.report()) {
+            System.out.println(column.name() + " " + column.status() + " " + column.door() + " " + column.matched()
+                    + " of " + column.sampled());
+        }
+
+        // A sheet takes the part of it that's the table; its plan's ordinals count from B here.
+        SheetOptions options = SheetOptions.DEFAULT.withRange(Range.parse("B2:D40"));
+        System.out.println(options.range().firstColumn() + " " + options.range().lastRow());
+    }
+}
+```
+
+A `TabularException` of `TabularFailure.ENCODING` comes after every intact row before it, and its
+`byteOffset()` alone counts the original bytes: a read's spans are all the decoded text's. A sheet's
+`range` is parsed by the core, so `Range.parse("A5:F200")` means what it means in every binding, with
+`Range.tryParse` for an `Optional` in place of its `IllegalArgumentException`, and
+`new Range(firstRow, firstColumn, lastRow, lastColumn)` for what that can't say, such as every row from
+the fifth (`new Range(5, 0, 0, 0)`). A plan's ordinals count from the range's first column, while
+`Batch.line` and a problem's `sourceColumn` stay the sheet's own. `skip` and `headerRow`, on a `Dialect`
+and on `SheetOptions`, count from zero; `skipEmptyRows` and `skipBlankLines` work on what they leave.
+
+`withNotes(false)`, on a `Dialect` or `SheetOptions`, drops the detail on a fault and the origin, which
+then say `null` and `Origin.CELL`: the read costs a little less, and `faults()` can't list a formula
+with no cached value. `Column.withDateOptions` hands a date door HyperCast's `DateOptions`, with its
+`MonthNames` if it has them, and on a sheet it and `withTokens` reach only a text cell. A cell's detail
+is on `batch.detail(column, row)`, `row.detail(column)` and `faults()`, `null` where there is none, and
+a `Fault` from `get` has only what the verdict holds. `faults()` belongs to its batch: walking it after
+the next `read()` throws `ConcurrentModificationException`.
+
+Declaring the locale, a number format and a date order, is the recommended route, and then nothing
+needs inferring. A suggestion is a starting point for a plan to inspect, and it's never applied. Read
+the report first: only a resolved column reads through its door in the plan, the rest as text. With no
+format declared, each of two notations has to read the whole column: `1,234,567` and `1,234.5` read
+only with `,` grouping, `1.234.567`, `1.234,5`, `2,5` and `0,125` only with `,` as the decimal, and the
+plan is in whichever is left. `1,234` and `1.234` read both ways, so they come back ambiguous and read
+as text until a format is declared or another cell settles them, which takes in a column of prices at
+three decimals; `SuggestOptions.withDateOrder` does the same for `01/02/2026`. `2,5` beside `2.5` is
+unresolved, and `1,23,456`, Indian grouping, is text until the column declares Indian grouping, because
+nothing says its culture. A sheet's number cell has no notation, so a column of them is a number under
+any format, where text holding the same digits asks. A column of `0` and `1` is `bool`, `007` and an
+integer past `long` are text, and a typed date in a sheet is text, for a plan to change by hand. With
+nothing to choose between, a resolved number is planned in `,` groups of three, and
+`SuggestedColumn.format()` names what the plan uses: a later `1,23,456` is refused.
+`DelimitedReader.suggest` takes a path, a `byte[]` or a `MemorySegment`. A headerless file is opened
+twice, so no suggestion is offered of a stream. `sampleRows` of `0` is one row, and a negative one is an
+`IllegalArgumentException` at `withSampleRows`. `Sheet.suggest` answers from the sheet's first row
+whatever has been read of it, and leaves it unbound and where it was. A failure past a whole sample only
+sets `truncated()`; one among the sampled rows is thrown, and so is a thread interrupt wherever it comes:
+it is the caller asking to stop, not a failure of the file.
+
+**To keep every row of a sheet, use `withEmptyRowsSkipped(false)`.** By default a row whose only cells
+are formulas with no cached value is filtered out as empty, with nothing to say so; off, those rows are
+delivered, their cells at `Origin.UNCACHED`.
+
+A column given no format reads `NumFormat.INVARIANT`, which is Western: `1,234,567` is 1234567 and
+`1,23,456` is `MALFORMED`, and a format that names no policy is the same. If a column of Indian numbers
+comes back refused, declare it, one column at a time, so an Indian column reads beside a Western one in
+the same read:
+
+```java
+NumFormat indian = NumFormat.INVARIANT.withGrouping(Grouping.INDIAN);
+List<Column> plan = List.of(
+        Column.i32(0, indian),              // 1,23,456 is 123456, and 1,234,567 is MALFORMED
+        Column.i32(1, NumFormat.INVARIANT)); // 1,234,567 is 1234567, and 1,23,456 is MALFORMED
+```
+
+Neither policy reads `0,125`, `12,34`, `1,2,345` or `1234,567` as a number. `NumFormat.DETECT` isn't a
+policy: a column that declares it infers `,` and `.` from each cell, so `Column.f64` reads `1,2345` as
+1.2345, `12,34` as 12.34 and `0,125` as 0.125. A `NumFormat` can't hold the retired grouping bit `256`
+(the words `351` and `863`): its constructor refuses it, so no plan or suggestion here has one to
+refuse. HyperCast's
+[grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
+and the locales neither policy matches.
+
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
@@ -104,7 +222,9 @@ rows, not once per cell.
 
 - **One batch type.** `read()` returns a `Batch` — `rows()`, `columns()`, `line(row)`,
   `verdicts(column)`, `values(column)` for a whole column, `get(column, row, type)` for any
-  one cell, `text`/`string`/`chars` for text, and `raw` for the text a cell was cast from —
+  one cell, `detail` and `origin` for what a cell's verdict says beside itself, `faults()` for
+  what went wrong in the batch, `text`/`string`/`chars` for text, and `raw` for the text a cell
+  was cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
   the next `read()`, and the same type for delimited text and for a sheet.
 - **Whole columns as the core wrote them.** `values(column)` is a read-only `MemorySegment`
@@ -115,13 +235,23 @@ rows, not once per cell.
   `get` would make, and likewise `uuid`, `instant`, `date`, `civil`, `time` and `duration`.
 - **Rows, when that is how the code thinks.** A `Batch` is `Iterable<Row>` (and `row(i)`
   picks one): a `Row` is the batch's accessors with the row chosen — `index()`, `line()`,
-  `get(column, type)`, `verdict`, `text`, `string`, `chars`, `raw` — a view, valid as long
-  as the batch. `reader.forEachRow(row -> …)` and `sheet.forEachRow(row -> …)` read every
+  `get(column, type)`, `verdict`, `detail`, `origin`, `text`, `string`, `chars`, `raw` — a view, valid as long
+  as the batch, and an iterator goes on no further than that: past the next `read()` it throws
+  `ConcurrentModificationException`, never answering for the next batch. `reader.forEachRow(row -> …)` and `sheet.forEachRow(row -> …)` read every
   batch left and hand over each row; a row is valid only for its own call.
-- **Nothing is sniffed.** The `Dialect` states the separator, the quoting and the header;
-  `SheetOptions` states a sheet's header and whether empty rows are skipped; the plan states each column's door and, for numbers, its `NumFormat`.
-- **HyperCast is the judge.** `Verdict`, `Success`, `Fault`, `CastFailure`, `NumFormat`,
-  `UnixPrecision`, `DateOrder` and `ExcelEpoch` are HyperCast's own types, from its own jar
+- **The core decides how much a batch may ask for.** A `batchRows` or `bufferBytes` of 0, and a batch
+  past 4 GiB (214 million rows of one `i32` column, 1.8 million of 100 text columns), are an
+  `IllegalArgumentException` from the core, when a reader or a sheet opens or a plan is bound, before
+  anything is allocated. A `bufferBytes` past 1 GiB starts there. An arena writes zeros over what it
+  hands out, so a batch near the limit holds that memory from the moment it's bound. `suggest` is never
+  refused for the size of its own batches: the core says what fits and the sampler reads as many as it
+  takes. A row that alone is past the limit is an `IllegalArgumentException` naming its width.
+- **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and the
+  encoding; `SheetOptions` states a sheet's header, its range and whether empty rows are skipped;
+  the plan states each column's door and, for numbers, its `NumFormat`. `suggest` reads a sample
+  to propose a plan, only when asked, and applies nothing.
+- **HyperCast is the judge.** `Verdict`, `Success`, `Fault`, `CastFailure`, `FaultDetail`,
+  `NumFormat`, `DateOptions`, `MonthNames`, `UnixPrecision`, `DateOrder` and `ExcelEpoch` are HyperCast's own types, from its own jar
   (`io.github.skunkwerkx:hypercast`, which this one depends on). A text cell means exactly
   what `Cast` would say of the same text, a typed workbook cell is converted by the door
   directly (a stored `2.5` through the decimal door is `2.5`), and either arrives as the Java type `Cast` gives the same
@@ -130,23 +260,25 @@ rows, not once per cell.
   `UUID`, and the unsigned doors widened (`u8`/`u16` to `Integer`, `u32` to `Long`, `u64`
   as the `Long` with the same bits).
 - **A bad value is a verdict; a broken file is an exception.** A cell that does not cast
-  is a `Fault` in its column and the read goes on. A record of the wrong width, input that
+  is a `Fault` in its column and the read goes on, and `batch.faults()` lists a batch's. A record of the wrong width, input that
   ends inside a quoted cell, a workbook whose container or parts cannot be read, is a
   `TabularException` — carrying the failure, the
   record, the line, the byte offset and the expected and found widths — raised after every
   intact row before it.
 - **Text is zero-copy.** `text` hands back a read-only `MemorySegment` view into the
   reader's own buffer — the input, or a workbook's shared strings; only a cell with `""`
-  inside, or a typed workbook cell said as text, is written to an arena. `raw`
-  gives the text any cell was cast from, one that did not cast included.
+  inside, or a typed workbook cell said as text, is written to an arena. Text in a declared
+  encoding is decoded into a buffer of the reader's, so its views are into that, even from
+  memory. `raw` gives the text any cell was cast from, one that did not cast included. A cell
+  whose bytes aren't UTF-8 is `MALFORMED` at the first bad sequence, with `text` and `string`
+  `null`, and `raw` still has its bytes.
 - **UTF-16 without a `String`.** `chars(column, row)` decodes a text cell into a char array
   the batch keeps and hands back a read-only `CharBuffer` over it (a `CharSequence`, for
   `Integer.parseInt(cs, 0, cs.length(), 10)`, a `StringBuilder`, a regex): valid until the
   next `read()`, every earlier view staying as it was, the array reused batch after batch.
   `getChars(column, row, char[], offset)` decodes into the caller's array instead and
-  returns the count, or `-1` if it does not fit. Bytes that are not UTF-8 are replaced
-  exactly as `string` replaces them; an empty cell is `null` and `0`, as it is `null` for
-  `string`.
+  returns the count, or `-1` if it does not fit. A cell with no text, empty or not UTF-8, is
+  `null` and `0`, as it is `null` for `string`.
 - **The memory is native, and confined.** The core is never handed the Java heap: a fill
   reads a whole batch, which is not the instant a `critical` downcall is for. So the
   buffers are a confined `Arena`'s — freed by `close()`, with a view handed out earlier
@@ -159,7 +291,7 @@ rows, not once per cell.
 | --- | --- |
 | `DelimitedReader.open(Path, …)` | A file, read through its channel straight into the reader's buffer. |
 | `DelimitedReader.of(InputStream, …)` | Any stream; the reader closes it. The buffer starts at `bufferBytes` and doubles when a record does not fit, up to `MAX_ROW_BYTES`. |
-| `DelimitedReader.of(MemorySegment, …)` | Native memory — a mapped file, an arena allocation — read in place, of any size. |
+| `DelimitedReader.of(MemorySegment, …)` | Native memory — a mapped file, an arena allocation — read in place, of any size. On JDK 21 to 24 a shared arena's segment is copied first (below). |
 | `DelimitedReader.of(byte[], …)` | A byte array, copied into native memory once. |
 
 Each takes the dialect, the plan and, optionally, the rows per batch
@@ -172,8 +304,9 @@ Each also comes without the plan — `open(path, dialect)`, `of(bytes, dialect)`
 leaves the plan to `reader.bind(plan[, batchRows])`, once, before the first read. A read
 before `bind` is an `IllegalStateException`, and not a final one: bind, and read. The header
 is a `Header`, the `List<String>` of names, with
-`ordinal(name)` (exact, case-sensitive, untrimmed; the first of two columns with one name;
-a `NoSuchElementException` naming a missing one), `findOrdinal(name)` → `OptionalInt`, and
+`ordinal(name)` (exact, case-sensitive, untrimmed; a `NoSuchElementException` naming a missing
+one, and its subclass `AmbiguousColumnException`, naming both positions, when two columns share the
+name), `findOrdinal(name)` → `OptionalInt`, which takes the first of those, and
 both again for the name's UTF-8 bytes (`byte[]` or `MemorySegment`). `columnCount()` is how
 many cells a record has — the header's count, or the first record's once read — as an
 `OptionalInt`; `isBound()` says whether a plan is in place.
@@ -187,7 +320,10 @@ alike: no workbook format has that many columns (XLSX and ODS stop at 16,384, Nu
 1,000), and at the cap one row of cell table is at most 8 MiB.
 
 A failure of the stream or file is an `UncheckedIOException`, from the factory or from
-`read()`.
+`read()`. A stream is read once a call, so the rows it has finished come back however long it then
+blocks. On JDK 21 a reader's or a workbook's buffers count against
+`-XX:MaxDirectMemorySize`, which is the heap size unless it's said, so a record or a workbook too big
+for that is an `OutOfMemoryError` there, short of `MAX_ROW_BYTES`: raise the flag.
 
 A workbook is `Workbook.open(Path)` — the file mapped, not read — or `Workbook.of(byte[])`,
 `Workbook.of(MemorySegment)` or `Workbook.of(InputStream)`, which reads the stream to its end
@@ -201,8 +337,37 @@ the header row first and leaves the plan to `sheet.bind(plan)`. A missing index 
 There is no asynchronous read. A reader is confined to the thread that built it, and in
 Java a virtual thread is the idiom for a read that blocks: run the loop on one, and a
 stream that blocks parks it rather than a carrier thread. `Thread.interrupt()` reaches a
-file read the way it reaches any `FileChannel` (an `UncheckedIOException` wrapping
-`ClosedByInterruptException`).
+file read the way it reaches any `FileChannel`: the channel closes, that read throws an
+`UncheckedIOException` wrapping `ClosedByInterruptException`, and every later read an
+`UncheckedIOException` wrapping an `InterruptedIOException` that says the interrupt ended it. The
+rows before it have all been delivered.
+
+A stream's code runs in the middle of a read. A call from it back into its reader — `read()`,
+`bind`, `forEachRow` — throws `IllegalStateException` ("The reader is in the middle of a read;
+its stream can't call back into it."), and the read it came from goes on whole. A `close()` from
+there is done as soon as the stream returns, and that read ends with an `IllegalStateException`
+("The reader was closed in the middle of a read."). It hands out no batch, and every later call
+throws "The reader is closed." What the stream throws reaches the caller and isn't final: the
+next read goes on from where the reader was.
+
+A segment handed to `DelimitedReader.of(MemorySegment, …)` or `Workbook.of(MemorySegment)` is read
+in place, and has to stay alive and unchanged while the reader or workbook is open. On JDK 25 each
+native call holds the segment's arena open, so a close from another thread in the middle of one is
+refused. The JNI path, on JDK 21 to 24, can't, so it copies a segment another thread could close —
+a shared arena's — into the reader's own memory when the reader or workbook is opened. A confined
+arena's, an automatic arena's and the global arena's are still read in place. The copy holds a
+second copy of the input in native memory for the reader's life, counted against
+`-XX:MaxDirectMemorySize` on JDK 21 like the reader's other buffers. Its time, measured 2026-11-08 on
+an Apple M6 (32 GB) with Temurin 21.0.13, opening 93.1 MiB of `id,name,score` rows (4,000,000, read as
+`i64`, text and `f64`, 4,096 a batch), median of 7 runs after a warm-up:
+
+| JDK 21, JNI | Open | Open and read every batch |
+| --- | ---: | ---: |
+| Confined arena, read in place | 0.2 ms | 80.5 ms |
+| Shared arena, copied | 2.4 ms | 83.1 ms |
+
+So a shared arena's input costs 2.2 ms more to open and 2.6 ms (3%) more over the whole read here.
+On JDK 25 (FFM) the two read the same: 79.1 and 78.7 ms.
 
 ## The doors
 
@@ -225,7 +390,7 @@ which is what `batch.get(c, r, type)` is asked for:
 | `Column.text(n)` | `String`; also `batch.text` → `MemorySegment` and `batch.string` → `String`, `null` for an empty cell |
 
 Asking for another type is an `IllegalStateException`. Every numeric factory also takes a
-`NumFormat`; without one the notation is `NumFormat.INVARIANT`. `batch.verdict(c, r)` and
+`NumFormat`; without one the notation is `NumFormat.INVARIANT`, Western. `batch.verdict(c, r)` and
 `batch.isOk(c, r)` answer for a cell of any door.
 
 ## The native library
@@ -283,7 +448,8 @@ message gives the rebuild commands.
 Gradle, Spotless, javadoc and publishing run on JDK 25. `./gradlew test` runs the suite — the
 conformance corpus included — against the built jar on JDK 25 (the FFM path); `testFloor` runs
 the same suite on JDK 21 (the JNI path end to end, under `-Xcheck:jni`), `checkSuiteParity`
-fails unless both ran the same tests with none skipped, and `checkFloorApi` fails if the base
+fails unless both ran the same tests with none skipped (but the one that reads a record at
+`MAX_ROW_BYTES`, which skips itself out loud on a host with under 6 GiB of memory), and `checkFloorApi` fails if the base
 references any JDK class, method or field that JDK 21 lacks: the base compiles
 `-source/-target 21` against JDK 25's API rather than `--release 21`, because `--release 21`
 refuses `java.lang.foreign` as preview. `gradle.properties` turns toolchain auto-download off,
