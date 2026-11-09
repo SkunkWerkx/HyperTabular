@@ -104,7 +104,11 @@ function checkCell(ctx, entry, verdict, raw, cell) {
       check(same(Array.from(raw), Array.from(hex(cell.raw_hex))), `${ctx}: raw`)
     else check(decoder.decode(raw) === cell.raw, `${ctx}: raw`)
   }
-  if (cell.expect === 'empty') check(offset === 0 && length === 0 && raw.length === 0, ctx)
+  if (cell.expect === 'empty') {
+    check(offset === 0 && length === 0, `${ctx}: span`)
+    // A cell made empty by a token or the row's padding keeps the text it came from.
+    if (cell.origin === undefined) check(raw.length === 0, `${ctx}: raw`)
+  }
 }
 
 function checkFailure(ctx, error, expected) {
@@ -267,10 +271,19 @@ try {
           const ctx = `delimited.json ${c.name} (${batchRows} rows, buffer ${bufferBytes}${headerFirst ? ', header first' : ''})`
           const plan = c.plan.map(planned)
           const options = { batchRows, bufferBytes }
-          const reader = opened(
-            ctx,
-            DelimitedReader.fromBytes(bytes, dialect, headerFirst ? null : plan, options),
+          const opening = DelimitedReader.fromBytes(
+            bytes,
+            dialect,
+            headerFirst ? null : plan,
+            options,
           )
+          // A case whose header record itself fails comes from opening, with no rows.
+          if (!opening.ok && c.failure !== undefined && opening.error.kind === 'structure') {
+            check(c.rows.length === 0 && c.problems.length === 0, `${ctx}: rows before the header`)
+            checkFailure(ctx, opening.error, c.failure)
+            continue
+          }
+          const reader = opened(ctx, opening)
           check(same(reader.header?.names ?? null, c.header), `${ctx}: header`)
           if (headerFirst) check(opened(ctx, reader.bind(plan)) === null, `${ctx}: bind`)
           replay(ctx, reader, c.plan, c.rows, c.failure, batchRows)
