@@ -10,7 +10,8 @@
 // a regression, so they run only with `HYPERTABULAR_BIG_SIZES=1`, in a container capped at 4 GiB.
 // The read at 2^21 rows holds about 125 MiB untouched, however right the code is.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
-const { mkdtempSync, rmSync, writeFileSync }: typeof import('node:fs') = require('node:fs')
+const { mkdtempSync, readFileSync, rmSync, writeFileSync }: typeof import('node:fs') =
+  require('node:fs')
 const { tmpdir }: typeof import('node:os') = require('node:os')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
@@ -18,6 +19,23 @@ const api = require('../index.js') as typeof import('../index.js')
 const { Column, DelimitedReader, Workbook } = api
 
 type Outcome<T> = import('../index.js').Outcome<T>
+
+// Under the WASI fallback on Windows no path reaches the module (README): there a path's open
+// is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
+// file is touched is still the path's answer.
+const pathsUnreachable =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
+  process.platform === 'win32'
+function byPath<T>(
+  opened: Outcome<T>,
+  file: string,
+  bytes: (data: Uint8Array) => Outcome<T>,
+): Outcome<T> {
+  if (!pathsUnreachable || opened.ok || opened.error.kind !== 'io') return opened
+  return bytes(readFileSync(file))
+}
+const openBook = (file: string) =>
+  byPath(Workbook.open(file), file, (data) => Workbook.fromBytes(data))
 
 const BOOK = path.resolve(__dirname, '../../corpus/workbook/basic-1904.xlsx')
 const OVER_LIMIT = /^batch_rows asks for \d+ bytes, past the limit of 4294967296$/
@@ -32,7 +50,7 @@ const big =
     : 'HYPERTABULAR_BIG_SIZES=1 runs it, in a container capped at 4 GiB'
 
 function book() {
-  const opened = Workbook.open(BOOK)
+  const opened = openBook(BOOK)
   assert.ok(opened.ok)
   return opened.value
 }
@@ -85,7 +103,14 @@ test('every entry point opened with a zero is refused, and each omitted is its d
         ok: true,
         value: 1,
       })
-      assert.equal(firstRows(DelimitedReader.open(file, null, plan, options)).rows, 1)
+      assert.equal(
+        firstRows(
+          byPath(DelimitedReader.open(file, null, plan, options), file, (data) =>
+            DelimitedReader.fromBytes(data, null, plan, options),
+          ),
+        ).rows,
+        1,
+      )
     }
     assert.ok(firstRows(book().sheet(0, {}, plan)).rows > 0)
     assert.ok(firstRows(book().sheet(0, { batchRows: undefined }, plan)).rows > 0)

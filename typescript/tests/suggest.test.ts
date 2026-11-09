@@ -3,7 +3,8 @@
 // suggested as is the core's; these tests prove the options reach it, what it says comes
 // back whole, and a suggested plan is a plan a read takes.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
-const { mkdtempSync, rmSync, writeFileSync }: typeof import('node:fs') = require('node:fs')
+const { mkdtempSync, readFileSync, rmSync, writeFileSync }: typeof import('node:fs') =
+  require('node:fs')
 const { tmpdir }: typeof import('node:os') = require('node:os')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
@@ -12,6 +13,23 @@ const api = require('../index.js') as typeof import('../index.js')
 const { DelimitedReader, Workbook } = api
 
 type Outcome<T> = import('../index.js').Outcome<T>
+
+// Under the WASI fallback on Windows no path reaches the module (README): there a path's open
+// is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
+// file is touched is still the path's answer.
+const pathsUnreachable =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
+  process.platform === 'win32'
+function byPath<T>(
+  opened: Outcome<T>,
+  file: string,
+  bytes: (data: Uint8Array) => Outcome<T>,
+): Outcome<T> {
+  if (!pathsUnreachable || opened.ok || opened.error.kind !== 'io') return opened
+  return bytes(readFileSync(file))
+}
+const openBook = (file: string) =>
+  byPath(Workbook.open(file), file, (data) => Workbook.fromBytes(data))
 type SuggestOptions = import('../index.js').SuggestOptions
 
 const WORKBOOKS = path.resolve(__dirname, '../../corpus/workbook')
@@ -142,7 +160,9 @@ test('suggest applies nothing, and a path that is not there is an I/O error', ()
   const file = path.join(dir, 'a.csv')
   writeFileSync(file, 'a\n1\n')
   try {
-    const found = value(DelimitedReader.suggest(file))
+    const found = value(
+      byPath(DelimitedReader.suggest(file), file, (data) => DelimitedReader.suggestBytes(data)),
+    )
     assert.equal(found.report[0].door, 'bool')
     const reader = value(DelimitedReader.fromBytes('a\n1\n'))
     assert.equal(reader.isBound, false)
@@ -156,7 +176,7 @@ test('suggest applies nothing, and a path that is not there is an I/O error', ()
 })
 
 test('a sheet suggests from its first row under its own options, and its read stays where it is', () => {
-  const book = value(Workbook.open(path.join(WORKBOOKS, 'basic.xlsx')))
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
   const sheet = value(book.sheet(0))
   const before = value(sheet.suggest())
   const plan = before.plan

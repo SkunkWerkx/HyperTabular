@@ -833,9 +833,12 @@ function sheetOptionsOf(
   return options
 }
 
-test('workbook.json, from bytes and a path, by index and by name, header first and bound up front', () => {
+test('workbook.json, from bytes and a path, by index and by name, header first and bound up front', async () => {
   const books = new Map<string, Uint8Array>()
   for (const c of workbooks) {
+    // Under the WASI fallback what a case dropped is finalized only when the event loop turns
+    // (README): without a turn per case the whole corpus is held at once, past the default heap.
+    await new Promise(setImmediate)
     const file = path.join(CORPUS, c.file)
     let bytes = books.get(file)
     if (bytes === undefined) {

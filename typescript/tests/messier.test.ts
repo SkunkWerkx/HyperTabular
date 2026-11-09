@@ -4,6 +4,7 @@
 // is the core's, read by the core: these tests prove each reaches it, and what it answers comes
 // back.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
+const { readFileSync }: typeof import('node:fs') = require('node:fs')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
 const hypercast = require('@skunkwerkx/hypercast') as typeof import('@skunkwerkx/hypercast')
@@ -13,6 +14,23 @@ const { Column, DelimitedReader, Range, Workbook } = api
 type Batch = import('../index.js').Batch
 type Dialect = import('../index.js').Dialect
 type Outcome<T> = import('../index.js').Outcome<T>
+
+// Under the WASI fallback on Windows no path reaches the module (README): there a path's open
+// is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
+// file is touched is still the path's answer.
+const pathsUnreachable =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
+  process.platform === 'win32'
+function byPath<T>(
+  opened: Outcome<T>,
+  file: string,
+  bytes: (data: Uint8Array) => Outcome<T>,
+): Outcome<T> {
+  if (!pathsUnreachable || opened.ok || opened.error.kind !== 'io') return opened
+  return bytes(readFileSync(file))
+}
+const openBook = (file: string) =>
+  byPath(Workbook.open(file), file, (data) => Workbook.fromBytes(data))
 type ColumnT = InstanceType<typeof Column>
 
 const WORKBOOKS = path.resolve(__dirname, '../../corpus/workbook')
@@ -295,7 +313,7 @@ test('a range is a value, from its text or its four numbers', () => {
   const wrong = Range.of(-1, 1, 2, 1)
   assert.ok(!wrong.ok && wrong.error.kind === 'argument')
   // A sheet takes either, and refuses text that is not one as the core does.
-  const book = value(Workbook.open(path.join(WORKBOOKS, 'basic.xlsx')))
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
   const sheet = book.sheet(0, { range: 'nope' })
   assert.ok(!sheet.ok && sheet.error.kind === 'range')
   const object = book.sheet(0, { range: {} as never })
@@ -317,7 +335,7 @@ test('a range is a value, from its text or its four numbers', () => {
 })
 
 test("a sheet's skip, header row and tokens change what it reads", () => {
-  const book = value(Workbook.open(path.join(WORKBOOKS, 'basic.xlsx')))
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
   const plain = value(book.sheet(0, { hasHeader: false }, [Column.text(0)]))
   const all = value(plain.read())
   assert.ok(all !== null && all.rows >= 3)

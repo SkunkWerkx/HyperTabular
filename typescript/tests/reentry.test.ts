@@ -4,12 +4,30 @@
 // refused with the `busy` error: a method answers it, a getter, with no outcome to answer in,
 // throws it. The outer call goes on unharmed. Nothing here reaches state the outer call is using.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
+const { readFileSync }: typeof import('node:fs') = require('node:fs')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
 const api = require('../index.js') as typeof import('../index.js')
 const { Column, DelimitedReader, Workbook } = api
 
 type Outcome<T> = import('../index.js').Outcome<T>
+
+// Under the WASI fallback on Windows no path reaches the module (README): there a path's open
+// is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
+// file is touched is still the path's answer.
+const pathsUnreachable =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
+  process.platform === 'win32'
+function byPath<T>(
+  opened: Outcome<T>,
+  file: string,
+  bytes: (data: Uint8Array) => Outcome<T>,
+): Outcome<T> {
+  if (!pathsUnreachable || opened.ok || opened.error.kind !== 'io') return opened
+  return bytes(readFileSync(file))
+}
+const openBook = (file: string) =>
+  byPath(Workbook.open(file), file, (data) => Workbook.fromBytes(data))
 type ColumnT = InstanceType<typeof Column>
 
 const WORKBOOKS = path.resolve(__dirname, '../../corpus/workbook')
@@ -114,7 +132,7 @@ test('a call back into a reader from a plan it is binding is refused, and the bi
 })
 
 test('a call back into a sheet from a plan it is binding is refused, and the bind goes on', () => {
-  const book = value(Workbook.open(path.join(WORKBOOKS, 'basic.xlsx')))
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
   for (const inner of [
     (sheet: InstanceType<typeof api.Sheet>) => busy(sheet.read(), 'sheet'),
     (sheet: InstanceType<typeof api.Sheet>) => busy(sheet.close(), 'sheet'),
@@ -164,7 +182,7 @@ test('a call back into a reader from what its read assigns through is refused, a
 })
 
 test('a call back into a sheet from the options of its own suggestion is refused', () => {
-  const book = value(Workbook.open(path.join(WORKBOOKS, 'basic.xlsx')))
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
   const sheet = value(book.sheet(0))
   const answers: Outcome<unknown>[] = []
   const options = {

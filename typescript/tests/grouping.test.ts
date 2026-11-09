@@ -7,7 +7,8 @@
 // in them. The door these tests prove is this binding's `format_of`, which every factory and
 // every suggest takes, and which resolves a format through HyperCast.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
-const { mkdtempSync, rmSync, writeFileSync }: typeof import('node:fs') = require('node:fs')
+const { mkdtempSync, readFileSync, rmSync, writeFileSync }: typeof import('node:fs') =
+  require('node:fs')
 const { tmpdir }: typeof import('node:os') = require('node:os')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
@@ -16,6 +17,23 @@ const api = require('../index.js') as typeof import('../index.js')
 const { Column, DelimitedReader, Workbook } = api
 
 type Outcome<T> = import('../index.js').Outcome<T>
+
+// Under the WASI fallback on Windows no path reaches the module (README): there a path's open
+// is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
+// file is touched is still the path's answer.
+const pathsUnreachable =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
+  process.platform === 'win32'
+function byPath<T>(
+  opened: Outcome<T>,
+  file: string,
+  bytes: (data: Uint8Array) => Outcome<T>,
+): Outcome<T> {
+  if (!pathsUnreachable || opened.ok || opened.error.kind !== 'io') return opened
+  return bytes(readFileSync(file))
+}
+const openBook = (file: string) =>
+  byPath(Workbook.open(file), file, (data) => Workbook.fromBytes(data))
 type Packed = { packed: Uint8Array }
 
 const WESTERN = hypercast.NumFormat.invariant()
@@ -111,7 +129,7 @@ test('an Indian column reads beside a Western one', () => {
 test('an Indian sheet column reads beside a Western one', () => {
   for (const file of GROUPED) {
     const sheet = value(
-      value(Workbook.open(file)).sheet(0, null, [Column.i32(2, INDIAN), Column.i32(2)]),
+      value(openBook(file)).sheet(0, null, [Column.i32(2, INDIAN), Column.i32(2)]),
     )
     const batch = value(sheet.read())
     assert.ok(batch !== null)
@@ -132,7 +150,13 @@ test('a stale policy is refused at every delimited entry point, before any cell'
       const numeric = [Column.i32(0), Column.i32(1, stale(word))]
       for (const each of [numeric, [Column.text(0), Column.decimal(1, stale(word))]]) {
         rejects(refused, DelimitedReader.fromBytes(BOTH, null, each), 1)
-        rejects(refused, DelimitedReader.open(file, null, each), 1)
+        rejects(
+          refused,
+          byPath(DelimitedReader.open(file, null, each), file, (data) =>
+            DelimitedReader.fromBytes(data, null, each),
+          ),
+          1,
+        )
         const unbound = value(DelimitedReader.fromBytes(BOTH))
         const records = unbound.records
         rejects(refused, unbound.bind(each), 1)
@@ -151,7 +175,7 @@ test('a stale policy is refused at every delimited entry point, before any cell'
 })
 
 test('a stale policy is refused at every sheet entry point', () => {
-  const book = value(Workbook.open(GROUPED[0]))
+  const book = value(openBook(GROUPED[0]))
   for (const [word, refused] of WORDS) {
     const plan = [Column.i32(0), Column.i32(1, stale(word))]
     rejects(refused, book.sheet(0, null, plan), 1)
@@ -205,10 +229,10 @@ test('a stale format is refused before a suggest opens anything', () => {
       assert.ok(!nowhere.ok)
       assert.equal(nowhere.error.kind, refused ? 'plan' : 'io')
       // A sheet: the same, and one whose sample would meet its broken part.
-      const sheet = value(value(Workbook.open(GROUPED[0])).sheet(0))
+      const sheet = value(value(openBook(GROUPED[0])).sheet(0))
       for (const options of [every, past, replaced, twice])
         rejects(refused, sheet.suggest(options), at(options))
-      const broken = value(value(Workbook.open(path.join(WORKBOOKS, 'broken.xlsx'))).sheet(0))
+      const broken = value(value(openBook(path.join(WORKBOOKS, 'broken.xlsx'))).sheet(0))
       const failed = broken.suggest(every)
       assert.ok(!failed.ok)
       assert.equal(failed.error.kind, refused ? 'plan' : 'structure')

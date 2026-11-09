@@ -481,7 +481,7 @@ same, the suite is the same, and `isAvailable()` is `true`. What differs:
   in a long loop (`await new Promise(setImmediate)` after every few dozen reads: the same three
   passes peak at 281 MB yielding after every 64, 215 MB after every read), and `close()` each
   reader and sheet; the suite reads every workbook case under the fallback only because it
-  closes each sheet.
+  closes each sheet and yields after each case.
 - A Proxy whose prototype lookup throws (a `getPrototypeOf` trap that throws, or a revoked
   Proxy) makes a call throw under the fallback, a recorded loss: the runtime's handle lookup
   tests every argument `instanceof WeakRef`, which runs the trap, and its exception unwinds
