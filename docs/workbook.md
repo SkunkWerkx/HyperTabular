@@ -505,32 +505,32 @@ tables predate validation.
 
 ### What this release costs the core
 
-Apple M6, Rust 1.99.1, 2026-11-09, one session, built as "Numbers" in
+Apple M6, Rust 1.99.1, 2026-11-10, one session, built as "Numbers" in
 [`delimited.md`](delimited.md#numbers) says: **1.0** is tag `v1.0.0`'s `rust/` over HyperCast 1.0.0,
-**now** this release over HyperCast 1.1 (simdutf8 in its text door), and the third build, 1.0's
+**now** this release over HyperCast 1.1 (`439b8cf`, simdutf8 in its text door), and the third build, 1.0's
 `rust/` over HyperCast 1.1, splits each change into **HyperCast** (that build against 1.0) and
 **HyperTabular** (now against that build). The same benchmark file on all three, five runs of each
-interleaved with the order rotated, the median of each build's Criterion medians; load average 1.5
-to 1.9. Every file reads to the same checksum on all three.
+interleaved with the order rotated, the median of each build's Criterion medians; load average 1.7
+to 2.3. Every file reads to the same checksum on all three.
 
 | File | 1.0 | Now | Change | HyperCast | HyperTabular |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `text_heavy` (read only) | 48.5 ms | 50.5 ms | +4.1% | -1.2% | +5.4% |
-| `excel-win-300k.xlsx`, open | 13.6 ms | 13.6 ms | +0.1% | +0.4% | -0.3% |
-| `excel-win-300k.xlsx`, read | 252.3 ms | 257.8 ms | +2.2% | -0.5% | +2.7% |
-| `libreoffice-300k.ods`, open | 184.3 ms | 185.5 ms | +0.7% | +0.4% | +0.3% |
-| `libreoffice-300k.ods`, read | 577.6 ms | 585.9 ms | +1.4% | 0.0% | +1.4% |
-| `numbers-300k.numbers`, open | 457.5 ms | 460.7 ms | +0.7% | +0.2% | +0.5% |
-| `numbers-300k.numbers`, read | 667.9 ms | 670.5 ms | +0.4% | 0.0% | +0.3% |
+| `text_heavy` (read only) | 49.6 ms | 50.3 ms | +1.4% | -2.7% | +4.3% |
+| `excel-win-300k.xlsx`, open | 13.8 ms | 13.8 ms | -0.3% | -1.4% | +1.1% |
+| `excel-win-300k.xlsx`, read | 253.6 ms | 260.8 ms | +2.9% | -1.0% | +3.9% |
+| `libreoffice-300k.ods`, open | 184.7 ms | 185.6 ms | +0.5% | +0.4% | +0.1% |
+| `libreoffice-300k.ods`, read | 578.2 ms | 589.7 ms | +2.0% | +0.6% | +1.4% |
+| `numbers-300k.numbers`, open | 457.6 ms | 461.1 ms | +0.8% | +2.2% | -1.4% |
+| `numbers-300k.numbers`, read | 667.8 ms | 672.1 ms | +0.6% | +2.0% | -1.3% |
 
 The losses are HyperTabular's. `text_heavy`'s cells are shared strings of 19 to 36 bytes: its
 2 000 strings are asked about once each when they are loaded, and its 800 000 cells are handed
 out on that answer. Asking every cell, as this tree did until 2026-11-09, read it in 58.1 ms
-(+17.8% against 1.0, an earlier session the same evening, where this tree read it in 50.1 ms).
-The xlsx read's 2% is notes and the sheet options, with the check on its one text column now
-made once a string; the ods read's 1.4% is the same work with every text cell still asked about.
-The Numbers rows are inside the session's noise (their spread was 2.0 to 2.4%); nothing in an
-open reaches a door.
+(+17.8% against 1.0, in a session on 2026-11-09 where this tree read it in 50.1 ms).
+The xlsx read's 3% is notes and the sheet options, with the check on its one text column now
+made once a string; the ods read's 2% is the same work with every text cell still asked about.
+The Numbers rows are inside the session's noise: the split build read them 2% slower than
+either of the others, with a spread of up to 3.9%, and nothing in an open reaches a door.
 
 ## Parked
 

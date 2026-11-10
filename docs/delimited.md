@@ -334,55 +334,55 @@ rows, so that every batch's region is refused and a few of its rows set aside, a
 `cells/hypertabular-bad-every-row`, the first file with such a byte in every row, so that all
 but sixteen rows of a batch are judged cell by cell, the most validation can cost. `faulty` is a 100 000-row file where four cells in five fail their door.
 
-This release against 1.0, Apple M6 (Mac18,5), macOS 27.2, Rust 1.99.1, 2026-11-09, one session.
+This release against 1.0, Apple M6 (Mac18,5), macOS 27.2, Rust 1.99.1, 2026-11-10, one session.
 **1.0** is tag `v1.0.0`'s `rust/` built over HyperCast 1.0.0 from crates.io (byte for byte its
-`v1.0.0` tag); **now** is this release's tree over HyperCast 1.1, simdutf8 in its text door. A
+`v1.0.0` tag); **now** is this release's tree over HyperCast 1.1 (`439b8cf`), simdutf8 in its text door. A
 third build splits each loss between the two libraries: 1.0's `rust/` over HyperCast 1.1, so
 **HyperCast** is that build against 1.0 and **HyperTabular** is now against that build. All three
 run this release's benchmark file; 1.0's copy leaves out the stray-quote file, which 1.0 can't read,
 and the setup check that every batch of the bad-per-batch file has a refused cell, which fails on
 1.0 because 1.0 refuses nothing (it runs before the timing and changes none of it). Six runs of each
 build, interleaved with the order rotated, the median of each build's six Criterion medians; load
-average 1.6 to 2.2.
+average 2.2 to 3.6, so the builds' six medians spread by up to 7%.
 
 | Scope | 1.0 | Now | Change | HyperCast | HyperTabular |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `structure`, NEON + PMULL | 3.30 ms | 3.55 ms (6.82 GiB/s) | +7.6% | -0.8% | +8.4% |
-| `structure`, NEON | 3.35 ms | 3.58 ms | +6.8% | +0.2% | +6.6% |
-| `structure`, SWAR | 6.77 ms | 6.75 ms | -0.3% | +0.1% | -0.4% |
-| `structure_all_quoted`, NEON + PMULL | 3.44 ms | 3.90 ms | +13.1% | -0.8% | +14.0% |
-| `structure_all_quoted`, NEON | 3.51 ms | 3.93 ms | +12.0% | +0.2% | +11.8% |
-| `structure_all_quoted`, SWAR | 7.40 ms | 7.40 ms | +0.1% | -0.1% | +0.1% |
-| `structure_stray_quote`, NEON + PMULL | no such read | 4.16 ms | | | |
-| `structure_stray_quote`, NEON | no such read | 4.19 ms | | | |
+| `structure`, NEON + PMULL | 3.28 ms | 3.57 ms (6.77 GiB/s) | +9.0% | +0.3% | +8.7% |
+| `structure`, NEON | 3.35 ms | 3.58 ms | +6.8% | +0.4% | +6.4% |
+| `structure`, SWAR | 6.77 ms | 6.73 ms | -0.6% | +0.1% | -0.8% |
+| `structure_all_quoted`, NEON + PMULL | 3.44 ms | 3.92 ms | +13.9% | +0.2% | +13.7% |
+| `structure_all_quoted`, NEON | 3.51 ms | 3.93 ms | +11.8% | +0.9% | +10.9% |
+| `structure_all_quoted`, SWAR | 7.38 ms | 7.39 ms | +0.1% | +0.3% | -0.2% |
+| `structure_stray_quote`, NEON + PMULL | no such read | 4.17 ms | | | |
+| `structure_stray_quote`, NEON | no such read | 4.20 ms | | | |
 | `structure_stray_quote`, SWAR | no such read | 7.50 ms | | | |
-| `cells`, HyperTabular | 7.84 ms | 9.02 ms (2.68 GiB/s) | +15.1% | +0.1% | +15.0% |
-| `cells/hypertabular-utf8` | 8.49 ms | 11.30 ms | +33.1% | -0.5% | +33.8% |
-| `cells/hypertabular-bad-per-batch` | 7.86 ms | 9.43 ms | +20.1% | -0.2% | +20.3% |
-| `cells/hypertabular-bad-every-row` | 7.85 ms | 18.15 ms | +131.0% | -0.1% | +131.2% |
-| `cells`, the `csv` crate (control, unchanged code) | 13.11 ms | 13.06 ms (1.85 GiB/s) | -0.3% | -0.1% | -0.2% |
-| `faulty`, HyperTabular | 6.11 ms | 7.71 ms | +26.2% | +15.4% | +9.4% |
-| `batch`, ten typed columns | 13.02 ms | 14.25 ms (1.70 GiB/s) | +9.5% | +1.2% | +8.1% |
+| `cells`, HyperTabular | 7.80 ms | 9.03 ms (2.68 GiB/s) | +15.8% | +0.8% | +14.9% |
+| `cells/hypertabular-utf8` | 8.47 ms | 11.37 ms | +34.1% | +0.3% | +33.8% |
+| `cells/hypertabular-bad-per-batch` | 7.84 ms | 9.38 ms | +19.7% | +0.6% | +19.0% |
+| `cells/hypertabular-bad-every-row` | 7.86 ms | 18.15 ms | +131.0% | +0.2% | +130.5% |
+| `cells`, the `csv` crate (control, unchanged code) | 13.22 ms | 13.08 ms (1.85 GiB/s) | -1.1% | -1.0% | -0.1% |
+| `faulty`, HyperTabular | 6.13 ms | 6.74 ms | +9.9% | +0.1% | +9.8% |
+| `batch`, ten typed columns | 13.06 ms | 14.17 ms (1.71 GiB/s) | +8.5% | +2.3% | +6.0% |
 
 Every scope the core reaches is a loss but `structure` on the portable engine, and the `csv`
 crate's row is the control that the session was level. Where each comes from:
 
-- **HyperCast's share is `faulty`'s, +15.4%.** Four cells in five fail their door there
-  (`123x`, `y123` and an empty cell at `i32`, `123z` at `f64`), and HyperCast 1.1's doors take
-  that much longer to refuse them; which of its changes does it isn't split here, and its own
-  benchmarks compare 1.0 on numerals that read, not on ones that fail. Everywhere else
-  HyperCast moved nothing measurable under 1.0's core: 1.0 never asks the text door, and the
-  typed doors in `batch` came out within 1.2%.
+- **HyperCast's share is nothing measurable.** `faulty`, where four cells in five fail their
+  door (`123x`, `y123` and an empty cell at `i32`, `123z` at `f64`), is level under 1.0's core
+  (+0.1%). It was +15.4% on 2026-11-09, when HyperCast 1.1's doors took that much longer to
+  refuse them; HyperCast has since taken that back (its `docs/benchmarks.md`, "Refused cells").
+  The typed doors in `batch` came out +2.3%, inside this session's spread, and every other scope
+  within 1.0%: 1.0 never asks the text door.
 - **The rest is HyperTabular's.** `cells` is validation plus notes and the options' checks.
-  Validation is asked of HyperCast's text door, now SIMD, so the multi-byte file costs +33% where it
-  cost +150% against core's check. One bad byte in every batch costs 5% over the valid file (9.43
-  against 9.02 ms): the region is refused, the row holding the byte is found from where the door
+  Validation is asked of HyperCast's text door, now SIMD, so the multi-byte file costs +34% where it
+  cost +150% against core's check. One bad byte in every batch costs 4% over the valid file (9.38
+  against 9.03 ms): the region is refused, the row holding the byte is found from where the door
   stopped and set aside, the rest is read as valid, and that row's text cells are asked about
   alone. A bad byte in every row is the worst case, twice the valid file (18.15 ms): past sixteen
   rows set aside, every cell left in the batch, most of them shorter than the 64 bytes the SIMD
   check starts at, is checked alone. Setting rows aside is not free on a clean read: `cells` and
   `batch` were each 1 to 2% faster in the same tree before it (8.80 against 8.96 ms and 14.14
-  against 14.28 ms, five interleaved runs, the same evening). `faulty` and `batch` are mostly
+  against 14.28 ms, five interleaved runs, on 2026-11-09). `faulty` and `batch` are mostly
   notes, with the options' checks, and in `batch` the validation of its two text columns.
 - **`structure`'s +7 to +14% on NEON is the quote rule and the fill's per-row bookkeeping.**
   Swapping the scanners between the trees on 2026-11-08 (1.0's `rust/` with this release's

@@ -2,7 +2,7 @@
 
 The candidates for the performance pass after the CRAN 1.1 gate, gathered on 2026-11-09 from where each
 was found. Every number here is a receipt from the source named beside it, measured on the machine and
-date given there. Candidates keep their numbers; 1, 2 and 6 landed on 2026-11-09 and are gone from here
+date given there. Candidates keep their numbers; 1, 2 and 6 landed on 2026-11-09 and 10 on 2026-11-10, and are gone from here
 ("Landed", below). Each fix comes with its own
 proof, and with the tables that print its loss re-measured. When a candidate lands, move its outcome to
 the doc that holds the table (`docs/delimited.md`, `docs/workbook.md`) and the CHANGELOG, then delete it
@@ -19,7 +19,7 @@ Candidates 1, 2, 3, 6 and 10 were probed on throwaway patches: Apple M6, rustc 1
 over HyperCast 1.0.0 against `42efa83` over HyperCast `f558c7e`, five or six interleaved rounds with
 the order rotated, median of Criterion medians (1 s warm-up, 3 s measured), load 1.4 to 2.5,
 per-build spread under 2.5%. Rounds run while another program held a core were dropped. What was
-learned about 3 and 10 is under each.
+learned about 3 is under it, and about 10 under "Landed".
 
 ## Landed
 
@@ -32,13 +32,20 @@ learned about 3 and 10 is under each.
   byte are found from the door's offset and set aside, up to sixteen a batch; past that the rest
   is asked cell by cell, so a bad byte in every row is still +131%, and that file is now a
   benchmark scope of its own.
-- **6, xlsx shared strings validated once.** `text_heavy` +17.8% is +4.1% against 1.0. The answer
+- **6, xlsx shared strings validated once.** `text_heavy` +17.8% was +4.1% against 1.0 that evening
+  (+1.4% in the 2026-11-10 session). The answer
   is the top bit of each string's table entry, so the ABI's layout didn't move. Receipts:
   `docs/workbook.md`, "What this release costs the core".
+- **10, HyperCast 1.1 refused bad numerals slower.** HyperCast's share of `faulty` was +15.4% under
+  1.0's core and is +0.1% over HyperCast `439b8cf` (2026-11-10): its integer engine gathers short
+  numerals in a `u64`, a declared symbol is tried against its first byte, and an empty cell
+  returns before the white-space scan. `faulty` is +9.9% against 1.0, all of it HyperTabular's.
+  The real door's refusal is still 6% slower than 1.0's, and two grouped numerals that read cost
+  3 to 4% more than before. Receipts: HyperCast's `docs/benchmarks.md`, "Refused cells".
 
 ## The delimited core
 
-### 3. Validation cost on text cells (cells +15%, utf8 cells +33%)
+### 3. Validation cost on text cells (cells +16%, utf8 cells +34%)
 
 - **Measured:**
   - (2026-11-08 figures, before candidates 1, 2 and 6 landed.) `cells` +12.3% is HyperTabular's own share: validation (the region check and simdutf8), notes, and
@@ -105,21 +112,6 @@ learned about 3 and 10 is under each.
 - ODS open's full-part scan.
 - Lazy shared strings (Sylvan's forward cursor), if a huge table with a small read ever makes the
   preload the wrong trade.
-
-## HyperCast (its own repo, its own receipts)
-
-### 10. HyperCast 1.1 refuses bad numerals slower (`faulty` +14.5%)
-
-- **Measured:** under 1.0's kernel, HyperCast 1.1 refuses `123x`, `y123` and `123z` 14.5% slower than
-  1.0 did. The cause inside HyperCast hasn't been split.
-- **Isolated (spike, 2026-11-09):** both versions linked into one program, 100,000 cells a pass, 61
-  alternated passes, run twice. `cast_i32` on `123x` 19.4 → 23.0 ns (+17–19%), on `y123` 11.3 → 13.1 ns
-  (+17–18%), `cast_f64` on `123z` 20.6 → 23.9 ns (+16%). Numerals that read are level or faster
-  (`cast_i32` −9%, `cast_f64` +1%).
-- **Not the cause:** building the `Failure` from its site, which is a few moves.
-- **First step:** a receipt in HyperCast's `docs/benchmarks.md`: a `*-malformed` row against tag
-  `v1.0.0`. Its benchmarks only compare numerals that read.
-- **Then:** profile the engine's failure lane; that is where the 3.5 ns are.
 
 ## The bindings
 
