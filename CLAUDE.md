@@ -473,10 +473,10 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Remove agent worktrees and their branches once the work is in the main checkout;
   `.claude/` is untracked and `git add` picks it up.
 
-## Open follow-ups (as of 2026-11-08)
+## Open follow-ups (as of 2026-11-10)
 
 - The next release waits on HyperCast 1.1.0 on every registry. HyperCast 1.1's work is on
-  HyperCast's `master` (`f558c7e`, still versioned 1.0.0), and the companion pin in
+  HyperCast's `master` (`439b8cf`, still versioned 1.0.0), and the companion pin in
   `.github/hyper.json` names that commit and its green run. Every manifest requires 1.1.0, but the committed lockfiles
   (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `java/jni/`) and
   `swift/Benchmarks/Package.resolved` still name 1.0.0, which only the bump above can move
@@ -487,8 +487,9 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Benchmark tables: the workbook table through every binding and Go's and PHP's receipts were
   measured on an Apple M6 on 2026-11-08, one session; the delimited and workbook core against 1.0
   (tag `v1.0.0` over HyperCast 1.0.0, with a third build splitting each loss between the two
-  libraries) on 2026-11-09, after the sink, bad-row and shared-string fixes; the tables through
-  the bindings predate those three. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
+  libraries) on 2026-11-10, after the sink, bad-row and shared-string fixes and over the HyperCast
+  (`439b8cf`) that took back what a refused cell costs; the tables through the bindings predate
+  all four. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
   and `docs/design.md`) say so. Re-measure every harness on one machine before relabelling a
   table; never mix machines.
 - Ruby's Fiddle path reads an xlsx sheet 54% and an ods one 30% slower than the Magnus

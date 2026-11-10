@@ -408,13 +408,13 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   `text_heavy` from a workbook, whose real files moved +0.5% to +1.3%. A batch with an invalid cell
   reads its bytes a second time and asks the door about that row's text cells; past sixteen such
   rows in a batch, the rest are asked cell by cell. Those figures predate HyperCast's SIMD check (above). The
-  release with it, against tag `v1.0.0` over HyperCast 1.0.0 in one session (Apple M6, 2026-11-09,
-  `docs/delimited.md`, `docs/workbook.md`), with notes and the options' checks in it too: +15.1% on
-  `cells`, +33.1% on the multi-byte file, +20.1% on a file with one bad byte in every batch
-  (9.43 ms against 9.02 ms for the same file valid), +131.0% on one with a bad byte in every row,
-  +9.5% on typed batches, +26.2% where four cells in five fail (HyperCast 1.1's doors are +15.4%
-  of that under 1.0's core), +4.1% on `text_heavy` and +2.2% on the xlsx read, the other real
-  files within 1.4%. An XLSX shared string is asked about once, when the strings are loaded, and
+  release with it, against tag `v1.0.0` over HyperCast 1.0.0 in one session (Apple M6, 2026-11-10,
+  `docs/delimited.md`, `docs/workbook.md`), with notes and the options' checks in it too: +15.8% on
+  `cells`, +34.1% on the multi-byte file, +19.7% on a file with one bad byte in every batch
+  (9.38 ms against 9.03 ms for the same file valid), +131.0% on one with a bad byte in every row,
+  +8.5% on typed batches, +9.9% where four cells in five fail (HyperCast 1.1's doors are level
+  with 1.0's there, under 1.0's core), +1.4% on `text_heavy` and +2.9% on the xlsx read, the other
+  real files within 2.0%. An XLSX shared string is asked about once, when the strings are loaded, and
   a plain read's rows go through a sink without the header, width and policy steps on the SIMD
   engines. *(all packages)*
 - **`hypertabular_delimited_state_size` reports 80 bytes, where 1.0 reported 64**, and
