@@ -22,7 +22,7 @@ use packages::{
     ods_generated, ods_table, xlsx, xlsx_generated, xlsx_sheet,
 };
 use std::path::PathBuf;
-use support::{Harness, Sizing, compare, compare_plan, every_door};
+use support::{Harness, Read, Sizing, compare, compare_plan, every_door};
 
 fn options() -> [SheetOptions; 4] {
     let base = SheetOptions::default();
@@ -1618,6 +1618,192 @@ fn invalid_utf8_in_a_workbook_cell_is_malformed() {
     let options = SheetOptions::default().with_header(false);
     let read = harness.read(&sheets[0], options, &specs[..1], 4);
     assert_eq!(read.rows[0].1[0], format!("fault 2 @0+1 {:?}", "\u{FFFD}"));
+}
+
+/// A sheet of shared strings: three columns of `rows`, each cell naming a string by index.
+fn shared_sheet(rows: &[[u32; 3]]) -> Vec<u8> {
+    let mut sheet = String::from("<worksheet><sheetData>");
+    for row in rows {
+        sheet.push_str("<row>");
+        for index in row {
+            sheet.push_str(&format!("<c t=\"s\"><v>{index}</v></c>"));
+        }
+        sheet.push_str("</row>");
+    }
+    sheet.push_str("</sheetData></worksheet>");
+    sheet.into_bytes()
+}
+
+/// What a text cell reads as in a [`Harness`] read: the door's verdict of `text`, spans and all.
+fn judged(text: &[u8]) -> String {
+    match hypercast::cast_text(text) {
+        Ok(_) => format!("ok {:?}", String::from_utf8_lossy(text)),
+        Err(fault) if text.is_empty() => {
+            assert_eq!((fault.offset, fault.len), (0, 0));
+            "empty @0+0".to_string()
+        }
+        Err(fault) => format!(
+            "fault 2 @{}+{} {:?}",
+            fault.offset,
+            fault.len,
+            String::from_utf8_lossy(text)
+        ),
+    }
+}
+
+/// A shared string is asked of the door once, when the strings are loaded, and every cell that
+/// names it reads as the door says of it: valid ones as text, a broken one as its own fault with
+/// the cell's own span, wherever and however often it's named. Two strings side by side that are
+/// each broken and together one character are still each broken, and a string of no bytes is
+/// empty. Both through a stored part and a deflated one, with room and without.
+#[test]
+fn a_shared_string_is_judged_once_and_reads_the_same_in_every_cell() {
+    let strings: [&[u8]; 7] = [
+        b"plain",
+        "caf\u{e9} \u{6771}\u{4eac}".as_bytes(),
+        b"ab\xc3",
+        b"caf\xc3",
+        b"\xa9t",
+        b"",
+        b"",
+    ];
+    let mut table = b"<sst>".to_vec();
+    for (index, text) in strings.iter().enumerate() {
+        if index == 6 {
+            table.extend_from_slice(b"<si/>");
+        } else {
+            table.extend_from_slice(b"<si><t>");
+            table.extend_from_slice(text);
+            table.extend_from_slice(b"</t></si>");
+        }
+    }
+    table.extend_from_slice(b"</sst>");
+    let rows = [
+        [0, 1, 2],
+        [2, 3, 4],
+        [4, 0, 2],
+        [5, 6, 1],
+        [1, 1, 1],
+        [3, 4, 3],
+    ];
+    let specs = [
+        ColumnSpec::new(0, 18, 0),
+        ColumnSpec::new(1, 18, 0),
+        ColumnSpec::new(2, 18, 0),
+    ];
+    let expected: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|&index| judged(strings[index as usize]))
+                .collect()
+        })
+        .collect();
+    assert!(expected[1].iter().all(|cell| cell.starts_with("fault 2 @")));
+    assert_eq!(expected[1][1], format!("fault 2 @3+1 {:?}", "caf\u{FFFD}"));
+    for deflate in [false, true] {
+        let package = xlsx_around(&shared_sheet(&rows), &table, deflate);
+        for sizing in [Sizing::Stingy, Sizing::Roomy] {
+            let mut harness = Harness::new(&package, sizing);
+            harness.open().unwrap();
+            let sheets = harness.sheets().unwrap();
+            harness.load().unwrap();
+            let options = SheetOptions::default().with_header(false);
+            for batch in [8, 1, 3] {
+                let read = harness.read(&sheets[0], options, &specs, batch);
+                assert!(!read.failed, "{deflate}, {sizing:?}, {batch}");
+                let cells: Vec<Vec<String>> = read.rows.iter().map(|row| row.1.clone()).collect();
+                assert_eq!(cells, expected, "{deflate}, {sizing:?}, {batch}");
+            }
+        }
+    }
+}
+
+/// What the load found of one workbook's strings is that workbook's alone. Two workbooks of the
+/// same shape, one whose third string is broken, opened and loaded turn about and then read turn
+/// about, and (where there are threads) on eight at once: each reads as it would alone, every time.
+#[test]
+fn workbooks_open_together_keep_their_own_strings() {
+    let rows = [[0, 1, 2], [2, 2, 0], [1, 2, 1]];
+    let specs = [
+        ColumnSpec::new(0, 18, 0),
+        ColumnSpec::new(1, 18, 0),
+        ColumnSpec::new(2, 18, 0),
+    ];
+    let package = |third: &[u8]| {
+        let mut table = b"<sst><si><t>one</t></si><si><t>tw\xc3\xb6</t></si><si><t>".to_vec();
+        table.extend_from_slice(third);
+        table.extend_from_slice(b"</t></si></sst>");
+        xlsx_around(&shared_sheet(&rows), &table, true)
+    };
+    let expected = |third: &[u8]| -> Vec<Vec<String>> {
+        let strings: [&[u8]; 3] = [b"one", "tw\u{f6}".as_bytes(), third];
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .map(|&index| judged(strings[index as usize]))
+                    .collect()
+            })
+            .collect()
+    };
+    let (sound, broken): (&[u8], &[u8]) = (b"three", b"thr\xffe");
+    let (sound_package, broken_package) = (package(sound), package(broken));
+    let (sound_rows, broken_rows) = (expected(sound), expected(broken));
+    assert_ne!(sound_rows, broken_rows);
+    let options = SheetOptions::default().with_header(false);
+    let cells =
+        |read: &Read| -> Vec<Vec<String>> { read.rows.iter().map(|row| row.1.clone()).collect() };
+
+    for sizing in [Sizing::Stingy, Sizing::Roomy] {
+        let mut one = Harness::new(&sound_package, sizing);
+        let mut two = Harness::new(&broken_package, sizing);
+        one.open().unwrap();
+        two.open().unwrap();
+        let one_sheets = one.sheets().unwrap();
+        let two_sheets = two.sheets().unwrap();
+        two.load().unwrap();
+        one.load().unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                cells(&one.read(&one_sheets[0], options, &specs, 2)),
+                sound_rows
+            );
+            assert_eq!(
+                cells(&two.read(&two_sheets[0], options, &specs, 2)),
+                broken_rows
+            );
+        }
+    }
+
+    // wasm32-wasip1 has no threads: the turn-about reads above are the whole of it there.
+    #[cfg(not(target_family = "wasm"))]
+    std::thread::scope(|scope| {
+        for thread in 0..8 {
+            let (package, rows) = if thread % 2 == 0 {
+                (&sound_package, &sound_rows)
+            } else {
+                (&broken_package, &broken_rows)
+            };
+            let specs = &specs;
+            scope.spawn(move || {
+                for round in 0..40 {
+                    let sizing = if round % 2 == 0 {
+                        Sizing::Stingy
+                    } else {
+                        Sizing::Roomy
+                    };
+                    let mut harness = Harness::new(package, sizing);
+                    harness.open().unwrap();
+                    let sheets = harness.sheets().unwrap();
+                    harness.load().unwrap();
+                    let read = harness.read(&sheets[0], options, specs, 2);
+                    let cells: Vec<Vec<String>> =
+                        read.rows.iter().map(|row| row.1.clone()).collect();
+                    assert_eq!(&cells, rows, "thread {thread}, round {round}");
+                }
+            });
+        }
+    });
 }
 
 #[test]

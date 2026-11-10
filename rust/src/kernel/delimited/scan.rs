@@ -105,6 +105,11 @@ impl Scanner {
         Scanner { sep, quoting, kind }
     }
 
+    /// True on the portable engine, which reads eight bytes at a time.
+    pub(crate) fn is_portable(&self) -> bool {
+        matches!(self.kind, Kind::Swar)
+    }
+
     /// The same scanner for reading physical lines: a quote is a byte like another.
     pub fn lines(&self) -> Scanner {
         Scanner {

@@ -35,8 +35,14 @@ own the buffers, grow one when the core asks, and lend out what the core wrote.
   shared, inline or Numbers string alike, are a `Malformed` verdict on a cell read through the
   text door, and `FailureKind::Encoding` in a header name, with the part and sheet row where
   a workbook's failures put them. Character references can't produce it: an unusable one
-  stays as written. Each text cell is asked about for itself, since its bytes aren't one
-  region of the part: a shared string read twice is judged twice.
+  stays as written. A text cell is asked about for itself, since its bytes aren't one region
+  of the part, with one exception: an XLSX shared string is asked about once, when the strings
+  are loaded, and the answer travels in its own table entry (the top bit of its length, which
+  no string is long enough to need). A cell naming a string that passed is handed its bytes
+  without a second look; one naming a string that didn't is asked again, so its fault and span
+  are that cell's own. The answer is the workbook's, in the table its caller holds: two
+  workbooks open at once share nothing. An inline string, an ODS cell and a Numbers string are
+  still asked about each time.
 - **Formulas are never evaluated.** `<f>` is skipped; the cached value is the value. A
   formula with no cached value reads as an empty cell, which `_fill_with` marks: "Cells" under
   "Reading part of a sheet" says what counts as one in each format.
@@ -499,30 +505,32 @@ tables predate validation.
 
 ### What this release costs the core
 
-Apple M6, Rust 1.99.1, 2026-11-08, one session, built as "Numbers" in
+Apple M6, Rust 1.99.1, 2026-11-09, one session, built as "Numbers" in
 [`delimited.md`](delimited.md#numbers) says: **1.0** is tag `v1.0.0`'s `rust/` over HyperCast 1.0.0,
 **now** this release over HyperCast 1.1 (simdutf8 in its text door), and the third build, 1.0's
 `rust/` over HyperCast 1.1, splits each change into **HyperCast** (that build against 1.0) and
 **HyperTabular** (now against that build). The same benchmark file on all three, five runs of each
-interleaved with the order rotated, the median of each build's Criterion medians; load average 1.3
-to 3.4. Every file reads to the same checksum on all three.
+interleaved with the order rotated, the median of each build's Criterion medians; load average 1.5
+to 1.9. Every file reads to the same checksum on all three.
 
 | File | 1.0 | Now | Change | HyperCast | HyperTabular |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `text_heavy` (read only) | 49.0 ms | 58.0 ms | +18.3% | -1.1% | +19.6% |
-| `excel-win-300k.xlsx`, open | 13.6 ms | 13.6 ms | 0.0% | +0.1% | -0.1% |
-| `excel-win-300k.xlsx`, read | 252.2 ms | 261.7 ms | +3.8% | -0.1% | +3.9% |
-| `libreoffice-300k.ods`, open | 184.2 ms | 185.3 ms | +0.6% | +0.1% | +0.6% |
-| `libreoffice-300k.ods`, read | 575.2 ms | 583.6 ms | +1.5% | +0.2% | +1.2% |
-| `numbers-300k.numbers`, open | 457.7 ms | 457.0 ms | -0.1% | +2.3% | -2.4% |
-| `numbers-300k.numbers`, read | 668.0 ms | 666.8 ms | -0.2% | +1.9% | -2.1% |
+| `text_heavy` (read only) | 48.5 ms | 50.5 ms | +4.1% | -1.2% | +5.4% |
+| `excel-win-300k.xlsx`, open | 13.6 ms | 13.6 ms | +0.1% | +0.4% | -0.3% |
+| `excel-win-300k.xlsx`, read | 252.3 ms | 257.8 ms | +2.2% | -0.5% | +2.7% |
+| `libreoffice-300k.ods`, open | 184.3 ms | 185.5 ms | +0.7% | +0.4% | +0.3% |
+| `libreoffice-300k.ods`, read | 577.6 ms | 585.9 ms | +1.4% | 0.0% | +1.4% |
+| `numbers-300k.numbers`, open | 457.5 ms | 460.7 ms | +0.7% | +0.2% | +0.5% |
+| `numbers-300k.numbers`, read | 667.9 ms | 670.5 ms | +0.4% | 0.0% | +0.3% |
 
-Both losses are HyperTabular's, and both are validating text. `text_heavy`'s cells are shared
-strings of 19 to 36 bytes, under the 64 bytes HyperCast's SIMD check starts at, and each is checked
-every time a cell names it: 800 000 checks of a table of 2 000 strings. The xlsx read's 4% is the
-same check on its one text column, with notes and the sheet options. The Numbers rows' opposite
-moves in the two columns cancel and are the build's layout (see "Through every binding"); nothing
-in an open reaches a door.
+The losses are HyperTabular's. `text_heavy`'s cells are shared strings of 19 to 36 bytes: its
+2 000 strings are asked about once each when they are loaded, and its 800 000 cells are handed
+out on that answer. Asking every cell, as this tree did until 2026-11-09, read it in 58.1 ms
+(+17.8% against 1.0, an earlier session the same evening, where this tree read it in 50.1 ms).
+The xlsx read's 2% is notes and the sheet options, with the check on its one text column now
+made once a string; the ods read's 1.4% is the same work with every text cell still asked about.
+The Numbers rows are inside the session's noise (their spread was 2.0 to 2.4%); nothing in an
+open reaches a door.
 
 ## Parked
 

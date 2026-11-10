@@ -143,16 +143,17 @@ fn generate_utf8(rows: usize) -> Vec<u8> {
     text
 }
 
-/// `generate`'s file with one byte that isn't UTF-8 in every 1024 rows: every 1024th row has
-/// `Springf\xFFeld` for its city, so every batch holds at least one. Every batch's region then
-/// fails validation and falls to judging cell by cell, which is the most text validation can cost
-/// a read.
-fn generate_bad_per_batch(rows: usize) -> Vec<u8> {
+/// `generate`'s file with one byte that isn't UTF-8 in every `every` rows: each such row has
+/// `Springf\xFFeld` for its city. At 1024, every batch holds at least one: its region fails
+/// validation, the rows holding the bytes are set aside and the rest is read again. At 1, every
+/// row is one, and all but the first few of a batch are judged cell by cell, which is the most
+/// text validation can cost a read.
+fn generate_bad(rows: usize, every: usize) -> Vec<u8> {
     let text = generate(rows);
     let mut out = Vec::with_capacity(text.len());
     for (line, record) in text.split_inclusive(|&b| b == b'\n').enumerate() {
         // Line 0 is the header.
-        if line > 0 && (line - 1) % 1024 == 1023 {
+        if line > 0 && (line - 1) % every == every - 1 {
             let at = record
                 .windows(11)
                 .position(|w| w == b"Springfield")
@@ -283,8 +284,8 @@ fn benchmarks(c: &mut Criterion) {
             total
         });
     });
-    // The worst case for validation: every batch's region refused, every cell judged alone.
-    let bad = generate_bad_per_batch(ROWS);
+    // A bad byte in every batch: its region refused, the rows holding one set aside.
+    let bad = generate_bad(ROWS, 1024);
     {
         let mut reader = DelimitedReader::from_slice(&bad, Dialect::CSV, &every).unwrap();
         while let Some(batch) = reader.read().unwrap() {
@@ -295,6 +296,24 @@ fn benchmarks(c: &mut Criterion) {
     group.bench_function("hypertabular-bad-per-batch", |b| {
         b.iter(|| {
             let mut reader = DelimitedReader::from_slice(&bad, Dialect::CSV, &every).unwrap();
+            let mut total = 0usize;
+            while let Some(batch) = reader.read().unwrap() {
+                for column in 0..10 {
+                    for row in 0..batch.rows() {
+                        total += batch.text(column, row).map_or(0, <[u8]>::len);
+                    }
+                }
+            }
+            total
+        });
+    });
+    // The worst case for validation: a bad byte in every row, so every batch runs out of rows
+    // to set aside and judges the rest cell by cell.
+    let worst = generate_bad(ROWS, 1);
+    group.throughput(Throughput::Bytes(worst.len() as u64));
+    group.bench_function("hypertabular-bad-every-row", |b| {
+        b.iter(|| {
+            let mut reader = DelimitedReader::from_slice(&worst, Dialect::CSV, &every).unwrap();
             let mut total = 0usize;
             while let Some(batch) = reader.read().unwrap() {
                 for column in 0..10 {

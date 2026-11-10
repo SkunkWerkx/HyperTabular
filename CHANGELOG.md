@@ -406,13 +406,17 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   (Apple M6, 2026-11-06, `docs/delimited.md`, `docs/workbook.md`): +6.8% on `cells`, +146.2% on a file
   whose every cell is multi-byte, +2.9% on typed batches with a text column, and +19.3% reading
   `text_heavy` from a workbook, whose real files moved +0.5% to +1.3%. A batch with an invalid cell
-  pays for its region and then each cell. Those figures predate HyperCast's SIMD check (above). The
-  release with it, against tag `v1.0.0` over HyperCast 1.0.0 in one session (Apple M6, 2026-11-08,
-  `docs/delimited.md`, `docs/workbook.md`), with notes and the options' checks in it too: +12.5% on
-  `cells`, +32.1% on the multi-byte file, +131.4% on a file with one bad byte in every batch
-  (18.15 ms against 8.79 ms for the same file valid), +5.7% on typed batches, +25.8% where four
-  cells in five fail (HyperCast 1.1's doors are +14.5% of that under 1.0's core), +18.3% on
-  `text_heavy` and +3.8% on the xlsx read, the other real files level. *(all packages)*
+  reads its bytes a second time and asks the door about that row's text cells; past sixteen such
+  rows in a batch, the rest are asked cell by cell. Those figures predate HyperCast's SIMD check (above). The
+  release with it, against tag `v1.0.0` over HyperCast 1.0.0 in one session (Apple M6, 2026-11-09,
+  `docs/delimited.md`, `docs/workbook.md`), with notes and the options' checks in it too: +15.1% on
+  `cells`, +33.1% on the multi-byte file, +20.1% on a file with one bad byte in every batch
+  (9.43 ms against 9.02 ms for the same file valid), +131.0% on one with a bad byte in every row,
+  +9.5% on typed batches, +26.2% where four cells in five fail (HyperCast 1.1's doors are +15.4%
+  of that under 1.0's core), +4.1% on `text_heavy` and +2.2% on the xlsx read, the other real
+  files within 1.4%. An XLSX shared string is asked about once, when the strings are loaded, and
+  a plain read's rows go through a sink without the header, width and policy steps on the SIMD
+  engines. *(all packages)*
 - **`hypertabular_delimited_state_size` reports 80 bytes, where 1.0 reported 64**, and
   `HyperTabularDelimitedState_SIZE` in the header is 80: the block `_init_with` writes holds what it
   was asked for after the first 64. A block only ever given to `hypertabular_delimited_init` may still

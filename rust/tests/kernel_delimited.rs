@@ -3482,6 +3482,299 @@ fn the_region_check_holds_across_plans_and_buffers() {
     );
 }
 
+/// A refused region sets the rows holding its bad bytes aside and answers for the rest, up to a
+/// count of them; past it the rows left are asked cell by cell. Files of many rows, with a bad
+/// byte in one row in forty, in eight, in two or in every row: plain, quoted, escaped into the
+/// arena, or a sequence cut short at the cell's end, in a column the plan may not read. Every
+/// reading holds each text cell to the door, and agrees with every other however it's fed.
+#[test]
+fn the_region_check_sets_bad_rows_aside() {
+    let mut random = Random(0x5E7_A51D_E000_0001);
+    let (mut few, mut many, mut unread) = (0u32, 0u32, 0u32);
+    for file in 0..160 {
+        let one_in = [40, 8, 2, 1][file % 4];
+        let rows = 24 + random.below(70);
+        let mut data = Vec::new();
+        let mut bad_rows = 0;
+        let mut bad_columns = [false; 3];
+        for _ in 0..rows {
+            let bad = random.below(one_in) == 0;
+            let column = random.below(3);
+            if bad {
+                bad_rows += 1;
+                bad_columns[column] = true;
+            }
+            for cell in 0..3 {
+                if cell > 0 {
+                    data.push(b',');
+                }
+                if bad && cell == column {
+                    data.extend_from_slice(
+                        [
+                            &b"\xff"[..],
+                            b"\"x,\xffy\"",
+                            b"\"a\"\"\xff\"",
+                            b"caf\xc3",
+                            b"\xe6\x9d",
+                        ][random.below(5)],
+                    );
+                } else {
+                    data.extend_from_slice(
+                        [
+                            &b"plain"[..],
+                            "caf\u{e9}".as_bytes(),
+                            b"\"a,b\"",
+                            b"\"say \"\"hi\"\"\"",
+                            "\u{6771}\u{4eac}".as_bytes(),
+                            b"",
+                        ][random.below(6)],
+                    );
+                }
+            }
+            data.extend_from_slice([&b"\n"[..], b"\r\n"][random.below(2)]);
+        }
+        match bad_rows {
+            0 => {}
+            1..=16 => few += 1,
+            _ => many += 1,
+        }
+        let mut specs = Vec::new();
+        for _ in 0..1 + random.below(3) {
+            let door = if random.below(5) == 0 { I32 } else { TEXT };
+            specs.push(ColumnSpec::new(random.below(3) as u32, door, 0));
+        }
+        if (0..3).any(|column| {
+            bad_columns[column] && specs.iter().all(|spec| spec.ordinal as usize != column)
+        }) {
+            unread += 1;
+        }
+        for kind in available() {
+            let dialect = RawDialect {
+                engine: kind.code(),
+                ..CSV
+            };
+            // One fill takes the whole file, so every bad row is in one region.
+            let whole = read_chaotic(
+                &data,
+                dialect,
+                &specs,
+                false,
+                FillExport::OnePointOh,
+                None,
+                256,
+            );
+            assert_eq!(whole.1.len(), rows, "{data:?}");
+            assert_eq!(whole.2, None, "{data:?}");
+            for export in [FillExport::OnePointOh, FillExport::With] {
+                for batch in [256, 40, 5, 1] {
+                    assert_eq!(
+                        read_chaotic(&data, dialect, &specs, false, export, None, batch),
+                        whole,
+                        "{data:?} {specs:?} by {export:?}, {batch} rows a batch"
+                    );
+                }
+                assert_eq!(
+                    read_chaotic(&data, dialect, &specs, false, export, Some(&mut random), 64),
+                    whole,
+                    "{data:?} {specs:?} by {export:?}, stingy"
+                );
+            }
+        }
+    }
+    assert!(
+        few > 30 && many > 30 && unread > 30,
+        "{few} files with a few bad rows, {many} with many, {unread} with one unread"
+    );
+}
+
+/// What a cell's verdict and note are when its row was set aside is what they are when it's read
+/// alone: a bad byte in a cell a cut row dropped, or in a column the plan doesn't read, faults
+/// nothing, and the bad cells of rows past the count are faulted like the first.
+#[test]
+fn a_row_set_aside_reads_as_it_does_alone() {
+    let alone = |cell: &[u8]| {
+        let mut data = cell.to_vec();
+        data.push(b'\n');
+        read_split(
+            &data,
+            &options(),
+            false,
+            &[text_column(0)],
+            &[],
+            data.len(),
+            4,
+        )
+        .rows[0][0]
+            .clone()
+    };
+    let cut = RawDelimitedOptions {
+        long_rows: RawDelimitedOptions::LONG_ROWS_TRUNCATE,
+        ..options()
+    };
+    let columns = [text_column(0), text_column(1)];
+    let data = b"a,b\n1,2,\xff\n\xfe,z\n\"q\"\"\xfd\",\"w,\xc3\"\nok,fine\n";
+    let read = read_split(data, &cut, false, &columns, &[], data.len(), 64);
+    assert_eq!(read.failure, None);
+    let cells: Vec<Vec<ChaoticCell>> = read
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| {
+                    let verdict = cell.verdict;
+                    (
+                        verdict.reason,
+                        verdict.offset,
+                        verdict.len,
+                        cell.text.clone(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            [(0, 0, 0, b"a".to_vec()), (0, 0, 0, b"b".to_vec())],
+            // The bad byte went with the cell the row was cut of.
+            [(0, 0, 0, b"1".to_vec()), (0, 0, 0, b"2".to_vec())],
+            [(2, 0, 1, b"".to_vec()), (0, 0, 0, b"z".to_vec())],
+            // Unescaped first, so each span is of the text the cell reads as: `q"\xfd`, `w,\xc3`.
+            [(2, 2, 1, b"".to_vec()), (2, 2, 1, b"".to_vec())],
+            [(0, 0, 0, b"ok".to_vec()), (0, 0, 0, b"fine".to_vec())],
+        ]
+    );
+    let said = |cell: &WithCell| (cell.verdict, cell.note, cell.text.clone());
+    assert_eq!(said(&read.rows[2][0]), said(&alone(b"\xfe")));
+    assert_eq!(said(&read.rows[3][0]), said(&alone(b"\"q\"\"\xfd\"")));
+    assert_eq!(read.rows[2][0].note.origin, CellNote::ORIGIN_CELL);
+    assert_ne!(read.rows[2][0].note.detail, 0);
+    assert_eq!(read.rows[4][1].note, CellNote::default());
+
+    // A bad byte in a column no one reads sets its row aside and faults nothing.
+    let second = [text_column(1)];
+    let read = read_split(
+        b"\xff,ok\nfine,\xfe\n",
+        &options(),
+        false,
+        &second,
+        &[],
+        15,
+        64,
+    );
+    assert_eq!(read.rows[0][0].verdict, CellVerdict::OK);
+    assert_eq!(read.rows[0][0].text, b"ok");
+    assert_eq!(said(&read.rows[1][0]), said(&alone(b"\xfe")));
+
+    // Forty bad rows in one region, a good one between each two: past the count like before it.
+    let mut data = Vec::new();
+    for _ in 0..40 {
+        data.extend_from_slice(b"\xff\ngood\n");
+    }
+    let first = [text_column(0)];
+    let read = read_split(&data, &options(), false, &first, &[], data.len(), 128);
+    assert_eq!(read.rows.len(), 80);
+    for (index, row) in read.rows.iter().enumerate() {
+        if index % 2 == 0 {
+            assert_eq!(said(&row[0]), said(&alone(b"\xff")), "row {index}");
+        } else {
+            assert_eq!(said(&row[0]), said(&alone(b"good")), "row {index}");
+        }
+    }
+}
+
+/// A fill with no header row to pass over, no widths to report and no policy for a row of the
+/// wrong width runs a sink compiled without them. It finds the rows the other sink finds: the same
+/// files read with nothing asked, and with only a widths array asked for, which changes no row.
+/// Rows of the wrong width, blank lines, quoted, escaped and broken cells, on every engine.
+#[test]
+fn a_fill_with_nothing_asked_finds_the_same_rows() {
+    let mut random = Random(0x514B_0000_0002);
+    let (mut rows_seen, mut failures) = (0u64, 0u64);
+    for _ in 0..600 {
+        let separator = b",;\t"[random.below(3)];
+        let quoting = (random.below(5) != 0) as u8;
+        let skip_blank_lines = random.below(2) as u8;
+        let width = 1 + random.below(4);
+        let mut data = Vec::new();
+        for _ in 0..1 + random.below(40) {
+            if random.below(8) == 0 {
+                data.push(b'\n');
+            }
+            let cells = match random.below(30) {
+                0 => width + 1,
+                1 => width.saturating_sub(1).max(1),
+                _ => width,
+            };
+            for column in 0..cells {
+                if column > 0 {
+                    data.push(separator);
+                }
+                chaotic_cell(&mut random, separator, &mut data);
+            }
+            data.extend_from_slice([&b"\n"[..], b"\r\n", b"\r"][random.below(3)]);
+        }
+        let mut specs = Vec::new();
+        for _ in 0..1 + random.below(3) {
+            let door = if random.below(4) == 0 { I32 } else { TEXT };
+            specs.push(ColumnSpec::new(random.below(width + 1) as u32, door, 0));
+        }
+        let with: Vec<ColumnSpecWith> = specs
+            .iter()
+            .map(|spec| ColumnSpecWith::new(spec.ordinal, spec.door, spec.param))
+            .collect();
+        for kind in available() {
+            let dialect = RawDialect {
+                separator,
+                quoting,
+                skip_blank_lines,
+                engine: kind.code(),
+            };
+            let asked = RawDelimitedOptions {
+                separator,
+                quoting,
+                skip_blank_lines,
+                engine: kind.code(),
+                ..options()
+            };
+            for batch in [64, 3] {
+                let (_, plain, failure) =
+                    read_chaotic(&data, dialect, &specs, false, FillExport::With, None, batch);
+                let widths = read_split(&data, &asked, false, &with, &[], data.len(), batch);
+                let rows: Vec<Vec<ChaoticCell>> = widths
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|cell| {
+                                let verdict = cell.verdict;
+                                (
+                                    verdict.reason,
+                                    verdict.offset,
+                                    verdict.len,
+                                    cell.text.clone(),
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(plain, rows, "{data:?} {specs:?}, {batch} rows a batch");
+                assert_eq!(
+                    failure,
+                    widths.failure.map(|f| (f.code, f.record, f.byte, f.line)),
+                    "{data:?} {specs:?}, {batch} rows a batch"
+                );
+                rows_seen += plain.len() as u64;
+                failures += u64::from(failure.is_some());
+            }
+        }
+    }
+    assert!(
+        rows_seen > 5000 && failures > 100,
+        "{rows_seen} rows, {failures} failures"
+    );
+}
+
 /// The cases a generator takes a while to reach, each said by hand.
 #[test]
 fn the_region_check_on_cases_said_by_hand() {
