@@ -826,6 +826,14 @@ pub(crate) fn is_table(tag: &Tag<'_>) -> bool {
 /// rich-text runs joined (phonetic runs left out), and its span into `cells`; `out.rows`
 /// is how many. A workbook without any — every ODS, some XLSX — has zero.
 ///
+/// Each string with bytes in it is asked of HyperCast's text door here, once, and a string that
+/// is UTF-8 has its span's flag set: a cell that names it is then text without being asked again,
+/// however many cells do. The flag is the table entry's alone and is never part of a cell's span;
+/// a string the door refuses has none, and each cell that names it gets the door's verdict with
+/// its own span, as before. One string says nothing of another, even next to it in the arena: a
+/// character's bytes can straddle two strings that are each broken. A Numbers table's entries are
+/// not strings' spans and are never flagged.
+///
 /// Uses `window`, `arena` and `cells`. Resumes after a refusal.
 pub fn strings(
     state: &mut State,
@@ -900,7 +908,7 @@ fn strings_inner(
             }
             (Kind::Empty, 0) => {
                 if Tag::of(buf, &token).local() == b"si" {
-                    finish_string(state.count, state.used, state.used, cells, too_large)?;
+                    finish_string(state.count, state.used, state.used, false, cells, too_large)?;
                     state.count += 1;
                 }
             }
@@ -912,7 +920,18 @@ fn strings_inner(
                 }
             }
             (Kind::End, 1) => {
-                finish_string(state.count, state.mark, state.used, cells, too_large)?;
+                let text = arena
+                    .get(state.mark as usize..state.used as usize)
+                    .unwrap_or_default();
+                let vouched = !text.is_empty() && hypercast::cast_text(text).is_ok();
+                finish_string(
+                    state.count,
+                    state.mark,
+                    state.used,
+                    vouched,
+                    cells,
+                    too_large,
+                )?;
                 state.count += 1;
                 state.depth = 0;
             }
@@ -941,11 +960,13 @@ fn strings_inner(
     }
 }
 
-/// Records string `count` as `mark..used` of the arena.
+/// Records string `count` as `mark..used` of the arena, flagged when `vouched` says its bytes
+/// are UTF-8.
 fn finish_string(
     count: u64,
     mark: u64,
     used: u64,
+    vouched: bool,
     cells: &mut [Span],
     too_large: Stop,
 ) -> Result<(), Stop> {
@@ -957,7 +978,7 @@ fn finish_string(
     };
     *slot = Span {
         offset: mark as u32,
-        len: (used - mark) as u32,
+        len: (used - mark) as u32 | if vouched { Span::FLAG } else { 0 },
     };
     Ok(())
 }

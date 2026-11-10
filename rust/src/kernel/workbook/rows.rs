@@ -508,10 +508,13 @@ impl Run<'_> {
                     failure.expected = self.table.len() as u32;
                     return Err(Stop::Fail(failure));
                 };
-                Some(Slot::text(Span {
+                // The entry's flag is the load's word that the string is UTF-8; the cell's own
+                // span never carries it.
+                let own = Span {
                     offset: span.offset,
                     len: span.len & !Span::FLAG,
-                }))
+                };
+                Some(Slot::shared(own, span.flagged()))
             }
             T_STRING => None,
             T_BOOL => match value {

@@ -299,7 +299,12 @@ classifies a `filename<TAB>previous_filename` list from stdin the way the `chang
 Until HyperCast's next version is on its registries, every binding verifies against
 `../HyperCast`'s working tree through overrides that stay out of the tree: a cargo
 `[patch.crates-io]`, a `go.work` with a `replace`, a local NuGet feed, Maven repository, npm
-tarballs, pip and R installs.
+tarballs, pip and R installs. The pin's own artifacts do the same for every binding at once: a board
+run's `companion-hypercast` artifact (`gh run download`), then the Forge's `companion_fetch.py`
+`stage`, `env` and `wire` per leg, in a scratch clone and never the main checkout (it rewrites
+manifests and lockfiles). That wiring writes where a runner's home is: set `CARGO_HOME`,
+`GRADLE_USER_HOME`, `R_LIBS_USER`, `GITHUB_ENV` and `HYPER_COMPANION_PYTHON` (a venv) to scratch
+first, or it patches `~/.cargo/config.toml` and `~/.gradle/init.d`.
 
 `cd rust && cargo test`, then `./check-core.sh`, which is Linux-only (`.so`, `nm -D`,
 `readelf`): on a Mac run it in Docker (`rust:latest`, the three `cargo check` targets and
@@ -470,10 +475,9 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 
 ## Open follow-ups (as of 2026-11-08)
 
-- The next release waits on HyperCast 1.1.0 on every registry. HyperCast 1.1 is a freeze
-  candidate, uncommitted in `../HyperCast`'s working tree on `cran_1_1`, and the companion pin in
-  `.github/hyper.json` hasn't moved (still `9fbe8b2`): moving it needs that work merged to
-  HyperCast's default branch. Every manifest requires 1.1.0, but the committed lockfiles
+- The next release waits on HyperCast 1.1.0 on every registry. HyperCast 1.1's work is on
+  HyperCast's `master` (`f558c7e`, still versioned 1.0.0), and the companion pin in
+  `.github/hyper.json` names that commit and its green run. Every manifest requires 1.1.0, but the committed lockfiles
   (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `java/jni/`) and
   `swift/Benchmarks/Package.resolved` still name 1.0.0, which only the bump above can move
   once 1.1.0 is published; the board meanwhile runs on the pin, whose wiring relocks each job's
@@ -483,7 +487,8 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Benchmark tables: the workbook table through every binding and Go's and PHP's receipts were
   measured on an Apple M6 on 2026-11-08, one session; the delimited and workbook core against 1.0
   (tag `v1.0.0` over HyperCast 1.0.0, with a third build splitting each loss between the two
-  libraries) in a second session that evening, after simdutf8. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
+  libraries) on 2026-11-09, after the sink, bad-row and shared-string fixes; the tables through
+  the bindings predate those three. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
   and `docs/design.md`) say so. Re-measure every harness on one machine before relabelling a
   table; never mix machines.
 - Ruby's Fiddle path reads an xlsx sheet 54% and an ods one 30% slower than the Magnus
@@ -499,5 +504,6 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Java does not reach Android: the JNI base still works in `java.lang.foreign`'s memory API
   (`Arena`, `MemorySegment`), which ART lacks, so Android would need a heap or `ByteBuffer`
   data plane. Python, Ruby, PHP and R don't reach Android either.
-- Workbook performance candidates after the 2026-10-05 tokenizer pass, and Numbers' open
-  (most of a `.numbers` read, sampled 2026-10-24): `docs/workbook.md`, "Parked".
+- Performance candidates for the pass after the CRAN gate, with their receipts and how to
+  measure them: `docs/performance-candidates.md` (gathered 2026-11-09 from the Task 23c report,
+  the docs' "Parked" sections and these follow-ups).

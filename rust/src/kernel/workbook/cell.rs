@@ -92,6 +92,10 @@ impl Slot {
     const UNCACHED: u32 = 8;
     /// `aux` of a text cell of no bytes that's really a formula with no result.
     const NO_RESULT: u32 = 1;
+    /// `aux` of a text cell whose bytes are a shared string that was found to be UTF-8 when the
+    /// strings were loaded, so the text door has nothing left to ask of them but whether there
+    /// are any.
+    const VOUCHED: u32 = 2;
 
     /// A text cell, by where its bytes are.
     pub const fn text(span: Span) -> Slot {
@@ -100,6 +104,20 @@ impl Slot {
             aux: 0,
             bits: span.offset as u64 | (span.len as u64) << 32,
         }
+    }
+
+    /// A text cell whose bytes are a shared string, by where they are and whether the load
+    /// vouched for them ([`book::strings`](super::book::strings)).
+    pub(crate) const fn shared(span: Span, vouched: bool) -> Slot {
+        Slot {
+            aux: if vouched { Slot::VOUCHED } else { 0 },
+            ..Slot::text(span)
+        }
+    }
+
+    /// True for a text cell the strings' load vouched for.
+    pub(crate) const fn is_vouched(&self) -> bool {
+        self.tag == Slot::TEXT && self.aux == Slot::VOUCHED
     }
 
     /// This text cell with its bytes moved to `span`, whatever else it is.
@@ -682,6 +700,8 @@ pub unsafe fn cast(
                 // a typed cell said as text.
                 let result = match *cell {
                     Cell::Empty => Err(EMPTY),
+                    // A shared string was judged once, when the strings were loaded.
+                    Cell::Text(text) if slot.is_vouched() && !text.is_empty() => Ok(raw),
                     Cell::Text(text) => hypercast::cast_text(text).map(|_| raw),
                     _ => {
                         raw = append(
@@ -1123,6 +1143,7 @@ pub unsafe fn cast_with(
             Door::Text => {
                 let result = match *cell {
                     Cell::Empty => Err(BLANK),
+                    Cell::Text(text) if slot.is_vouched() && !text.is_empty() => Ok(raw),
                     Cell::Text(text) => detailed::cast_text(text)
                         .map(|_| raw)
                         .map_err(Refused::from),

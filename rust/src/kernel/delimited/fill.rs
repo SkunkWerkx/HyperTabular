@@ -38,7 +38,7 @@ use crate::kernel::abi::{
     no_format,
 };
 use crate::kernel::delimited::engine::{self, Kind};
-use crate::kernel::delimited::scan::{Flow, Scanner, Sink};
+use crate::kernel::delimited::scan::{Flow, Scanner, Sink, Stop};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
 use hypercast::detailed;
@@ -402,7 +402,12 @@ impl Planned for ColumnSpecWith {
 }
 
 /// The sink of a fill: writes each row's cells into the caller's table.
-struct Rows<'a, 'c, P> {
+///
+/// `EXTRAS` says whether a row can meet what 1.0's sink never did: a header row still to pass
+/// over, a widths array to write in, or a policy that pads a short row or cuts a long one. A fill
+/// with none of them takes the sink compiled without them ([`walk`] picks), and the two agree on
+/// every row such a fill can see. Both are in every build; a scan is one or the other throughout.
+struct Rows<'a, 'c, P, const EXTRAS: bool> {
     data: &'a [u8],
     specs: &'a [P],
     cells: &'c mut [Span],
@@ -435,7 +440,7 @@ struct Rows<'a, 'c, P> {
     widths: &'a mut [u32],
 }
 
-impl<P: Planned> Sink for Rows<'_, '_, P> {
+impl<P: Planned, const EXTRAS: bool> Sink for Rows<'_, '_, P, EXTRAS> {
     #[inline(always)]
     fn cell(&mut self, start: usize, end: usize, quotes: u32) {
         if self.seen == 0 {
@@ -466,7 +471,7 @@ impl<P: Planned> Sink for Rows<'_, '_, P> {
             self.records += 1;
             return Flow::More;
         }
-        if self.header_row > 0 {
+        if EXTRAS && self.header_row > 0 {
             self.header_row -= 1;
             self.records += 1;
             return Flow::More;
@@ -477,7 +482,7 @@ impl<P: Planned> Sink for Rows<'_, '_, P> {
             self.expected
         };
         let width = found as u32;
-        if width != expected && !(if width < expected { self.pad } else { self.cut }) {
+        if width != expected && !(EXTRAS && if width < expected { self.pad } else { self.cut }) {
             // Every intact row before it is delivered first; the failure is raised by the
             // call that finds it at the front.
             if self.rows == 0 {
@@ -495,7 +500,12 @@ impl<P: Planned> Sink for Rows<'_, '_, P> {
         let base = self.rows * self.per_row;
         // Source columns the plan reads past this record's last cell are empty, as are those
         // past the width in a row that's cut.
-        for ordinal in found.min(expected as usize)..self.width {
+        let from = if EXTRAS {
+            found.min(expected as usize)
+        } else {
+            found
+        };
+        for ordinal in from..self.width {
             if let Some(slot) = self.cells.get_mut(base + ordinal) {
                 *slot = Span::default();
             }
@@ -523,7 +533,7 @@ impl<P: Planned> Sink for Rows<'_, '_, P> {
                 len: line,
             };
         }
-        if let Some(slot) = self.widths.get_mut(self.rows) {
+        if EXTRAS && let Some(slot) = self.widths.get_mut(self.rows) {
             *slot = width;
         }
         self.expected = expected;
@@ -601,7 +611,8 @@ unsafe fn column<T: Copy>(
 }
 
 /// One column as `hypertabular_delimited_fill` has always cast it: HyperCast's doors, a fault
-/// and nothing more. `valid` says the rows' whole region is valid UTF-8.
+/// and nothing more. `valid` says a text cell with bytes in it is taken as valid UTF-8 here:
+/// [`vouch`] answered for its row, or [`rejudge`] asks the door for it afterwards.
 ///
 /// # Safety
 /// `buffer`'s two arrays each have room for `run.rows` elements of the door's types.
@@ -710,8 +721,8 @@ unsafe fn cast_plain(
                 })
             }
             // The bytes themselves, untrimmed, as HyperCast's door judges them: no bytes at
-            // all is `Empty`, and bytes that aren't UTF-8 are `Malformed`. A region already
-            // found valid leaves only the first of those to ask.
+            // all is `Empty`, and bytes that aren't UTF-8 are `Malformed`. The region check
+            // leaves only the first of those to ask here.
             Door::Text => column(run, ordinal, buffer, Span::default(), |text, span| {
                 if valid && !text.is_empty() {
                     Ok(span)
@@ -981,6 +992,78 @@ struct Walked<'c> {
     line: u32,
 }
 
+/// What [`gather`] scans, and the room it has for the rows.
+struct Begin<'a, 'c, P> {
+    scanner: &'a Scanner,
+    input: &'a [u8],
+    first: usize,
+    line: u32,
+    last: bool,
+    specs: &'a [P],
+    cells: &'c mut [Span],
+    width: usize,
+    per_row: usize,
+    capacity: usize,
+    arena_cap: usize,
+    widths: &'a mut [u32],
+}
+
+/// What a scan left in its sink, and where it stopped.
+struct Gathered<'c> {
+    stop: Stop,
+    cells: &'c mut [Span],
+    rows: usize,
+    expected: u32,
+    records: u64,
+    arena_needed: usize,
+    failure: Failure,
+    header_row: u32,
+}
+
+/// One scan's rows into the cell table, through the sink `EXTRAS` names: see [`Rows`].
+#[inline(always)]
+fn gather<'c, P: Planned, const EXTRAS: bool>(
+    state: &State,
+    begin: Begin<'_, 'c, P>,
+) -> Gathered<'c> {
+    let mut sink: Rows<'_, 'c, P, EXTRAS> = Rows {
+        data: begin.input,
+        specs: begin.specs,
+        cells: begin.cells,
+        width: begin.width,
+        per_row: begin.per_row,
+        capacity: begin.capacity,
+        rows: 0,
+        seen: 0,
+        first_empty: false,
+        escaped: false,
+        skip_blank: state.skip_blank_lines != 0,
+        expected: state.expected,
+        records: state.records,
+        arena_free: begin.arena_cap,
+        arena_needed: 0,
+        failure: state.failure,
+        offset: state.offset,
+        header_row: state.header_row,
+        pad: state.short_rows != 0,
+        cut: state.long_rows != 0,
+        widths: begin.widths,
+    };
+    let stop = begin
+        .scanner
+        .scan_into(begin.input, begin.first, begin.line, begin.last, &mut sink);
+    Gathered {
+        stop,
+        cells: sink.cells,
+        rows: sink.rows,
+        expected: sink.expected,
+        records: sink.records,
+        arena_needed: sink.arena_needed,
+        failure: sink.failure,
+        header_row: sink.header_row,
+    }
+}
+
 /// The part of a fill the plan's types don't enter: past what's skipped, then rows into the cell
 /// table. `Err` holds what the call returns, its work done: no rows came of it.
 #[allow(clippy::too_many_arguments)]
@@ -1019,31 +1102,32 @@ fn walk<'c, P: Planned>(
         return Err(OK);
     }
 
-    let mut sink = Rows {
-        data: input,
+    // A row asks more of the sink than 1.0's did only when there are header rows to pass over, widths
+    // to report or a policy for a row of the wrong width. Without any of them the scan runs through
+    // the sink that leaves those out, which is most of what they cost a plain read on a SIMD
+    // engine. The portable engine keeps the full sink: it measured 3 to 4% slower through the lean
+    // one (Apple M6, 2026-11-09, `docs/delimited.md`).
+    let extras = scanner.is_portable()
+        || state.header_row != 0
+        || !widths.is_empty()
+        || state.short_rows != 0
+        || state.long_rows != 0;
+    let begin = Begin {
+        scanner,
+        input,
+        first,
+        line,
+        last,
         specs,
         cells,
         width,
         per_row,
         capacity,
-        rows: 0,
-        seen: 0,
-        first_empty: false,
-        escaped: false,
-        skip_blank: state.skip_blank_lines != 0,
-        expected: state.expected,
-        records: state.records,
-        arena_free: arena_cap,
-        arena_needed: 0,
-        failure: state.failure,
-        offset: state.offset,
-        header_row: state.header_row,
-        pad: state.short_rows != 0,
-        cut: state.long_rows != 0,
+        arena_cap,
         widths,
     };
-    let stop = scanner.scan_into(input, first, line, last, &mut sink);
-    let Rows {
+    let Gathered {
+        stop,
         cells,
         rows,
         expected,
@@ -1051,8 +1135,11 @@ fn walk<'c, P: Planned>(
         arena_needed,
         failure,
         header_row,
-        ..
-    } = sink;
+    } = if extras {
+        gather::<P, true>(state, begin)
+    } else {
+        gather::<P, false>(state, begin)
+    };
 
     if rows == 0 {
         if arena_needed != 0 {
@@ -1091,18 +1178,147 @@ fn walk<'c, P: Planned>(
     })
 }
 
-/// Whether the rows found are all valid UTF-8, asked of the whole region they came from: from the
+/// How many rows a refused region can set aside before the rest are asked cell by cell.
+const SUSPECTS: usize = 16;
+
+/// What the region check found: every row below `upto` is valid UTF-8 but the first `count` of
+/// `suspects`, which each hold a byte the door refused.
+struct Vouched {
+    suspects: [usize; SUSPECTS],
+    count: usize,
+    upto: usize,
+}
+
+impl Vouched {
+    /// Whether any row is left for [`rejudge`].
+    fn all(&self, rows: usize) -> bool {
+        self.count == 0 && self.upto >= rows
+    }
+}
+
+/// Which of the rows found are valid UTF-8, asked of the whole region they came from: from the
 /// first row's start, so what was passed over or discarded is no part of it, to where the scan
-/// stopped. If it is, so is every cell of it: a cell is cut out at ASCII bytes, which no
-/// multi-byte character holds, and unescaping only takes ASCII quotes out. Asked once, this is
-/// most of what validating costs. A region the door refuses says nothing about any one cell, so
-/// each is then asked for itself; a bad byte in a cell a cut row dropped does no more than that.
-fn region_is_valid(input: &[u8], walked: &Walked<'_>) -> bool {
-    let from = walked
-        .cells
-        .get(walked.per_row - 1)
-        .map_or(0, |start| start.offset as usize);
-    hypercast::cast_text(input.get(from..walked.next).unwrap_or_default()).is_ok()
+/// stopped. If the region is valid, so is every cell of it: a cell is cut out at ASCII bytes,
+/// which no multi-byte character holds, and unescaping only takes ASCII quotes out. Asked once,
+/// this is most of what validating costs.
+///
+/// A region the door refuses says where its first bad byte is. The row holding it is set aside, a
+/// suspect, and the rest is asked again from the row after: of `core`, which is what the door
+/// itself asks once its fast check has refused, so a fill reads its bytes once fast and at most
+/// once more however many rows are bad. A suspect is only that: the byte may be in a cell the plan
+/// doesn't read, in one a cut row dropped, or in a line passed over after the row. Past
+/// [`SUSPECTS`] of them the rows left are all for [`rejudge`].
+fn vouch(input: &[u8], walked: &Walked<'_>) -> Vouched {
+    let rows = walked.rows;
+    let start = |row: usize| {
+        walked
+            .cells
+            .get(row * walked.per_row + walked.per_row - 1)
+            .map_or(0, |start| start.offset as usize)
+    };
+    let mut vouched = Vouched {
+        suspects: [0; SUSPECTS],
+        count: 0,
+        upto: rows,
+    };
+    // Rows below `settled` are answered for; the region left starts at `from`.
+    let mut settled = 0usize;
+    let mut from = start(0);
+    loop {
+        let region = input.get(from..walked.next).unwrap_or_default();
+        let bad = if settled == 0 {
+            match hypercast::cast_text(region) {
+                Ok(_) => return vouched,
+                Err(fault) if fault.reason == Reason::Malformed => fault.offset as usize,
+                // No bytes at all: every cell is empty, which the door says of each.
+                Err(_) => return vouched,
+            }
+        } else {
+            match core::str::from_utf8(region) {
+                Ok(_) => return vouched,
+                Err(error) => error.valid_up_to(),
+            }
+        };
+        // The last row that starts at or before the bad byte: rows are in input order.
+        let at = from.saturating_add(bad);
+        let (mut low, mut high) = (settled, rows);
+        while high.saturating_sub(low) > 1 {
+            let middle = low + (high - low) / 2;
+            if start(middle) <= at {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        if let Some(slot) = vouched.suspects.get_mut(vouched.count) {
+            *slot = low;
+            vouched.count += 1;
+        }
+        settled = low + 1;
+        if settled >= rows {
+            return vouched;
+        }
+        if vouched.count == SUSPECTS {
+            vouched.upto = settled;
+            return vouched;
+        }
+        from = start(settled);
+    }
+}
+
+/// A text column's cells in the rows [`vouch`] did not answer for, each asked of the door for
+/// itself: its verdict, and its note when there is somewhere for it, are then what the door says
+/// of that cell alone. The column was cast as if every row were valid, so a cell with a value has
+/// its text where the value says, and a cell without one (empty, padded or a token) was never
+/// taken as valid.
+///
+/// # Safety
+/// `values` has room for `rows` spans and `verdicts` for as many verdicts, `notes` for as many
+/// notes unless it's null, and the column has been cast through the text door.
+#[cold]
+unsafe fn rejudge(
+    vouched: &Vouched,
+    rows: usize,
+    data: &[u8],
+    arena: &[u8],
+    values: *mut Span,
+    verdicts: *mut CellVerdict,
+    notes: *mut CellNote,
+) {
+    let cell = |row: usize| {
+        // SAFETY: per the function contract; no array need be aligned.
+        unsafe {
+            if verdicts.add(row).read_unaligned() != CellVerdict::OK {
+                return;
+            }
+            let span = values.add(row).read_unaligned();
+            let store = if span.flagged() { arena } else { data };
+            let from = span.offset as usize;
+            let text = store
+                .get(from..from.saturating_add(span.len()))
+                .unwrap_or_default();
+            if let Err(failure) = detailed::cast_text(text) {
+                values.add(row).write_unaligned(Span::default());
+                verdicts
+                    .add(row)
+                    .write_unaligned(CellVerdict::from_fault(failure.fault()));
+                if !notes.is_null() {
+                    notes.add(row).write_unaligned(CellNote {
+                        detail: failure.detail.code() as u16,
+                        origin: CellNote::ORIGIN_CELL,
+                    });
+                }
+            }
+        }
+    };
+    for &row in vouched.suspects.get(..vouched.count).unwrap_or_default() {
+        if row < rows {
+            cell(row);
+        }
+    }
+    for row in vouched.upto..rows {
+        cell(row);
+    }
 }
 
 impl State {
@@ -1258,8 +1474,8 @@ unsafe fn fill_read(
         Err(code) => return code,
     };
 
-    let valid =
-        specs.iter().any(|spec| spec.door == Door::Text.code()) && region_is_valid(input, &walked);
+    let valid = specs.iter().any(|spec| spec.door == Door::Text.code());
+    let vouched = valid.then(|| vouch(input, &walked));
     let mut run = Run {
         data: input,
         cells: walked.cells,
@@ -1284,6 +1500,25 @@ unsafe fn fill_read(
                 buffer,
             )
         };
+    }
+
+    if let Some(vouched) = vouched.filter(|vouched| !vouched.all(walked.rows)) {
+        for (spec, buffer) in specs.iter().zip(columns) {
+            if spec.door == Door::Text.code() {
+                // SAFETY: the caller's contract, passed on; the loop above cast the column.
+                unsafe {
+                    rejudge(
+                        &vouched,
+                        walked.rows,
+                        run.data,
+                        run.arena,
+                        buffer.values.cast(),
+                        buffer.verdicts,
+                        core::ptr::null_mut(),
+                    )
+                };
+            }
+        }
     }
 
     let used = run.used;
@@ -1470,8 +1705,8 @@ pub unsafe fn fill_with(
         Err(code) => return code,
     };
 
-    let valid =
-        specs.iter().any(|spec| spec.door == Door::Text.code()) && region_is_valid(input, &walked);
+    let valid = specs.iter().any(|spec| spec.door == Door::Text.code());
+    let vouched = valid.then(|| vouch(input, &walked));
     let mut run = Run {
         data: input,
         cells: walked.cells,
@@ -1503,6 +1738,25 @@ pub unsafe fn fill_with(
                 );
             } else {
                 cast_noted(&mut run, column.door, ordinal, &column, valid, buffer);
+            }
+        }
+    }
+
+    if let Some(vouched) = vouched.filter(|vouched| !vouched.all(walked.rows)) {
+        for (spec, buffer) in specs.iter().zip(columns) {
+            if spec.door == Door::Text.code() {
+                // SAFETY: the caller's contract, passed on; the loop above cast the column.
+                unsafe {
+                    rejudge(
+                        &vouched,
+                        walked.rows,
+                        run.data,
+                        run.arena,
+                        buffer.values.cast(),
+                        buffer.verdicts,
+                        buffer.notes,
+                    )
+                };
             }
         }
     }

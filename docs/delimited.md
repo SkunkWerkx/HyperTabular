@@ -57,10 +57,13 @@ binding is: it owns the buffers, reads the file, and lends out what the core wro
   the whole region its rows came from, once. If that's valid, every cell in it is: a cell is
   cut out at separators, line ends and quotes, all ASCII, and no byte of a multi-byte
   character is ASCII, so valid UTF-8 split at those bytes stays valid; unescaping only takes
-  ASCII quotes out of what's left. A refused region says nothing about any one cell, so the
-  door is then asked about each text cell of that fill's rows, unescaped, and only that gives
-  a verdict or a span. So one bad cell slows its batch and faults only itself, and a bad byte
-  in a column the plan doesn't read slows the batch and faults nothing.
+  ASCII quotes out of what's left. A refused region says where its first bad byte is, and no
+  more: the row holding that byte is set aside and the rest of the region asked again from the
+  row after, for up to sixteen rows a fill. The door is then asked about each text cell of the
+  rows set aside, and of every row past the sixteenth's, unescaped, and only that gives a
+  verdict or a span. So a bad cell costs its batch a second reading of its bytes and faults
+  only itself, and a bad byte in a column the plan doesn't read costs the same and faults
+  nothing.
   `the_region_check_gives_what_each_cell_would` holds this to the door, cell for cell, on
   seeded input, at every chunk split.
 - **Header** (`has_header`) is the first record, read when the reader is built, exposed
@@ -138,7 +141,7 @@ predate both.
 
 The region check is the same for both fills, and a region is from the first delivered row to the
 end of the last, so lines passed over and records discarded are no part of it; a bad byte in a cell
-a cut row dropped can only send the batch down the cell-by-cell path, which gives the same answers.
+a cut row dropped can only set its row aside to be asked cell by cell, which gives the same answers.
 
 ## Decoding a declared encoding
 
@@ -302,7 +305,9 @@ first batches have sized them, a read allocates nothing — over a slice and ove
 - HyperCast's door asked about each cell on the spot, in `tests/kernel_delimited.rs`, for what
   the region check could get wrong: random files with broken bytes, read through both fills, with
   plans reading some ordinals or no text at all, byte-order marks, blank lines, rows of the wrong
-  width, and an arena and cell table that start small and grow when refused.
+  width, and an arena and cell table that start small and grow when refused; and files of many
+  rows with a bad byte in a few of them, in most or in all, so that rows are set aside up to the
+  count and past it.
 
 ## Exports
 
@@ -325,10 +330,11 @@ columns), and `structure` again on two more files, `structure_all_quoted` (every
 and `structure_stray_quote` (stray quotes in every row). `cells` also runs on two more:
 `cells/hypertabular-utf8`, the same shape with every cell multi-byte, and
 `cells/hypertabular-bad-per-batch`, the first file with one byte that isn't UTF-8 in every 1024
-rows, so that every batch's region is refused and every cell judged alone, the most validation
-can cost. `faulty` is a 100 000-row file where four cells in five fail their door.
+rows, so that every batch's region is refused and a few of its rows set aside, and
+`cells/hypertabular-bad-every-row`, the first file with such a byte in every row, so that all
+but sixteen rows of a batch are judged cell by cell, the most validation can cost. `faulty` is a 100 000-row file where four cells in five fail their door.
 
-This release against 1.0, Apple M6 (Mac18,5), macOS 27.2, Rust 1.99.1, 2026-11-08, one session.
+This release against 1.0, Apple M6 (Mac18,5), macOS 27.2, Rust 1.99.1, 2026-11-09, one session.
 **1.0** is tag `v1.0.0`'s `rust/` built over HyperCast 1.0.0 from crates.io (byte for byte its
 `v1.0.0` tag); **now** is this release's tree over HyperCast 1.1, simdutf8 in its text door. A
 third build splits each loss between the two libraries: 1.0's `rust/` over HyperCast 1.1, so
@@ -337,50 +343,58 @@ run this release's benchmark file; 1.0's copy leaves out the stray-quote file, w
 and the setup check that every batch of the bad-per-batch file has a refused cell, which fails on
 1.0 because 1.0 refuses nothing (it runs before the timing and changes none of it). Six runs of each
 build, interleaved with the order rotated, the median of each build's six Criterion medians; load
-average 1.4 to 2.2.
+average 1.6 to 2.2.
 
 | Scope | 1.0 | Now | Change | HyperCast | HyperTabular |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `structure`, NEON + PMULL | 3.25 ms | 3.63 ms (6.66 GiB/s) | +11.8% | +0.3% | +11.5% |
-| `structure`, NEON | 3.35 ms | 3.66 ms | +9.3% | -0.4% | +9.8% |
-| `structure`, SWAR | 6.77 ms | 6.79 ms | +0.4% | 0.0% | +0.4% |
-| `structure_all_quoted`, NEON + PMULL | 3.39 ms | 3.94 ms | +16.2% | +0.3% | +15.8% |
-| `structure_all_quoted`, NEON | 3.52 ms | 4.04 ms | +14.6% | -0.6% | +15.3% |
-| `structure_all_quoted`, SWAR | 7.38 ms | 7.51 ms | +1.7% | 0.0% | +1.7% |
-| `structure_stray_quote`, NEON + PMULL | no such read | 4.22 ms | | | |
-| `structure_stray_quote`, NEON | no such read | 4.26 ms | | | |
-| `structure_stray_quote`, SWAR | no such read | 7.56 ms | | | |
-| `cells`, HyperTabular | 7.81 ms | 8.79 ms (2.75 GiB/s) | +12.5% | +0.2% | +12.3% |
-| `cells/hypertabular-utf8` | 8.44 ms | 11.15 ms | +32.1% | +0.1% | +31.9% |
-| `cells/hypertabular-bad-per-batch` | 7.84 ms | 18.15 ms | +131.4% | -0.1% | +131.7% |
-| `cells`, the `csv` crate (control, unchanged code) | 13.07 ms | 13.08 ms (1.85 GiB/s) | 0.0% | +0.1% | 0.0% |
-| `faulty`, HyperTabular | 6.22 ms | 7.83 ms | +25.8% | +14.5% | +9.9% |
-| `batch`, ten typed columns | 13.32 ms | 14.08 ms (1.72 GiB/s) | +5.7% | -0.9% | +6.6% |
+| `structure`, NEON + PMULL | 3.30 ms | 3.55 ms (6.82 GiB/s) | +7.6% | -0.8% | +8.4% |
+| `structure`, NEON | 3.35 ms | 3.58 ms | +6.8% | +0.2% | +6.6% |
+| `structure`, SWAR | 6.77 ms | 6.75 ms | -0.3% | +0.1% | -0.4% |
+| `structure_all_quoted`, NEON + PMULL | 3.44 ms | 3.90 ms | +13.1% | -0.8% | +14.0% |
+| `structure_all_quoted`, NEON | 3.51 ms | 3.93 ms | +12.0% | +0.2% | +11.8% |
+| `structure_all_quoted`, SWAR | 7.40 ms | 7.40 ms | +0.1% | -0.1% | +0.1% |
+| `structure_stray_quote`, NEON + PMULL | no such read | 4.16 ms | | | |
+| `structure_stray_quote`, NEON | no such read | 4.19 ms | | | |
+| `structure_stray_quote`, SWAR | no such read | 7.50 ms | | | |
+| `cells`, HyperTabular | 7.84 ms | 9.02 ms (2.68 GiB/s) | +15.1% | +0.1% | +15.0% |
+| `cells/hypertabular-utf8` | 8.49 ms | 11.30 ms | +33.1% | -0.5% | +33.8% |
+| `cells/hypertabular-bad-per-batch` | 7.86 ms | 9.43 ms | +20.1% | -0.2% | +20.3% |
+| `cells/hypertabular-bad-every-row` | 7.85 ms | 18.15 ms | +131.0% | -0.1% | +131.2% |
+| `cells`, the `csv` crate (control, unchanged code) | 13.11 ms | 13.06 ms (1.85 GiB/s) | -0.3% | -0.1% | -0.2% |
+| `faulty`, HyperTabular | 6.11 ms | 7.71 ms | +26.2% | +15.4% | +9.4% |
+| `batch`, ten typed columns | 13.02 ms | 14.25 ms (1.70 GiB/s) | +9.5% | +1.2% | +8.1% |
 
 Every scope the core reaches is a loss but `structure` on the portable engine, and the `csv`
 crate's row is the control that the session was level. Where each comes from:
 
-- **HyperCast's share is `faulty`'s, +14.5%.** Four cells in five fail their door there
+- **HyperCast's share is `faulty`'s, +15.4%.** Four cells in five fail their door there
   (`123x`, `y123` and an empty cell at `i32`, `123z` at `f64`), and HyperCast 1.1's doors take
   that much longer to refuse them; which of its changes does it isn't split here, and its own
   benchmarks compare 1.0 on numerals that read, not on ones that fail. Everywhere else
   HyperCast moved nothing measurable under 1.0's core: 1.0 never asks the text door, and the
-  typed doors in `batch` came out level.
+  typed doors in `batch` came out within 1.2%.
 - **The rest is HyperTabular's.** `cells` is validation plus notes and the options' checks.
-  Validation is asked of HyperCast's text door, now SIMD, so the multi-byte file costs +32% where it
-  cost +150% against core's check. One bad byte in every batch is still twice the valid file (18.15
-  against 8.79 ms): the region is checked whole, refused, and every cell, most of them shorter than
-  the 64 bytes the SIMD check starts at, is then checked alone. `faulty` and `batch` are mostly notes, with the options' checks, and in
-  `batch` the validation of its two text columns.
-- **`structure`'s +9 to +16% on NEON is two things, about equal.** Swapping the scanners between
-  the trees (1.0's `rust/` with this release's `scan.rs`, and this release with 1.0's, five or six
-  interleaved runs each) puts the quote rule at +1.5 to +4.0% on `structure` and +4.5 to +7.0% on
-  the all-quoted file, and the fill's per-row bookkeeping at +5 to +9%. Taking four lines out of
-  the row sink of the build with 1.0's scanner (the header-row countdown, the short- and long-row
-  policy check, the `found.min(expected)` padding bound and the store of each row's width), none of
-  which this benchmark uses, brings both files on NEON back to 1.0's time or within 4.3% of it.
-  It isn't code alignment: building every side with every function and branch target aligned
-  leaves the same gaps. SWAR, which is slower per block, hides that work entirely.
+  Validation is asked of HyperCast's text door, now SIMD, so the multi-byte file costs +33% where it
+  cost +150% against core's check. One bad byte in every batch costs 5% over the valid file (9.43
+  against 9.02 ms): the region is refused, the row holding the byte is found from where the door
+  stopped and set aside, the rest is read as valid, and that row's text cells are asked about
+  alone. A bad byte in every row is the worst case, twice the valid file (18.15 ms): past sixteen
+  rows set aside, every cell left in the batch, most of them shorter than the 64 bytes the SIMD
+  check starts at, is checked alone. Setting rows aside is not free on a clean read: `cells` and
+  `batch` were each 1 to 2% faster in the same tree before it (8.80 against 8.96 ms and 14.14
+  against 14.28 ms, five interleaved runs, the same evening). `faulty` and `batch` are mostly
+  notes, with the options' checks, and in `batch` the validation of its two text columns.
+- **`structure`'s +7 to +14% on NEON is the quote rule and the fill's per-row bookkeeping.**
+  Swapping the scanners between the trees on 2026-11-08 (1.0's `rust/` with this release's
+  `scan.rs`, and this release with 1.0's, five or six interleaved runs each) put the quote rule at
+  +1.5 to +4.0% on `structure` and +4.5 to +7.0% on the all-quoted file, and the bookkeeping at +5
+  to +9%. A read that asks for no header row to pass over, no widths and no policy for a row of
+  the wrong width now runs through a row sink without those four steps, which took 2 to 3 points
+  off both files on NEON (master against this tree, five interleaved runs: 3.65 to 3.53 ms and
+  3.95 to 3.87 ms with PMULL). The portable engine keeps the full sink, because it measured 2.7%
+  and 4.4% slower through the lean one, and is level with 1.0 as it was. It isn't code alignment:
+  building every side with every function and branch target aligned leaves the same gaps. The
+  x86-64 engines take the lean sink and haven't been measured with it.
 
 Linux x64 (WSL 2), i9-11900H, Rust 1.99, 2026-10-07, Criterion's median, before a quote could only
 open at a cell's first byte, and before validation and notes; not run again on that machine:
@@ -419,8 +433,9 @@ without validation, interleaved, the median of six runs of Criterion's median.
 `cells/hypertabular-utf8` is a file of the same shape with every cell multi-byte, where the loss
 is much larger: the validator's fast path (`core`'s, before HyperCast took simdutf8) only covers
 ASCII; the release table above is the same validation with HyperCast's SIMD check, +32% on that
-file. The earlier tables predate validation. A batch with an invalid cell pays for the region and then for each cell: the release
-table above measures that, at twice the time of the valid file.
+file. The earlier tables predate validation. A batch with an invalid cell pays for the region and then for the rows holding one: the release
+table above measures that, at 5% over the valid file for one such row in a batch and twice its
+time when every row is one.
 
 | Scope | Without | With | Change |
 | --- | ---: | ---: | ---: |
