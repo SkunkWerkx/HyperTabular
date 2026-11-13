@@ -19,6 +19,9 @@ type column struct {
 	verdicts []CellVerdict
 	// notes is the door's word on each verdict, pointed at as verdicts is: nil with notes off.
 	notes []rawNote
+	// checks is what the checked door reports beside each verdict, pointed at as verdicts is: nil
+	// for a column that declares no constraints.
+	checks []hypercast.RawCheck
 
 	// The doors whose Go type is not the core's layout are converted here, once per batch,
 	// the first time the column is asked for: at most one of these is allocated.
@@ -45,10 +48,10 @@ type columns struct {
 	widths bool
 
 	// The plan as the core reads it, and where each column's arrays sit in the block of
-	// blockBytes that holds them all: offsets[3i] is column i's values, offsets[3i+1] its
-	// verdicts, offsets[3i+2] its notes. The block is laid out in the reader's instance of the
-	// core (core.go's attach); block here is the Go copy a host that cannot view the instance's
-	// memory decodes it into, allocated the first time one does.
+	// blockBytes that holds them all: offsets[4i] is column i's values, offsets[4i+1] its
+	// verdicts, offsets[4i+2] its notes and offsets[4i+3] its checks. The block is laid out in
+	// the reader's instance of the core (core.go's attach); block here is the Go copy a host that
+	// cannot view the instance's memory decodes it into, allocated the first time one does.
 	specs      []rawSpec
 	extras     []specExtra
 	offsets    []uintptr
@@ -67,7 +70,7 @@ func newColumns(plan []Column, batchRows int, notes bool, flags uint32) (*column
 		notes:     notes,
 		specs:     make([]rawSpec, len(plan)),
 		extras:    make([]specExtra, len(plan)),
-		offsets:   make([]uintptr, 3*len(plan)),
+		offsets:   make([]uintptr, 4*len(plan)),
 	}
 	widest := -1
 	for index, planned := range plan {
@@ -92,13 +95,18 @@ func newColumns(plan []Column, batchRows int, notes bool, flags uint32) (*column
 	rows := uint64(batchRows)
 	var words uint64
 	for index, planned := range plan {
-		s.offsets[3*index] = uintptr(words * 8)
+		s.offsets[4*index] = uintptr(words * 8)
 		words += (rows*uint64(planned.door.valueSize()) + 7) / 8
-		s.offsets[3*index+1] = uintptr(words * 8)
+		s.offsets[4*index+1] = uintptr(words * 8)
 		words += (rows*uint64(unsafe.Sizeof(CellVerdict{})) + 7) / 8
-		s.offsets[3*index+2] = uintptr(words * 8)
+		s.offsets[4*index+2] = uintptr(words * 8)
 		if notes {
 			words += (rows*uint64(unsafe.Sizeof(rawNote{})) + 7) / 8
+		}
+		// As many checks as there are verdicts: the core writes one beside each.
+		s.offsets[4*index+3] = uintptr(words * 8)
+		if planned.checked {
+			words += (rows*uint64(hypercast.RawCheckSize) + 7) / 8
 		}
 		if words > math.MaxInt/8 {
 			return nil, fmt.Errorf("hypertabular: a plan of %d columns at %d rows a batch is too large", len(plan), batchRows)

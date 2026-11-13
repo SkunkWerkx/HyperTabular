@@ -147,6 +147,25 @@ impl Door {
             .map(|(door, _, _)| *door)
     }
 
+    /// Whether the door takes HyperCast's `Constraints`: the numeric doors and text.
+    pub(crate) const fn checkable(self) -> bool {
+        matches!(
+            self,
+            Door::I8
+                | Door::I16
+                | Door::I32
+                | Door::I64
+                | Door::U8
+                | Door::U16
+                | Door::U32
+                | Door::U64
+                | Door::F32
+                | Door::F64
+                | Door::Decimal
+                | Door::Text
+        )
+    }
+
     /// Bytes one value of this door takes in a column buffer: the core's layout
     /// (`kernel::abi`'s `ColumnBuffer`), as 1.0's `valueSize()` said it.
     pub(crate) const fn value_size(self) -> usize {

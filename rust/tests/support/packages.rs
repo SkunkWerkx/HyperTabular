@@ -585,7 +585,48 @@ pub fn corpus_packages() -> Vec<(&'static str, Vec<u8>)> {
         ("grouping.xlsx", grouping_xlsx()),
         ("grouping.ods", grouping_ods()),
         ("grouping.numbers", grouping_numbers()),
+        ("constraints.xlsx", constraints_xlsx()),
     ]
+}
+
+/// The table the constraint cases read, stored: typed numbers, a boolean and a formula with no
+/// result beside text cells, for HyperCast's checked doors to judge a typed cell through its typed
+/// twin, and text through the text door, with its span.
+///
+/// ```text
+///      A                     B         C
+///  1   n                     name      flag
+///  2   -0                    "  ab "   TRUE
+///  3   0.30000000000000004   MALE      =A1+1 (no result)
+///  4   42                    " 11"     NA
+///  5   11                    x         7
+///  6   "1.3" (text)          Female    2
+/// ```
+pub fn constraints_xlsx() -> Vec<u8> {
+    let text =
+        |t: &str| format!("<c t=\"inlineStr\"><is><t xml:space=\"preserve\">{t}</t></is></c>");
+    let number = |v: &str| format!("<c><v>{v}</v></c>");
+    let rows = [
+        [text("n"), text("name"), text("flag")],
+        [
+            number("-0"),
+            text("  ab "),
+            "<c t=\"b\"><v>1</v></c>".to_owned(),
+        ],
+        [
+            number("0.30000000000000004"),
+            text("MALE"),
+            "<c><f>A1+1</f></c>".to_owned(),
+        ],
+        [number("42"), text(" 11"), text("NA")],
+        [number("11"), text("x"), number("7")],
+        [text("1.3"), text("Female"), number("2")],
+    ];
+    let sheet: String = rows
+        .iter()
+        .map(|cells| format!("<row>{}</row>", cells.concat()))
+        .collect();
+    xlsx(&[("Data", &sheet)], "", false, false)
 }
 
 /// The table the date fixtures hold, in text a declared field order has to decide, in each format's

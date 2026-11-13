@@ -11,8 +11,8 @@ use crate::kernel::delimited::fill;
 use crate::kernel::door::Door;
 use crate::kernel::size;
 use hypercast::{
-    DateOptions, DateOrder, ExcelEpoch, MonthNames, NumFormat, RawDateOptions, RawNumFormat,
-    UnixPrecision,
+    Constraints, DateOptions, DateOrder, Decimal, ExcelEpoch, MonthNames, NumFormat,
+    RawConstraints, RawDateOptions, RawNumFormat, Text, UnixPrecision,
 };
 use std::alloc::{Layout, alloc_zeroed};
 use std::collections::BTreeSet;
@@ -49,6 +49,63 @@ pub(crate) fn packed_tokens(tokens: &[&str]) -> &'static [u8] {
     intern(list)
 }
 
+/// One copy of each distinct declaration for the life of the program, as [`intern`] keeps lists:
+/// what lets a [`Column`], `Copy` and without a lifetime, carry a declaration a fill can point to.
+fn intern_constraints(raw: RawConstraints) -> &'static RawConstraints {
+    static KEPT: Mutex<Vec<&'static RawConstraints>> = Mutex::new(Vec::new());
+    // A panic with this held can't leave the list anything but a list.
+    let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(known) = kept.iter().find(|known| ***known == raw) {
+        return known;
+    }
+    let leaked: &'static RawConstraints = Box::leak(Box::new(raw));
+    kept.push(leaked);
+    leaked
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A type whose door takes HyperCast's [`Constraints`]: the integers, the floats, [`Decimal`] and
+/// HyperCast's [`Text`] marker, each naming its door. Sealed: it says which doors a
+/// [`Column::checked`] can be, so a door that takes none is a compile error.
+///
+/// ```compile_fail
+/// use hypertabular::{Column, Constraints, NumericRules};
+/// // A UUID column takes no constraints: there is no `Constraints::<[u8; 16]>`.
+/// let column = Column::checked(0, Constraints::<[u8; 16]>::numeric(NumericRules::new(), None).unwrap());
+/// ```
+pub trait CheckedDoor: sealed::Sealed {
+    /// The door a column of this type reads through.
+    const DOOR: Door;
+}
+
+macro_rules! checked_doors {
+    ($($ty:ty => $door:ident),+ $(,)?) => {$(
+        impl sealed::Sealed for $ty {}
+        impl CheckedDoor for $ty {
+            const DOOR: Door = Door::$door;
+        }
+    )+};
+}
+
+checked_doors! {
+    i8 => I8, i16 => I16, i32 => I32, i64 => I64,
+    u8 => U8, u16 => U16, u32 => U32, u64 => U64,
+    f32 => F32, f64 => F64, Decimal => Decimal, Text => Text,
+}
+
+/// A column's constraints as a fill takes them, kept for the life of the program, and the door
+/// they were declared for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Declared {
+    pub(crate) raw: &'static RawConstraints,
+    /// The packed `enum`; empty for none.
+    pub(crate) entries: &'static [u8],
+    pub(crate) door: Door,
+}
+
 /// One output column.
 ///
 /// Build columns with [`Column::new`] or a typed constructor, then set their numeric
@@ -75,6 +132,8 @@ pub struct Column {
     date: DateOptions,
     /// The month vocabulary, packed.
     months: Option<&'static [u8]>,
+    /// The constraints its cells must also meet: [`Column::checked`].
+    constraints: Option<Declared>,
 }
 
 macro_rules! plain_doors {
@@ -100,7 +159,67 @@ impl Column {
             tokens: None,
             date: DateOptions::NONE,
             months: None,
+            constraints: None,
         }
+    }
+
+    /// Source column `ordinal` through `T`'s door, whose cells must also meet `constraints`,
+    /// HyperCast's declaration: read through [`Batch::get_checked`](crate::Batch::get_checked) or
+    /// [`Batch::text_checked`](crate::Batch::text_checked), a cell that casts and breaks a declared
+    /// rule is a [`Violation`](crate::Violation) carrying the value as cast, and one that casts and
+    /// meets them all is [`Checked`](crate::Checked), flagged when `multipleOf`'s rounding adjusted
+    /// it. A cell that doesn't cast, and one no door is asked about, is its fault, as with
+    /// [`Batch::get`](crate::Batch::get), whose getters a constrained column refuses.
+    ///
+    /// The door is `T`'s, and the column's `door` must stay it: a column whose `door` was changed
+    /// after this is [`Error::Plan`] when the plan is bound. The numeric notation, tokens and date
+    /// options are set as on any column. Each distinct declaration is kept for the life of the
+    /// process, as tokens are.
+    ///
+    /// ```
+    /// use hypertabular::{Column, Constraints, DelimitedReader, Dialect, Keyword, NumericRules, Rejection};
+    /// let at_most = NumericRules::new().maximum(hypercast::decimal_for_declaration("10").unwrap());
+    /// let plan = [Column::checked(0, Constraints::<i32>::numeric(at_most, None).unwrap())];
+    /// let mut reader = DelimitedReader::from_slice(b"n\n7\n11\n", Dialect::CSV, &plan)?;
+    /// let batch = reader.read()?.unwrap();
+    /// assert_eq!(batch.get_checked::<i32>(0, 0).map(|ok| ok.value), Ok(7));
+    /// let Err(Rejection::Violation(broken)) = batch.get_checked::<i32>(0, 1) else { panic!() };
+    /// assert_eq!((broken.keyword, broken.value), (Keyword::Maximum, 11));
+    /// # Ok::<(), hypertabular::Error>(())
+    /// ```
+    pub fn checked<T: CheckedDoor>(ordinal: usize, constraints: Constraints<'_, T>) -> Column {
+        // A packed `enum` too long for the length word can't be declared: HyperCast's
+        // `pack_enum` says `None`, and the fill refuses the stand-in, a list that isn't whole.
+        let entries = match constraints.pack_enum(&mut []) {
+            Some(0) => &[][..],
+            Some(len) => {
+                let mut packed = vec![0; len];
+                match constraints.pack_enum(&mut packed) {
+                    Some(_) => intern(packed),
+                    None => &[0],
+                }
+            }
+            None => &[0],
+        };
+        Column {
+            constraints: Some(Declared {
+                raw: intern_constraints(constraints.raw()),
+                entries,
+                door: T::DOOR,
+            }),
+            ..Column::new(ordinal, T::DOOR)
+        }
+    }
+
+    /// Whether the column declares constraints: [`Column::checked`].
+    pub const fn is_checked(&self) -> bool {
+        self.constraints.is_some()
+    }
+
+    /// The column's declaration, as its door's type takes it, when it is text.
+    pub(crate) fn text_constraints(&self) -> Option<Constraints<'static, Text>> {
+        let declared = self.constraints?;
+        Constraints::<Text>::from_raw(*declared.raw, declared.entries).ok()
     }
 
     plain_doors! {
@@ -230,6 +349,17 @@ impl Column {
             with.tokens = tokens.as_ptr();
             with.tokens_len = tokens.len();
         }
+        if let Some(declared) = self.constraints {
+            // A door changed after the declaration: the constraints are another door's.
+            if declared.door != self.door {
+                return Err(Error::Plan { column: index });
+            }
+            with.constraints = declared.raw;
+            if !declared.entries.is_empty() {
+                with.enum_ptr = declared.entries.as_ptr();
+                with.enum_len = declared.entries.len();
+            }
+        }
         // Everything the fill would refuse, said before any read.
         // SAFETY: the lists are interned, so they live as long as the program.
         if !unsafe { fill::honours(&with) } {
@@ -333,6 +463,8 @@ unsafe impl AllZero for CellNote {}
 unsafe impl AllZero for Span {}
 // SAFETY: as above.
 unsafe impl AllZero for Slot {}
+// SAFETY: as above.
+unsafe impl AllZero for hypercast::RawCheck {}
 
 /// `count` zeroed elements, or `None` if memory for them can't be had. Nothing is written: the
 /// pages stay untouched until a read reaches them, so a batch costs what it uses.
@@ -405,5 +537,89 @@ pub(crate) fn table<T: AllZero>(len: Option<usize>, column: usize) -> Result<Vec
     let len = len.ok_or(Error::Plan { column })?;
     zeroed(len).ok_or(Error::NoMemory {
         bytes: (len as u64).saturating_mul(size_of::<T>() as u64),
+    })
+}
+
+/// A declaration as the packages HyperCast's extensions build lay out a `Constraints`' `packed`
+/// bytes, native-endian: six words, then the five decimals, each its magnitude's low 64 bits and
+/// high 32, its scale and its sign. `None` for bytes of another length.
+#[cfg(any(feature = "python", feature = "ruby", feature = "php"))]
+pub(crate) fn raw_constraints(packed: &[u8]) -> Option<RawConstraints> {
+    if packed.len() != RawConstraints::SIZE as usize {
+        return None;
+    }
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_ne_bytes(packed.get(at..at + 4)?.try_into().ok()?))
+    };
+    let decimal = |at: usize| -> Option<Decimal> {
+        Some(Decimal {
+            lo: u64::from_ne_bytes(packed.get(at..at + 8)?.try_into().ok()?),
+            hi: word(at + 8)?,
+            scale: *packed.get(at + 12)?,
+            negative: *packed.get(at + 13)? != 0,
+        })
+    };
+    Some(RawConstraints {
+        size: word(0)?,
+        flags: word(4)?,
+        rounding: word(8)?,
+        min_length: word(12)?,
+        max_length: word(16)?,
+        _reserved: word(20)?,
+        minimum: decimal(24)?,
+        maximum: decimal(40)?,
+        multiple_of: decimal(56)?,
+        exclusive_minimum: decimal(72)?,
+        exclusive_maximum: decimal(88)?,
+    })
+}
+
+/// Why a declaration an extension was handed can't make a plan column.
+#[cfg(any(feature = "python", feature = "php"))]
+pub(crate) enum Undeclarable {
+    /// The packed bytes aren't HyperCast's layout: a binding bug.
+    NotPacked,
+    /// The declaration is for another door, or the column's door takes none.
+    Mismatched,
+    /// HyperCast's core refuses the declaration.
+    Refused,
+}
+
+/// A column of `door` reading `ordinal` that declares the constraints HyperCast's extension packed
+/// (`packed` and its `enum`, `entries`) for the door whose code is `declared`.
+#[cfg(any(feature = "python", feature = "php"))]
+pub(crate) fn checked_from_packed(
+    ordinal: usize,
+    door: Door,
+    declared: u32,
+    packed: &[u8],
+    entries: &[u8],
+) -> Result<Column, Undeclarable> {
+    let raw = raw_constraints(packed).ok_or(Undeclarable::NotPacked)?;
+    macro_rules! typed {
+        ($ty:ty, $door:ident) => {{
+            if declared != hypercast::Door::$door.code() {
+                return Err(Undeclarable::Mismatched);
+            }
+            let typed =
+                Constraints::<$ty>::from_raw(raw, entries).map_err(|_| Undeclarable::Refused)?;
+            Column::checked(ordinal, typed)
+        }};
+    }
+    Ok(match door {
+        Door::I8 => typed!(i8, I8),
+        Door::I16 => typed!(i16, I16),
+        Door::I32 => typed!(i32, I32),
+        Door::I64 => typed!(i64, I64),
+        Door::U8 => typed!(u8, U8),
+        Door::U16 => typed!(u16, U16),
+        Door::U32 => typed!(u32, U32),
+        Door::U64 => typed!(u64, U64),
+        Door::F32 => typed!(f32, F32),
+        Door::F64 => typed!(f64, F64),
+        Door::Decimal => typed!(Decimal, Decimal),
+        Door::Text => typed!(Text, Text),
+        // A door that takes no constraints has none for its own door.
+        _ => return Err(Undeclarable::Mismatched),
     })
 }

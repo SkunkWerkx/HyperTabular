@@ -13,6 +13,9 @@
 //   moved_from      a reader moved from by its own source, in the middle of a read
 //   moved_onto      a reader moved onto by its own source, in the middle of a read
 //   sheet_destroyed a sheet destroyed by its own for_each_row callback
+//   checked_get     get() of a column that declares constraints: a violation is no fault, so
+//                   get() would say it passed (get_checked() reads it)
+//   checked_text    text() of a text column that declares constraints, likewise
 //
 // The version goes out first, as every smoke program's does. Only the handler then exits 0: it's
 // reached by the header's std::abort(), and a program that comes back is a failure. Each way sets
@@ -47,6 +50,8 @@ namespace ht = hypertabular;
 #define WAY_moved_onto 7
 #define WAY_sheet_destroyed 8
 #define WAY_rows_postfix 9
+#define WAY_checked_get 10
+#define WAY_checked_text 11
 #define WAY_OF(way) WAY_##way
 #define WAY_IS(way) (WAY_OF(way) == WAY_OF_SMOKE)
 #define WAY_OF_SMOKE_(way) WAY_OF(way)
@@ -107,6 +112,42 @@ int main(int argc, char **argv) {
   walking++;
 #else
   (void)(*walking).line();
+#endif
+  came_back = 1;
+#elif WAY_IS(checked_get) || WAY_IS(checked_text)
+  // The control first: get_checked() reads the same cells, a violation and a pass.
+  ht::Constraints<std::int32_t>::Fields bound;
+  bound.maximum = 10;
+  ht::Constraints<std::string_view>::Fields length;
+  length.max_length = 3;
+  const auto at_most = ht::Constraints<std::int32_t>::declare(bound);
+  const auto short_text = ht::Constraints<std::string_view>::declare(length);
+  if (at_most.value_if() == nullptr || short_text.value_if() == nullptr) {
+    return 2;
+  }
+  auto opened = ht::DelimitedReader::from_bytes("n,s\n11,a\n", ht::Dialect::csv(),
+                                                {ht::Column::checked(0, *at_most.value_if()),
+                                                 ht::Column::checked(1, *short_text.value_if())});
+  if (!opened.ok()) {
+    return 2;
+  }
+  auto read = opened.value().read();
+  if (!read.ok() || !read.value()) {
+    return 2;
+  }
+  const ht::Batch &batch = *read.value();
+  const auto broken = batch.get_checked<std::int32_t>(0, 0);
+  const auto passed = batch.get_checked<std::string_view>(1, 0);
+  if (broken.ok() || broken.rejection().is_fault() ||
+      broken.rejection().violation().keyword != ht::Keyword::maximum || !passed.ok() ||
+      passed.value().value != "a") {
+    return 2;
+  }
+  version_then_expect_abort();
+#if WAY_IS(checked_get)
+  (void)batch.get<std::int32_t>(0, 0);
+#else
+  (void)batch.text(1, 0);
 #endif
   came_back = 1;
 #elif WAY_IS(sheet_destroyed)

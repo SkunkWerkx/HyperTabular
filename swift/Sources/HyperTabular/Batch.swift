@@ -32,7 +32,8 @@ public struct Problem: Equatable, Sendable {
     /// for an entry about the row as a whole.
     public let sourceColumn: Int?
     /// Why the verdict is what it is: malformed, out of range, or empty for a formula with no
-    /// cached value. `nil` for an entry about the row as a whole.
+    /// cached value. `nil` for an entry about the row as a whole, and for a violation, which
+    /// ``keyword`` names.
     public let reason: CastFailure?
     /// HyperCast's raw detail code, 0 for none; one this binding does not name is kept here.
     public let detailCode: UInt32
@@ -47,6 +48,8 @@ public struct Problem: Equatable, Sendable {
     public let expected: Int
     /// How many cells a long row had; otherwise 0.
     public let found: Int
+    /// The constraint a cell broke, in a column that declares them: `nil` for anything else.
+    public let keyword: Keyword?
 
     /// What failed, named: `nil` for no detail, and otherwise HyperCast's own value, which keeps a
     /// code this binding does not name.
@@ -57,7 +60,8 @@ public struct Problem: Equatable, Sendable {
 /// the same type for delimited text and for a sheet of a workbook.
 ///
 /// A column is handed out whole — ``values(_:as:)``, with ``verdicts(_:)`` beside it — or a
-/// cell at a time through ``get(_:row:as:)``, which answers with HyperCast's own `Verdict`.
+/// cell at a time through ``get(_:row:as:)``, which answers with HyperCast's own `Verdict`
+/// (``checked(_:row:as:)`` and its `CheckedVerdict` for a column that declares constraints).
 /// A batch is also the collection of its rows: each a ``Row``, the same accessors read
 /// across.
 ///
@@ -170,7 +174,9 @@ public final class Batch {
 
     // MARK: - a column at a time
 
-    /// A column's verdicts, one per row.
+    /// A column's verdicts, one per row, as the core wrote them. A verdict that `isOk` is a value.
+    /// On a column that declares constraints, one that `isViolation` cast and broke one, and
+    /// ``checked(_:row:as:)`` names it. Any other is the cell's fault, its span in the cell's text.
     public func verdicts(_ column: Int) -> UnsafeBufferPointer<CellVerdict> {
         UnsafeBufferPointer(start: columnSet.verdictBase[column], count: rows)
     }
@@ -210,22 +216,70 @@ public final class Batch {
     /// `DateComponents` (the date, civil date-time and time doors), `Duration`, and `String`
     /// for text.
     ///
-    /// - Precondition: the column's door is presented as `T`, and the row is in the batch.
+    /// - Precondition: the column's door is presented as `T`, the column declares no constraints
+    ///   (``checked(_:row:as:)`` reads one), and the row is in the batch.
     public func get<T: CellValue>(_ column: Int, row: Int, as type: T.Type = T.self) -> Verdict<T> {
         let door = columnSet.plan[column].door
         precondition(
             T.isPresented(by: door), "Column \(column) is cast through \(door), which is not read as \(T.self)")
+        unchecked(column)
         if let fault = fault(column, row: row) {
             return .fault(fault)
         }
         return .success(T.present(self, column, row))
     }
 
+    /// The cell at (`column`, `row`) as HyperCast's checked doors judge it: the value, with
+    /// whether `multipleOf` rounding adjusted it and the `enum` entry it matched; or the fault,
+    /// for text that isn't the type; or the violation, naming the keyword broken, with the value
+    /// as cast. A text `enum` match reads as the entry as declared, the caller's own string. A
+    /// column that declares no constraints reads too: every cell that cast passes, unadjusted.
+    ///
+    /// - Precondition: the column's door is a checked one (a numeric door or text) presented as
+    ///   `T`, and the row is in the batch.
+    public func checked<T: CellValue & CheckedCastTarget>(
+        _ column: Int, row: Int, as type: T.Type = T.self
+    ) -> CheckedVerdict<T> {
+        let door = columnSet.plan[column].door
+        precondition(
+            (Column.isNumeric(door) || door == .text) && T.isPresented(by: door),
+            "Column \(column) is cast through \(door), which has no checked door read as \(T.self)")
+        let verdict = self.verdict(column, row: row)
+        if let fault = fault(column, row: row) {
+            return .rejection(.fault(fault))
+        }
+        let value = T.present(self, column, row)
+        guard let checks = columnSet.checkBase[column] else {
+            return .success(Checked(value: value, adjusted: false, enumIndex: nil))
+        }
+        let check = checks[row]
+        if verdict.isViolation {
+            guard let keyword = Keyword(rawValue: check.keyword) else {
+                preconditionFailure(Workbook.contractViolation)
+            }
+            return .rejection(
+                .violation(Violation(keyword: keyword, value: value, offset: verdict.offset, length: verdict.length)))
+        }
+        let index = check.enum_index == UInt32.max ? nil : Int(check.enum_index)
+        if door == .text, let index, let entry = columnSet.plan[column].constraints?.entries?[index] as? T {
+            return .success(Checked(value: entry, adjusted: check.adjusted != 0, enumIndex: index))
+        }
+        return .success(Checked(value: value, adjusted: check.adjusted != 0, enumIndex: index))
+    }
+
+    /// Traps when a column declares constraints: a plain getter would read a violation as passed.
+    func unchecked(_ column: Int) {
+        precondition(
+            !columnSet.plan[column].isChecked,
+            "Column \(column) declares constraints: read it with checked(_:row:as:).")
+    }
+
     /// The fault of the cell at (`column`, `row`), with what failed there — `nil` for a cell that
-    /// cast. With notes off (``Dialect/notes``, ``SheetOptions/notes``) it has no detail.
+    /// cast, and for one that cast and broke a constraint, which is no fault. With notes off
+    /// (``Dialect/notes``, ``SheetOptions/notes``) it has no detail.
     public func fault(_ column: Int, row: Int) -> Fault? {
         let verdict = self.verdict(column, row: row)
-        guard verdict.raw.reason != 0 else { return nil }
+        guard !verdict.isOk, !verdict.isViolation else { return nil }
         return Interop.fault(
             code: Int32(truncatingIfNeeded: verdict.raw.reason), offset: verdict.raw.offset, length: verdict.raw.len,
             detail: UInt32(note(column, row).detail))
@@ -247,7 +301,8 @@ public final class Batch {
     }
 
     /// What went wrong in this batch, in order by row and then by column, a row's own entry first:
-    /// cells at `malformed` or `outOfRange`, formulas with no cached value (``Origin/uncached``), and
+    /// cells at `malformed` or `outOfRange`, cells that broke a constraint their column declares
+    /// (``Problem/keyword``), formulas with no cached value (``Origin/uncached``), and
     /// rows longer than the width under ``LongRows/report``. Blanks, tokens, padding and
     /// ``LongRows/truncate`` are not listed. A row the empty-row filter dropped cannot be named. With
     /// notes off a refused cell has no detail, and an uncached one is not listed.
@@ -283,14 +338,17 @@ public final class Batch {
         guard raw.plan_column != UInt32.max else {
             return Problem(
                 row: row, line: line(row), planColumn: nil, sourceColumn: nil, reason: nil, detailCode: 0,
-                origin: .cell, offset: 0, length: 0, expected: Int(raw.expected), found: Int(raw.found))
+                origin: .cell, offset: 0, length: 0, expected: Int(raw.expected), found: Int(raw.found), keyword: nil)
         }
         let column = Int(raw.plan_column)
+        let violated = raw.reason == UInt32(HyperTabularCellVerdict_VIOLATION)
         return Problem(
             row: row, line: line(row), planColumn: column, sourceColumn: columnSet.plan[column].ordinal + firstColumn,
-            reason: Interop.fault(code: Int32(truncatingIfNeeded: raw.reason), offset: 0, length: 0).reason,
+            reason: violated
+                ? nil : Interop.fault(code: Int32(truncatingIfNeeded: raw.reason), offset: 0, length: 0).reason,
             detailCode: UInt32(raw.detail), origin: Origin(rawValue: raw.origin) ?? .cell, offset: Int(raw.offset),
-            length: Int(raw.len), expected: Int(raw.expected), found: Int(raw.found))
+            length: Int(raw.len), expected: Int(raw.expected), found: Int(raw.found),
+            keyword: violated ? Keyword(rawValue: raw.keyword) : nil)
     }
 
     /// The value the core wrote for the cell at (`column`, `row`), as the type it wrote.
@@ -323,19 +381,29 @@ public final class Batch {
     /// shared strings, for every cell but one with an escaped quote in it or a typed
     /// workbook cell.
     ///
-    /// - Precondition: the column is cast through ``Door/text``, and the row is in the batch.
+    /// - Precondition: the column is cast through ``Door/text`` and declares no constraints
+    ///   (``checked(_:row:as:)`` reads one), and the row is in the batch.
     public func text(_ column: Int, row: Int) -> UnsafeRawBufferPointer? {
         let door = columnSet.plan[column].door
         precondition(door == .text, "Column \(column) is cast through \(door), not text")
-        guard verdict(column, row: row).isOk else {
-            return nil
-        }
-        return located(load(column, row, as: HyperTabularSpan.self))
+        unchecked(column)
+        return cellText(column, row)
     }
 
     /// The cell of a ``Door/text`` column as a `String`, or `nil` for an empty cell.
+    ///
+    /// - Precondition: as ``text(_:row:)``.
     public func string(_ column: Int, row: Int) -> String? {
         text(column, row: row).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// A text cell's bytes, a violation's included: `nil` for a cell with none.
+    func cellText(_ column: Int, _ row: Int) -> UnsafeRawBufferPointer? {
+        let verdict = self.verdict(column, row: row)
+        guard verdict.isOk || verdict.isViolation else {
+            return nil
+        }
+        return located(load(column, row, as: HyperTabularSpan.self))
     }
 
     /// The text the cell at (`column`, `row`) was cast from, whatever its door and whatever
@@ -582,6 +650,14 @@ public struct Row {
         current.get(column, row: index, as: type)
     }
 
+    /// The row's cell as HyperCast's checked doors judge it: ``Batch/checked(_:row:as:)``.
+    ///
+    /// - Precondition: the column's door is a checked one presented as `T`.
+    public func checked<T: CellValue & CheckedCastTarget>(_ column: Int, as type: T.Type = T.self) -> CheckedVerdict<T>
+    {
+        current.checked(column, row: index, as: type)
+    }
+
     /// The row's cell in a ``Door/text`` column, zero-copy: ``Batch/text(_:row:)``.
     ///
     /// - Precondition: the column is cast through ``Door/text``.
@@ -702,6 +778,6 @@ extension String: CellValue {
     public static func isPresented(by door: Door) -> Bool { door == .text }
     /// The cell's text, as ``Batch/string(_:row:)`` says it.
     public static func present(_ batch: Batch, _ column: Int, _ row: Int) -> String {
-        batch.string(column, row: row) ?? ""
+        batch.cellText(column, row).map { String(decoding: $0, as: UTF8.self) } ?? ""
     }
 }

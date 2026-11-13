@@ -97,6 +97,9 @@ _Static_assert(sizeof(HyperTabularRawSheetOptions) == HyperTabularRawSheetOption
                "sheet options");
 _Static_assert(sizeof(HyperTabularRawTranscoded) == HyperTabularRawTranscoded_SIZE, "transcoded");
 _Static_assert(sizeof(HyperTabularRawProblem) == HyperTabularRawProblem_SIZE, "problem");
+_Static_assert(sizeof(HyperTabularRawConstraints) == HyperTabularRawConstraints_SIZE,
+               "constraints");
+_Static_assert(sizeof(HyperTabularRawCheck) == HyperTabularRawCheck_SIZE, "check metadata");
 _Static_assert(sizeof(HyperTabularRawSuggestion) == HyperTabularRawSuggestion_SIZE, "suggestion");
 _Static_assert(sizeof(HyperTabularRawRange) == HyperTabularRawRange_SIZE, "range");
 _Static_assert(sizeof(HyperTabularRawBatchCheck) == HyperTabularRawBatchCheck_SIZE, "check");
@@ -119,6 +122,9 @@ _Static_assert(sizeof(HyperTabularBuffers) == 14 * sizeof(void *), "buffers");
 /* What R packs for one plan column: ordinal, door and param, HyperCast's 92-byte RawNumFormat
  * and its 12-byte RawDateOptions, little-endian. */
 #define PACKED_SPEC (12 + HyperTabularRawNumFormat_SIZE + HyperTabularRawDateOptions_SIZE)
+
+/* The lists beside each column's spec: months, tokens, constraints and the packed enum. */
+#define LISTS 4
 
 /* A span's length, its flag bit cleared. */
 #define SPAN_LENGTH (HyperTabularSpan_FLAG - 1u)
@@ -219,18 +225,20 @@ static size_t count_size(SEXP x) {
 
 /*
  * The plan's specs, decoded from what R packed, and the native copies of each column's month
- * vocabulary and tokens they point into. `specs` is PACKED_SPEC bytes a column; `lists` a list
- * with an entry a column, each list(months, tokens), each NULL or a raw vector. A null tokens
- * pointer inherits the reader's; an empty list is a real address of no bytes.
+ * vocabulary, tokens, constraints and packed enum they point into. `specs` is PACKED_SPEC bytes a
+ * column; `lists` a list with an entry a column, each list(months, tokens, constraints, enum),
+ * each NULL or a raw vector. A null tokens pointer inherits the reader's; an empty list is a real
+ * address of no bytes. The constraints are HyperCast's RawConstraints as hypercast_constraints()
+ * laid them out on this machine, and the enum its packed list, read only with them.
  */
 struct specs {
   size_t count;
   HyperTabularColumnSpecWith *with;
-  uint8_t **owned; /* 2 a column, NULL where none */
+  uint8_t **owned; /* LISTS a column, NULL where none */
 };
 
 static void specs_free(struct specs *s) {
-  for (size_t i = 0; s->owned && i < 2 * s->count; i++)
+  for (size_t i = 0; s->owned && i < LISTS * s->count; i++)
     release(s->owned[i]);
   release(s->owned);
   release(s->with);
@@ -253,13 +261,67 @@ static void list_into(SEXP list, uint8_t **owned, const uint8_t **ptr, uintptr_t
     return;
   }
   if (TYPEOF(list) != RAWSXP)
-    Rf_error("hypertabular: a month vocabulary or a token list is a raw vector");
+    Rf_error("hypertabular: a month vocabulary, a token list, constraints or an enum is a raw "
+             "vector");
   size_t n = (size_t)XLENGTH(list);
   *owned = block(n);
   if (n)
     memcpy(*owned, RAW(list), n);
   *ptr = *owned;
   *len = n;
+}
+
+/* A column's list(months, tokens, constraints, enum), checked. */
+static SEXP lists_entry(SEXP lists, size_t i) {
+  SEXP entry = VECTOR_ELT(lists, (R_xlen_t)i);
+  if (TYPEOF(entry) != VECSXP || XLENGTH(entry) != LISTS)
+    Rf_error("hypertabular: lists must hold list(months, tokens, constraints, enum) a column");
+  SEXP constraints = VECTOR_ELT(entry, 2);
+  if (constraints != R_NilValue &&
+      (TYPEOF(constraints) != RAWSXP || XLENGTH(constraints) != HyperTabularRawConstraints_SIZE))
+    Rf_error("hypertabular: constraints are the %d bytes hypercast_constraints() packs",
+             HyperTabularRawConstraints_SIZE);
+  return entry;
+}
+
+/* Points spec at the lists in entry, each copied into owned[0..LISTS). */
+static void lists_into(HyperTabularColumnSpecWith *spec, SEXP entry, uint8_t **owned) {
+  list_into(VECTOR_ELT(entry, 0), &owned[0], &spec->months, &spec->months_len);
+  list_into(VECTOR_ELT(entry, 1), &owned[1], &spec->tokens, &spec->tokens_len);
+  const uint8_t *constraints;
+  uintptr_t constraints_len;
+  list_into(VECTOR_ELT(entry, 2), &owned[2], &constraints, &constraints_len);
+  spec->constraints = (const HyperTabularRawConstraints *)constraints;
+  if (constraints)
+    list_into(VECTOR_ELT(entry, 3), &owned[3], &spec->enum_ptr, &spec->enum_len);
+}
+
+/* A list's bytes in place, held by R for the call: NULL for none, and a real address of no bytes
+ * for an empty one. */
+static const uint8_t *borrowed(SEXP list, uintptr_t *len) {
+  if (list == R_NilValue) {
+    *len = 0;
+    return NULL;
+  }
+  *len = (uintptr_t)XLENGTH(list);
+  return *len ? RAW(list) : (const uint8_t *)R_alloc(1, 1);
+}
+
+/* Points spec at the lists in entry in place, for a call that ends before R can free them. */
+static void lists_borrowed(HyperTabularColumnSpecWith *spec, SEXP entry) {
+  for (int k = 0; k < LISTS; k++) {
+    SEXP list = VECTOR_ELT(entry, k);
+    if (list != R_NilValue && TYPEOF(list) != RAWSXP)
+      Rf_error("hypertabular: a month vocabulary, a token list, constraints or an enum is a raw "
+               "vector");
+  }
+  spec->months = borrowed(VECTOR_ELT(entry, 0), &spec->months_len);
+  spec->tokens = borrowed(VECTOR_ELT(entry, 1), &spec->tokens_len);
+  uintptr_t constraints_len;
+  spec->constraints =
+      (const HyperTabularRawConstraints *)borrowed(VECTOR_ELT(entry, 2), &constraints_len);
+  if (spec->constraints)
+    spec->enum_ptr = borrowed(VECTOR_ELT(entry, 3), &spec->enum_len);
 }
 
 /* Fills s, which owns everything it points to; on an R error part way, s holds what was
@@ -273,7 +335,7 @@ static void specs_build(struct specs *s, SEXP specs, SEXP lists) {
       Rf_error("hypertabular: unknown door %u", door);
   }
   s->with = block(mul(count, sizeof(HyperTabularColumnSpecWith)));
-  s->owned = block(mul(2 * count, sizeof(uint8_t *)));
+  s->owned = block(mul(mul(LISTS, count), sizeof(uint8_t *)));
   s->count = count;
   for (size_t i = 0; i < count; i++) {
     const uint8_t *p = b + i * PACKED_SPEC;
@@ -284,11 +346,7 @@ static void specs_build(struct specs *s, SEXP specs, SEXP lists) {
     spec->param = le32(p + 8);
     format_from(p + 12, &spec->format);
     date_from(p + 12 + HyperTabularRawNumFormat_SIZE, &spec->date);
-    SEXP entry = VECTOR_ELT(lists, (R_xlen_t)i);
-    if (TYPEOF(entry) != VECSXP || XLENGTH(entry) != 2)
-      Rf_error("hypertabular: lists must hold list(months, tokens) a column");
-    list_into(VECTOR_ELT(entry, 0), &s->owned[2 * i], &spec->months, &spec->months_len);
-    list_into(VECTOR_ELT(entry, 1), &s->owned[2 * i + 1], &spec->tokens, &spec->tokens_len);
+    lists_into(spec, lists_entry(lists, i), &s->owned[LISTS * i]);
   }
 }
 
@@ -309,6 +367,7 @@ static void plan_free(struct plan *p) {
     release(p->table[i].values);
     release(p->table[i].verdicts);
     release(p->table[i].notes);
+    release(p->table[i].checks);
   }
   release(p->table);
   release(p->raws);
@@ -335,6 +394,9 @@ static void plan_bind(struct plan *p, SEXP specs, SEXP lists, SEXP raws, size_t 
     c->values = block(mul(DOORS[p->specs.with[i].door].size, batch_rows));
     c->verdicts = block(mul(sizeof(HyperTabularCellVerdict), batch_rows));
     c->notes = block(mul(sizeof(HyperTabularCellNote), batch_rows));
+    /* A check a row for a column that declares constraints, which the core requires of it. */
+    if (p->specs.with[i].constraints)
+      c->checks = block(mul(sizeof(HyperTabularRawCheck), batch_rows));
     p->raws[i] = LOGICAL(raws)[i] == TRUE && p->specs.with[i].door == TEXT_DOOR;
   }
   if (widths)
@@ -442,6 +504,10 @@ struct columns {
   SEXP raw;
   int *detail;
   int *origin;
+  /* A column that declares constraints: hypercast's checked verdict's own columns. */
+  int *adjusted;
+  int *enum_index;
+  int *keyword;
 };
 
 /* The next column of c->list, named: the name first, so the new vector is in the list before
@@ -456,10 +522,10 @@ static SEXP column(struct columns *c, const char *name, SEXPTYPE type, R_xlen_t 
 
 /* Allocates every column and returns c->list, unprotected: the caller stores or protects it
  * before anything else allocates. The protect stack is as it was on entry. */
-static SEXP columns_alloc(struct columns *c, enum kind kind, R_xlen_t n) {
+static SEXP columns_alloc(struct columns *c, enum kind kind, R_xlen_t n, int checked) {
   memset(c, 0, sizeof *c);
   c->kind = kind;
-  int total = 8;
+  int total = checked ? 11 : 8;
   if (kind == INSTANT_KIND || kind == CIVIL_KIND || kind == DURATION_KIND)
     total += 2;
   else if (kind == TIME_KIND)
@@ -501,8 +567,16 @@ static SEXP columns_alloc(struct columns *c, enum kind kind, R_xlen_t n) {
     c->real = REAL(column(c, "value", REALSXP, n));
     break;
   }
+  /* In hypercast_checked_verdict's order: adjusted and enum_index after the value, keyword
+   * after the reason. */
+  if (checked) {
+    c->adjusted = LOGICAL(column(c, "adjusted", LGLSXP, n));
+    c->enum_index = INTEGER(column(c, "enum_index", INTSXP, n));
+  }
   c->ok = LOGICAL(column(c, "ok", LGLSXP, n));
   c->reason = INTEGER(column(c, "reason", INTSXP, n));
+  if (checked)
+    c->keyword = INTEGER(column(c, "keyword", INTSXP, n));
   c->offset = INTEGER(column(c, "offset", INTSXP, n));
   c->length = INTEGER(column(c, "length", INTSXP, n));
   c->raw = column(c, "raw", STRSXP, n);
@@ -536,11 +610,19 @@ static int span_int(uint64_t v) { return v > (uint64_t)INT_MAX ? INT_MAX : (int)
  * Row i faulted with `reason` over the core's byte span of the cell's text b[0..n): raw is
  * that text, and the span is re-expressed in the units substr() counts raw in.
  */
+static void row_span(struct columns *c, R_xlen_t i, uint32_t offset, uint32_t len, const uint8_t *b,
+                     size_t n);
 static void row_fault(struct columns *c, R_xlen_t i, int reason, uint32_t offset, uint32_t len,
                       const uint8_t *b, size_t n) {
   value_na(c, i);
   c->ok[i] = FALSE;
   c->reason[i] = reason;
+  row_span(c, i, offset, len, b, n);
+}
+
+/* Row i's raw text b[0..n) and the core's byte span over it, in the units substr() counts it in. */
+static void row_span(struct columns *c, R_xlen_t i, uint32_t offset, uint32_t len, const uint8_t *b,
+                     size_t n) {
   enum text_unit unit;
   SET_STRING_ELT(c->raw, i, text_char(b, n, &unit));
   uint64_t start = offset < n ? offset : n;
@@ -878,8 +960,10 @@ static SEXP batch(const struct plan *p, size_t rows, const HyperTabularSpan *cel
     size_t size = DOORS[door].size;
     const uint8_t *values = p->table[k].values;
     struct columns c;
+    const HyperTabularRawCheck *checks = p->table[k].checks;
     SET_VECTOR_ELT(cols, (R_xlen_t)k,
-                   columns_alloc(&c, p->raws[k] ? BYTES_KIND : DOORS[door].kind, (R_xlen_t)rows));
+                   columns_alloc(&c, p->raws[k] ? BYTES_KIND : DOORS[door].kind, (R_xlen_t)rows,
+                                 checks != NULL));
     size_t entry = t->delimited ? p->specs.with[k].ordinal : k;
     for (size_t r = 0; r < rows; r++) {
       tick(&ticks);
@@ -890,7 +974,21 @@ static SEXP batch(const struct plan *p, size_t rows, const HyperTabularSpan *cel
       c.detail[r] = note.detail ? (int)note.detail : NA_INTEGER;
       c.origin[r] = note.origin;
       const uint8_t *v = values + r * size;
-      if (verdict.reason == 0 && door == TEXT_DOOR) {
+      if (checks) {
+        /* What hypercast's checked doors say beside the verdict: whether a passing value was
+         * rounded and which enum entry it matched, or the keyword a violation broke. A text
+         * enum match's value is the entry as declared, which R puts in place. */
+        HyperTabularRawCheck check;
+        memcpy(&check, (const uint8_t *)checks + r * sizeof check, sizeof check);
+        int passed = verdict.reason == 0;
+        c.adjusted[r] = passed ? check.adjusted != 0 : NA_LOGICAL;
+        c.enum_index[r] =
+            passed && check.enum_index < (uint32_t)INT_MAX ? (int)check.enum_index + 1 : NA_INTEGER;
+        c.keyword[r] =
+            verdict.reason == HyperTabularCellVerdict_VIOLATION ? (int)check.keyword : NA_INTEGER;
+      }
+      if ((verdict.reason == 0 || verdict.reason == HyperTabularCellVerdict_VIOLATION) &&
+          door == TEXT_DOOR) {
         HyperTabularSpan s;
         memcpy(&s, v, sizeof s);
         size_t n;
@@ -904,7 +1002,7 @@ static SEXP batch(const struct plan *p, size_t rows, const HyperTabularSpan *cel
           enum text_unit unit;
           SET_STRING_ELT(c.strings, (R_xlen_t)r, text_char(b, n, &unit));
         }
-      } else if (verdict.reason == 0) {
+      } else if (verdict.reason == 0 || verdict.reason == HyperTabularCellVerdict_VIOLATION) {
         row_ok(&c, (R_xlen_t)r, door, v);
       } else if (verdict.reason <= 3) {
         size_t n;
@@ -912,6 +1010,16 @@ static SEXP batch(const struct plan *p, size_t rows, const HyperTabularSpan *cel
         row_fault(&c, (R_xlen_t)r, (int)verdict.reason, verdict.offset, verdict.len, b, n);
       } else {
         contract_violation();
+      }
+      if (verdict.reason == HyperTabularCellVerdict_VIOLATION) {
+        /* The value as cast, kept; not ok, for no reason but its keyword, over the span of the
+         * judged text in the cell's own. */
+        if (!checks)
+          contract_violation();
+        size_t n;
+        const uint8_t *b = cell_text(t, cells[r * per_row + entry], &n);
+        c.ok[r] = FALSE;
+        row_span(&c, (R_xlen_t)r, verdict.offset, verdict.len, b, n);
       }
       vmaxset(vmax);
     }
@@ -1060,6 +1168,8 @@ SEXP C_batch_check(SEXP specs, SEXP lists, SEXP batch_rows, SEXP buffer_bytes, S
     with[i].ordinal = le32(b + i * PACKED_SPEC);
     with[i].door = le32(b + i * PACKED_SPEC + 4);
     with[i].param = le32(b + i * PACKED_SPEC + 8);
+    /* Only whether a column declares constraints counts here: a check a row. */
+    lists_borrowed(&with[i], lists_entry(lists, i));
   }
   HyperTabularRawBatchCheck out;
   memset(&out, 0, sizeof out);
@@ -1106,6 +1216,7 @@ SEXP C_judge(SEXP specs, SEXP lists) {
     contract_violation();
   uint64_t value[4] = {0};
   HyperTabularCellVerdict verdict;
+  HyperTabularRawCheck check;
   HyperTabularColumnBufferWith table;
   memset(&table, 0, sizeof table);
   table.size = HyperTabularColumnBufferWith_SIZE;
@@ -1126,30 +1237,8 @@ SEXP C_judge(SEXP specs, SEXP lists) {
     spec.param = le32(p + 8);
     format_from(p + 12, &spec.format);
     date_from(p + 12 + HyperTabularRawNumFormat_SIZE, &spec.date);
-    SEXP entry = VECTOR_ELT(lists, (R_xlen_t)i);
-    if (TYPEOF(entry) != VECSXP || XLENGTH(entry) != 2)
-      Rf_error("hypertabular: lists must hold list(months, tokens) a column");
-    for (int k = 0; k < 2; k++) {
-      SEXP list = VECTOR_ELT(entry, k);
-      const uint8_t *ptr = NULL;
-      uintptr_t len = 0;
-      if (list != R_NilValue) {
-        if (TYPEOF(list) != RAWSXP)
-          Rf_error("hypertabular: a month vocabulary or a token list is a raw vector");
-        len = (uintptr_t)XLENGTH(list);
-        uint8_t *copy = (uint8_t *)R_alloc(len ? len : 1, 1);
-        if (len)
-          memcpy(copy, RAW(list), len);
-        ptr = copy;
-      }
-      if (k == 0) {
-        spec.months = ptr;
-        spec.months_len = len;
-      } else {
-        spec.tokens = ptr;
-        spec.tokens_len = len;
-      }
-    }
+    lists_borrowed(&spec, lists_entry(lists, i));
+    table.checks = spec.constraints ? &check : NULL;
     int32_t code =
         hypertabular_delimited_fill_with(state, NULL, 0, 0, &spec, &table, 1, 0, &buffers, &out);
     if (code == HYPERTABULAR_ERR_CONTRACT)
@@ -1178,9 +1267,10 @@ SEXP C_range_parse(SEXP text) {
 
 /*
  * What hypertabular_faults lists of a read's rows, from the verdict columns R kept:
- * list(row, plan_column, reason, detail, origin, expected, found), row and plan column from 0,
- * plan column -1 for a row-level entry. `columns` holds, per plan column, list(reason, detail,
- * origin) as integer vectors (NA a 0); `widths` each row's cells or NULL. Pure: it holds no
+ * list(row, plan_column, reason, detail, origin, expected, found, keyword), row and plan column
+ * from 0, plan column -1 for a row-level entry. `columns` holds, per plan column, list(reason,
+ * detail, origin, keyword) as integer vectors (NA a 0; a violation's reason 4), keyword NULL for
+ * a column that declares no constraints; `widths` each row's cells or NULL. Pure: it holds no
  * reader's state, so an interrupt between its calls changes nothing.
  */
 SEXP C_faults(SEXP columns, SEXP rows_arg, SEXP widths, SEXP expected, SEXP long_rows) {
@@ -1192,13 +1282,25 @@ SEXP C_faults(SEXP columns, SEXP rows_arg, SEXP widths, SEXP expected, SEXP long
       (HyperTabularColumnBufferWith *)R_alloc(count ? count : 1, sizeof *table);
   for (size_t k = 0; k < count; k++) {
     SEXP c = VECTOR_ELT(columns, (R_xlen_t)k);
-    if (TYPEOF(c) != VECSXP || XLENGTH(c) != 3)
-      Rf_error("hypertabular: a column is list(reason, detail, origin)");
+    if (TYPEOF(c) != VECSXP || XLENGTH(c) != 4)
+      Rf_error("hypertabular: a column is list(reason, detail, origin, keyword)");
     SEXP reason = VECTOR_ELT(c, 0), detail = VECTOR_ELT(c, 1), origin = VECTOR_ELT(c, 2);
+    SEXP keyword = VECTOR_ELT(c, 3);
     if (TYPEOF(reason) != INTSXP || TYPEOF(detail) != INTSXP || TYPEOF(origin) != INTSXP ||
         (size_t)XLENGTH(reason) != rows || (size_t)XLENGTH(detail) != rows ||
-        (size_t)XLENGTH(origin) != rows)
+        (size_t)XLENGTH(origin) != rows ||
+        (keyword != R_NilValue && (TYPEOF(keyword) != INTSXP || (size_t)XLENGTH(keyword) != rows)))
       Rf_error("hypertabular: a column's codes are integer vectors of the read's rows");
+    HyperTabularRawCheck *checks = NULL;
+    if (keyword != R_NilValue) {
+      checks = (HyperTabularRawCheck *)R_alloc(rows ? rows : 1, sizeof *checks);
+      for (size_t r = 0; r < rows; r++) {
+        int k = INTEGER(keyword)[r];
+        checks[r].keyword = k == NA_INTEGER ? 0 : (uint32_t)k;
+        checks[r].adjusted = 0;
+        checks[r].enum_index = UINT32_MAX;
+      }
+    }
     HyperTabularCellVerdict *verdicts =
         (HyperTabularCellVerdict *)R_alloc(rows ? rows : 1, sizeof *verdicts);
     HyperTabularCellNote *notes = (HyperTabularCellNote *)R_alloc(rows ? rows : 1, sizeof *notes);
@@ -1214,6 +1316,7 @@ SEXP C_faults(SEXP columns, SEXP rows_arg, SEXP widths, SEXP expected, SEXP long
     table[k].values = NULL;
     table[k].verdicts = verdicts;
     table[k].notes = notes;
+    table[k].checks = checks;
   }
   uint32_t *row_widths = NULL;
   if (widths != R_NilValue) {
@@ -1229,12 +1332,12 @@ SEXP C_faults(SEXP columns, SEXP rows_arg, SEXP widths, SEXP expected, SEXP long
   uint32_t width = (uint32_t)asReal(expected);
   /* Twice: once to count, once to copy, so the R vectors are allocated once. */
   size_t total = 0;
-  SEXP out = PROTECT(allocVector(VECSXP, 7));
+  SEXP out = PROTECT(allocVector(VECSXP, 8));
   for (int pass = 0; pass < 2; pass++) {
     uint64_t cursor = 0;
     size_t at = 0;
     if (pass == 1) {
-      for (int f = 0; f < 7; f++)
+      for (int f = 0; f < 8; f++)
         SET_VECTOR_ELT(out, f, allocVector(REALSXP, (R_xlen_t)total));
     }
     for (;;) {
@@ -1256,6 +1359,7 @@ SEXP C_faults(SEXP columns, SEXP rows_arg, SEXP widths, SEXP expected, SEXP long
           REAL(VECTOR_ELT(out, 4))[at] = q->origin;
           REAL(VECTOR_ELT(out, 5))[at] = q->expected;
           REAL(VECTOR_ELT(out, 6))[at] = q->found;
+          REAL(VECTOR_ELT(out, 7))[at] = q->keyword;
         }
       }
       if (written < CAP)

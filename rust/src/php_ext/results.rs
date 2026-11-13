@@ -24,7 +24,7 @@ use super::errors::{invalid_argument, invalid_argument_exception, pending};
 use super::guard;
 use super::hypercast::hypercast_enum;
 use super::values::construct;
-use crate::kernel::abi::RawProblem;
+use crate::kernel::abi::{CellVerdict, RawProblem};
 
 const RANGE: Declaration = Declaration {
     name: "HyperTabular\\Range",
@@ -54,6 +54,8 @@ const PROBLEM: Declaration = Declaration {
         ("length", Type::Int),
         ("expected", Type::Int),
         ("found", Type::Int),
+        ("keyword", Type::NullableClass("HyperCast\\Keyword")),
+        ("keywordCode", Type::Int),
     ],
     constants: &[],
     readonly_class: true,
@@ -200,6 +202,15 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
     ] {
         problem = problem.arg(arg);
     }
+    // A violation's keyword, which every other entry leaves out.
+    problem = problem
+        .not_required()
+        .arg(
+            Arg::new("keyword", DataType::object("HyperCast\\Keyword"))
+                .allow_null()
+                .default("null"),
+        )
+        .arg(Arg::new("keywordCode", int).default("0"));
     register_class(&PROBLEM, vec![(problem, public)], keep_problem)?;
 
     register_class(
@@ -316,7 +327,7 @@ zend_fastcall! {
 }
 
 fn problem_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
-    construct(ex, Plain::Problem, &PROBLEM, &[])?;
+    construct(ex, Plain::Problem, &PROBLEM, &[Zval::new(), int_zval(0)])?;
     Ok(Zval::new())
 }
 
@@ -326,10 +337,34 @@ zend_fastcall! {
     }
 }
 
+/// HyperCast's `Keyword` for a violated constraint's code, or the bare code for one this
+/// HyperCast doesn't name.
+pub(crate) fn keyword(code: u32) -> PhpResult<Zval> {
+    let named = keyword_case(code)?;
+    Ok(if named.is_null() {
+        int_zval(i64::from(code))
+    } else {
+        named
+    })
+}
+
+/// HyperCast's `Keyword` for `code`, or null: none for a cell that broke nothing.
+fn keyword_case(code: u32) -> PhpResult<Zval> {
+    if code == 0 {
+        return Ok(Zval::new());
+    }
+    super::classes::call(
+        None,
+        "HyperCast\\Keyword::tryFrom",
+        &mut [int_zval(i64::from(code))],
+    )
+}
+
 /// A list entry of `Batch::faults()`, from the core's.
 pub(crate) fn problem(raw: &RawProblem, line: u32, source: Option<usize>) -> PhpResult<Zval> {
     let row_level = raw.plan_column == RawProblem::ROW_LEVEL;
-    let reason = if raw.reason == 0 {
+    // A violation cast: it has its keyword, and no reason.
+    let reason = if raw.reason == 0 || raw.reason == CellVerdict::VIOLATION {
         Zval::new()
     } else {
         hypercast_enum("CastFailure", raw.reason)?
@@ -360,6 +395,8 @@ pub(crate) fn problem(raw: &RawProblem, line: u32, source: Option<usize>) -> Php
             int_zval(i64::from(raw.len)),
             int_zval(i64::from(raw.expected)),
             int_zval(i64::from(raw.found)),
+            keyword_case(raw.keyword)?,
+            int_zval(i64::from(raw.keyword)),
         ],
     )
 }

@@ -57,7 +57,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   read as one. *(Rust and Go; each other binding's entry is below)*
 - **A list of what went wrong in a batch.** The new export `hypertabular_faults` writes a batch's
   `Malformed` and `OutOfRange` cells, formulas with no cached value and long rows under
-  `long_rows = report` into a caller's array of a new 32-byte `RawProblem`, a few at a time from a
+  `long_rows = report` into a caller's array of a new 36-byte `RawProblem`, a few at a time from a
   cursor; blanks, declared tokens and padding aren't listed. Rust's `Batch::faults` yields each as a
   `Problem`, with `line` and `source_column`. It can't name a row the empty-row filter left out.
   `corpus/delimited.json` and `corpus/workbook.json` carry `problems` on every case they read, and
@@ -93,6 +93,55 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   sample up to 1,000 rows of a path, bytes or a sheet, never a stream, and return a plan, a report and
   whether rows lie past the sample. `corpus/delimited.json` gains cases with a `suggest` key. *(Rust and Go; each
   other binding's entry is below)*
+- **A column declares HyperCast's constraints.** A numeric or text column may declare what its cells
+  must also meet, the OpenAPI 3.2 keywords HyperCast 1.1 judges (bounds, `multipleOf` with a rounding,
+  lengths, `enum`, `trim`), and is read through HyperCast's checked door: a cell that casts passes,
+  flagged when rounding adjusted it and naming the `enum` entry a text matched, or is a violation,
+  `CellVerdict::VIOLATION` (`4`), its value as cast and the keyword it broke. `ColumnSpecWith` carries
+  HyperCast's 104-byte `RawConstraints` and its packed `enum` list, `ColumnBufferWith` a 12-byte
+  `RawCheck` a row, which a constrained column requires, and `RawProblem` the keyword, so
+  `hypertabular_faults` lists violations beside faults; there's no new export. The core judges the
+  declaration when the plan is bound, so one it refuses is the plan's error, never a column with no
+  rules, and `hypertabular_batch_check` counts the checks. The plain getters can't say a violation,
+  which is no fault, so every binding refuses them on a constrained column and reads it through a
+  checked getter, which reads an unconstrained column too, every cell that cast passing unadjusted.
+  `docs/design.md` maps each binding's surface. *(every package)*
+  - Rust: `Column::checked(ordinal, constraints)`, `Column::is_checked`, `Batch::get_checked` and
+    `Batch::text_checked` and their `Row` twins, `Batch::checks`, `KeptColumn::with_checks` and
+    `Problem.keyword`; `get` and `text` panic on a constrained column.
+  - C and C++: the layouts above in `hypertabular.h`; in `hypertabular.hpp`,
+    `Column::checked(ordinal, hypercast::Constraints<T>)`, which copies the declaration,
+    `is_checked()`, `Batch::get_checked<T>` and `Row::get_checked<T>`, a `hypercast::Checked<T>`, and
+    `Problem::keyword`; `get` and `text` end the program on a constrained column, and `fault` says
+    `std::nullopt` for a violation.
+  - C#: a `Constraints<T>` overload of every numeric and text factory, `Column.IsChecked`,
+    `Batch.GetChecked<T>` and `Row.GetChecked<T>`, `CellVerdict.IsViolation` and `Problem.Keyword`;
+    `Get` and `TryGetText` throw `InvalidOperationException` on a constrained column.
+  - Java, on both paths: a `Constraints` overload of every numeric and text factory, refusing one built
+    for another door, `Batch.getChecked` and `Row.getChecked`, `CellVerdict.isViolation` and
+    `Problem.keyword()`; the plain getters throw `IllegalStateException` on a constrained column.
+  - Go: `Checked[V]` and `CheckedText`, `Column.IsChecked`, `GetChecked` and `CellChecked`, and
+    `Problem.Keyword`; `Get` and `Text` panic on a constrained column.
+  - Swift: a `constraints:` overload of every numeric and text factory, `Column.isChecked`,
+    `Batch.checked(_:row:as:)` and `Row.checked(_:as:)`, and `Problem.keyword`; the plain getters stop
+    with a precondition failure on a constrained column.
+  - Python: `constraints=` on every numeric and text factory, refusing a declaration for another door,
+    `Batch.get_checked` and `Row.get_checked`, and `Problem.keyword`; the plain getters raise
+    `TypeError` on a constrained column.
+  - Ruby, on both backends: `constraints:` on every numeric and text factory, `Batch#get_checked`,
+    `Batch#checked_verdicts` (the whole column) and `Row#get_checked`, and `Problem#keyword`; the plain
+    getters, `verdicts` among them, raise `TypeError` on a constrained column.
+  - PHP: `$constraints` on every numeric and text factory, `Batch::getChecked`,
+    `Batch::checkedVerdicts` (the whole column) and `Row::getChecked`, and `Problem->keyword`; the plain
+    getters, `verdicts` among them, throw `LogicException` on a constrained column.
+  - TypeScript: `Column.checked(ordinal, constraints, format?)`, whose door is the declaration's, so
+    something that is no declaration makes a column that isn't `valid`, refused when the plan is bound;
+    a `checked` getter, `Batch.getChecked`, `Batch.columnChecked` (the whole column) and
+    `Row.getChecked`, a `CheckedVerdict<T>`, and `Problem.keyword`; the plain getters, `column` among
+    them, give the contract violation on a constrained column.
+  - R: `constraints =` on every numeric and text `col_*()`, refusing a declaration for another door
+    there and again when the plan is bound; a constrained column is a `hypercast_checked_verdict`,
+    `problems()` gains `keyword`, and `as.data.frame()` keeps a violation's value as cast.
 - **Go has all of that.** `Dialect` adds `Skip`, `HeaderRow`, `ShortRows`, `LongRows`, `Encoding` and
   `Tokens`, and `SheetOptions` adds `Skip`, `HeaderRow`, `Range` and `Tokens`, with `ParseRange` and
   `NewRange`. A column has `WithTokens` and `WithDateOptions`. A batch has `Detail`, `Origin` and
@@ -297,6 +346,11 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   month names decide. Every case it
   had reads the same otherwise, including the four cells of `numbers-data.xlsx` and one each of
   `basic.xlsx` and `basic-1904.xlsx` that are now `uncached`.
+- **`corpus/delimited.json` and `corpus/workbook.json` gain constraints cases**: plan columns that
+  declare HyperCast's constraints, in its own corpus shape, with each cell's `adjusted`, `enum_index`,
+  `keyword` and a float's `bits`, and `problems` listing violations by keyword. `constraints.xlsx`
+  joins the packages, and `rust/tests/constraints_equivalence.rs` holds each workbook case to
+  HyperCast's checked door asked directly (`corpus/README.md`, "Constraints").
 - **A TypeScript binding for Node and Bun, on npm as `@skunkwerkx/hypertabular`.** A napi-rs
   addon over the core, ten packages: the root, eight platform addons and the WebAssembly
   fallback `@skunkwerkx/hypertabular-wasm32-wasip1`, for Node `^22.14.0 || >=23.6.0` and Bun. npm or `bun add` installs it, and Node runs either.
@@ -513,6 +567,13 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   bounds-checked, which `go/internal/core/bounds_test.go` now pins, and the whole suite runs on
   s390x under QEMU to prove the big-endian path. It remains slower than the cgo binding: 1.7–2.3x
   per read on 2026-11-08, against that binding over 1.0's core and over this release's alike. *(Go)*
+- **Go — the core is built at opt-level `s`, a workaround.** At the release profile's opt-level 3,
+  the translated core read two cells of `corpus/workbook/constraints.xlsx` as `Empty` on arm64 and
+  `GOARCH=wasm` (amd64, wasmtime and every native binding read them right); at `s` it reads the
+  whole corpus right on every target. The cause, Go's optimizer or wasm2go's unsafe helpers, is not
+  settled; `go/internal/wasm2go` carries the flag until it is fixed upstream. It costs 8.8%
+  (geomean) against opt-level 3: an xlsx read 18.5% slower, an ods read 9.6%, delimited 7.6%, a
+  Numbers read 1.6% faster (Apple M6, 2026-11-13; `go/README.md`). *(Go)*
 - **Java runs on JDK 21.** The jar is multi-release: its base reaches the core through JNI,
   from a library (`libhypertabular_jni`) built for every platform, and JDK 25 and later keep
   FFM. The API, verdicts, exceptions and messages are the same on both, except that the load

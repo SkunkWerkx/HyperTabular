@@ -35,6 +35,7 @@
 //! ```
 
 pub mod abi;
+pub(crate) mod checked;
 pub mod delimited;
 pub mod door;
 pub mod exports;

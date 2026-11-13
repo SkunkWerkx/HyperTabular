@@ -1,7 +1,7 @@
 // HyperCast is the judge, and its types are this module's vocabulary: `Verdict`, `Fault`,
-// `CastFailure`, `NumFormat`, `NumStyles`, `DateOrder`, `UnixPrecision` and `ExcelEpoch`
-// appear in every signature here and are HyperCast's own, from its package. Re-exported so
-// that `import HyperTabular` is enough to name them.
+// `CastFailure`, `NumFormat`, `NumStyles`, `DateOrder`, `UnixPrecision`, `ExcelEpoch`,
+// `Constraints`, `CheckedVerdict` and `Keyword` appear in its signatures and are HyperCast's
+// own, from its package. Re-exported so that `import HyperTabular` is enough to name them.
 @_exported import HyperCast
 import HyperTabularCore
 

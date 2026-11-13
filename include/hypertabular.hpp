@@ -33,9 +33,10 @@
 // on every read after). Unlike HyperCast's doors this binding owns memory, the way every
 // HyperTabular binding does: its buffers are standard containers, and running out of memory
 // ends the program, as an allocation failure under noexcept does. A contract violation (a
-// column or a row index outside the batch, a door read as a type it does not make, the value
-// of a result that holds an error, a faults walk past the next read()) ends the program with
-// std::abort(), as Rust's panic and Swift's precondition do.
+// column or a row index outside the batch, a door read as a type it does not make, a column that
+// declares constraints read by get() or text() rather than get_checked(), the value of a result
+// that holds an error, a faults walk past the next read()) ends the program with std::abort(), as
+// Rust's panic and Swift's precondition do.
 //
 // A batch is a view of the reader's buffers, valid until the next read() and while the reader
 // lives, as any C++ view is, and otherwise as C#'s, Java's, Go's and Swift's are. Fault spans count
@@ -91,9 +92,14 @@
 namespace hypertabular {
 
 // HyperCast's, as every HyperTabular binding hands them out: a cell's verdict, its fault, the
-// values the doors make, and what a column declares.
+// values the doors make, and what a column declares: among it the constraints a checked column
+// declares, and the Checked verdict it reads back.
 using hypercast::CastFailure;
+using hypercast::Checked;
+using hypercast::CheckedValue;
 using hypercast::CivilDateTime;
+using hypercast::Constraints;
+using hypercast::ConstraintValue;
 using hypercast::Date;
 using hypercast::DateOptions;
 using hypercast::DateOrder;
@@ -101,17 +107,22 @@ using hypercast::DateStyles;
 using hypercast::Decimal;
 using hypercast::Detail;
 using hypercast::Duration;
+using hypercast::EnumStorage;
 using hypercast::ExcelEpoch;
 using hypercast::Fault;
+using hypercast::Keyword;
 using hypercast::MonthName;
 using hypercast::MonthNames;
 using hypercast::NumFormat;
 using hypercast::NumStyles;
 using hypercast::optional;
+using hypercast::Rejection;
+using hypercast::Rounding;
 using hypercast::Timestamp;
 using hypercast::UnixPrecision;
 using hypercast::Uuid;
 using hypercast::Verdict;
+using hypercast::Violation;
 
 namespace detail {
 // The file at `path`, opened for reading in binary, or nullptr. MSVC's fopen_s, since its
@@ -210,6 +221,30 @@ inline const std::uint8_t *packed_data(const Packed &packed) noexcept {
 }
 inline std::size_t packed_size(const Packed &packed) noexcept {
   return packed == nullptr ? 0 : packed->size();
+}
+
+// The entry at `index` of a text enum packed as HyperCast packs one, each a little-endian 32-bit
+// length, then its bytes: the entry the core matched, which the list therefore holds.
+inline std::string_view packed_entry(const Packed &packed, std::uint32_t index) noexcept {
+  const std::uint8_t *data = packed_data(packed);
+  const std::size_t size = packed_size(packed);
+  std::size_t at = 0;
+  for (std::uint32_t i = 0;; ++i) {
+    if (size - at < 4) {
+      contract_violation(); // the core matched an entry the list doesn't hold
+    }
+    const std::size_t length =
+        static_cast<std::size_t>(data[at]) | static_cast<std::size_t>(data[at + 1]) << 8 |
+        static_cast<std::size_t>(data[at + 2]) << 16 | static_cast<std::size_t>(data[at + 3]) << 24;
+    at += 4;
+    if (size - at < length) {
+      contract_violation();
+    }
+    if (i == index) {
+      return std::string_view(reinterpret_cast<const char *>(data + at), length);
+    }
+    at += length;
+  }
 }
 } // namespace detail
 
@@ -612,6 +647,7 @@ enum class Door : std::uint32_t {
   excel_serial = 22  // under a declared ExcelEpoch
 };
 
+class Batch;
 class Column;
 
 namespace detail {
@@ -662,6 +698,26 @@ public:
   static Column of(std::size_t ordinal, Door door, std::uint32_t param = 0) noexcept {
     return {ordinal, door, param};
   }
+  // A column whose cells must also meet `constraints`, read through HyperCast's checked door for
+  // T, the door T names: std::int8_t to std::uint64_t, float, double, Decimal, or std::string_view
+  // for text. Batch::get_checked<T> reads each cell: its value, flagged when multipleOf's rounding
+  // adjusted it; a Violation of a declared rule, carrying the value as cast; or the cell's Fault,
+  // a cell no door was asked about included. The plain getters refuse the column. The declaration
+  // and its enum list are copied here, so its EnumStorage needn't outlive this call; the numeric
+  // notation, tokens and date options are set as on any column.
+  template <class T>
+  static Column checked(std::size_t ordinal, const Constraints<T> &constraints) noexcept {
+    static_assert(sizeof(HyperCastRawConstraints) == sizeof(HyperTabularRawConstraints),
+                  "HyperCast's constraints layout is the one the core reads");
+    Column column(ordinal, static_cast<Door>(Constraints<T>::door));
+    auto raw = std::make_shared<HyperTabularRawConstraints>();
+    std::memcpy(raw.get(), &constraints.raw(), sizeof *raw);
+    column.constraints_ = std::move(raw);
+    const std::uint8_t *entries = constraints.enum_data();
+    column.enum_ = std::make_shared<const std::vector<std::uint8_t>>(
+        entries, entries == nullptr ? entries : entries + constraints.enum_size());
+    return column;
+  }
 
   // The same column, its numeric text read in `format`, this column's alone. With none,
   // NumFormat::invariant(), as every binding reads no format: Western grouping, so `1,234,567`
@@ -706,9 +762,12 @@ public:
   std::uint32_t param() const noexcept { return param_; }
   const NumFormat &format() const noexcept { return format_; }
   const DateOptions &date_options() const noexcept { return date_; }
+  // Whether the column declares constraints: Column::checked.
+  bool is_checked() const noexcept { return constraints_ != nullptr; }
 
 private:
   friend bool detail::spec(const Column &column, HyperTabularColumnSpecWith &out) noexcept;
+  friend class Batch;
 
   Column(std::size_t ordinal, Door door, std::uint32_t param = 0) noexcept
       : ordinal_(ordinal), door_(door), param_(param), format_(NumFormat::invariant()) {}
@@ -720,6 +779,8 @@ private:
   DateOptions date_;
   detail::Packed months_;
   detail::Packed tokens_;
+  std::shared_ptr<const HyperTabularRawConstraints> constraints_; // Column::checked's, or none
+  detail::Packed enum_;                                           // and its enum list, packed
 };
 
 // A record with fewer cells than the width the first record fixed.
@@ -1012,12 +1073,20 @@ inline bool spec(const Column &column, HyperTabularColumnSpecWith &out) noexcept
   out.months_len = packed_size(column.months_);
   out.tokens = packed_data(column.tokens_);
   out.tokens_len = packed_size(column.tokens_);
+  if (column.constraints_ != nullptr) {
+    out.constraints = column.constraints_.get();
+    // The list is read under HAS_ENUM alone, and one passed without it is a malformed layout.
+    if ((column.constraints_->flags & HyperTabularRawConstraints_HAS_ENUM) != 0) {
+      out.enum_ptr = packed_data(column.enum_);
+      out.enum_len = packed_size(column.enum_);
+    }
+  }
   return true;
 }
 
 // The core's own word on a column, asked before any input is read: a fill of no rows judges its
-// door, what the door declares, its format, date options, vocabulary and tokens, and writes
-// nothing. It answers on a state of its own, so a workbook's plan is asked the same way.
+// door, what the door declares, its format, date options, vocabulary, tokens and constraints, and
+// writes nothing. It answers on a state of its own, so a workbook's plan is asked the same way.
 class Judge {
 public:
   Judge() noexcept {
@@ -1030,8 +1099,10 @@ public:
   bool accepts(const HyperTabularColumnSpecWith &spec) noexcept {
     std::uint64_t value[4] = {};
     HyperTabularCellVerdict verdict{};
+    HyperTabularRawCheck check{};
     const HyperTabularColumnBufferWith buffer{HyperTabularColumnBufferWith_SIZE, value, &verdict,
-                                              nullptr};
+                                              nullptr,
+                                              spec.constraints != nullptr ? &check : nullptr};
     HyperTabularBuffersWith memory{};
     memory.size = HyperTabularBuffersWith_SIZE;
     HyperTabularFilled out{};
@@ -1123,11 +1194,13 @@ inline std::size_t cell_rows(std::size_t per_row, std::size_t batch_rows) noexce
 }
 
 // One column's room: batch_rows values of its door, held as u64s so they are aligned for any
-// of them, as many verdicts, and as many notes unless a read asks for none.
+// of them, as many verdicts, as many notes unless a read asks for none, and for a column that
+// declares constraints as many checks.
 struct Store {
   std::vector<std::uint64_t> values;
   std::vector<HyperTabularCellVerdict> verdicts;
   std::vector<HyperTabularCellNote> notes;
+  std::vector<HyperTabularRawCheck> checks;
 };
 
 // A bound plan and the buffers it is read into.
@@ -1156,9 +1229,13 @@ struct Columns {
       if (notes) {
         stores[i].notes.assign(batch_rows, HyperTabularCellNote{});
       }
-      pointers[i] = HyperTabularColumnBufferWith{HyperTabularColumnBufferWith_SIZE,
-                                                 stores[i].values.data(), stores[i].verdicts.data(),
-                                                 notes ? stores[i].notes.data() : nullptr};
+      if (plan[i].is_checked()) {
+        stores[i].checks.assign(batch_rows, HyperTabularRawCheck{});
+      }
+      pointers[i] = HyperTabularColumnBufferWith{
+          HyperTabularColumnBufferWith_SIZE, stores[i].values.data(), stores[i].verdicts.data(),
+          notes ? stores[i].notes.data() : nullptr,
+          stores[i].checks.empty() ? nullptr : stores[i].checks.data()};
     }
   }
 };
@@ -1283,7 +1360,8 @@ inline std::string name(Origin origin) noexcept {
 
 // One entry of Batch::faults(): a cell that went wrong, or a row. An entry about the row as a whole
 // has no plan_column, source_column or reason, says Detail::none and Origin::cell, and carries
-// a long row's widths in expected and found.
+// a long row's widths in expected and found. A cell that cast and broke a constraint its column
+// declares has no reason: its keyword says what it broke, its span is the value's.
 struct Problem {
   std::size_t row;                          // the row in the batch, from zero
   std::uint32_t line;                       // where the row came from, as Batch::line says
@@ -1292,13 +1370,14 @@ struct Problem {
                                             // and on a sheet its own column, A being 0, wherever a
                                             // range starts
   std::optional<CastFailure> reason;        // malformed, out_of_range, or empty for a formula with
-                                            // no cached value
+                                            // no cached value; none for a violation
   Detail detail;                            // what failed, as Batch::detail says
   Origin origin;                            // where the verdict came from, as Batch::origin says
   std::uint32_t offset;                     // the span in the cell's decoded, unescaped text, in
   std::uint32_t length;                     // bytes of its UTF-8: 0 where there's none
   std::uint32_t expected;                   // a long row's width, the first record's: 0 otherwise
   std::uint32_t found;                      // and the cells it had: 0 otherwise
+  std::optional<Keyword> keyword;           // the rule a violation broke; none otherwise
 };
 
 class Batch;
@@ -1313,6 +1392,7 @@ public:
   // sheet its one-based row number.
   inline std::uint32_t line() const noexcept;
   template <class T> Verdict<T> get(std::size_t column) const noexcept;
+  template <class T> Checked<T> get_checked(std::size_t column) const noexcept;
   inline Verdict<std::string_view> text(std::size_t column) const noexcept;
   inline std::string raw(std::size_t column) const noexcept;
   inline std::optional<Fault> fault(std::size_t column) const noexcept;
@@ -1348,10 +1428,12 @@ public:
   // double for the door of the same name; Decimal; Uuid; Timestamp for timestamp, unix_time
   // and excel_serial; Date for date and date_ordered; CivilDateTime for datetime;
   // std::chrono::nanoseconds (or std::uint64_t) for time, since midnight; Duration. Text is
-  // read with text(). Any other T ends the program.
+  // read with text(). Any other T ends the program, as does a column that declares constraints,
+  // whose cells get_checked() reads: a violation is no fault, so get() would say it passed.
   template <class T> Verdict<T> get(std::size_t column, std::size_t row) const noexcept {
     const hypertabular::detail::Store &store = this->store(column);
     check_row(row);
+    unchecked(column);
     const Door door = columns_->plan[column].door();
     if (!reads<T>(door)) {
       hypertabular::detail::contract_violation();
@@ -1363,10 +1445,12 @@ public:
   }
 
   // The cell at `row` of a text column: its bytes, untrimmed, or an Empty fault for a cell with
-  // none. A typed workbook cell is said the canonical way: 42, true, 2024-01-31T10:30:00.
+  // none. A typed workbook cell is said the canonical way: 42, true, 2024-01-31T10:30:00. A text
+  // column that declares constraints ends the program, as get() does.
   Verdict<std::string_view> text(std::size_t column, std::size_t row) const noexcept {
     const hypertabular::detail::Store &store = this->store(column);
     check_row(row);
+    unchecked(column);
     if (columns_->plan[column].door() != Door::text) {
       hypertabular::detail::contract_violation();
     }
@@ -1380,10 +1464,70 @@ public:
     return bytes(span);
   }
 
-  // The cell's fault, or std::nullopt for a cell that cast.
+  // The cell at `row` of column `column` as HyperCast's checked door judged it: a CheckedValue,
+  // flagged when multipleOf's rounding adjusted it and, at the text door, naming the enum entry
+  // it matched; or a Rejection, the cell's Fault as get() gives it or a Violation of a rule the
+  // column declares (Column::checked), carrying the value as cast and its span. T is the checked
+  // door's type: std::int8_t to std::uint64_t, float, double, Decimal, or std::string_view for a
+  // text column, the text it judged (after the trim it declares), a view of the batch, or on an
+  // enum match the entry as declared, a view of the column's copy of its declaration. A column
+  // that declares none reads as get() and text() read it, every cell that cast passing,
+  // unadjusted. Any other T, or a column whose door doesn't make it, ends the program.
+  template <class T> Checked<T> get_checked(std::size_t column, std::size_t row) const noexcept {
+    static_assert(checks_through<T>(), "no checked door makes this type");
+    const hypertabular::detail::Store &store = this->store(column);
+    check_row(row);
+    const Column &declared = columns_->plan[column];
+    if constexpr (std::is_same_v<T, std::string_view>) {
+      if (declared.door() != Door::text) {
+        hypertabular::detail::contract_violation();
+      }
+    } else if (!reads<T>(declared.door())) {
+      hypertabular::detail::contract_violation();
+    }
+    const HyperTabularCellVerdict &verdict = store.verdicts[row];
+    const bool broke = verdict.reason == HyperTabularCellVerdict_VIOLATION;
+    if (!broke) {
+      if (auto fault = fault_of(verdict)) {
+        return Rejection<T>(*fault);
+      }
+    }
+    T cast{};
+    if constexpr (std::is_same_v<T, std::string_view>) {
+      HyperTabularSpan span;
+      std::memcpy(&span,
+                  reinterpret_cast<const unsigned char *>(store.values.data()) + row * sizeof span,
+                  sizeof span);
+      cast = bytes(span);
+    } else {
+      cast = value<T>(store, declared.door(), row);
+    }
+    if (store.checks.empty()) {
+      return CheckedValue<T>{cast, false, std::nullopt};
+    }
+    const HyperTabularRawCheck &check = store.checks[row];
+    if (broke) {
+      return Rejection<T>(
+          Violation<T>{static_cast<Keyword>(check.keyword), cast, verdict.offset, verdict.len});
+    }
+    std::optional<std::uint32_t> index;
+    if (check.enum_index != UINT32_MAX) {
+      index = check.enum_index;
+      if constexpr (std::is_same_v<T, std::string_view>) {
+        cast = hypertabular::detail::packed_entry(declared.enum_, check.enum_index);
+      }
+    }
+    return CheckedValue<T>{cast, check.adjusted != 0, index};
+  }
+
+  // The cell's fault, or std::nullopt for a cell that cast, whether or not it broke a constraint
+  // its column declares (get_checked() says which).
   std::optional<Fault> fault(std::size_t column, std::size_t row) const noexcept {
     const hypertabular::detail::Store &store = this->store(column);
     check_row(row);
+    if (store.verdicts[row].reason == HyperTabularCellVerdict_VIOLATION) {
+      return std::nullopt;
+    }
     return fault_of(store.verdicts[row]);
   }
 
@@ -1406,8 +1550,9 @@ public:
   }
 
   // What went wrong in this batch, by row and then by column, a row's own entry first: cells at
-  // malformed or out_of_range, formulas with no cached value (Origin::uncached), and rows longer
-  // than the width under LongRows::report. Blanks, tokens, padding and a row cut under
+  // malformed or out_of_range, formulas with no cached value (Origin::uncached), cells that broke
+  // a constraint their column declares (Problem::keyword), and rows longer than the width under
+  // LongRows::report. Blanks, tokens, padding and a row cut under
   // LongRows::truncate aren't problems, and aren't listed.
   //
   //   for (const hypertabular::Problem &problem : batch.faults()) { ... }
@@ -1520,6 +1665,12 @@ private:
       hypertabular::detail::contract_violation();
     }
   }
+  // Refuses a column that declares constraints, whose verdicts the plain getters can't say.
+  void unchecked(std::size_t column) const noexcept {
+    if (columns_->plan[column].is_checked()) {
+      hypertabular::detail::contract_violation();
+    }
+  }
   // The reader has read on: what its buffers hold is the next batch's.
   void check_current() const noexcept {
     if (columns_->generation != generation_) {
@@ -1585,6 +1736,16 @@ private:
       static_assert(!std::is_same_v<T, T>, "no door makes this type; text is read with text()");
       return false;
     }
+  }
+
+  // Whether a checked door makes a T.
+  template <class T> static constexpr bool checks_through() noexcept {
+    return std::is_same_v<T, std::int8_t> || std::is_same_v<T, std::int16_t> ||
+           std::is_same_v<T, std::int32_t> || std::is_same_v<T, std::int64_t> ||
+           std::is_same_v<T, std::uint8_t> || std::is_same_v<T, std::uint16_t> ||
+           std::is_same_v<T, std::uint32_t> || std::is_same_v<T, std::uint64_t> ||
+           std::is_same_v<T, float> || std::is_same_v<T, double> || std::is_same_v<T, Decimal> ||
+           std::is_same_v<T, std::string_view>;
   }
 
   template <class Raw>
@@ -1741,12 +1902,17 @@ private:
                     raw.offset,
                     raw.len,
                     raw.expected,
-                    raw.found};
+                    raw.found,
+                    std::nullopt};
     if (raw.plan_column != HyperTabularRawProblem_ROW_LEVEL) {
       problem.plan_column = raw.plan_column;
       problem.source_column =
           batch_.columns_->plan[raw.plan_column].ordinal() + batch_.first_column_;
-      problem.reason = static_cast<CastFailure>(raw.reason);
+      if (raw.reason == HyperTabularCellVerdict_VIOLATION) {
+        problem.keyword = static_cast<Keyword>(raw.keyword);
+      } else {
+        problem.reason = static_cast<CastFailure>(raw.reason);
+      }
     }
     return problem;
   }
@@ -1765,6 +1931,9 @@ inline Faults Batch::faults() const noexcept { return Faults(*this); }
 inline std::uint32_t Row::line() const noexcept { return batch_->line(index_); }
 template <class T> Verdict<T> Row::get(std::size_t column) const noexcept {
   return batch_->get<T>(column, index_);
+}
+template <class T> Checked<T> Row::get_checked(std::size_t column) const noexcept {
+  return batch_->get_checked<T>(column, index_);
 }
 inline Verdict<std::string_view> Row::text(std::size_t column) const noexcept {
   return batch_->text(column, index_);

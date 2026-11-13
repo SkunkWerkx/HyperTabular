@@ -38,6 +38,7 @@ use crate::kernel::abi::{
     ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, ERR_CELLS, ERR_CONTRACT,
     ERR_STRUCTURE, Failure, Filled, OK, RawRange, RawSheetOptions, Slot, Span,
 };
+use crate::kernel::checked::resolved_constraints;
 use crate::kernel::delimited::fill::{
     resolved_date, resolved_format, resolved_tokens, tokens_are_whole,
 };
@@ -1678,11 +1679,22 @@ pub unsafe fn fill_with(
         return ERR_CONTRACT;
     }
     for (spec, buffer) in specs.iter().zip(columns) {
+        let Some(door) = Door::from_code(spec.door, spec.param) else {
+            return ERR_CONTRACT;
+        };
         // SAFETY: the caller's contract.
         let judged =
             unsafe { resolved_date(spec).is_some() && resolved_tokens(spec, &[]).is_some() };
+        // SAFETY: the caller's contract.
+        let Ok(checks) = (unsafe { resolved_constraints(spec, door) }) else {
+            return ERR_CONTRACT;
+        };
+        let unchecked =
+            checks.is_some() && (buffer.checks.is_null() || !buffer.checks.is_aligned());
+        // A declaration with nowhere to write its checks is refused even with no rows to fill, as
+        // the delimited fill refuses it.
         if !judged
-            || Door::from_code(spec.door, spec.param).is_none()
+            || unchecked
             || resolved_format(spec).is_none()
             || spec.ordinal as usize >= memory.row.len()
             || (max_rows > 0 && (buffer.values.is_null() || buffer.verdicts.is_null()))

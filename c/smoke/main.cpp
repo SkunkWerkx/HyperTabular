@@ -4,8 +4,9 @@
 // One column declares its notation through hypercast::NumFormat::declare, which asks
 // HyperCast's library, so the program links both. Each read's options, its notes and faults, a
 // declared encoding, a suggestion and a range go through it too, and the 1.0 entry points are
-// compared with a read. CMakeLists.txt builds it as C++17, C++20 and, where the compiler has it,
-// C++23, warnings as errors, and once more with exceptions off.
+// compared with a read, and columns that declare HyperCast's constraints are read back through
+// get_checked(). CMakeLists.txt builds it as C++17, C++20 and, where the compiler has it, C++23,
+// warnings as errors, and once more with exceptions off.
 //
 // usage: smoke_cxx<std> <corpus directory>
 
@@ -58,6 +59,11 @@ static_assert(noexcept(ht::Range::parse(std::string_view())), "noexcept");
 static_assert(
     std::is_same_v<decltype(std::declval<const ht::Row &>().get<double>(0)), hc::Verdict<double>>,
     "a cell is a hypercast::Verdict");
+static_assert(std::is_same_v<decltype(std::declval<const ht::Row &>().get_checked<double>(0)),
+                             hc::Checked<double>>,
+              "a constrained cell is a hypercast::Checked");
+static_assert(noexcept(std::declval<const ht::Batch &>().get_checked<std::int32_t>(0, 0)),
+              "noexcept");
 static_assert(!std::is_constructible_v<bool, ht::Result<int>>, "a result is not a bool");
 static_assert(ht::is_available(), "the core is linked in");
 #if defined(__cpp_lib_ranges) && __cpp_lib_ranges >= 201911L
@@ -1178,6 +1184,109 @@ int grouping(const std::string &corpus) {
   return 0;
 }
 
+// Columns that declare HyperCast's constraints: what the corpus replay doesn't reach.
+static int constraints() {
+  // The declaration's enum list lives in the caller's storage, which Column::checked copies: the
+  // storage is scribbled on before the read, and the match is still the entry as declared.
+  std::uint8_t storage[32] = {};
+  const auto sex = hc::Constraints<std::string_view>::declare({}, {"Female", "Male"}, storage);
+  hc::Constraints<std::int32_t>::Fields bound;
+  bound.maximum = 10;
+  const auto at_most = hc::Constraints<std::int32_t>::declare(bound);
+  CHECK(sex.value_if() != nullptr && at_most.value_if() != nullptr);
+  const ht::Column text = ht::Column::checked(1, *sex.value_if());
+  // The numeric notation and tokens are set as on any column, and keep the declaration.
+  const ht::Column number = ht::Column::checked(0, *at_most.value_if()).tokens({"NA"});
+  std::fill(std::begin(storage), std::end(storage), std::uint8_t{'?'});
+  CHECK(text.is_checked() && text.door() == ht::Door::text);
+  CHECK(number.is_checked() && number.door() == ht::Door::i32);
+  CHECK(!ht::Column::i32(0).is_checked());
+
+  auto opened =
+      ht::DelimitedReader::from_bytes("n,s,m\n7,MALE,7\n11,other,x\nNA,Female,3\n",
+                                      ht::Dialect::csv(), {number, text, ht::Column::i32(2)});
+  CHECK(opened.ok());
+  auto read = opened.value().read();
+  CHECK(read.ok() && read.value());
+  const ht::Batch &batch = *read.value();
+
+  const auto seven = batch.get_checked<std::int32_t>(0, 0);
+  CHECK(seven.ok() && seven.value().value == 7 && !seven.value().adjusted &&
+        !seven.value().enum_index);
+  const auto male = batch.get_checked<std::string_view>(1, 0);
+  CHECK(male.ok() && male.value().value == "Male" && male.value().enum_index == 1u);
+  CHECK(batch.raw(1, 0) == "MALE"); // the text as read
+
+  // A violation keeps the value as cast, its span the cell's; it's no fault.
+  const auto eleven = batch.get_checked<std::int32_t>(0, 1);
+  const hc::Violation<std::int32_t> *broken =
+      eleven.ok() ? nullptr : eleven.rejection().violation_if();
+  CHECK(broken != nullptr && broken->keyword == ht::Keyword::maximum && broken->value == 11 &&
+        broken->offset == 0 && broken->length == 2);
+  CHECK(!batch.fault(0, 1).has_value());
+  const auto other = batch.get_checked<std::string_view>(1, 1);
+  CHECK(!other.ok() && !other.rejection().is_fault() &&
+        other.rejection().violation().keyword == ht::Keyword::enum_ &&
+        other.rejection().violation().value == "other");
+  // A token is Empty with no door asked, and a fault is the fault get() would give.
+  const auto token = batch.get_checked<std::int32_t>(0, 2);
+  CHECK(!token.ok() && token.rejection().is_fault() &&
+        token.rejection().fault().reason == hc::CastFailure::empty &&
+        batch.origin(0, 2) == ht::Origin::token);
+
+  // A column that declares none reads through get_checked() as through get(): passed, unadjusted.
+  const auto plain = batch.get_checked<std::int32_t>(2, 0);
+  CHECK(plain.ok() && plain.value().value == 7 && !plain.value().adjusted &&
+        !plain.value().enum_index);
+  const auto refused = batch.get_checked<std::int32_t>(2, 1);
+  CHECK(!refused.ok() && refused.rejection().is_fault() &&
+        refused.rejection().fault() == *batch.fault(2, 1));
+  CHECK(batch.row(1).get_checked<std::int32_t>(0) == eleven);
+
+  // Faults list a violation by its keyword, with no reason.
+  std::vector<ht::Problem> problems;
+  ht::Faults faults = batch.faults();
+  for (const ht::Problem &problem : faults) {
+    problems.push_back(problem);
+  }
+  CHECK(problems.size() == 3);
+  CHECK(problems[0].plan_column == std::optional<std::size_t>(0) &&
+        problems[0].keyword == ht::Keyword::maximum && !problems[0].reason &&
+        problems[0].offset == 0 && problems[0].length == 2);
+  CHECK(problems[1].plan_column == std::optional<std::size_t>(1) &&
+        problems[1].keyword == ht::Keyword::enum_ && !problems[1].reason);
+  CHECK(problems[2].plan_column == std::optional<std::size_t>(2) && !problems[2].keyword &&
+        problems[2].reason == hc::CastFailure::malformed);
+
+  // The checks are sized like the verdicts, across every batch.
+  std::string many;
+  for (int i = 0; i < 37; ++i) {
+    many += "11\n";
+  }
+  ht::DelimitedOptions small;
+  small.batch_rows = 5;
+  auto reader =
+      ht::DelimitedReader::from_bytes(many, ht::Dialect::csv().with_header(false),
+                                      {ht::Column::checked(0, *at_most.value_if())}, small);
+  CHECK(reader.ok());
+  std::size_t violated = 0;
+  for (;;) {
+    auto next = reader.value().read();
+    CHECK(next.ok());
+    if (!next.value()) {
+      break;
+    }
+    CHECK(next.value()->rows() <= 5);
+    for (const ht::Row &row : *next.value()) {
+      const auto cell = row.get_checked<std::int32_t>(0);
+      violated += !cell.ok() && !cell.rejection().is_fault() &&
+                  cell.rejection().violation().keyword == ht::Keyword::maximum;
+    }
+  }
+  CHECK(violated == 37);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) {
     std::fprintf(stderr, "usage: %s <corpus directory>\n", argv[0]);
@@ -1186,7 +1295,7 @@ int main(int argc, char **argv) {
   if (delimited() != 0 || workbook(argv[1]) != 0 || options() != 0 || sizes(argv[1]) != 0 ||
       faults_keep_the_entry_in_hand() != 0 || reentry(argv[1]) != 0 || encodings() != 0 ||
       suggestions(argv[1]) != 0 || ranges(argv[1]) != 0 || one_dot_zero(argv[1]) != 0 ||
-      grouping(argv[1]) != 0) {
+      grouping(argv[1]) != 0 || constraints() != 0) {
     return 1;
   }
   const std::string_view version = ht::native_version();

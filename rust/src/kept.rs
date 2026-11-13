@@ -38,7 +38,7 @@ use crate::kernel::abi::{
     CellNote, CellVerdict, ColumnBufferWith, OK, RawDelimitedOptions, RawProblem,
 };
 use crate::kernel::faults::faults;
-use hypercast::{Detail, Fault};
+use hypercast::{Detail, Fault, RawCheck};
 
 /// One plan column of a batch as a caller kept it: its verdicts, one a row, its notes, one a row or
 /// none for a read that takes none, and the source column it reads.
@@ -46,6 +46,7 @@ use hypercast::{Detail, Fault};
 pub struct KeptColumn<'a> {
     verdicts: &'a [CellVerdict],
     notes: &'a [CellNote],
+    checks: &'a [RawCheck],
     source_column: usize,
 }
 
@@ -57,15 +58,25 @@ impl<'a> KeptColumn<'a> {
         KeptColumn {
             verdicts,
             notes,
+            checks: &[],
             source_column,
         }
     }
 
+    /// The same column with the checks [`Batch::checks`](crate::Batch::checks) gave for it, so its
+    /// faults list names the keyword each violation broke. Without them a violation isn't listed,
+    /// as [`Batch::faults`](crate::Batch::faults) lists none for a column with no checks.
+    pub fn with_checks(self, checks: &'a [RawCheck]) -> Self {
+        KeptColumn { checks, ..self }
+    }
+
     /// The verdict at `row`: `Ok` for a cell that cast, or its fault. `None` for a row the column
-    /// doesn't have. A reason code HyperCast doesn't define, which no read writes, is `None` too.
+    /// doesn't have. A cell that cast and broke its column's constraints is `Ok`, as
+    /// [`CellVerdict::fault`](crate::kernel::abi::CellVerdict::fault) reads it: its checks say what
+    /// it broke. A reason code HyperCast doesn't define, which no read writes, is `None` too.
     pub fn verdict(&self, row: usize) -> Option<Result<(), Fault>> {
         let verdict = self.verdicts.get(row)?;
-        if verdict.is_ok() {
+        if verdict.is_ok() || verdict.reason == CellVerdict::VIOLATION {
             return Some(Ok(()));
         }
         verdict.fault().map(Err)
@@ -86,11 +97,12 @@ impl<'a> KeptColumn<'a> {
             .map_or(Origin::Cell, |note| Origin::from_code(note.origin))
     }
 
-    /// How many of the column's cells didn't cast.
+    /// How many of the column's cells didn't cast. A cell that cast and broke its column's
+    /// constraints isn't one.
     pub fn fault_count(&self) -> usize {
         self.verdicts
             .iter()
-            .filter(|verdict| !verdict.is_ok())
+            .filter(|verdict| verdict.fault().is_some())
             .count()
     }
 }
@@ -108,7 +120,7 @@ impl<'a> KeptBatch<'a> {
     /// A batch from each row's [`Batch::line`](crate::Batch::line), one a row, its plan columns,
     /// and what [`Batch::reported_widths`](crate::Batch::reported_widths) gave.
     ///
-    /// `None` unless each column's verdicts and its notes (when it has any) hold as many elements
+    /// `None` unless each column's verdicts, and its notes and checks when it has any, hold as many elements
     /// as `lines`, the widths at least as many, and the row and column counts fit a `u32`.
     pub fn new(
         lines: &'a [u32],
@@ -118,7 +130,9 @@ impl<'a> KeptBatch<'a> {
         let rows = lines.len();
         let fits = u32::try_from(rows).is_ok() && u32::try_from(columns.len()).is_ok();
         let whole = columns.iter().all(|column| {
-            column.verdicts.len() == rows && (column.notes.is_empty() || column.notes.len() == rows)
+            column.verdicts.len() == rows
+                && (column.notes.is_empty() || column.notes.len() == rows)
+                && (column.checks.is_empty() || column.checks.len() == rows)
         }) && long_rows.is_none_or(|(_, widths)| widths.len() >= rows);
         (fits && whole).then_some(KeptBatch {
             rows,
@@ -149,6 +163,11 @@ impl<'a> KeptBatch<'a> {
                         std::ptr::null_mut()
                     } else {
                         column.notes.as_ptr().cast_mut()
+                    },
+                    checks: if column.checks.is_empty() {
+                        std::ptr::null_mut()
+                    } else {
+                        column.checks.as_ptr().cast_mut()
                     },
                 })
                 .collect(),
@@ -184,7 +203,7 @@ impl KeptFaults<'_> {
             None => (RawDelimitedOptions::LONG_ROWS_REJECT, 0, &[][..]),
         };
         let mut written = 0;
-        // SAFETY: each buffer points into a column's verdicts, and its notes or null, which
+        // SAFETY: each buffer points into a column's verdicts, and its notes and checks or null, which
         // `KeptBatch::new` checked hold `rows` elements and which this iterator borrows for its life;
         // the core only reads them.
         let code = unsafe {

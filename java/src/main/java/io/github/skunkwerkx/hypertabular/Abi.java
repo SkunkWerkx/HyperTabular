@@ -35,6 +35,9 @@ final class Abi {
     /** {@code CellVerdict}: {@code {u32 offset, u32 len, u32 reason}}. */
     static final long VERDICT_BYTES = 12;
 
+    /** A verdict's {@code reason} for a cell that cast and broke a constraint its column declares. */
+    static final int VERDICT_VIOLATION = 4;
+
     /**
      * {@code ColumnSpec}: {@code {u32 ordinal, u32 door, u32 param, RawNumFormat format}},
      * the format HyperCast's 92-byte size-tagged layout ({@link NativeValues#FORMAT_BYTES}:
@@ -155,11 +158,12 @@ final class Abi {
 
     /**
      * {@code ColumnSpecWith}: a {@code u32} size, what {@code ColumnSpec} holds, the date options,
-     * and the month names and tokens as pointer-and-size pairs. A size of 0 on the format or the
-     * date options is none; a null token list inherits the dialect's or the sheet's, and an empty
-     * one with an address is none.
+     * the month names and tokens as pointer-and-size pairs, then a pointer to HyperCast's
+     * {@code RawConstraints} and the packed {@code enum} as a pointer and a size. A size of 0 on the
+     * format or the date options is none; a null token list inherits the dialect's or the sheet's,
+     * and an empty one with an address is none; null constraints declare none.
      */
-    static final long SPEC_WITH_BYTES = 152;
+    static final long SPEC_WITH_BYTES = 176;
 
     static final long SPEC_WITH_ORDINAL = 4;
     static final long SPEC_WITH_DOOR = 8;
@@ -168,13 +172,27 @@ final class Abi {
     static final long SPEC_WITH_DATE = 108;
     static final long SPEC_WITH_MONTHS = 120;
     static final long SPEC_WITH_TOKENS = 136;
+    static final long SPEC_WITH_CONSTRAINTS = 152;
+    static final long SPEC_WITH_ENUM = 160;
 
-    /** {@code ColumnBufferWith}: a size word, {@code values}, {@code verdicts} and the nullable {@code notes}. */
-    static final long BUFFER_WITH_BYTES = 32;
+    /**
+     * {@code ColumnBufferWith}: a size word, {@code values}, {@code verdicts}, the nullable {@code notes}
+     * and {@code checks}, HyperCast's {@code RawCheck} per row, null unless the column declares
+     * constraints.
+     */
+    static final long BUFFER_WITH_BYTES = 40;
 
     static final long BUFFER_WITH_VALUES = 8;
     static final long BUFFER_WITH_VERDICTS = 16;
     static final long BUFFER_WITH_NOTES = 24;
+    static final long BUFFER_WITH_CHECKS = 32;
+
+    /** HyperCast's {@code RawCheck}: {@code {u32 keyword, adjusted, enum_index}}, {@code enum_index} all ones for none. */
+    static final long CHECK_BYTES = 12;
+
+    static final long CHECK_ADJUSTED = 4;
+    static final long CHECK_ENUM_INDEX = 8;
+    static final int CHECK_NO_ENUM_INDEX = -1;
 
     /** {@code CellNote}: {@code {u16 detail, u16 origin}}. */
     static final long NOTE_BYTES = 4;
@@ -191,9 +209,10 @@ final class Abi {
 
     /**
      * {@code RawProblem}: {@code {u32 row, plan_column, reason, u16 detail, u16 origin, u32 offset,
-     * len, expected, found}}. A {@code plan_column} of {@link #PROBLEM_ROW_LEVEL} is about the row.
+     * len, expected, found, keyword}}. A {@code plan_column} of {@link #PROBLEM_ROW_LEVEL} is about the
+     * row.
      */
-    static final long PROBLEM_BYTES = 32;
+    static final long PROBLEM_BYTES = 36;
 
     static final long PROBLEM_PLAN_COLUMN = 4;
     static final long PROBLEM_REASON = 8;
@@ -203,6 +222,7 @@ final class Abi {
     static final long PROBLEM_LENGTH = 20;
     static final long PROBLEM_EXPECTED = 24;
     static final long PROBLEM_FOUND = 28;
+    static final long PROBLEM_KEYWORD = 32;
     static final int PROBLEM_ROW_LEVEL = -1;
 
     /** {@code RawSuggestion}: five {@code u32}s. */

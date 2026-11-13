@@ -8,6 +8,7 @@ mod support;
 
 mod delimited_reach;
 mod delimited_windows;
+mod kernel_checked;
 mod kernel_delimited;
 mod kernel_inflate;
 mod kernel_workbook;

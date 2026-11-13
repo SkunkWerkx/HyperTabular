@@ -7,6 +7,8 @@ namespace HyperTabular\Tests;
 use DateTimeImmutable;
 use DateTimeZone;
 use HyperCast\CastFailure;
+use HyperCast\Checked;
+use HyperCast\Constraints;
 use HyperCast\DateOptions;
 use HyperCast\DateOrder;
 use HyperCast\Decimal;
@@ -16,8 +18,10 @@ use HyperCast\ExcelEpoch;
 use HyperCast\Fault;
 use HyperCast\MonthNames;
 use HyperCast\NumFormat;
+use HyperCast\Rounding;
 use HyperCast\Success;
 use HyperCast\UnixPrecision;
+use HyperCast\Violation;
 use HyperTabular\AmbiguousColumn;
 use HyperTabular\Batch;
 use HyperTabular\Column;
@@ -93,13 +97,28 @@ final class CorpusTest extends TestCase
     private const CELL_KEYS = [
         'expect', 'value', 'text', 'seconds', 'nanos', 'year', 'month', 'day', 'nanos_of_day',
         'magnitude', 'scale', 'negative', 'fault', 'raw', 'raw_hex', 'detail', 'origin',
+        'keyword', 'adjusted', 'enum_index', 'bits',
     ];
     private const PROBLEM_KEYS = [
         'row', 'line', 'plan_column', 'source_column', 'reason', 'fault', 'detail', 'origin',
-        'expected', 'found',
+        'expected', 'found', 'keyword',
     ];
     private const FAILURE_KEYS = ['kind', 'record', 'line', 'byte', 'expected', 'found'];
-    private const PLAN_KEYS = ['door', 'ordinal', 'precision', 'order', 'epoch', 'format', 'tokens', 'options'];
+    private const PLAN_KEYS = [
+        'door', 'ordinal', 'precision', 'order', 'epoch', 'format', 'tokens', 'options', 'constraints',
+    ];
+    // A plan entry's constraints, by the OpenAPI names HyperCast's corpus gives them, which are
+    // HyperCast\Constraints' own parameter names.
+    private const CONSTRAINT_KEYS = [
+        'minimum', 'exclusiveMinimum', 'maximum', 'exclusiveMaximum', 'multipleOf', 'rounding',
+        'minLength', 'maxLength', 'trim', 'caseSensitive', 'enum',
+    ];
+    private const ROUNDINGS = [
+        'strict' => Rounding::Strict,
+        'midpoint' => Rounding::Midpoint,
+        'floor' => Rounding::Floor,
+        'ceiling' => Rounding::Ceiling,
+    ];
     private const FORMAT_KEYS = ['decimal_sep', 'group_sep', 'flags', 'currency'];
     private const DATE_OPTION_KEYS = ['flags', 'pivot', 'months'];
     private const DELIMITED_KEYS = [
@@ -199,6 +218,7 @@ final class CorpusTest extends TestCase
             $check($column, "{$name}.plan[]", self::PLAN_KEYS);
             $check($column['format'] ?? null, "{$name}.plan[].format", self::FORMAT_KEYS);
             $check($column['options'] ?? null, "{$name}.plan[].options", self::DATE_OPTION_KEYS);
+            $check($column['constraints'] ?? null, "{$name}.plan[].constraints", self::CONSTRAINT_KEYS);
         }
         foreach ($case['rows'] ?? [] as $row) {
             foreach ($row as $cell) {
@@ -269,9 +289,9 @@ final class CorpusTest extends TestCase
 
     public function testEveryCorpusKeyIsRead(): void
     {
-        $this->assertCount(123, self::corpus());
+        $this->assertCount(137, self::corpus());
         $this->assertKeysAreKnown(self::corpus(), false);
-        $this->assertCount(398, self::corpus('workbook.json'));
+        $this->assertCount(404, self::corpus('workbook.json'));
         $this->assertKeysAreKnown(self::corpus('workbook.json'), true);
     }
 
@@ -343,19 +363,20 @@ final class CorpusTest extends TestCase
     {
         $ordinal = $entry['ordinal'];
         $format = self::formatOf($entry);
+        $declared = self::constraintsOf($entry);
         $column = match ($entry['door']) {
             'bool' => Column::bool($ordinal),
-            'i8' => Column::i8($ordinal, $format),
-            'i16' => Column::i16($ordinal, $format),
-            'i32' => Column::i32($ordinal, $format),
-            'i64' => Column::i64($ordinal, $format),
-            'u8' => Column::u8($ordinal, $format),
-            'u16' => Column::u16($ordinal, $format),
-            'u32' => Column::u32($ordinal, $format),
-            'u64' => Column::u64($ordinal, $format),
-            'f32' => Column::f32($ordinal, $format),
-            'f64' => Column::f64($ordinal, $format),
-            'decimal' => Column::decimal($ordinal, $format),
+            'i8' => Column::i8($ordinal, $format, $declared),
+            'i16' => Column::i16($ordinal, $format, $declared),
+            'i32' => Column::i32($ordinal, $format, $declared),
+            'i64' => Column::i64($ordinal, $format, $declared),
+            'u8' => Column::u8($ordinal, $format, $declared),
+            'u16' => Column::u16($ordinal, $format, $declared),
+            'u32' => Column::u32($ordinal, $format, $declared),
+            'u64' => Column::u64($ordinal, $format, $declared),
+            'f32' => Column::f32($ordinal, $format, $declared),
+            'f64' => Column::f64($ordinal, $format, $declared),
+            'decimal' => Column::decimal($ordinal, $format, $declared),
             'uuid' => Column::uuid($ordinal),
             'timestamp' => Column::timestamp($ordinal),
             'unix' => Column::unix($ordinal, UnixPrecision::from($entry['precision'])),
@@ -365,8 +386,11 @@ final class CorpusTest extends TestCase
             'datetime' => Column::datetime($ordinal, DateOrder::from($entry['order'])),
             'time' => Column::time($ordinal),
             'duration' => Column::duration($ordinal),
-            'text' => Column::text($ordinal),
+            'text' => Column::text($ordinal, $declared),
         };
+        if ($column->constraints !== $declared) {
+            throw new \LogicException("{$entry['door']} with constraints its factory doesn't take");
+        }
         // Any door has a format, as a suggested plan's do, and only a number's reads it: a factory
         // without one gives the invariant notation, which is all the corpus names for the rest.
         if ($format !== null) {
@@ -395,6 +419,23 @@ final class CorpusTest extends TestCase
         return $column;
     }
 
+    /**
+     * A plan entry's constraints as HyperCast's own declaration for the door it names, or null.
+     *
+     * @param array<string, mixed> $entry
+     */
+    private static function constraintsOf(array $entry): ?Constraints
+    {
+        $declared = $entry['constraints'] ?? null;
+        if ($declared === null) {
+            return null;
+        }
+        if (isset($declared['rounding'])) {
+            $declared['rounding'] = self::ROUNDINGS[$declared['rounding']];
+        }
+        return new Constraints(\constant(\HyperCast\Door::class . '::' . ucfirst($entry['door'])), ...$declared);
+    }
+
     /** @param list<array<string, mixed>> $problems the case's */
     private static function problemsWithoutNotes(array $problems): array
     {
@@ -413,12 +454,27 @@ final class CorpusTest extends TestCase
     private function problemJson(Problem $problem, int $base): array
     {
         $entry = ['row' => $base + $problem->row, 'line' => $problem->line];
+        if ($problem->keyword === null) {
+            $this->assertSame(0, $problem->keywordCode);
+        } else {
+            $this->assertSame($problem->keyword->value, $problem->keywordCode);
+        }
         if ($problem->planColumn === null) {
             $this->assertNull($problem->sourceColumn);
             $this->assertNull($problem->reason);
+            $this->assertNull($problem->keyword);
             $this->assertSame([0, 0], [$problem->offset, $problem->length]);
             $entry['expected'] = $problem->expected;
             $entry['found'] = $problem->found;
+        } elseif ($problem->keyword !== null) {
+            // A violation: the cell cast, so there's no reason, and the span is the judged text's.
+            $this->assertNull($problem->reason);
+            $this->assertSame([0, 0], [$problem->expected, $problem->found]);
+            $entry['plan_column'] = $problem->planColumn;
+            $entry['source_column'] = $problem->sourceColumn;
+            $entry['reason'] = 'violation';
+            $entry['keyword'] = lcfirst($problem->keyword->name);
+            $entry['fault'] = [$problem->offset, $problem->length];
         } else {
             $this->assertNotNull($problem->sourceColumn);
             $this->assertNotNull($problem->reason);
@@ -935,6 +991,10 @@ final class CorpusTest extends TestCase
             $this->assertCount(\count($plan), $expected[$seen + $row], "{$label}: a corpus row of another width");
         }
         foreach ($plan as $column => $declared) {
+            if ($declared->constraints !== null) {
+                $this->assertCheckedColumn($label, $batch, $declared, $column, $expected, $seen, $notes);
+                continue;
+            }
             $values = $batch->values($column);
             $faults = $batch->faults($column);
             $verdicts = $batch->verdicts($column);
@@ -968,8 +1028,12 @@ final class CorpusTest extends TestCase
             $this->assertSame($index, $key, $label);
             $this->assertSame($index, $row->index(), $label);
             $this->assertSame($batch->line($index), $row->line(), $label);
-            foreach (array_keys($plan) as $column) {
-                $this->assertEquals($batch->get($column, $index), $row->get($column), $label);
+            foreach ($plan as $column => $declared) {
+                if ($declared->constraints !== null) {
+                    $this->assertEquals($batch->getChecked($column, $index), $row->getChecked($column), $label);
+                } else {
+                    $this->assertEquals($batch->get($column, $index), $row->get($column), $label);
+                }
                 $this->assertSame($batch->raw($column, $index), $row->raw($column), $label);
                 $this->assertSame($batch->origin($column, $index), $row->origin($column), $label);
                 $this->assertEquals($batch->detail($column, $index), $row->detail($column), $label);
@@ -980,8 +1044,98 @@ final class CorpusTest extends TestCase
     }
 
     /**
+     * Holds a column that declares constraints to the corpus's rows from `$seen` on, through the
+     * checked getter: what passed, a violation of a constraint the column declares, or the cell's
+     * fault. The plain getters refuse the column, and `values()` holds a violation's value as cast.
+     *
+     * @param list<list<array<string, mixed>>> $expected the corpus's rows
+     */
+    private function assertCheckedColumn(
+        string $label,
+        Batch $batch,
+        Column $declared,
+        int $column,
+        array $expected,
+        int $seen,
+        bool $notes,
+    ): void {
+        $refusals = [
+            'get' => static fn () => $batch->get($column, 0),
+            'verdicts' => static fn () => $batch->verdicts($column),
+        ];
+        foreach ($refusals as $name => $read) {
+            try {
+                $read();
+                $this->fail("{$label}, column {$column}: {$name} read a constrained column");
+            } catch (\LogicException $refused) {
+                $this->assertSame(
+                    "Column {$column} declares constraints: read it with getChecked()",
+                    $refused->getMessage(),
+                    $label
+                );
+            }
+        }
+        $values = $batch->values($column);
+        $faults = $batch->faults($column);
+        for ($row = 0; $row < $batch->rows(); $row++) {
+            $at = "{$label}, row " . ($seen + $row) . ", column {$column}";
+            $cell = $expected[$seen + $row][$column];
+            $verdict = $batch->getChecked($column, $row);
+            if ($verdict instanceof Fault) {
+                $this->assertNull($values[$row], $at);
+                $this->assertEquals($verdict, $faults[$row] ?? null, $at);
+                $this->assertCell($at, $batch, $declared->door, $column, $row, $cell, $notes, $verdict);
+                continue;
+            }
+            $this->assertArrayNotHasKey($row, $faults, $at);
+            $this->assertNull($batch->detail($column, $row), "{$at}: detail");
+            $origin = $notes ? ($cell['origin'] ?? 'cell') : 'cell';
+            $this->assertSame(self::named(Origin::class, $origin), $batch->origin($column, $row), "{$at}: origin");
+            if ($verdict instanceof Checked) {
+                $this->assertSame('ok', $cell['expect'], "{$at}: passed with " . var_export($verdict, true));
+                $this->assertSame(
+                    [$cell['adjusted'], $cell['enum_index'] ?? null],
+                    [$verdict->adjusted, $verdict->enumIndex],
+                    $at
+                );
+                if ($verdict->enumIndex !== null && $declared->door === Door::Text) {
+                    // The entry as declared: the declaration's own string.
+                    $this->assertSame($declared->constraints->enum[$verdict->enumIndex], $verdict->value, $at);
+                } else {
+                    $this->assertSame($values[$row], $verdict->value, $at);
+                }
+            } else {
+                $this->assertInstanceOf(Violation::class, $verdict, $at);
+                $this->assertSame('violation', $cell['expect'], "{$at}: broke " . var_export($verdict, true));
+                $this->assertSame($cell['keyword'], $verdict->keywordName(), $at);
+                $this->assertSame($cell['raw'], $batch->raw($column, $row), "{$at}: raw text");
+                $this->assertSame($cell['fault'], [$verdict->offset, $verdict->length], "{$at}: span");
+                $this->assertSame($values[$row], $verdict->value, "{$at}: the value as cast");
+            }
+            $this->assertCheckedValue($at, $declared->door, $verdict->value, $cell);
+        }
+    }
+
+    /**
+     * A checked cell's value, passed or as cast: a float to its exact bits, anything else as a
+     * cast one is held.
+     *
+     * @param array<string, mixed> $expected the corpus's cell
+     */
+    private function assertCheckedValue(string $label, Door $door, mixed $value, array $expected): void
+    {
+        if ($door === Door::F32 || $door === Door::F64) {
+            $this->assertIsFloat($value, $label);
+            $bits = '0x' . bin2hex(pack($door === Door::F32 ? 'G' : 'E', $value));
+            $this->assertSame($expected['bits'], $bits, "{$label}: " . var_export($value, true));
+            return;
+        }
+        $this->assertValue($label, $door, $value, $expected);
+    }
+
+    /**
      * Holds one cell of a batch to what the corpus says of it: its verdict and value, its detail
-     * and its origin.
+     * and its origin. A constrained column's cell comes with the fault its checked getter gave.
      *
      * @param array<string, mixed> $expected the corpus's cell
      */
@@ -993,8 +1147,10 @@ final class CorpusTest extends TestCase
         int $row,
         array $expected,
         bool $notes,
+        ?Fault $checked = null,
     ): void {
-        $verdict = $batch->get($column, $row);
+        // A constrained column's fault is the checked getter's: its plain getter refuses it.
+        $verdict = $checked ?? $batch->get($column, $row);
         $origin = $notes ? ($expected['origin'] ?? 'cell') : 'cell';
         $this->assertSame(self::named(Origin::class, $origin), $batch->origin($column, $row), "{$label}: origin");
         $detail = $batch->detail($column, $row);
@@ -1027,7 +1183,20 @@ final class CorpusTest extends TestCase
         $this->assertNull($detail, "{$label}: detail");
 
         $this->assertInstanceOf(Success::class, $verdict, $label);
-        $value = $verdict->value;
+        $this->assertValue($label, $door, $verdict->value, $expected);
+        if ($door === Door::Text) {
+            // A text cell's raw text is the text.
+            $this->assertSame($expected['text'], $batch->raw($column, $row), "{$label}: raw text");
+        }
+    }
+
+    /**
+     * A cast value as the corpus states it for `$door`.
+     *
+     * @param array<string, mixed> $expected the corpus's cell
+     */
+    private function assertValue(string $label, Door $door, mixed $value, array $expected): void
+    {
         switch ($door) {
             case Door::Bool:
             case Door::I8:
@@ -1119,8 +1288,6 @@ final class CorpusTest extends TestCase
                 break;
             case Door::Text:
                 $this->assertSame($expected['text'], $value, $label);
-                // A text cell's raw text is the text.
-                $this->assertSame($expected['text'], $batch->raw($column, $row), "{$label}: raw text");
                 break;
         }
     }

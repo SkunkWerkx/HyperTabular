@@ -58,7 +58,8 @@ lists each such cell as a \code{"host_conversion"} row. A faulted cell holding a
 row number in the sheet, and \code{row} its 1-based place among the rows the read delivered.
 
 \code{as.data.frame()} gives the values alone, one column per plan column, \code{NA} where a cell
-did not cast.
+did not cast. A cell that cast but broke its column's constraints keeps its value as cast
+there; its verdict's \code{ok} is what says it failed.
 }
 \examples{
 csv <- charToRaw("id,amount\n1,2.5\n2,x\n3,\n")

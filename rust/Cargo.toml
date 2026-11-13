@@ -131,6 +131,9 @@ name = "batch_size"
 name = "column_values"
 
 [[test]]
+name = "constraints_equivalence"
+
+[[test]]
 name = "corpus_delimited"
 
 [[test]]
@@ -165,6 +168,9 @@ name = "stream_progress"
 
 [[test]]
 name = "suggest"
+
+[[test]]
+name = "violation_span_invariant"
 
 [[bench]]
 name = "delimited_benchmarks"

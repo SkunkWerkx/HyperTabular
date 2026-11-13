@@ -15,9 +15,10 @@ A data frame, one row per problem, in the order the rows were read.
 \description{
 \code{problems()} lists what went wrong in a batch or a table, one row per problem, computed when
 it is called from the verdict columns the batch already holds, so a read pays nothing for
-it. It lists every cell that is \code{malformed} or \code{out_of_range}, every workbook formula with
-no cached value, every record \code{long_rows = "report"} cut to the width, and every cell the
-core accepted whose text R can't hold. It leaves out blanks, cells a declared \code{na} matched,
+it. It lists every cell that is \code{malformed} or \code{out_of_range}, every cell that broke a
+constraint its column declares, every workbook formula with no cached value, every record
+\code{long_rows = "report"} cut to the width, and every cell the core accepted whose text R can't
+hold. It leaves out blanks, cells a declared \code{na} matched,
 and cells a short record lacked under \code{fill = TRUE}: those are declared, not wrong.
 }
 \details{
@@ -26,10 +27,12 @@ The columns are \code{row} (the row's place among the rows the read delivered, f
 delimited text), \code{column} (the output column's name; \code{NA} for a row), \code{source_column} (the
 column in the source, from 1: a delimited plan column's position, a sheet column's own, \code{A}
 being 1, wherever a range starts; \code{NA} for a row), \code{kind} (\code{"cell"}, \code{"row"} for a record cut
-to the width, or \code{"host_conversion"} for a cell \code{ok} with an \code{NA} value), \code{reason}, \code{detail}
-and \code{origin} (the verdict's; \code{NA} for a row), \code{offset}, \code{length} and \code{raw} (the verdict's
-span and text; \code{NA} for a row and a host conversion, which has no span), and \code{expected} and
-\code{found} (a cut record's width and its own; \code{NA} otherwise).
+to the width, or \code{"host_conversion"} for a cell \code{ok} with an \code{NA} value), \code{reason}, \code{keyword},
+\code{detail} and \code{origin} (the verdict's; \code{NA} for a row), \code{offset}, \code{length} and \code{raw} (the
+verdict's span and text; \code{NA} for a row and a host conversion, which has no span), and
+\code{expected} and \code{found} (a cut record's width and its own; \code{NA} otherwise). A violation has the
+OpenAPI \code{keyword} it broke and no \code{reason}, since its cell cast; every other row has no
+\code{keyword}.
 }
 \examples{
 t <- read_delimited(charToRaw("title\na,b\n1,x\n2,3,4\n"), skip = 1, long_rows = "report",

@@ -47,6 +47,41 @@ const INDIAN: NumFormat = NumFormat::INVARIANT.with_grouping(Grouping::Indian);
 
 /// Where each row of a case starts, for every case with a cell in its `problems`: by hand.
 const ROW_LINES: &[(&str, &[u32])] = &[
+    (
+        "constraints: a violation keeps the value as cast",
+        &[2, 3, 4],
+    ),
+    (
+        "constraints: every numeric keyword over the integers",
+        &[2, 3, 4],
+    ),
+    (
+        "constraints: every numeric keyword over the floats and the decimal",
+        &[2, 3, 4],
+    ),
+    ("constraints: multipleOf rounds, or refuses", &[2, 3, 4]),
+    ("constraints: a rounding past the type is multipleOf", &[2]),
+    ("constraints: an empty enum matches nothing", &[2]),
+    (
+        "constraints: a numeric enum matches the value, not the text",
+        &[2, 3, 4],
+    ),
+    ("constraints: a trimmed text spans the judged text", &[2]),
+    ("constraints: a quoted cell is judged unescaped", &[2]),
+    ("constraints: tokens and padding stay empty", &[2, 3]),
+    ("constraints: a number in a text enum is text", &[2, 3]),
+    (
+        "constraints: an enum folds case unless it is case sensitive",
+        &[2, 3],
+    ),
+    (
+        "constraints: of duplicate enum entries the first matches",
+        &[2, 3],
+    ),
+    (
+        "constraints: text that isn't UTF-8 is the door's fault",
+        &[2, 3],
+    ),
     ("a cell that does not cast says where", &[2, 3]),
     ("an escaped cell is cast as its unescaped text", &[2, 3]),
     ("a declared notation", &[2, 3, 4]),
@@ -153,6 +188,8 @@ struct Case {
     column_dates: Vec<(usize, ColumnDate)>,
     /// The `(row, plan column)` cells that are tokens: by hand, as the rest of the grid is.
     token_cells: Vec<(usize, usize)>,
+    /// Plan columns' constraints, by place in the plan, in HyperCast's corpus shape.
+    column_constraints: Vec<(usize, Value)>,
     /// What `hypertabular_suggest` says of the input: by hand, worked out from the rule in
     /// `docs/design.md` and nothing that ran.
     suggest: Option<Suggest>,
@@ -266,6 +303,7 @@ impl Case {
             column_tokens: Vec::new(),
             column_dates: Vec::new(),
             token_cells: Vec::new(),
+            column_constraints: Vec::new(),
             suggest: None,
             states_format: false,
         }
@@ -332,6 +370,13 @@ impl Case {
                 months,
             },
         ));
+        self
+    }
+
+    /// Plan column `column` declaring these constraints, HyperCast's corpus shape as JSON text.
+    fn constrain(mut self, column: usize, constraints: &str) -> Case {
+        let declared = serde_json::from_str(constraints).expect("a declaration is JSON");
+        self.column_constraints.push((column, declared));
         self
     }
 
@@ -481,6 +526,80 @@ fn verdict(
         Door::Duration => judged(detailed::cast_duration(text), text, duration_json),
         Door::Text => judged(detailed::cast_text(text), text, |v| text_json(v.as_bytes())),
         _ => unreachable!("the fixture declares a known door"),
+    }
+}
+
+/// HyperCast's checked verdict on one cell's text, under the column's declaration: the door's
+/// own fault, a value that passed, or one that broke a declared constraint.
+fn checked_verdict(door: Door, format: &NumFormat, declared: &Value, text: &[u8]) -> Value {
+    use hypercast::detailed::{self, Rejection};
+    use hypercast::{Checked, Constraints, Text};
+    fn shaped<T>(
+        judged: Result<Checked<T>, Rejection<T>>,
+        door: Door,
+        text: &[u8],
+        ok: impl Fn(T) -> Value,
+    ) -> Value {
+        match judged {
+            Ok(passed) => judged_json(
+                door,
+                ok(passed.value),
+                Ok((passed.adjusted, passed.enum_index)),
+                text,
+            ),
+            Err(Rejection::Violation(broken)) => judged_json(
+                door,
+                ok(broken.value),
+                Err((broken.keyword, broken.offset, broken.len)),
+                text,
+            ),
+            Err(Rejection::Failure(failure)) => {
+                let mut cell = fault_json(failure.reason, failure.offset, failure.len, text);
+                cell["detail"] = json!(failure.detail.name());
+                cell
+            }
+        }
+    }
+    let (raw, packed) = declaration_of(door, declared);
+    let format = &format
+        .validate()
+        .expect("the fixture declares a format HyperCast takes");
+    let number = |value: Value| json!({"expect": "ok", "value": value});
+    macro_rules! numeric {
+        ($ty:ty, $ok:expr) => {{
+            let constraints =
+                Constraints::<$ty>::from_raw(raw, &packed).expect("a declaration for its door");
+            shaped(
+                detailed::cast_checked(text, format, &constraints),
+                door,
+                text,
+                $ok,
+            )
+        }};
+    }
+    match door {
+        Door::I8 => numeric!(i8, |v| number(json!(v))),
+        Door::I16 => numeric!(i16, |v| number(json!(v))),
+        Door::I32 => numeric!(i32, |v| number(json!(v))),
+        Door::I64 => numeric!(i64, |v| number(json!(v))),
+        Door::U8 => numeric!(u8, |v| number(json!(v))),
+        Door::U16 => numeric!(u16, |v| number(json!(v))),
+        Door::U32 => numeric!(u32, |v| number(json!(v))),
+        Door::U64 => numeric!(u64, |v| number(json!(v))),
+        Door::F32 => numeric!(f32, |v: f32| number(json!(f64::from(v)))),
+        Door::F64 => numeric!(f64, |v| number(json!(v))),
+        Door::Decimal => numeric!(hypercast::Decimal, decimal_json),
+        Door::Text => {
+            let constraints =
+                Constraints::<Text>::from_raw(raw, &packed).expect("a declaration for its door");
+            shaped(
+                detailed::cast_text_checked(text, &constraints),
+                door,
+                text,
+                |v: &str| text_json(v.as_bytes()),
+            )
+        }
+        other => panic!("the {other:?} door takes no constraints"),
     }
 }
 
@@ -1806,6 +1925,111 @@ fn cases() -> Vec<Case> {
                 ("i32", 0, "resolved", 2, 2),
                 ("text", 0, "resolved", 2, 2),
             ])),
+        // Constraints: HyperCast's checked doors judge each cell, and a value that casts and
+        // breaks a declared rule is a violation carrying it as cast.
+        Case::csv("constraints: a violation keeps the value as cast", "n,m\n11,7\n7,12\nx,5\n")
+            .plan(&[(0, Door::I32), (1, Door::I32)])
+            .constrain(0, r#"{"maximum": "10"}"#)
+            .constrain(1, r#"{"minimum": "6", "exclusiveMaximum": "12"}"#)
+            .header(&["n", "m"])
+            .rows(&[&["11", "7"], &["7", "12"], &["x", "5"]]),
+        Case::csv("constraints: every numeric keyword over the integers", "v\n0\n5\n-3\n")
+            .plan(&[
+                (0, Door::I8),
+                (0, Door::I16),
+                (0, Door::I64),
+                (0, Door::U8),
+                (0, Door::U16),
+                (0, Door::U32),
+                (0, Door::U64),
+            ])
+            .constrain(0, r#"{"minimum": "0"}"#)
+            .constrain(1, r#"{"exclusiveMinimum": "0"}"#)
+            .constrain(2, r#"{"maximum": "-1"}"#)
+            .constrain(3, r#"{"exclusiveMaximum": "5"}"#)
+            .constrain(4, r#"{"multipleOf": "5"}"#)
+            .constrain(5, r#"{"enum": ["0", "5"]}"#)
+            .constrain(6, r#"{"minimum": "5"}"#)
+            .header(&["v"])
+            .rows(&[&["0"], &["5"], &["-3"]]),
+        Case::csv("constraints: every numeric keyword over the floats and the decimal", "v\n-0\n0.3\n1.25\n")
+            .plan(&[(0, Door::F64), (0, Door::F32), (0, Door::Decimal), (0, Door::F64), (0, Door::Decimal), (0, Door::F32)])
+            .constrain(0, r#"{"minimum": "0", "maximum": "1"}"#)
+            .constrain(1, r#"{"exclusiveMinimum": "0", "exclusiveMaximum": "1"}"#)
+            .constrain(2, r#"{"multipleOf": "0.25"}"#)
+            .constrain(3, r#"{"enum": ["0", "0.3"]}"#)
+            .constrain(4, r#"{"minimum": "0.3", "exclusiveMaximum": "1.25"}"#)
+            .constrain(5, r#"{"multipleOf": "0.1", "rounding": "ceiling", "maximum": "1.2"}"#)
+            .header(&["v"])
+            .rows(&[&["-0"], &["0.3"], &["1.25"]]),
+        Case::csv("constraints: multipleOf rounds, or refuses", "v\n1.3\n1.2\n2.5\n")
+            .plan(&[(0, Door::F64), (0, Door::F64), (0, Door::Decimal), (0, Door::Decimal)])
+            .constrain(0, r#"{"multipleOf": "0.5", "rounding": "midpoint"}"#)
+            .constrain(1, r#"{"multipleOf": "0.5"}"#)
+            .constrain(2, r#"{"multipleOf": "0.5", "rounding": "floor"}"#)
+            .constrain(3, r#"{"multipleOf": "0.5", "rounding": "ceiling", "maximum": "2.5"}"#)
+            .header(&["v"])
+            .rows(&[&["1.3"], &["1.2"], &["2.5"]]),
+        // A rounding past what the type holds is `multipleOf`, and the value is as cast.
+        Case::csv("constraints: a rounding past the type is multipleOf", "v\n127\n")
+            .plan(&[(0, Door::I8)])
+            .constrain(0, r#"{"multipleOf": "5", "rounding": "ceiling"}"#)
+            .header(&["v"])
+            .rows(&[&["127"]]),
+        Case::csv("constraints: an empty enum matches nothing", "v\n7\n")
+            .plan(&[(0, Door::I32)])
+            .constrain(0, r#"{"enum": []}"#)
+            .header(&["v"])
+            .rows(&[&["7"]]),
+        Case::csv("constraints: a numeric enum matches the value, not the text", "v\n10\n10.0\n15\n")
+            .plan(&[(0, Door::I32), (0, Door::Decimal)])
+            .constrain(0, r#"{"enum": ["10", "20"]}"#)
+            .constrain(1, r#"{"enum": ["10"]}"#)
+            .header(&["v"])
+            .rows(&[&["10"], &["10.0"], &["15"]]),
+        Case::csv("constraints: a trimmed text spans the judged text", "a,b\nx,  ab \n")
+            .plan(&[(1, Door::Text), (1, Door::Text), (0, Door::Text)])
+            .constrain(0, r#"{"trim": true, "maxLength": 1}"#)
+            .constrain(1, r#"{"trim": true, "minLength": 2}"#)
+            .constrain(2, r#"{"minLength": 2}"#)
+            .header(&["a", "b"])
+            .rows(&[&["x", "  ab "]]),
+        Case::csv("constraints: a quoted cell is judged unescaped", "a\n\"  a\"\"b  \"\n")
+            .plan(&[(0, Door::Text), (0, Door::Text)])
+            .constrain(0, r#"{"trim": true, "enum": ["a\"b"]}"#)
+            .constrain(1, r#"{"trim": true, "maxLength": 1}"#)
+            .header(&["a"])
+            .rows(&[&["  a\"b  "]]),
+        Case::csv("constraints: tokens and padding stay empty", "a,b\nNA,abc\nabc\n")
+            .short_rows("pad")
+            .tokens(&["NA"])
+            .plan(&[(0, Door::Text), (1, Door::Text)])
+            .constrain(0, r#"{"minLength": 3}"#)
+            .constrain(1, r#"{"minLength": 3}"#)
+            .header(&["a", "b"])
+            .rows(&[&["NA", "abc"], &["abc"]])
+            .token_cells(&[(0, 0)]),
+        Case::csv("constraints: a number in a text enum is text", "v\n1\n1.0\n")
+            .plan(&[(0, Door::Text)])
+            .constrain(0, r#"{"enum": ["01", "1.0"]}"#)
+            .header(&["v"])
+            .rows(&[&["1"], &["1.0"]]),
+        Case::csv("constraints: an enum folds case unless it is case sensitive", "v\nyES\nYes\n")
+            .plan(&[(0, Door::Text), (0, Door::Text)])
+            .constrain(0, r#"{"enum": ["Yes"]}"#)
+            .constrain(1, r#"{"enum": ["Yes"], "caseSensitive": true}"#)
+            .header(&["v"])
+            .rows(&[&["yES"], &["Yes"]]),
+        Case::csv("constraints: of duplicate enum entries the first matches", "v\na\nA\n")
+            .plan(&[(0, Door::Text)])
+            .constrain(0, r#"{"enum": ["b", "A", "a"]}"#)
+            .header(&["v"])
+            .rows(&[&["a"], &["A"]]),
+        Case::bytes("constraints: text that isn't UTF-8 is the door's fault", b"v\nok\n\xff\n")
+            .plan(&[(0, Door::Text)])
+            .constrain(0, r#"{"maxLength": 9}"#)
+            .header(&["v"])
+            .byte_rows(&[&[b"ok"], &[b"\xff"]]),
     ]
 }
 
@@ -1834,6 +2058,11 @@ pub fn corpus_json() -> String {
                     if let Some((_, date)) = case.column_dates.iter().find(|c| c.0 == place) {
                         entry["options"] = date.json();
                     }
+                    if let Some((_, declared)) =
+                        case.column_constraints.iter().find(|c| c.0 == place)
+                    {
+                        entry["constraints"] = declared.clone();
+                    }
                     entry
                 })
                 .collect();
@@ -1853,6 +2082,11 @@ pub fn corpus_json() -> String {
                             };
                             if case.token_cells.contains(&(at, place)) {
                                 return json!({"expect": "empty", "origin": "token"});
+                            }
+                            if let Some((_, declared)) =
+                                case.column_constraints.iter().find(|c| c.0 == place)
+                            {
+                                return checked_verdict(*door, format, declared, text);
                             }
                             let date = case
                                 .column_dates
@@ -1877,7 +2111,12 @@ pub fn corpus_json() -> String {
             let refused = rows
                 .iter()
                 .flat_map(|row| row.as_array().expect("a row"))
-                .any(|cell| matches!(cell["expect"].as_str(), Some("malformed" | "out_of_range")));
+                .any(|cell| {
+                    matches!(
+                        cell["expect"].as_str(),
+                        Some("malformed" | "out_of_range" | "violation")
+                    )
+                });
             assert!(
                 (!refused && long.is_empty()) || lines.len() == rows.len(),
                 "{}: its problems need ROW_LINES to say where each of its rows starts",
@@ -1988,7 +2227,10 @@ fn columns_of(file: &str) -> (usize, Option<usize>) {
         (4, None)
     } else if file.starts_with("ranges") {
         (6, None)
-    } else if file.starts_with("uncached") || file.starts_with("dates") {
+    } else if file.starts_with("uncached")
+        || file.starts_with("dates")
+        || file.starts_with("constraints")
+    {
         (3, None)
     } else if file.starts_with("suggest") {
         (7, None)
@@ -2141,6 +2383,8 @@ pub fn workbook_cases() -> Vec<Value> {
             cases.extend(grouping_cases(file, &book, &sheets));
         } else if file.starts_with("suggest") {
             cases.extend(suggest_cases(file, &book, &sheets));
+        } else if file.starts_with("constraints") {
+            cases.extend(constraint_cases(file, &book, &sheets));
         }
     }
     for case in &mut cases {
@@ -2345,6 +2589,54 @@ fn uncached_cases(file: &str, book: &Workbook<'_>, sheets: &[Value]) -> Vec<Valu
                 entry(Door::Bool, 1),
                 entry(Door::Date, 1),
                 entry(Door::F64, 1),
+            ],
+        ),
+    ];
+    listed_cases(file, book, sheets, listed)
+}
+
+/// A plan entry for `door` at `ordinal` declaring `constraints`, HyperCast's corpus shape as JSON
+/// text.
+fn constrained(door: Door, ordinal: usize, constraints: &str) -> Value {
+    let mut entry = entry(door, ordinal);
+    entry["constraints"] = serde_json::from_str(constraints).expect("a declaration is JSON");
+    entry
+}
+
+/// The cases written by hand over `constraints.xlsx`: a typed number judged through its typed twin
+/// (`-0` with no sign, a sum on its shortest digits), at the text door through its canonical text, a
+/// cell the door has no twin for, a formula with no result and a token beside them, and text cells
+/// judged with their spans.
+fn constraint_cases(file: &str, book: &Workbook<'_>, sheets: &[Value]) -> Vec<Value> {
+    let mut options = json!({"has_header": true, "skip_empty_rows": false});
+    options["tokens"] = json!(["NA"]);
+    let listed = vec![
+        (
+            "typed numbers judged through their typed twins",
+            0,
+            options.clone(),
+            vec![
+                constrained(Door::F64, 0, r#"{"minimum": "0", "maximum": "0.3"}"#),
+                constrained(Door::I32, 0, r#"{"maximum": "10"}"#),
+                constrained(Door::Text, 0, r#"{"enum": ["42", "11", "0"]}"#),
+                constrained(
+                    Door::Decimal,
+                    0,
+                    r#"{"multipleOf": "0.5", "rounding": "midpoint"}"#,
+                ),
+                constrained(Door::I32, 2, r#"{"maximum": "5"}"#),
+                constrained(Door::F32, 0, r#"{"exclusiveMaximum": "42"}"#),
+            ],
+        ),
+        (
+            "text judged with its span",
+            0,
+            options,
+            vec![
+                constrained(Door::Text, 1, r#"{"trim": true, "maxLength": 3}"#),
+                constrained(Door::Text, 1, r#"{"enum": ["Female", "Male"]}"#),
+                constrained(Door::I32, 1, r#"{"maximum": "10"}"#),
+                constrained(Door::Text, 2, r#"{"minLength": 2}"#),
             ],
         ),
     ];

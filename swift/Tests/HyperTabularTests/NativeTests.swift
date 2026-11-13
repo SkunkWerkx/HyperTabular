@@ -245,19 +245,25 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(try said("RawRange"), MemoryLayout<HyperTabularRawRange>.size)
         XCTAssertEqual(try said("RawSuggestion"), MemoryLayout<HyperTabularRawSuggestion>.size)
         XCTAssertEqual(try said("CellVerdict"), MemoryLayout<CellVerdict>.size)
+        XCTAssertEqual(try said("RawConstraints"), MemoryLayout<HyperTabularRawConstraints>.size)
+        XCTAssertEqual(try said("RawCheck"), MemoryLayout<HyperTabularRawCheck>.size)
 
         // Those that hold pointers are a sizeof in the header: the core's asserts say what they come to.
         let word = MemoryLayout<UInt>.size
-        XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.size, 120 + 4 * word)
-        XCTAssertEqual(MemoryLayout<HyperTabularColumnBufferWith>.size, 4 * word)
+        XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.size, 120 + 7 * word)
+        XCTAssertEqual(MemoryLayout<HyperTabularColumnBufferWith>.size, 5 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularBuffersWith>.size, 18 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.offset(of: \.date), 108)
         XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.offset(of: \.months), 120)
         XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.offset(of: \.tokens), 120 + 2 * word)
+        XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.offset(of: \.constraints), 120 + 4 * word)
+        XCTAssertEqual(MemoryLayout<HyperTabularColumnSpecWith>.offset(of: \.enum_len), 120 + 6 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularColumnBufferWith>.offset(of: \.notes), 3 * word)
+        XCTAssertEqual(MemoryLayout<HyperTabularColumnBufferWith>.offset(of: \.checks), 4 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularBuffersWith>.offset(of: \.tokens), 15 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularBuffersWith>.offset(of: \.row_widths), 17 * word)
         XCTAssertEqual(MemoryLayout<HyperTabularRawProblem>.offset(of: \.row), 0)
+        XCTAssertEqual(MemoryLayout<HyperTabularRawProblem>.offset(of: \.keyword), 32)
         XCTAssertEqual(MemoryLayout<HyperTabularRawSheetOptions>.offset(of: \.last_column), 32)
     }
 }

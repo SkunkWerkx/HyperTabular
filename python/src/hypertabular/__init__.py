@@ -59,7 +59,10 @@ which anything that takes a buffer takes — with no Python call per cell::
   :meth:`DelimitedReader.suggest` offers a plan to inspect, from a sample, and applies nothing.
 - **HyperCast is the judge.** :class:`Success`, :class:`Fault`, :class:`CastFailure`,
   :class:`NumFormat`, :class:`UnixPrecision`, :class:`DateOrder`, :class:`ExcelEpoch`,
-  :class:`Detail`, :class:`DateOptions` and :class:`MonthNames` are the ``hypercast`` package's own objects, re-exported here unchanged — not copies. A
+  :class:`Detail`, :class:`DateOptions`, :class:`MonthNames`, :class:`Constraints`,
+  :class:`Rounding`, :class:`Checked`, :class:`Violation`, :class:`Keyword` and
+  :data:`CheckedVerdict` are the ``hypercast`` package's own objects, re-exported here unchanged —
+  not copies. A
   text cell means exactly what ``hypercast.cast_*`` says of the same text, a typed workbook
   cell is converted by the door directly, and its value is the
   Python type that door gives: ``int``, ``float``, ``bool``, ``decimal.Decimal``,
@@ -83,18 +86,26 @@ from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import Any, ClassVar, Self, overload
 
+from decimal import Decimal
+
 from hypercast import (
     CastFailure,
+    Checked,
+    CheckedVerdict,
+    Constraints,
     DateOptions,
     DateOrder,
     Detail,
     ExcelEpoch,
     Fault,
+    Keyword,
     MonthNames,
     NumFormat,
+    Rounding,
     Success,
     UnixPrecision,
     Verdict,
+    Violation,
 )
 
 from . import _native
@@ -133,6 +144,12 @@ __all__ = [
     "Success",
     "Fault",
     "Verdict",
+    "Constraints",
+    "Rounding",
+    "Checked",
+    "Violation",
+    "Keyword",
+    "CheckedVerdict",
     "NumFormat",
     "UnixPrecision",
     "DateOrder",
@@ -486,9 +503,12 @@ class Column:
     """What the date doors accept beyond their own shapes: see :meth:`with_date_options`."""
     months: MonthNames | None = None
     """The month vocabulary the date doors read: see :meth:`with_date_options`."""
+    constraints: Constraints[Any] | None = None
+    """HyperCast's declaration the column's cells must also meet, for its own door: given to the
+    factory of a numeric door or of text. Read such a column with :meth:`Batch.get_checked`."""
 
     def __post_init__(self) -> None:
-        """Refuses an ordinal no source column can have."""
+        """Refuses an ordinal no source column can have, and constraints for another door."""
         if not isinstance(self.ordinal, int) or isinstance(self.ordinal, bool):
             raise TypeError(f"ordinal must be an int, not {type(self.ordinal).__name__}")
         # No workbook format has 2^20 columns (XLSX and ODS stop at 16,384, Numbers at
@@ -498,6 +518,18 @@ class Column:
                 f"ordinal must be at least 0, and an ordinal must be below 2^20 (1,048,576);"
                 f" got {self.ordinal}"
             )
+        if self.constraints is not None:
+            if not isinstance(self.constraints, Constraints):
+                raise TypeError(
+                    "constraints must be a hypercast.Constraints, not"
+                    f" {type(self.constraints).__name__}"
+                )
+            # Any door can be paired with any declaration here, so the pairing is checked.
+            if self.constraints.door.value != self.door.value:
+                raise ValueError(
+                    f"Constraints for Door.{self.constraints.door.name} were given to a"
+                    f" Door.{self.door.name} column"
+                )
 
     def __repr__(self) -> str:
         """The column as the factory call that makes it."""
@@ -506,6 +538,8 @@ class Column:
             said.append(f"{type(self.declared).__name__}.{self.declared.name}")
         if self.format is not NumFormat.INVARIANT:
             said.append(repr(self.format))
+        if self.constraints is not None:
+            said.append(f"constraints={self.constraints!r}")
         made = f"Column.{self.door.name.lower()}({', '.join(said)})"
         if self.tokens is not None:
             made += f".with_tokens({list(self.tokens)!r})"
@@ -536,10 +570,12 @@ class Column:
         return replace(self, date_options=options, months=months)
 
     @classmethod
-    def _numeric(cls, ordinal: int, door: Door, fmt: NumFormat) -> Column:
+    def _numeric(
+        cls, ordinal: int, door: Door, fmt: NumFormat, constraints: Constraints[Any] | None
+    ) -> Column:
         if not isinstance(fmt, NumFormat):
             raise TypeError(f"fmt must be a hypercast.NumFormat, not {type(fmt).__name__}")
-        return cls(ordinal, door, fmt)
+        return cls(ordinal, door, fmt, constraints=constraints)
 
     @classmethod
     def bool(cls, ordinal: int) -> Column:
@@ -547,60 +583,126 @@ class Column:
         return cls(ordinal, Door.BOOL)
 
     @classmethod
-    def i8(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def i8(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """A signed 8-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.I8, fmt)
+        return cls._numeric(ordinal, Door.I8, fmt, constraints)
 
     @classmethod
-    def i16(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def i16(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """A signed 16-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.I16, fmt)
+        return cls._numeric(ordinal, Door.I16, fmt, constraints)
 
     @classmethod
-    def i32(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def i32(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """A signed 32-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.I32, fmt)
+        return cls._numeric(ordinal, Door.I32, fmt, constraints)
 
     @classmethod
-    def i64(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def i64(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """A signed 64-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.I64, fmt)
+        return cls._numeric(ordinal, Door.I64, fmt, constraints)
 
     @classmethod
-    def u8(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def u8(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """An unsigned 8-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.U8, fmt)
+        return cls._numeric(ordinal, Door.U8, fmt, constraints)
 
     @classmethod
-    def u16(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def u16(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """An unsigned 16-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.U16, fmt)
+        return cls._numeric(ordinal, Door.U16, fmt, constraints)
 
     @classmethod
-    def u32(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def u32(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """An unsigned 32-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.U32, fmt)
+        return cls._numeric(ordinal, Door.U32, fmt, constraints)
 
     @classmethod
-    def u64(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def u64(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[int] | None = None,
+    ) -> Column:
         """An unsigned 64-bit integer column under the declared notation."""
-        return cls._numeric(ordinal, Door.U64, fmt)
+        return cls._numeric(ordinal, Door.U64, fmt, constraints)
 
     @classmethod
-    def f32(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def f32(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[float] | None = None,
+    ) -> Column:
         """An IEEE single column under the declared notation."""
-        return cls._numeric(ordinal, Door.F32, fmt)
+        return cls._numeric(ordinal, Door.F32, fmt, constraints)
 
     @classmethod
-    def f64(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def f64(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[float] | None = None,
+    ) -> Column:
         """An IEEE double column under the declared notation."""
-        return cls._numeric(ordinal, Door.F64, fmt)
+        return cls._numeric(ordinal, Door.F64, fmt, constraints)
 
     @classmethod
-    def decimal(cls, ordinal: int, fmt: NumFormat = NumFormat.INVARIANT) -> Column:
+    def decimal(
+        cls,
+        ordinal: int,
+        fmt: NumFormat = NumFormat.INVARIANT,
+        *,
+        constraints: Constraints[Decimal] | None = None,
+    ) -> Column:
         """An exact ``decimal.Decimal`` column under the declared notation; no float is
         ever formed."""
-        return cls._numeric(ordinal, Door.DECIMAL, fmt)
+        return cls._numeric(ordinal, Door.DECIMAL, fmt, constraints)
 
     @classmethod
     def uuid(cls, ordinal: int) -> Column:
@@ -654,10 +756,10 @@ class Column:
         return cls(ordinal, Door.DURATION)
 
     @classmethod
-    def text(cls, ordinal: int) -> Column:
+    def text(cls, ordinal: int, *, constraints: Constraints[str] | None = None) -> Column:
         """A text column: the cell's bytes themselves, untrimmed, as a ``str``. A cell
         with no bytes at all is the one way text fails (``CastFailure.EMPTY``)."""
-        return cls(ordinal, Door.TEXT)
+        return cls(ordinal, Door.TEXT, constraints=constraints)
 
 
 class AmbiguousColumn(ValueError):
@@ -813,7 +915,7 @@ class Problem:
     ``0``, wherever the range starts."""
     reason: CastFailure | None
     """The verdict's reason: ``MALFORMED``, ``OUT_OF_RANGE``, or ``EMPTY`` for a formula with no
-    cached value. ``None`` for an entry about the row as a whole."""
+    cached value. ``None`` for an entry about the row as a whole, and for a violation."""
     detail: Detail | None
     """What failed in the cell, as a ``Fault``'s ``detail`` says."""
     detail_code: int | None
@@ -828,6 +930,9 @@ class Problem:
     """For a long row, the width the first record fixed; otherwise ``0``."""
     found: int
     """For a long row, the cells it had; otherwise ``0``."""
+    keyword: Keyword | None = None
+    """For a violation, the constraint its column declares that the cell broke: the cell cast,
+    so ``reason`` is ``None`` and the span is the judged text's. ``None`` otherwise."""
 
 
 def _pairs(

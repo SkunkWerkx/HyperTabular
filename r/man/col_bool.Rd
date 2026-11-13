@@ -27,27 +27,27 @@
 \usage{
 col_bool(source, na = NULL)
 
-col_i8(source, format = NULL, na = NULL)
+col_i8(source, format = NULL, na = NULL, constraints = NULL)
 
-col_i16(source, format = NULL, na = NULL)
+col_i16(source, format = NULL, na = NULL, constraints = NULL)
 
-col_i32(source, format = NULL, na = NULL)
+col_i32(source, format = NULL, na = NULL, constraints = NULL)
 
-col_i64(source, format = NULL, na = NULL)
+col_i64(source, format = NULL, na = NULL, constraints = NULL)
 
-col_u8(source, format = NULL, na = NULL)
+col_u8(source, format = NULL, na = NULL, constraints = NULL)
 
-col_u16(source, format = NULL, na = NULL)
+col_u16(source, format = NULL, na = NULL, constraints = NULL)
 
-col_u32(source, format = NULL, na = NULL)
+col_u32(source, format = NULL, na = NULL, constraints = NULL)
 
-col_u64(source, format = NULL, na = NULL)
+col_u64(source, format = NULL, na = NULL, constraints = NULL)
 
-col_f32(source, format = NULL, na = NULL)
+col_f32(source, format = NULL, na = NULL, constraints = NULL)
 
-col_f64(source, format = NULL, na = NULL)
+col_f64(source, format = NULL, na = NULL, constraints = NULL)
 
-col_decimal(source, format = NULL, na = NULL)
+col_decimal(source, format = NULL, na = NULL, constraints = NULL)
 
 col_uuid(source, na = NULL)
 
@@ -65,7 +65,7 @@ col_time(source, na = NULL)
 
 col_duration(source, na = NULL)
 
-col_text(source, na = NULL, raw = FALSE)
+col_text(source, na = NULL, raw = FALSE, constraints = NULL)
 
 \method{print}{hypertabular_column}(x, ...)
 }
@@ -79,6 +79,9 @@ bytes, an \code{empty} verdict at origin \code{"token"}), in place of the read's
 inherits the read's, and \code{character(0)} declares none.}
 
 \item{format}{A \code{\link[hypercast:num_format]{hypercast::num_format()}}, or \code{NULL} for the invariant notation.}
+
+\item{constraints}{For a numeric column or \code{col_text()}, a
+\code{\link[hypercast:hypercast_constraints]{hypercast::hypercast_constraints()}} declaration for the column's door, or \code{NULL} for none.}
 
 \item{options}{A \code{\link[hypercast:date_options]{hypercast::date_options()}}, or \code{NULL} for none: the forms the door reads
 beyond its own, and a two-digit year's pivot.}
@@ -131,6 +134,16 @@ A workbook's typed cells (numbers, dates, booleans, errors) go through the door 
 cast matrix in the project's \code{docs/design.md} says: a stored number through the door's
 typed twin, never through text, and a typed cell through \code{col_text()} as its canonical
 text.
+
+A numeric or text column can also declare a \code{\link[hypercast:hypercast_constraints]{hypercast::hypercast_constraints()}}
+declaration for its door, the OpenAPI 3.2 keywords its values must keep once cast. Its
+verdict is then hypercast's checked verdict (\link[hypercast:hypercast_checked_verdict]{hypercast::hypercast_checked_verdict}), with
+\code{adjusted}, \code{enum_index} and \code{keyword} beside the value: a cell that breaks one is \code{ok}
+\code{FALSE} with no \code{reason} but the \code{keyword} it broke, its \code{value} the value exactly as cast,
+never rounded, and its span the judged text's; a cell \code{multiple_of} rounded is \code{adjusted}; and
+a text \code{enum} match is the entry as declared, with \code{enum_index} counted from 1. A declaration
+for another door is an error, and the declaration is judged again, from its fields, when the
+plan is bound.
 
 Everything a column declares is judged by the core before anything is read: a plan the
 core can't honour is an R error naming the column. A format or date options packed by a

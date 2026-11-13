@@ -36,6 +36,16 @@ namespace HyperTabular {
         private function __construct() {}
 
         /**
+         * A column as HyperCast's checked door judges it, one verdict per row: each cell as
+         * `getChecked()` reads it. Any column can be read this way, a constrained one and one that
+         * declares nothing alike.
+         *
+         * @param int $column
+         * @return array
+         */
+        public function checkedVerdicts(int $column): array {}
+
+        /**
          * The plan the batch was read through: column `i` of the batch is `columns()[i]`.
          *
          * @return array
@@ -55,8 +65,9 @@ namespace HyperTabular {
 
         /**
          * With no column, everything wrong in this batch, by row and then by column, a row's own entry
-         * first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, a workbook's
-         * formulas with no cached value, and rows a `LongRows::Report` dialect cut. Blanks, declared
+         * first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, cells that broke
+         * a constraint their column declares (with its `keyword`), a workbook's formulas with no cached
+         * value, and rows a `LongRows::Report` dialect cut. Blanks, declared
          * tokens, padding and a row cut under `LongRows::Truncate` aren't. With notes off a refused
          * cell has no detail and a formula with no cached value isn't listed. A row the empty-row
          * filter dropped isn't in the batch to be named. Made the first time it is asked for.
@@ -72,13 +83,28 @@ namespace HyperTabular {
         /**
          * The cell at (`$column`, `$row`) as HyperCast judged it: its `Success` around the value —
          * the PHP carrier of the column's door (`Door`) — or its `Fault`, whose span indexes the
-         * cell's own text (`raw()`).
+         * cell's own text (`raw()`). A `\LogicException` for a column that declares constraints,
+         * which this would read a violation of as passed: read it with `getChecked()`.
          *
          * @param int $column
          * @param int $row
          * @return \HyperCast\Success|\HyperCast\Fault
          */
         public function get(int $column, int $row): \HyperCast\Success|\HyperCast\Fault {}
+
+        /**
+         * The cell at (`$column`, `$row`) as HyperCast's checked door judges it, for a column that
+         * declares `Constraints`: `Checked` when it cast and met them (`adjusted` when a `multipleOf`
+         * rounding changed the value, and a text `enum` match the entry as declared, with its
+         * `enumIndex`), its `Violation` when it cast and broke one (the keyword, the value as cast and
+         * the judged text's span), or its `Fault` when it didn't cast. A column that declares none is
+         * read too: every cell that cast passes, unadjusted.
+         *
+         * @param int $column
+         * @param int $row
+         * @return \HyperCast\Checked|\HyperCast\Fault|\HyperCast\Violation
+         */
+        public function getChecked(int $column, int $row): \HyperCast\Checked|\HyperCast\Fault|\HyperCast\Violation {}
 
         /**
          * The batch's rows, in order, each a `Row` — keyed by its index — that answers as the batch
@@ -130,8 +156,9 @@ namespace HyperTabular {
 
         /**
          * A column, one value per row, each the PHP carrier of the column's door (`Door`) — and null
-         * where the cell did not cast, whatever the reason; `faults()` says why. Built in one piece
-         * the first time it is asked for.
+         * where the cell did not cast, whatever the reason; `faults()` says why. A cell that broke a
+         * constraint its column declares cast, so its value is here as cast, never rounded. Built in
+         * one piece the first time it is asked for.
          *
          * @param int $column
          * @return array
@@ -140,6 +167,8 @@ namespace HyperTabular {
 
         /**
          * A column as verdicts, one per row: HyperCast's `Success` around the value, or its `Fault`.
+         * A `\LogicException` for a column that declares constraints: read it with
+         * `checkedVerdicts()`.
          *
          * @param int $column
          * @return array
@@ -659,6 +688,14 @@ namespace HyperTabular {
         public function get(int $column): \HyperCast\Success|\HyperCast\Fault {}
 
         /**
+         * The cell in `$column` as HyperCast's checked door judged it: `Batch::getChecked()`.
+         *
+         * @param int $column
+         * @return \HyperCast\Checked|\HyperCast\Fault|\HyperCast\Violation
+         */
+        public function getChecked(int $column): \HyperCast\Checked|\HyperCast\Fault|\HyperCast\Violation {}
+
+        /**
          * The row's place in its batch, from zero.
          *
          * @return int
@@ -1128,7 +1165,8 @@ namespace HyperTabular {
 
     /**
      * One output column of a plan: which source column it reads, the door it casts through,
-     * and the numeric notation. Built with the factory named after its door.
+     * the numeric notation, and the HyperCast `Constraints` it declares, if any. Built with the
+     * factory named after its door.
      */
     final readonly class Column {
         private function __construct(
@@ -1139,6 +1177,7 @@ namespace HyperTabular {
             public ?array $tokens = null,
             public ?\HyperCast\DateOptions $dateOptions = null,
             public ?\HyperCast\MonthNames $months = null,
+            public ?\HyperCast\Constraints $constraints = null,
         ) {}
 
         /**
@@ -1163,57 +1202,101 @@ namespace HyperTabular {
         /**
          * A signed 8-bit integer column, as `int`.
          */
-        public static function i8(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function i8(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * A signed 16-bit integer column, as `int`.
          */
-        public static function i16(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function i16(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * A signed 32-bit integer column, as `int`.
          */
-        public static function i32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function i32(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * A signed 64-bit integer column, as `int`.
          */
-        public static function i64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function i64(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An unsigned 8-bit integer column, as `int`.
          */
-        public static function u8(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function u8(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An unsigned 16-bit integer column, as `int`.
          */
-        public static function u16(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function u16(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An unsigned 32-bit integer column, as `int`.
          */
-        public static function u32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function u32(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An unsigned 64-bit integer column, as `int`'s two's-complement bit pattern (sprintf('%u')).
          */
-        public static function u64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function u64(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An IEEE single column, as `float` (widened losslessly).
          */
-        public static function f32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function f32(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An IEEE double column, as `float`.
          */
-        public static function f64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function f64(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * An exact decimal column, as HyperCast's `Decimal` triple.
          */
-        public static function decimal(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+        public static function decimal(
+            int $ordinal,
+            ?\HyperCast\NumFormat $format = null,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
 
         /**
          * A UUID column, as the lowercase hyphenated string.
@@ -1263,7 +1346,10 @@ namespace HyperTabular {
         /**
          * A text column: the cell's bytes themselves, untrimmed, quotes resolved.
          */
-        public static function text(int $ordinal): \HyperTabular\Column {}
+        public static function text(
+            int $ordinal,
+            ?\HyperCast\Constraints $constraints = null,
+        ): \HyperTabular\Column {}
     }
 
     /**
@@ -1312,7 +1398,8 @@ namespace HyperTabular {
     }
 
     /**
-     * One entry of a batch's faults: a cell that did not cast, or a record of the wrong width.
+     * One entry of a batch's faults: a cell that did not cast, a cell that broke a constraint its
+     * column declares, or a record of the wrong width.
      */
     final readonly class Problem {
         public function __construct(
@@ -1328,6 +1415,8 @@ namespace HyperTabular {
             public int $length,
             public int $expected,
             public int $found,
+            public ?\HyperCast\Keyword $keyword = null,
+            public int $keywordCode = 0,
         ) {}
     }
 

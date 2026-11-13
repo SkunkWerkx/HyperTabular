@@ -115,16 +115,53 @@ packed_tokens <- function(tokens) {
   }), use.names = FALSE) %||% raw()
 }
 
+# The fields of a hypercast_constraints() declaration, as it takes them.
+constraint_fields <- c("door", "minimum", "exclusive_minimum", "maximum", "exclusive_maximum",
+                       "multiple_of", "rounding", "min_length", "max_length", "trim",
+                       "case_sensitive", "enum")
+
+# `constraints` declared again from its own fields, so hypercast judges what they say now, for
+# a column of `door`: its packed bytes, list(packed, packed_enum). An error for anything that is
+# not a declaration, one for another door, and hypercast's own for one it refuses.
+declaration_of <- function(constraints, door) {
+  if (!inherits(constraints, "hypercast_constraints") || !is.list(constraints)) {
+    stop("constraints must be a hypercast_constraints, as hypercast::hypercast_constraints() ",
+         "returns, or NULL", call. = FALSE)
+  }
+  declared <- constraints$door
+  if (!identical(declared, door)) {
+    stop(sprintf("constraints for %s were given to a col_%s() column",
+                 if (is.character(declared) && length(declared) == 1L) {
+                   encodeString(declared, quote = "\"")
+                 } else {
+                   "another door"
+                 }, door), call. = FALSE)
+  }
+  args <- lapply(constraint_fields, function(field) constraints[[field]])
+  names(args) <- constraint_fields
+  again <- do.call(hypercast::hypercast_constraints, args)
+  if (!is.raw(again$packed) || !is.raw(again$packed_enum)) {
+    stop(sprintf(paste("hypercast %s packs no constraints; hypertabular %s needs a hypercast",
+                       "that does"), utils::packageVersion("hypercast"),
+                 utils::packageVersion("hypertabular")), call. = FALSE)
+  }
+  list(again$packed, again$packed_enum)
+}
+
 new_column <- function(source, door, param = 0L, format = NULL, factory = door, na = NULL,
-                       options = NULL, months = NULL, raw = FALSE) {
+                       options = NULL, months = NULL, raw = FALSE, constraints = NULL) {
   if (!is.logical(raw) || length(raw) != 1L || is.na(raw)) {
     stop("raw must be TRUE or FALSE", call. = FALSE)
+  }
+  if (!is.null(constraints)) {
+    declaration_of(constraints, door)
   }
   structure(
     list(source = check_source(source), door = door, param = param,
          format = if (door %in% numeric_doors) packed_format(format) else raw(format_bytes),
          num_format = format, factory = factory, na = check_tokens(na, TRUE),
-         options = check_options(options), months = check_months(months), raw = raw),
+         options = check_options(options), months = check_months(months), raw = raw,
+         constraints = constraints),
     class = "hypertabular_column"
   )
 }
@@ -155,6 +192,16 @@ new_column <- function(source, door, param = 0L, format = NULL, factory = door, 
 #' typed twin, never through text, and a typed cell through `col_text()` as its canonical
 #' text.
 #'
+#' A numeric or text column can also declare a [hypercast::hypercast_constraints()]
+#' declaration for its door, the OpenAPI 3.2 keywords its values must keep once cast. Its
+#' verdict is then hypercast's checked verdict ([hypercast::hypercast_checked_verdict]), with
+#' `adjusted`, `enum_index` and `keyword` beside the value: a cell that breaks one is `ok`
+#' `FALSE` with no `reason` but the `keyword` it broke, its `value` the value exactly as cast,
+#' never rounded, and its span the judged text's; a cell `multiple_of` rounded is `adjusted`; and
+#' a text `enum` match is the entry as declared, with `enum_index` counted from 1. A declaration
+#' for another door is an error, and the declaration is judged again, from its fields, when the
+#' plan is bound.
+#'
 #' Everything a column declares is judged by the core before anything is read: a plan the
 #' core can't honour is an R error naming the column. A format or date options packed by a
 #' hypercast whose layouts this hypertabular's core doesn't read is such an error, naming both
@@ -180,6 +227,8 @@ new_column <- function(source, door, param = 0L, format = NULL, factory = door, 
 #' @param raw For `col_text()`, `TRUE` gives each value as a raw vector of the exact bytes
 #'   (`NULL` where the cell faulted), which holds what an R string can't: a NUL, or more than
 #'   `INT_MAX` bytes.
+#' @param constraints For a numeric column or `col_text()`, a
+#'   [hypercast::hypercast_constraints()] declaration for the column's door, or `NULL` for none.
 #' @return A `hypertabular_column`.
 #' @family plans
 #' @export
@@ -198,68 +247,68 @@ col_bool <- function(source, na = NULL) new_column(source, "bool", na = na)
 
 #' @rdname col_bool
 #' @export
-col_i8 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "i8", format = format, na = na)
+col_i8 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "i8", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_i16 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "i16", format = format, na = na)
+col_i16 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "i16", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_i32 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "i32", format = format, na = na)
+col_i32 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "i32", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_i64 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "i64", format = format, na = na)
+col_i64 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "i64", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_u8 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "u8", format = format, na = na)
+col_u8 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "u8", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_u16 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "u16", format = format, na = na)
+col_u16 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "u16", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_u32 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "u32", format = format, na = na)
+col_u32 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "u32", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_u64 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "u64", format = format, na = na)
+col_u64 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "u64", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_f32 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "f32", format = format, na = na)
+col_f32 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "f32", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_f64 <- function(source, format = NULL, na = NULL) {
-  new_column(source, "f64", format = format, na = na)
+col_f64 <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "f64", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
 #' @export
-col_decimal <- function(source, format = NULL, na = NULL) {
-  new_column(source, "decimal", format = format, na = na)
+col_decimal <- function(source, format = NULL, na = NULL, constraints = NULL) {
+  new_column(source, "decimal", format = format, na = na, constraints = constraints)
 }
 
 #' @rdname col_bool
@@ -311,8 +360,8 @@ col_duration <- function(source, na = NULL) new_column(source, "duration", na = 
 
 #' @rdname col_bool
 #' @export
-col_text <- function(source, na = NULL, raw = FALSE) {
-  new_column(source, "text", na = na, raw = raw)
+col_text <- function(source, na = NULL, raw = FALSE, constraints = NULL) {
+  new_column(source, "text", na = na, raw = raw, constraints = constraints)
 }
 
 # A column as the call that makes it, pasteable: `format` the text its num_format prints as.
@@ -341,6 +390,10 @@ column_call <- function(x, format = NULL) {
     })
   }
   if (isTRUE(x$raw)) extra <- paste0(extra, ", raw = TRUE")
+  if (!is.null(x$constraints)) {
+    extra <- paste0(extra, ", constraints = hypercast::",
+                    trimws(utils::capture.output(print(x$constraints))))
+  }
   sprintf("col_%s(%s%s)", x$factory, source, extra)
 }
 
@@ -423,15 +476,25 @@ u32_le <- function(value) {
 }
 
 # The plan as the C shim takes it: each column's ordinal, door, param, format and date options
-# (116 bytes), each column's month vocabulary and tokens, and which text columns come back raw.
+# (116 bytes), each column's month vocabulary, tokens, constraints and packed enum, and which text
+# columns come back raw. Constraints are declared again from their fields here, so a column that
+# got past its factory, or one edited since, is judged as it stands.
 pack_specs <- function(plan, ordinals) {
   specs <- unlist(lapply(seq_along(plan), function(i) {
     column <- plan[[i]]
     c(u32_le(ordinals[[i]]), u32_le(door_codes[[column$door]]), u32_le(column$param),
       column$format, packed_date(column$options))
   }), use.names = FALSE) %||% raw()
-  lists <- lapply(plan, function(column) {
-    list(if (!is.null(column$months)) column$months$packed, packed_tokens(column$na))
+  lists <- lapply(seq_along(plan), function(i) {
+    column <- plan[[i]]
+    declared <- if (!is.null(column$constraints)) {
+      tryCatch(declaration_of(column$constraints, column$door), error = function(e) {
+        stop(sprintf("plan column %d cannot be honoured: %s", i, conditionMessage(e)),
+             call. = FALSE)
+      })
+    }
+    list(if (!is.null(column$months)) column$months$packed, packed_tokens(column$na),
+         declared[[1]], declared[[2]])
   })
   raws <- vapply(plan, function(column) isTRUE(column$raw), FALSE)
   list(specs = specs, lists = lists, raws = raws)

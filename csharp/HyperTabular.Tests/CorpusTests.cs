@@ -74,7 +74,7 @@ public sealed unsafe class CorpusTests
 
 	internal static Column ColumnOf(JsonElement entry)
 	{
-		var column = DoorOf(entry);
+		var column = entry.TryGetProperty("constraints", out var constraints) ? CheckedOf(entry, constraints) : DoorOf(entry);
 		if (entry.TryGetProperty("tokens", out var tokens))
 			column = column.WithTokens([.. tokens.EnumerateArray().Select(token => token.GetString()!)]);
 		if (entry.TryGetProperty("options", out var options))
@@ -113,6 +113,63 @@ public sealed unsafe class CorpusTests
 			var other => throw new InvalidOperationException($"unknown door {other}"),
 		};
 	}
+
+	/// <summary>A plan entry that declares constraints, through the factory of its door.</summary>
+	static Column CheckedOf(JsonElement entry, JsonElement declared)
+	{
+		var ordinal = entry.GetProperty("ordinal").GetInt32();
+		var format = FormatOf(entry) ?? NumFormat.Invariant;
+		return entry.GetProperty("door").GetString() switch
+		{
+			"i8" => Column.SByte(ordinal, format, Numeric<sbyte>(declared)),
+			"i16" => Column.Int16(ordinal, format, Numeric<short>(declared)),
+			"i32" => Column.Int32(ordinal, format, Numeric<int>(declared)),
+			"i64" => Column.Int64(ordinal, format, Numeric<long>(declared)),
+			"u8" => Column.Byte(ordinal, format, Numeric<byte>(declared)),
+			"u16" => Column.UInt16(ordinal, format, Numeric<ushort>(declared)),
+			"u32" => Column.UInt32(ordinal, format, Numeric<uint>(declared)),
+			"u64" => Column.UInt64(ordinal, format, Numeric<ulong>(declared)),
+			"f32" => Column.Single(ordinal, format, Numeric<float>(declared)),
+			"f64" => Column.Double(ordinal, format, Numeric<double>(declared)),
+			"decimal" => Column.Decimal(ordinal, format, Numeric<decimal>(declared)),
+			"text" => Column.Text(ordinal, new Constraints<string>(
+				minLength: declared.TryGetProperty("minLength", out var fewest) ? fewest.GetInt32() : null,
+				maxLength: declared.TryGetProperty("maxLength", out var most) ? most.GetInt32() : null,
+				trim: declared.TryGetProperty("trim", out var trim) && trim.GetBoolean(),
+				caseSensitive: declared.TryGetProperty("caseSensitive", out var exact) && exact.GetBoolean(),
+				@enum: EnumOf(declared))),
+			var other => throw new InvalidOperationException($"no checked door {other}"),
+		};
+	}
+
+	/// <summary>A numeric declaration in the corpus's shape: every bound, step and entry a decimal's text.</summary>
+	static Constraints<T> Numeric<T>(JsonElement declared) where T : notnull
+	{
+		ConstraintValue? Bound(string keyword) =>
+			declared.TryGetProperty(keyword, out var bound) ? (ConstraintValue?)bound.GetString()! : null;
+		return new(
+			minimum: Bound("minimum"),
+			exclusiveMinimum: Bound("exclusiveMinimum"),
+			maximum: Bound("maximum"),
+			exclusiveMaximum: Bound("exclusiveMaximum"),
+			multipleOf: Bound("multipleOf"),
+			rounding: declared.TryGetProperty("rounding", out var rounding)
+				? rounding.GetString() switch
+				{
+					"strict" => Rounding.Strict,
+					"midpoint" => Rounding.Midpoint,
+					"floor" => Rounding.Floor,
+					"ceiling" => Rounding.Ceiling,
+					var other => throw new InvalidOperationException($"unknown rounding {other}"),
+				}
+				: Rounding.Strict,
+			@enum: EnumOf(declared));
+	}
+
+	static ConstraintValue[]? EnumOf(JsonElement declared) =>
+		declared.TryGetProperty("enum", out var entries)
+			? [.. entries.EnumerateArray().Select(entry => (ConstraintValue)entry.GetString()!)]
+			: null;
 
 	/// <summary>A door's name in the corpus.</summary>
 	internal static string DoorName(Door door) =>
@@ -208,10 +265,15 @@ public sealed unsafe class CorpusTests
 				entry["source_column"] = problem.SourceColumn!.Value;
 				entry["reason"] = problem.Reason switch
 				{
+					null => "violation",
 					CastFailure.Empty => "empty",
 					CastFailure.Malformed => "malformed",
 					_ => "out_of_range",
 				};
+				// A violation names its keyword, and has no reason; anything else has a reason and no keyword.
+				(problem.Reason is null).ShouldBe(problem.Keyword is not null, label);
+				if (problem.Keyword is { } keyword)
+					entry["keyword"] = keyword.Name;
 				if (problem.Reason != CastFailure.Empty)
 					entry["fault"] = new[] { problem.Offset, problem.Length };
 				else
@@ -280,11 +342,17 @@ public sealed unsafe class CorpusTests
 		var note = batch.Note(column, row);
 		DetailName((FaultDetail)note.Detail).ShouldBe(notes && expected.TryGetProperty("detail", out var detail) ? detail.GetString() : "none", label);
 		OriginName(batch.Origin(column, row)).ShouldBe(notes && expected.TryGetProperty("origin", out var origin) ? origin.GetString() : "cell", label);
-		(batch.Fault(column, row) is null).ShouldBe(expect == "ok", label);
+		(batch.Fault(column, row) is null).ShouldBe(expect is "ok" or "violation", label);
+		verdict.IsViolation.ShouldBe(expect == "violation", label);
 		if (batch.Fault(column, row) is { } listed)
 		{
 			listed.ShouldBe(verdict.ToFault(), label);
 			listed.DetailCode.ShouldBe((uint)note.Detail, label);
+		}
+		if (batch.Columns[column].IsChecked)
+		{
+			AssertChecked(label, batch, column, row, expected, verdict, note);
+			return;
 		}
 
 		if (expect != "ok")
@@ -412,6 +480,109 @@ public sealed unsafe class CorpusTests
 		}
 	}
 
+	/// <summary>
+	/// Holds a constrained column's cell to what the corpus says of it, through the checked getter:
+	/// a value with its <c>adjusted</c> flag and <c>enum</c> match, a fault, or a violation with its
+	/// keyword and the value as cast.
+	/// </summary>
+	static void AssertChecked(string label, Batch batch, int column, int row, JsonElement expected, CellVerdict verdict, Native.RawCellNote note)
+	{
+		var door = batch.Columns[column].Door;
+		var (judged, value) = door switch
+		{
+			Door.SByte => Judged(batch.GetChecked<sbyte>(column, row)),
+			Door.Int16 => Judged(batch.GetChecked<short>(column, row)),
+			Door.Int32 => Judged(batch.GetChecked<int>(column, row)),
+			Door.Int64 => Judged(batch.GetChecked<long>(column, row)),
+			Door.Byte => Judged(batch.GetChecked<byte>(column, row)),
+			Door.UInt16 => Judged(batch.GetChecked<ushort>(column, row)),
+			Door.UInt32 => Judged(batch.GetChecked<uint>(column, row)),
+			Door.UInt64 => Judged(batch.GetChecked<ulong>(column, row)),
+			Door.Single => Judged(batch.GetChecked<float>(column, row)),
+			Door.Double => Judged(batch.GetChecked<double>(column, row)),
+			Door.Decimal => Judged(batch.GetChecked<decimal>(column, row)),
+			Door.Text => Judged(batch.GetChecked<string>(column, row)),
+			_ => throw new InvalidOperationException($"{label}: no checked door {door}"),
+		};
+		// The plain getters refuse the column: a violation is no fault, and they would read it as passed.
+		Should.Throw<InvalidOperationException>(() =>
+		{
+			if (door == Door.Text)
+				batch.TryGetText(column, row, out _);
+			else
+				FaultOf(batch, column, row, door);
+		}, label);
+		var expect = expected.GetProperty("expect").GetString();
+		switch (judged)
+		{
+			case Checked<object> passed:
+				expect.ShouldBe("ok", label);
+				passed.Adjusted.ShouldBe(expected.GetProperty("adjusted").GetBoolean(), label);
+				passed.EnumIndex.ShouldBe(expected.TryGetProperty("enum_index", out var index) ? index.GetInt32() : null, label);
+				break;
+			case Violation<object> broken:
+				expect.ShouldBe("violation", label);
+				broken.Keyword.Name.ShouldBe(expected.GetProperty("keyword").GetString(), label);
+				var span = expected.GetProperty("fault");
+				(broken.Offset, broken.Length).ShouldBe((span[0].GetInt32(), span[1].GetInt32()), label);
+				(verdict.Offset, verdict.Length).ShouldBe((broken.Offset, broken.Length), label);
+				Encoding.UTF8.GetString(batch.Raw(column, row)).ShouldBe(expected.GetProperty("raw").GetString(), label);
+				break;
+			case Fault fault:
+				fault.ShouldBe(verdict.ToFault() with { DetailCode = (uint)note.Detail }, label);
+				fault.Reason.ShouldBe(expect switch
+				{
+					"empty" => CastFailure.Empty,
+					"malformed" => CastFailure.Malformed,
+					_ => CastFailure.OutOfRange,
+				}, label);
+				if (expected.TryGetProperty("fault", out var at))
+				{
+					(fault.Offset, fault.Length).ShouldBe((at[0].GetInt32(), at[1].GetInt32()), label);
+					if (expected.TryGetProperty("raw_hex", out var hex))
+						Convert.ToHexStringLower(batch.Raw(column, row)).ShouldBe(hex.GetString(), label);
+					else
+						Encoding.UTF8.GetString(batch.Raw(column, row)).ShouldBe(expected.GetProperty("raw").GetString(), label);
+				}
+				return;
+		}
+		switch (door)
+		{
+			case Door.Text:
+				value.ShouldBe(expected.GetProperty("text").GetString(), label);
+				break;
+			case Door.Decimal:
+				var magnitude = UInt128.Parse(expected.GetProperty("magnitude").GetString()!, CultureInfo.InvariantCulture);
+				var lo = (ulong)magnitude;
+				value.ShouldBe(new decimal(
+					(int)lo, (int)(lo >> 32), (int)(uint)(magnitude >> 64),
+					expected.GetProperty("negative").GetBoolean(),
+					expected.GetProperty("scale").GetByte()), label);
+				break;
+			case Door.Single:
+				$"0x{BitConverter.SingleToUInt32Bits((float)value!):x8}".ShouldBe(expected.GetProperty("bits").GetString(), label);
+				break;
+			case Door.Double:
+				$"0x{BitConverter.DoubleToUInt64Bits((double)value!):x16}".ShouldBe(expected.GetProperty("bits").GetString(), label);
+				break;
+			default:
+				Convert.ToDecimal(value, CultureInfo.InvariantCulture).ShouldBe(expected.GetProperty("value").GetDecimal(), label);
+				break;
+		}
+	}
+
+	/// <summary>What a checked getter said, its value boxed: the passed value's or the violation's, none for a fault.</summary>
+	static (object Judged, object? Value) Judged<T>(CheckedVerdict<T> verdict) where T : notnull
+	{
+		if (verdict.TryGetValue(out Checked<T> passed))
+			return (new Checked<object>(passed.Value, passed.Adjusted, passed.EnumIndex), passed.Value);
+		verdict.TryGetValue(out Rejection<T> rejected).ShouldBeTrue();
+		if (rejected.TryGetValue(out Violation<T> broken))
+			return (new Violation<object>(broken.Keyword, broken.Value, broken.Offset, broken.Length), broken.Value);
+		rejected.TryGetValue(out Fault fault).ShouldBeTrue();
+		return (fault, null);
+	}
+
 	static T Value<T>(Verdict<T> verdict) where T : struct =>
 		verdict.TryGetValue(out Success<T> success)
 			? success.Value
@@ -537,6 +708,26 @@ public sealed unsafe class CorpusTests
 				row.Origin(column).ShouldBe(batch.Origin(column, index), label);
 				row.Fault(column).ShouldBe(batch.Fault(column, index), label);
 				var door = batch.Columns[column].Door;
+				if (batch.Columns[column].IsChecked)
+				{
+					var (mine, its) = door switch
+					{
+						Door.SByte => (row.GetChecked<sbyte>(column).ToString(), batch.GetChecked<sbyte>(column, index).ToString()),
+						Door.Int16 => (row.GetChecked<short>(column).ToString(), batch.GetChecked<short>(column, index).ToString()),
+						Door.Int32 => (row.GetChecked<int>(column).ToString(), batch.GetChecked<int>(column, index).ToString()),
+						Door.Int64 => (row.GetChecked<long>(column).ToString(), batch.GetChecked<long>(column, index).ToString()),
+						Door.Byte => (row.GetChecked<byte>(column).ToString(), batch.GetChecked<byte>(column, index).ToString()),
+						Door.UInt16 => (row.GetChecked<ushort>(column).ToString(), batch.GetChecked<ushort>(column, index).ToString()),
+						Door.UInt32 => (row.GetChecked<uint>(column).ToString(), batch.GetChecked<uint>(column, index).ToString()),
+						Door.UInt64 => (row.GetChecked<ulong>(column).ToString(), batch.GetChecked<ulong>(column, index).ToString()),
+						Door.Single => (row.GetChecked<float>(column).ToString(), batch.GetChecked<float>(column, index).ToString()),
+						Door.Double => (row.GetChecked<double>(column).ToString(), batch.GetChecked<double>(column, index).ToString()),
+						Door.Decimal => (row.GetChecked<decimal>(column).ToString(), batch.GetChecked<decimal>(column, index).ToString()),
+						_ => (row.GetChecked<string>(column).ToString(), batch.GetChecked<string>(column, index).ToString()),
+					};
+					mine.ShouldBe(its, label);
+					continue;
+				}
 				if (door == Door.Text)
 				{
 					row.TryGetText(column, out var mine).ShouldBe(batch.TryGetText(column, index, out var its), label);

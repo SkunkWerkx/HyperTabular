@@ -3,8 +3,8 @@
 //! allocates anything, and none holds a size rule of its own.
 //!
 //! A batch's bytes are what a read holds for `batch_rows` rows of a plan: each column's values and
-//! verdicts, its notes when they're on, each row's width when a read reports long rows, and the
-//! cell table. They're counted with checked arithmetic and nothing is allocated, so asking about
+//! verdicts, its notes when they're on, its checks when it declares constraints, each row's width
+//! when a read reports long rows, and the cell table. They're counted with checked arithmetic and nothing is allocated, so asking about
 //! any size is safe.
 //!
 //! A plan of no columns has no value arrays. A delimited read's cell table stops at
@@ -21,7 +21,7 @@ use crate::kernel::abi::{
     CellNote, CellVerdict, ColumnSpecWith, ERR_BATCH, ERR_CONTRACT, OK, RawBatchCheck, Slot, Span,
 };
 use crate::kernel::door::Door;
-use hypercast::{CivilDateTime, Date, Decimal, Duration, Timestamp};
+use hypercast::{CivilDateTime, Date, Decimal, Duration, RawCheck, Timestamp};
 
 /// The most bytes one batch may ask for: 4 GiB, fixed, not raisable by a caller.
 pub const BATCH_BYTES_LIMIT: u64 = 1 << 32;
@@ -172,6 +172,10 @@ pub const fn check_batch(
         let mut column = value_bytes(door) + CellVerdict::SIZE as u64;
         if notes {
             column += CellNote::SIZE as u64;
+        }
+        // A column that declares constraints is given a check a row beside its verdict.
+        if !spec.constraints.is_null() {
+            column += size_of::<RawCheck>() as u64;
         }
         row_bytes = row_bytes.saturating_add(column);
         let ordinal = spec.ordinal as u64 + 1;

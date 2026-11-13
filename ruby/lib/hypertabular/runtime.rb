@@ -89,8 +89,8 @@ module HyperTabular
 
       # The index of the first of +specs+ (Column.specs' form) the core refuses, or nil. A fill of
       # no rows judges a column's door, what it declares, its format, date options, vocabulary and
-      # tokens, and writes nothing. It answers on a state of its own, so a sheet's plan is asked
-      # the same way.
+      # tokens and constraints, and writes nothing. It answers on a state of its own, so a sheet's
+      # plan is asked the same way.
       def refused(specs)
         state = buffer(function(:hypertabular_delimited_state_size).call)
         options = buffer(Dialect::OPTIONS_BYTES)
@@ -100,8 +100,10 @@ module HyperTabular
 
         value = buffer(32)
         verdict = buffer(Columns::VERDICT_BYTES)
+        # A constrained column without checks is refused, so each is asked with them.
+        check = buffer(Columns::CHECK_BYTES)
         table = buffer(Columns::COLUMN_BUFFER_BYTES)
-        table[0, Columns::COLUMN_BUFFER_BYTES] = Columns.column_buffer(value, verdict, nil)
+        table[0, Columns::COLUMN_BUFFER_BYTES] = Columns.column_buffer(value, verdict, nil, check)
         memory = buffer(Columns::BUFFERS_WITH_BYTES)
         memory[0, Columns::WORD] = Columns.word(Columns::BUFFERS_WITH_BYTES)
         out = buffer(Delimited::FILLED_BYTES)
@@ -131,14 +133,17 @@ module HyperTabular
       end
 
       # Every RawProblem of a batch, as one binary String: +verdicts+ is each column's array as the
-      # core wrote it, +notes+ the same or nil, and +widths+ the row widths or nil.
-      def faults(verdicts, notes, rows, widths, expected, long_rows)
+      # core wrote it, +notes+ the same or nil, +checks+ each column's RawCheck array or nil (and
+      # nil for every column of a plan that declares no constraints), and +widths+ the row widths
+      # or nil.
+      def faults(verdicts, notes, checks, rows, widths, expected, long_rows)
         pinned = verdicts.map { |column| pin(column) }
         noted = notes&.map { |column| pin(column) }
+        checked = checks&.map { |column| column && pin(column) }
         table = buffer([Columns::COLUMN_BUFFER_BYTES * verdicts.size, 1].max)
         verdicts.each_index do |column|
           table[Columns::COLUMN_BUFFER_BYTES * column, Columns::COLUMN_BUFFER_BYTES] =
-            Columns.column_buffer(nil, pinned[column], noted && noted[column])
+            Columns.column_buffer(nil, pinned[column], noted && noted[column], checked && checked[column])
         end
         held = widths && pin(widths)
         cursor = buffer(8)
@@ -203,7 +208,7 @@ module HyperTabular
     # Bytes in one RawTranscoded.
     TRANSCODED_BYTES = 32
     # Bytes in one RawProblem.
-    PROBLEM_BYTES = 32
+    PROBLEM_BYTES = 36
     # The room one hypertabular_faults call lists into.
     FAULTS_BYTES = PROBLEM_BYTES * 256
     # Bytes in one RawSuggestion.

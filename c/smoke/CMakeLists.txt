@@ -98,7 +98,7 @@ if(CMAKE_CXX_COMPILER AND hypercast_FOUND)
   list(APPEND _programs smoke_corpus)
   list(APPEND _cxx_programs smoke_corpus)
   foreach(way faults_begin faults_advance rows_deref rows_advance rows_postfix destroyed moved_from
-          moved_onto sheet_destroyed)
+          moved_onto sheet_destroyed checked_get checked_text)
     set(program smoke_aborts_${way})
     add_executable(${program} aborts.cpp)
     set_target_properties(${program} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

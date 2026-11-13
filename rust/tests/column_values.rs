@@ -308,3 +308,166 @@ fn a_formula_with_no_result_is_listed_unless_the_read_kept_no_notes() {
         }
     }
 }
+
+mod checked {
+    use hypertabular::{
+        Column, Constraints, DelimitedReader, Dialect, Door, Error, Fault, KeptBatch, KeptColumn,
+        Keyword, NumericRules, Reason, Rejection, Rounding, TextRules,
+    };
+
+    fn at_most(text: &str) -> Constraints<'static, i32> {
+        let bound = hypercast::decimal_for_declaration(text).unwrap();
+        Constraints::numeric(NumericRules::new().maximum(bound), None).unwrap()
+    }
+
+    fn reader<'a>(input: &'a [u8], plan: &'a [Column]) -> DelimitedReader<'a> {
+        DelimitedReader::from_slice(input, Dialect::CSV, plan).unwrap()
+    }
+
+    #[test]
+    fn a_checked_column_reads_violations() {
+        let plan = [Column::checked(0, at_most("10"))];
+        assert!(plan[0].is_checked() && plan[0].door == Door::I32);
+        let mut reader = reader(b"n\n7\n11\nx\n\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        let passed = batch.get_checked::<i32>(0, 0).unwrap();
+        assert_eq!(
+            (passed.value, passed.adjusted, passed.enum_index),
+            (7, false, None)
+        );
+        let Err(Rejection::Violation(broken)) = batch.get_checked::<i32>(0, 1) else {
+            panic!("a violation");
+        };
+        assert_eq!(
+            (broken.keyword, broken.value, broken.offset, broken.len),
+            (Keyword::Maximum, 11, 0, 2)
+        );
+        let Err(Rejection::Fault(fault)) = batch.get_checked::<i32>(0, 2) else {
+            panic!("a fault");
+        };
+        assert_eq!(fault.reason, Reason::Malformed);
+        let problems: Vec<_> = batch.faults().collect();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(
+            (problems[0].row, problems[0].keyword),
+            (1, Some(Keyword::Maximum))
+        );
+        assert_eq!(problems[0].reason, None);
+        assert_eq!((problems[1].row, problems[1].keyword), (2, None));
+        // Kept, with its checks: the same list. Without them, no violation.
+        let lines: Vec<u32> = (0..batch.rows()).map(|row| batch.line(row)).collect();
+        let with =
+            [KeptColumn::new(batch.verdicts(0), batch.notes(0), 0).with_checks(batch.checks(0))];
+        let kept: Vec<_> = KeptBatch::new(&lines, &with, None)
+            .unwrap()
+            .faults()
+            .collect();
+        assert_eq!(kept, problems);
+        let without = [KeptColumn::new(batch.verdicts(0), batch.notes(0), 0)];
+        let kept: Vec<_> = KeptBatch::new(&lines, &without, None)
+            .unwrap()
+            .faults()
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].row, 2);
+        // A violation cast, so a kept column reads it as no fault, and counts only the one fault.
+        for column in [&with[0], &without[0]] {
+            assert_eq!(column.verdict(1), Some(Ok(())));
+            assert!(column.verdict(2).is_some_and(|verdict| verdict.is_err()));
+            assert_eq!(column.fault_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_rounded_value_is_flagged_adjusted() {
+        let half = hypercast::decimal_for_declaration("0.5").unwrap();
+        let rules = NumericRules::new().multiple_of(half, Rounding::Midpoint);
+        let plan = [Column::checked(
+            0,
+            Constraints::<f64>::numeric(rules, None).unwrap(),
+        )];
+        let mut reader = reader(b"n\n1.3\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        let passed = batch.get_checked::<f64>(0, 0).unwrap();
+        assert_eq!((passed.value, passed.adjusted), (1.5, true));
+    }
+
+    #[test]
+    fn a_mutated_door_is_refused_before_any_cell() {
+        // To a door that takes no constraints, and to one whose own type would take these.
+        for door in [Door::Uuid, Door::I64, Door::Text] {
+            let mut column = Column::checked(0, at_most("10"));
+            column.door = door;
+            let plan = [column];
+            match DelimitedReader::from_slice(b"n\n1\n", Dialect::CSV, &plan) {
+                Err(Error::Plan { column: 0 }) => {}
+                Err(other) => panic!("{door:?}: {other:?}"),
+                Ok(_) => panic!("{door:?}: a mutated door read"),
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "declares constraints")]
+    fn the_plain_getter_panics_on_a_constrained_column() {
+        let plan = [Column::checked(0, at_most("10"))];
+        let mut reader = reader(b"n\n11\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        let _ = batch.get::<i32>(0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "declares constraints")]
+    fn the_plain_text_getter_panics_on_a_constrained_column() {
+        let text = Constraints::text(TextRules::new().max_length(1), None).unwrap();
+        let plan = [Column::checked(0, text)];
+        let mut reader = reader(b"n\nab\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        let _ = batch.text(0, 0);
+    }
+
+    #[test]
+    fn an_unconstrained_column_keeps_its_faults_under_get_checked() {
+        let plan = [Column::i32(0), Column::text(0)];
+        let mut reader = reader(b"n\n7\n\"\"\nx\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        // No checks are kept for it, so none can be stale.
+        assert!(batch.checks(0).is_empty());
+        let passed = batch.get_checked::<i32>(0, 0).unwrap();
+        assert_eq!(
+            (passed.value, passed.adjusted, passed.enum_index),
+            (7, false, None)
+        );
+        let empty = |fault: &Fault| fault.reason == Reason::Empty;
+        assert!(matches!(batch.get_checked::<i32>(0, 1), Err(Rejection::Fault(f)) if empty(&f)));
+        assert!(matches!(
+            batch.get_checked::<i32>(0, 2),
+            Err(Rejection::Fault(Fault {
+                reason: Reason::Malformed,
+                ..
+            }))
+        ));
+        let text = batch.text_checked(1, 2).unwrap();
+        assert_eq!(
+            (text.value, text.adjusted, text.enum_index),
+            ("x", false, None)
+        );
+        assert!(matches!(batch.text_checked(1, 1), Err(Rejection::Fault(f)) if empty(&f)));
+    }
+
+    #[test]
+    fn a_text_enum_match_delivers_the_declared_entry() {
+        let entries: &[&str] = &["Female", "Male", "Other"];
+        let text = Constraints::text(TextRules::new().trim(true), Some(entries)).unwrap();
+        let plan = [Column::checked(0, text)];
+        let mut reader = reader(b"n\n MALE \nunknown\n", &plan);
+        let batch = reader.read().unwrap().unwrap();
+        let passed = batch.text_checked(0, 0).unwrap();
+        assert_eq!((passed.value, passed.enum_index), ("Male", Some(1)));
+        let row = batch.row(1);
+        let Err(Rejection::Violation(broken)) = row.text_checked(0) else {
+            panic!("a violation");
+        };
+        assert_eq!((broken.keyword, broken.value), (Keyword::Enum, "unknown"));
+    }
+}

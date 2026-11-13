@@ -10,6 +10,8 @@ use crate::kernel::abi::{ColumnBufferWith, ERR_CONTRACT, OK, RawDelimitedOptions
 /// The list runs by row, then within a row a row-level entry first, then by plan column. It holds:
 ///
 /// - A cell at reason `2` (malformed) or `3` (out of range).
+/// - A cell at reason `4` (a violation of a constraint its column declares), with the keyword its
+///   column's `checks` names. A column with no `checks` can't name one, so lists none.
 /// - A cell at reason `1` (empty) whose note says [`CellNote::ORIGIN_UNCACHED`]: a workbook's formula
 ///   with no cached value. A column with no notes can't say so, and its cell reads as a blank.
 /// - Under [`RawDelimitedOptions::LONG_ROWS_REPORT`], a row with more than `expected_width` cells.
@@ -27,8 +29,8 @@ use crate::kernel::abi::{ColumnBufferWith, ERR_CONTRACT, OK, RawDelimitedOptions
 /// [`CellNote::ORIGIN_UNCACHED`]: crate::kernel::abi::CellNote::ORIGIN_UNCACHED
 ///
 /// # Safety
-/// Each column's `verdicts`, and its `notes` unless they're null, hold `rows` elements, at any
-/// alignment.
+/// Each column's `verdicts`, and its `notes` and `checks` unless they're null, hold `rows`
+/// elements, at any alignment.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn faults(
     columns: &[ColumnBufferWith],
@@ -120,13 +122,19 @@ unsafe fn cell(column: &ColumnBufferWith, row: u32, plan_column: u32) -> Option<
     const EMPTY: u32 = Reason::Empty as u32;
     const MALFORMED: u32 = Reason::Malformed as u32;
     const OUT_OF_RANGE: u32 = Reason::OutOfRange as u32;
+    const VIOLATION: u32 = CellVerdict::VIOLATION;
 
     let at = row as usize;
     // SAFETY: per the function contract.
     let verdict: CellVerdict = unsafe { column.verdicts.add(at).read_unaligned() };
-    if !matches!(verdict.reason, EMPTY | MALFORMED | OUT_OF_RANGE) {
-        return None;
-    }
+    let keyword = match verdict.reason {
+        EMPTY | MALFORMED | OUT_OF_RANGE => 0,
+        VIOLATION if !column.checks.is_null() => {
+            // SAFETY: per the function contract.
+            unsafe { column.checks.add(at).read_unaligned() }.keyword
+        }
+        _ => return None,
+    };
     let note = if column.notes.is_null() {
         CellNote::default()
     } else {
@@ -146,5 +154,6 @@ unsafe fn cell(column: &ColumnBufferWith, row: u32, plan_column: u32) -> Option<
         len: verdict.len,
         expected: 0,
         found: 0,
+        keyword,
     })
 }

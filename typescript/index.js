@@ -44,6 +44,7 @@ const Column = nativeClass('Column', [
   'time',
   'duration',
   'text',
+  'checked',
 ])
 const DelimitedReader = nativeClass('DelimitedReader', [
   'fromBytes',
@@ -88,6 +89,9 @@ class Batch {
   get(column, row) {
     return native.batchGet(this.#store, column, row)
   }
+  getChecked(column, row) {
+    return native.batchGetChecked(this.#store, column, row)
+  }
   detail(column, row) {
     return native.batchDetail(this.#store, column, row)
   }
@@ -105,6 +109,9 @@ class Batch {
   }
   column(column) {
     return native.batchColumn(this.#store, column)
+  }
+  columnChecked(column) {
+    return native.batchColumnChecked(this.#store, column)
   }
   faultCount(column) {
     return native.batchFaultCount(this.#store, column)
@@ -136,6 +143,9 @@ class Row {
   }
   get(column) {
     return this.#batch.get(column, this.#index)
+  }
+  getChecked(column) {
+    return this.#batch.getChecked(column, this.#index)
   }
   detail(column) {
     return this.#batch.detail(column, this.#index)

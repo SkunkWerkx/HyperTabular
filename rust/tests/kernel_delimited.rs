@@ -1870,6 +1870,7 @@ fn read_split(
                     values: values[column].as_mut_ptr().cast(),
                     verdicts: verdicts[column].as_mut_ptr(),
                     notes: notes[column].as_mut_ptr(),
+                    checks: core::ptr::null_mut(),
                 })
                 .collect();
             let mut buffers = BuffersWith::empty();
@@ -2460,6 +2461,7 @@ fn date_options_reach_the_door() {
         values: values.as_mut_ptr().cast(),
         verdicts: verdicts.as_mut_ptr(),
         notes: std::ptr::null_mut(),
+        checks: core::ptr::null_mut(),
     }];
     let mut buffers = BuffersWith::empty();
     buffers.cells = cells.as_mut_ptr();
@@ -2618,6 +2620,7 @@ fn null_notes_write_nothing() {
             values: values.as_mut_ptr().cast(),
             verdicts: verdicts.as_mut_ptr(),
             notes: std::ptr::null_mut(),
+            checks: core::ptr::null_mut(),
         })
         .collect();
     let mut buffers = BuffersWith::empty();
@@ -2682,6 +2685,7 @@ fn refused(
             values: values.as_mut_ptr().cast(),
             verdicts: verdicts.as_mut_ptr(),
             notes: notes.as_mut_ptr(),
+            checks: core::ptr::null_mut(),
         })
         .collect();
     let mut buffers = BuffersWith::empty();
@@ -2949,6 +2953,7 @@ fn one_point_oh_callers_keep_their_64_bytes() {
         values: values.as_mut_ptr().cast(),
         verdicts: verdicts.as_mut_ptr(),
         notes: notes.as_mut_ptr(),
+        checks: core::ptr::null_mut(),
     }];
     let mut buffers = BuffersWith::empty();
     buffers.cells = cells.as_mut_ptr();
@@ -3213,6 +3218,7 @@ fn read_chaotic(
                             values: values.as_mut_ptr().cast(),
                             verdicts: verdicts.as_mut_ptr(),
                             notes: std::ptr::null_mut(),
+                            checks: core::ptr::null_mut(),
                         })
                         .collect();
                     let mut buffers = BuffersWith::empty();
@@ -3823,6 +3829,7 @@ fn call_with_room(
         values: values.as_mut_ptr().cast(),
         verdicts: verdicts.as_mut_ptr(),
         notes: std::ptr::null_mut(),
+        checks: core::ptr::null_mut(),
     }];
     let mut b = BuffersWith::empty();
     b.cells = cells.as_mut_ptr();
@@ -3989,6 +3996,7 @@ fn a_note_is_cleared_by_the_next_batch() {
         values: values.as_mut_ptr().cast(),
         verdicts: verdicts.as_mut_ptr(),
         notes: notes.as_mut_ptr(),
+        checks: core::ptr::null_mut(),
     }];
     let mut buffers = BuffersWith::empty();
     buffers.cells = cells.as_mut_ptr();
@@ -4621,6 +4629,7 @@ mod faulting {
                 } else {
                     ptr::null_mut()
                 },
+                checks: core::ptr::null_mut(),
             })
             .collect();
         let mut widths = vec![0u32; ROWS];
@@ -4677,6 +4686,7 @@ mod faulting {
             len: 7,
             expected: 7,
             found: 7,
+            keyword: 0,
         };
         let mut all = Vec::new();
         let mut cursor = 0u64;

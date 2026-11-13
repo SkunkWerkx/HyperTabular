@@ -1,3 +1,4 @@
+import Foundation
 import HyperTabularCore
 
 /// The door a column is cast through: HyperCast's, plus ``text`` for the bytes themselves.
@@ -76,13 +77,23 @@ public struct Column: Equatable, Sendable {
     public let dateOptions: DateOptions
     /// What the door declares beside itself, as the core numbers it.
     let declared: UInt32
+    /// What the column's cells must also meet, as the core reads it: `nil` declares none.
+    let constraints: Declaration?
 
-    init(_ ordinal: Int, _ door: Door, declared: UInt32 = 0, format: NumFormat = .invariant) {
+    /// Whether the column declares HyperCast's constraints, and so is read with
+    /// ``Batch/checked(_:row:as:)``.
+    public var isChecked: Bool { constraints != nil }
+
+    init(
+        _ ordinal: Int, _ door: Door, declared: UInt32 = 0, format: NumFormat = .invariant,
+        constraints: Declaration? = nil
+    ) {
         precondition(ordinal >= 0, "A column's ordinal is zero-based; got \(ordinal)")
         self.ordinal = ordinal
         self.door = door
         self.declared = declared
         self.format = format
+        self.constraints = constraints
         tokens = nil
         dateOptions = .none
     }
@@ -92,8 +103,25 @@ public struct Column: Equatable, Sendable {
         door = column.door
         declared = column.declared
         format = column.format
+        constraints = column.constraints
         self.tokens = tokens
         self.dateOptions = dateOptions
+    }
+
+    /// A declaration of HyperCast's constraints with its type let go, as a column holds it: the
+    /// 104 bytes the core reads, the packed `enum`, and at the text door the entries as declared,
+    /// which a match hands back. The factories take `Constraints<T>` of the door's own type, so a
+    /// column can't pair one door with another's.
+    struct Declaration: Equatable, Sendable {
+        let raw: [UInt8]
+        let packed: [UInt8]
+        let entries: [String]?
+
+        init<T>(_ constraints: Constraints<T>) {
+            raw = withUnsafeBytes(of: Interop.rawConstraints(constraints)) { Array($0) }
+            packed = Interop.packedEnum(constraints)
+            entries = T.self == String.self ? constraints.enum?.map(\.description) : nil
+        }
     }
 
     /// This column, with tokens of its own in place of the dialect's or the sheet's: a cell whose
@@ -127,9 +155,25 @@ public struct Column: Equatable, Sendable {
         Column(ordinal, .i8, format: format)
     }
 
+    /// An `Int8` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func i8(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Int8>
+    ) -> Column {
+        Column(ordinal, .i8, format: format, constraints: Declaration(constraints))
+    }
+
     /// An `Int16` column under a declared notation — the invariant one unless stated.
     public static func i16(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .i16, format: format)
+    }
+
+    /// An `Int16` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func i16(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Int16>
+    ) -> Column {
+        Column(ordinal, .i16, format: format, constraints: Declaration(constraints))
     }
 
     /// An `Int32` column under a declared notation — the invariant one unless stated.
@@ -137,9 +181,25 @@ public struct Column: Equatable, Sendable {
         Column(ordinal, .i32, format: format)
     }
 
+    /// An `Int32` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func i32(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Int32>
+    ) -> Column {
+        Column(ordinal, .i32, format: format, constraints: Declaration(constraints))
+    }
+
     /// An `Int64` column under a declared notation — the invariant one unless stated.
     public static func i64(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .i64, format: format)
+    }
+
+    /// An `Int64` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func i64(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Int64>
+    ) -> Column {
+        Column(ordinal, .i64, format: format, constraints: Declaration(constraints))
     }
 
     /// A `UInt8` column under a declared notation — the invariant one unless stated.
@@ -147,9 +207,25 @@ public struct Column: Equatable, Sendable {
         Column(ordinal, .u8, format: format)
     }
 
+    /// An `UInt8` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func u8(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<UInt8>
+    ) -> Column {
+        Column(ordinal, .u8, format: format, constraints: Declaration(constraints))
+    }
+
     /// A `UInt16` column under a declared notation — the invariant one unless stated.
     public static func u16(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .u16, format: format)
+    }
+
+    /// An `UInt16` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func u16(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<UInt16>
+    ) -> Column {
+        Column(ordinal, .u16, format: format, constraints: Declaration(constraints))
     }
 
     /// A `UInt32` column under a declared notation — the invariant one unless stated.
@@ -157,9 +233,25 @@ public struct Column: Equatable, Sendable {
         Column(ordinal, .u32, format: format)
     }
 
+    /// An `UInt32` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func u32(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<UInt32>
+    ) -> Column {
+        Column(ordinal, .u32, format: format, constraints: Declaration(constraints))
+    }
+
     /// A `UInt64` column under a declared notation — the invariant one unless stated.
     public static func u64(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .u64, format: format)
+    }
+
+    /// An `UInt64` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func u64(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<UInt64>
+    ) -> Column {
+        Column(ordinal, .u64, format: format, constraints: Declaration(constraints))
     }
 
     /// A `Float` column under a declared notation — the invariant one unless stated.
@@ -167,14 +259,38 @@ public struct Column: Equatable, Sendable {
         Column(ordinal, .f32, format: format)
     }
 
+    /// A `Float` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func f32(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Float>
+    ) -> Column {
+        Column(ordinal, .f32, format: format, constraints: Declaration(constraints))
+    }
+
     /// A `Double` column under a declared notation — the invariant one unless stated.
     public static func f64(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .f64, format: format)
     }
 
+    /// A `Double` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func f64(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Double>
+    ) -> Column {
+        Column(ordinal, .f64, format: format, constraints: Declaration(constraints))
+    }
+
     /// An exact `Decimal` column under a declared notation — the invariant one unless stated.
     public static func decimal(_ ordinal: Int, format: NumFormat = .invariant) -> Column {
         Column(ordinal, .decimal, format: format)
+    }
+
+    /// An exact `Decimal` column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``.
+    public static func decimal(
+        _ ordinal: Int, format: NumFormat = .invariant, constraints: Constraints<Decimal>
+    ) -> Column {
+        Column(ordinal, .decimal, format: format, constraints: Declaration(constraints))
     }
 
     /// A `UUID` column.
@@ -214,6 +330,12 @@ public struct Column: Equatable, Sendable {
 
     /// A text column: the cell's bytes themselves, untrimmed.
     public static func text(_ ordinal: Int) -> Column { Column(ordinal, .text) }
+
+    /// A text column whose cells must also meet `constraints`: read with
+    /// ``Batch/checked(_:row:as:)``, where an `enum` match reads as the entry as declared.
+    public static func text(_ ordinal: Int, constraints: Constraints<String>) -> Column {
+        Column(ordinal, .text, constraints: Declaration(constraints))
+    }
 
     /// Bytes one value of this column's door takes in a column buffer.
     var valueSize: Int {

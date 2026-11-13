@@ -10,11 +10,14 @@ final class Judge {
     // Room for one value of any door and its verdict, though the core writes neither.
     private let value: UnsafeMutableRawPointer
     private let verdict: UnsafeMutablePointer<HyperTabularCellVerdict>
+    // And a check, which a column that declares constraints must be given.
+    private let check: UnsafeMutablePointer<HyperTabularRawCheck>
 
     init() {
         state = .allocate(capacity: 1)
         value = .allocate(byteCount: 16, alignment: 16)
         verdict = .allocate(capacity: 1)
+        check = .allocate(capacity: 1)
         var options = HyperTabularRawDelimitedOptions()
         options.size = UInt32(HyperTabularRawDelimitedOptions_SIZE)
         options.separator = UInt8(ascii: ",")
@@ -29,6 +32,7 @@ final class Judge {
         state.deallocate()
         value.deallocate()
         verdict.deallocate()
+        check.deallocate()
     }
 
     /// Whether the core would read a column of this spec.
@@ -38,6 +42,7 @@ final class Judge {
         buffer.size = columnBufferSize
         buffer.values = value
         buffer.verdicts = verdict
+        buffer.checks = spec.constraints == nil ? nil : check
         var memory = HyperTabularBuffersWith()
         memory.size = buffersSize
         var filled = HyperTabularFilled()
@@ -70,10 +75,15 @@ final class Columns {
     let verdictBase: [UnsafeMutablePointer<CellVerdict>]
     /// Each column's notes: `nil` with notes off.
     let noteBase: [UnsafeMutablePointer<HyperTabularCellNote>]?
+    /// Each column's checks, one a row: `nil` for a column that declares no constraints.
+    let checkBase: [UnsafeMutablePointer<HyperTabularRawCheck>?]
     /// How many cells each row had, for a read that asks: `nil` when none does.
     let rowWidths: UnsafeMutablePointer<UInt32>?
-    /// The tokens and month vocabularies the specs point at, held for as long as they do.
+    /// The tokens, month vocabularies and `enum` lists the specs point at, held for as long as
+    /// they do.
     private let lists: [UnsafeMutableBufferPointer<UInt8>]
+    /// The constraints the specs point at, each 8-aligned as the core reads it.
+    private let declarations: [UnsafeMutableRawPointer]
 
     /// The widest ordinal a plan may name: 2²⁰ − 1. No workbook format has more columns
     /// (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the cap one row of cell table
@@ -157,6 +167,7 @@ final class Columns {
         var furthest = -1
         var reaching = 0
         var held = [UnsafeMutableBufferPointer<UInt8>]()
+        var declared = [UnsafeMutableRawPointer]()
         var built = [HyperTabularColumnSpecWith]()
         do {
             let judge = Judge()
@@ -184,11 +195,23 @@ final class Columns {
                     spec.tokens = UnsafePointer(list.baseAddress)
                     spec.tokens_len = UInt(packed.count)
                 }
+                if let constraints = column.constraints {
+                    let raw = UnsafeMutableRawPointer.allocate(
+                        byteCount: constraints.raw.count, alignment: MemoryLayout<UInt64>.alignment)
+                    declared.append(raw)
+                    raw.copyMemory(from: constraints.raw, byteCount: constraints.raw.count)
+                    spec.constraints = UnsafePointer(raw.assumingMemoryBound(to: HyperTabularRawConstraints.self))
+                    let list = Self.hold(constraints.packed)
+                    held.append(list)
+                    spec.enum_ptr = UnsafePointer(list.baseAddress)
+                    spec.enum_len = UInt(constraints.packed.count)
+                }
                 guard judge.accepts(spec) else { throw PlanError.refused(column: index) }
                 built.append(spec)
             }
         } catch {
             for list in held { list.deallocate() }
+            for raw in declared { raw.deallocate() }
             throw error
         }
         do {
@@ -197,9 +220,11 @@ final class Columns {
                 notes: notes, widths: wantsWidths, sheet: sheet)
         } catch {
             for list in held { list.deallocate() }
+            for raw in declared { raw.deallocate() }
             throw error
         }
         lists = held
+        declarations = declared
         widest = reaching
         self.plan = plan
         self.batchRows = batchRows
@@ -209,6 +234,7 @@ final class Columns {
         var values = [UnsafeMutableRawPointer]()
         var verdicts = [UnsafeMutablePointer<CellVerdict>]()
         var noted = [UnsafeMutablePointer<HyperTabularCellNote>]()
+        var checked = [UnsafeMutablePointer<HyperTabularRawCheck>?]()
         for (index, column) in plan.enumerated() {
             // 16-aligned, the widest any value is, so every door's values sit as Swift lays
             // that type out and can be handed back as a buffer of it.
@@ -227,8 +253,14 @@ final class Columns {
                 noted.append(note)
                 buffer.notes = note
             }
+            // As many as there are verdicts: the core writes one beside each.
+            let check: UnsafeMutablePointer<HyperTabularRawCheck>? =
+                column.constraints == nil ? nil : .allocate(capacity: batchRows)
+            checked.append(check)
+            buffer.checks = check
             (buffers + index).initialize(to: buffer)
         }
+        checkBase = checked
         valueBase = values
         verdictBase = verdicts
         noteBase = notes ? noted : nil
@@ -242,7 +274,9 @@ final class Columns {
         for value in valueBase { value.deallocate() }
         for verdict in verdictBase { verdict.deallocate() }
         for note in noteBase ?? [] { note.deallocate() }
+        for check in checkBase { check?.deallocate() }
         for list in lists { list.deallocate() }
+        for raw in declarations { raw.deallocate() }
     }
 
     /// A copy of `list` at an address that is never null, an empty list's included.

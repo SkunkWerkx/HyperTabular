@@ -15,6 +15,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import io.github.skunkwerkx.hypercast.CastFailure;
+import io.github.skunkwerkx.hypercast.Checked;
+import io.github.skunkwerkx.hypercast.CheckedVerdict;
+import io.github.skunkwerkx.hypercast.Constraints;
 import io.github.skunkwerkx.hypercast.DateOptions;
 import io.github.skunkwerkx.hypercast.DateOrder;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
@@ -23,8 +26,10 @@ import io.github.skunkwerkx.hypercast.FaultDetail;
 import io.github.skunkwerkx.hypercast.Grouping;
 import io.github.skunkwerkx.hypercast.MonthNames;
 import io.github.skunkwerkx.hypercast.NumFormat;
+import io.github.skunkwerkx.hypercast.Rounding;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
+import io.github.skunkwerkx.hypercast.Violation;
 import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -157,7 +162,8 @@ final class CorpusTest {
     }
 
     static Column columnOf(JsonObject entry) {
-        Column column = doorOf(entry);
+        Column column =
+                entry.has("constraints") ? checkedOf(entry, entry.getAsJsonObject("constraints")) : doorOf(entry);
         if (entry.has("tokens")) {
             column = column.withTokens(stringsOf(entry.getAsJsonArray("tokens")));
         }
@@ -196,6 +202,73 @@ final class CorpusTest {
             case "text" -> Column.text(ordinal);
             default -> throw new IllegalStateException("unknown door " + door);
         };
+    }
+
+    /** A plan entry that declares constraints, through the factory of its door. */
+    private static Column checkedOf(JsonObject entry, JsonObject declared) {
+        int ordinal = entry.get("ordinal").getAsInt();
+        NumFormat format = formatOf(entry);
+        String door = entry.get("door").getAsString();
+        return switch (door) {
+            case "i8" -> Column.i8(ordinal, format, numeric(Constraints.i8(), declared));
+            case "i16" -> Column.i16(ordinal, format, numeric(Constraints.i16(), declared));
+            case "i32" -> Column.i32(ordinal, format, numeric(Constraints.i32(), declared));
+            case "i64" -> Column.i64(ordinal, format, numeric(Constraints.i64(), declared));
+            case "u8" -> Column.u8(ordinal, format, numeric(Constraints.u8(), declared));
+            case "u16" -> Column.u16(ordinal, format, numeric(Constraints.u16(), declared));
+            case "u32" -> Column.u32(ordinal, format, numeric(Constraints.u32(), declared));
+            case "u64" -> Column.u64(ordinal, format, numeric(Constraints.u64(), declared));
+            case "f32" -> Column.f32(ordinal, format, numeric(Constraints.f32(), declared));
+            case "f64" -> Column.f64(ordinal, format, numeric(Constraints.f64(), declared));
+            case "decimal" -> Column.decimal(ordinal, format, numeric(Constraints.decimal(), declared));
+            case "text" -> {
+                Constraints.Builder<String> text = Constraints.text();
+                if (declared.has("minLength")) {
+                    text.minLength(declared.get("minLength").getAsInt());
+                }
+                if (declared.has("maxLength")) {
+                    text.maxLength(declared.get("maxLength").getAsInt());
+                }
+                if (declared.has("trim")) {
+                    text.trim(declared.get("trim").getAsBoolean());
+                }
+                if (declared.has("caseSensitive")) {
+                    text.caseSensitive(declared.get("caseSensitive").getAsBoolean());
+                }
+                if (declared.has("enum")) {
+                    text.enumOf(stringsOf(declared.getAsJsonArray("enum")));
+                }
+                yield Column.text(ordinal, text.build());
+            }
+            default -> throw new IllegalStateException("no checked door " + door);
+        };
+    }
+
+    /** A numeric declaration in the corpus's shape: every bound, step and entry a decimal's text. */
+    private static <T> Constraints<T> numeric(Constraints.Builder<T> builder, JsonObject declared) {
+        if (declared.has("minimum")) {
+            builder.minimum(declared.get("minimum").getAsString());
+        }
+        if (declared.has("exclusiveMinimum")) {
+            builder.exclusiveMinimum(declared.get("exclusiveMinimum").getAsString());
+        }
+        if (declared.has("maximum")) {
+            builder.maximum(declared.get("maximum").getAsString());
+        }
+        if (declared.has("exclusiveMaximum")) {
+            builder.exclusiveMaximum(declared.get("exclusiveMaximum").getAsString());
+        }
+        if (declared.has("multipleOf")) {
+            builder.multipleOf(declared.get("multipleOf").getAsString());
+        }
+        if (declared.has("rounding")) {
+            builder.rounding(
+                    Rounding.valueOf(declared.get("rounding").getAsString().toUpperCase(Locale.ROOT)));
+        }
+        if (declared.has("enum")) {
+            builder.enumOf(stringsOf(declared.getAsJsonArray("enum")));
+        }
+        return builder.build();
     }
 
     /** The Java type a door's value is presented as: what {@link Batch#get} is asked for. */
@@ -293,10 +366,20 @@ final class CorpusTest {
                 label);
         // The verdict array, read in place, says what the per-cell verdict says.
         MemorySegment entry = batch.verdicts(column).asSlice(row * CellVerdict.LAYOUT.byteSize());
-        assertEquals(verdict.isOk() ? 0 : verdict.reason().code(), entry.get(ValueLayout.JAVA_INT, 8), label);
+        assertEquals(
+                verdict.isOk()
+                        ? 0
+                        : verdict.isViolation() ? 4 : verdict.reason().code(),
+                entry.get(ValueLayout.JAVA_INT, 8),
+                label);
         assertEquals(verdict.offset(), entry.get(ValueLayout.JAVA_INT, 0), label);
         assertEquals(verdict.length(), entry.get(ValueLayout.JAVA_INT, 4), label);
         assertEquals(verdict.isOk(), batch.isOk(column, row), label);
+        assertEquals(expect.equals("violation"), verdict.isViolation(), label);
+        if (batch.columns().get(column).isChecked()) {
+            assertChecked(label, batch, column, row, expected, verdict);
+            return;
+        }
 
         if (!expect.equals("ok")) {
             assertFalse(verdict.isOk(), label);
@@ -370,6 +453,87 @@ final class CorpusTest {
     }
 
     /**
+     * Holds a constrained column's cell to what the corpus says of it, through the checked getter:
+     * a value with its {@code adjusted} flag and {@code enum} match, a fault, or a violation with its
+     * keyword and the value as cast.
+     */
+    private static void assertChecked(
+            String label, Batch batch, int column, int row, JsonObject expected, CellVerdict verdict) {
+        Door door = batch.columns().get(column).door();
+        String expect = expected.get("expect").getAsString();
+        // The plain getters refuse the column: a violation is no fault, and they would read it as passed.
+        assertThrows(IllegalStateException.class, () -> batch.get(column, row, typeOf(door)), label);
+        if (door == Door.TEXT) {
+            assertThrows(IllegalStateException.class, () -> batch.string(column, row), label);
+        }
+        CheckedVerdict<?> judged = batch.getChecked(column, row, typeOf(door));
+        Object value;
+        switch (judged) {
+            case Checked<?> passed -> {
+                assertEquals("ok", expect, label);
+                assertEquals(expected.get("adjusted").getAsBoolean(), passed.adjusted(), label);
+                assertEquals(
+                        expected.has("enum_index") ? expected.get("enum_index").getAsInt() : -1,
+                        passed.enumIndex().orElse(-1),
+                        label);
+                value = passed.value();
+            }
+            case Violation<?> broken -> {
+                assertEquals("violation", expect, label);
+                assertEquals(
+                        expected.get("keyword").getAsString(), broken.keyword().name(), label);
+                JsonArray span = expected.getAsJsonArray("fault");
+                assertEquals(span.get(0).getAsInt(), broken.offset(), label);
+                assertEquals(span.get(1).getAsInt(), broken.length(), label);
+                assertEquals(broken.offset(), verdict.offset(), label);
+                assertEquals(broken.length(), verdict.length(), label);
+                assertEquals(broken.keyword(), verdict.keyword(), label);
+                assertEquals(expected.get("raw").getAsString(), batch.rawString(column, row), label);
+                value = broken.value();
+            }
+            case Fault<?> fault -> {
+                assertEquals(verdict.toFault(), fault, label);
+                assertEquals(
+                        switch (expect) {
+                            case "empty" -> CastFailure.EMPTY;
+                            case "malformed" -> CastFailure.MALFORMED;
+                            case "out_of_range" -> CastFailure.OUT_OF_RANGE;
+                            default -> throw new IllegalStateException("unknown expectation " + expect);
+                        },
+                        fault.reason(),
+                        label);
+                if (expected.has("fault")) {
+                    JsonArray span = expected.getAsJsonArray("fault");
+                    assertEquals(span.get(0).getAsInt(), fault.offset(), label);
+                    assertEquals(span.get(1).getAsInt(), fault.length(), label);
+                    if (expected.has("raw_hex")) {
+                        assertEquals(
+                                expected.get("raw_hex").getAsString(),
+                                HexFormat.of().formatHex(batch.raw(column, row).toArray(ValueLayout.JAVA_BYTE)),
+                                label);
+                    } else {
+                        assertEquals(expected.get("raw").getAsString(), batch.rawString(column, row), label);
+                    }
+                }
+                return;
+            }
+        }
+        switch (door) {
+            case F32 ->
+                assertEquals(
+                        expected.get("bits").getAsString(),
+                        String.format("0x%08x", Float.floatToRawIntBits((Float) value)),
+                        label);
+            case F64 ->
+                assertEquals(
+                        expected.get("bits").getAsString(),
+                        String.format("0x%016x", Double.doubleToRawLongBits((Double) value)),
+                        label);
+            default -> assertEquals(valueOf(expected, door), value, label);
+        }
+    }
+
+    /**
      * Holds a text cell's chars — into the batch's own arena, and into the caller's array, at
      * an offset, too small by one, and exactly large enough — to its string.
      */
@@ -399,6 +563,11 @@ final class CorpusTest {
                 assertEquals(batch.origin(column, index), row.origin(column), label);
                 assertEquals(batch.rawString(column, index), utf8(row.raw(column)), label);
                 assertEquals(batch.rawString(column, index), row.rawString(column), label);
+                if (batch.columns().get(column).isChecked()) {
+                    assertEquals(
+                            batch.getChecked(column, index, typeOf(door)), row.getChecked(column, typeOf(door)), label);
+                    continue;
+                }
                 assertEquals(batch.get(column, index, typeOf(door)), row.get(column, typeOf(door)), label);
                 if (door == Door.TEXT) {
                     MemorySegment text = row.text(column);
@@ -497,7 +666,16 @@ final class CorpusTest {
             if (problem.planColumn().isPresent()) {
                 entry.addProperty("plan_column", problem.planColumn().getAsInt());
                 entry.addProperty("source_column", problem.sourceColumn().getAsInt());
-                entry.addProperty("reason", problem.reason().name().toLowerCase(Locale.ROOT));
+                // A violation names its keyword and has no reason; anything else has a reason and no keyword.
+                assertEquals(problem.reason() == null, problem.keyword() != null, label);
+                entry.addProperty(
+                        "reason",
+                        problem.reason() == null
+                                ? "violation"
+                                : problem.reason().name().toLowerCase(Locale.ROOT));
+                if (problem.keyword() != null) {
+                    entry.addProperty("keyword", problem.keyword().name());
+                }
                 if (problem.reason() != CastFailure.EMPTY) {
                     JsonArray span = new JsonArray();
                     span.add(problem.offset());

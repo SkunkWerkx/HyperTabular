@@ -18,7 +18,7 @@ use ext_php_rs::zend_fastcall;
 use super::args::{BatchRows, checked_args};
 use super::classes::{
     Declaration, Plain, Type, assign, bool_zval, build, bytes_zval, entry, finish,
-    finish_registration, instantiate, int_zval, list_zval, object_zval_ref,
+    finish_registration, instantiate, int_zval, list_zval, object_zval_ref, read_own,
     register as register_class, this,
 };
 use super::convert::token_strings;
@@ -57,6 +57,7 @@ const COLUMN: Declaration = Declaration {
         ("tokens", Type::NullableArray),
         ("dateOptions", Type::NullableClass("HyperCast\\DateOptions")),
         ("months", Type::NullableClass("HyperCast\\MonthNames")),
+        ("constraints", Type::NullableClass("HyperCast\\Constraints")),
     ],
     constants: &[],
     readonly_class: true,
@@ -137,11 +138,13 @@ fn keep_tabular_exception(ce: &'static mut ClassEntry, tables: ArgInfoTables) {
     finish_registration(Plain::TabularException, &TABULAR_EXCEPTION, ce);
 }
 
-/// The factories' shapes: `(int $ordinal)`, `(int $ordinal, ?NumFormat $format = null)`, and
-/// `(int $ordinal, <HyperCast enum> $declared)`.
+/// The factories' shapes: `(int $ordinal)`, `(int $ordinal, ?NumFormat $format = null,
+/// ?Constraints $constraints = null)`, `(int $ordinal, ?Constraints $constraints = null)` for text,
+/// and `(int $ordinal, <HyperCast enum> $declared)`.
 enum Shape {
     Plain,
     Numeric,
+    Text,
     Declared(&'static str, &'static str),
 }
 
@@ -276,7 +279,7 @@ static FACTORIES: [(&str, Door, Shape, &str); 22] = [
     (
         "text",
         Door::Text,
-        Shape::Plain,
+        Shape::Text,
         " A text column: the cell's bytes themselves, untrimmed, quotes resolved.",
     ),
 ];
@@ -353,7 +356,8 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
                 Arg::new("months", DataType::object("HyperCast\\MonthNames"))
                     .allow_null()
                     .default("null"),
-            ),
+            )
+            .arg(constraints_arg()),
         MethodFlags::Private,
     )];
     methods.push((
@@ -381,11 +385,15 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
         let mut function = factory_builder(index).arg(Arg::new("ordinal", int));
         function = match shape {
             Shape::Plain => function,
-            Shape::Numeric => function.not_required().arg(
-                Arg::new("format", DataType::object("HyperCast\\NumFormat"))
-                    .allow_null()
-                    .default("null"),
-            ),
+            Shape::Numeric => function
+                .not_required()
+                .arg(
+                    Arg::new("format", DataType::object("HyperCast\\NumFormat"))
+                        .allow_null()
+                        .default("null"),
+                )
+                .arg(constraints_arg()),
+            Shape::Text => function.not_required().arg(constraints_arg()),
             Shape::Declared(arg, class) => function.arg(Arg::new(*arg, DataType::object(class))),
         };
         methods.push((
@@ -453,6 +461,13 @@ pub(crate) fn register() -> ext_php_rs::error::Result<()> {
         )],
         keep_tabular_exception,
     )
+}
+
+/// `?Constraints $constraints = null`: what a numeric or text column's cells must also meet.
+fn constraints_arg() -> Arg<'static> {
+    Arg::new("constraints", DataType::object("HyperCast\\Constraints"))
+        .allow_null()
+        .default("null")
 }
 
 /// The promoted assignments of a constructor called from PHP, in declaration order, with the
@@ -634,13 +649,48 @@ fn check_ordinal(ordinal: i64) -> PhpResult<()> {
 }
 
 fn column_new(ex: &mut ExecuteData) -> PhpResult<Zval> {
-    let defaults = [int_zval(0), Zval::new(), Zval::new(), Zval::new()];
+    let defaults = [
+        int_zval(0),
+        Zval::new(),
+        Zval::new(),
+        Zval::new(),
+        Zval::new(),
+    ];
     let args = construct(ex, Plain::Column, &COLUMN, &defaults)?;
     check_ordinal(args[0].long().unwrap_or_default())?;
     if !args[4].is_null() {
         token_strings(&args[4], "A column's tokens")?;
     }
+    check_pairing(&args[1], &args[7])?;
     Ok(Zval::new())
+}
+
+/// Refuses `constraints` declared for another door than `door`'s (a `Door` case), or given to a
+/// door that takes none; null passes.
+fn check_pairing(door: &Zval, constraints: &Zval) -> PhpResult<()> {
+    if constraints.is_null() {
+        return Ok(());
+    }
+    let declared = read_own(constraints, "door")?;
+    let code = enum_value(door);
+    let checkable = code.and_then(Door::from_code).is_some_and(Door::checkable);
+    if checkable && enum_value(&declared) == code {
+        return Ok(());
+    }
+    Err(invalid_argument(mismatched(&declared, door)?))
+}
+
+/// What a column of `door` given constraints for `declared` (each a `Door` case, HyperCast's and
+/// this binding's) is refused with.
+pub(crate) fn mismatched(declared: &Zval, door: &Zval) -> PhpResult<String> {
+    let name = |case: &Zval| -> PhpResult<String> {
+        Ok(read_own(case, "name")?.string().unwrap_or_default())
+    };
+    Ok(format!(
+        "Constraints for Door::{} were given to a Door::{} column",
+        name(declared)?,
+        name(door)?
+    ))
 }
 
 /// A copy of the running `Column` with `tokens`, `dateOptions` and `months` as given, each `None`
@@ -670,6 +720,7 @@ fn column_changed(
             },
             options,
             months,
+            field("constraints")?,
         ],
     )
 }
@@ -715,12 +766,14 @@ zend_fastcall! {
 }
 
 /// A column of `door` reading `ordinal`, in `format` (the invariant notation when null), with
-/// `declared` beside the door.
+/// `declared` beside the door, declaring `constraints` (refused unless they are for `door`) or
+/// none.
 pub(crate) fn column(
     ordinal: i64,
     door: Door,
     format: Option<Zval>,
     declared: i64,
+    constraints: Option<Zval>,
 ) -> PhpResult<Zval> {
     check_ordinal(ordinal)?;
     let format = match format {
@@ -728,6 +781,8 @@ pub(crate) fn column(
         _ => invariant_format()?,
     };
     let door = door.into_zval(false).map_err(|_| pending("Door case"))?;
+    let constraints = constraints.unwrap_or_default();
+    check_pairing(&door, &constraints)?;
     build(
         Plain::Column,
         vec![
@@ -738,6 +793,7 @@ pub(crate) fn column(
             Zval::new(),
             Zval::new(),
             Zval::new(),
+            constraints,
         ],
     )
 }
@@ -747,19 +803,22 @@ fn factory(ex: &mut ExecuteData, index: usize) -> PhpResult<Zval> {
     let (_, door, shape, _) = &FACTORIES[index];
     let (min, max) = match shape {
         Shape::Plain => (1, 1),
-        Shape::Numeric => (1, 2),
+        Shape::Numeric => (1, 3),
+        Shape::Text => (1, 2),
         Shape::Declared(..) => (2, 2),
     };
     let Some(args) = checked_args(ex, min, max) else {
         return Err(pending("argument check"));
     };
     let ordinal = args[0].long().unwrap_or_default();
+    let arg = |at: usize| args.get(at).map(Zval::shallow_clone);
     match shape {
-        Shape::Plain => column(ordinal, *door, None, 0),
-        Shape::Numeric => column(ordinal, *door, args.get(1).map(Zval::shallow_clone), 0),
+        Shape::Plain => column(ordinal, *door, None, 0, None),
+        Shape::Numeric => column(ordinal, *door, arg(1), 0, arg(2)),
+        Shape::Text => column(ordinal, *door, None, 0, arg(1)),
         Shape::Declared(..) => {
             let declared = enum_value(&args[1]).ok_or_else(|| pending("enum value"))?;
-            column(ordinal, *door, None, declared)
+            column(ordinal, *door, None, declared, None)
         }
     }
 }
@@ -1102,6 +1161,8 @@ pub(crate) struct ColumnFields {
     pub(crate) tokens: Zval,
     pub(crate) date_options: Zval,
     pub(crate) months: Zval,
+    /// HyperCast's `Constraints`, or null.
+    pub(crate) constraints: Zval,
 }
 
 /// Reads a plan entry, which must be a `Column`; `None` for anything else.
@@ -1123,6 +1184,7 @@ pub(crate) fn column_fields(column: &Zval) -> PhpResult<Option<ColumnFields>> {
         tokens: read("tokens")?,
         date_options: read("dateOptions")?,
         months: read("months")?,
+        constraints: read("constraints")?,
     }))
 }
 

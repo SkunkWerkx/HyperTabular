@@ -216,6 +216,52 @@ anything. HyperCast's
 [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and
 the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints<T>`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf` with a `Rounding`,
+`minLength`, `maxLength`, `enum`, with `trim` and `caseSensitive` for text), through the factory of
+its door. Each cell is cast first, so text that isn't the type is a `Fault` as ever, and then judged:
+
+```swift
+import HyperTabular
+
+let reader = try DelimitedReader(
+    bytes: Array("qty,sex\n12,MALE\n7,x\n".utf8), dialect: .csv,
+    plan: [
+        .i32(0, constraints: Constraints<Int32>(minimum: 1, maximum: 10)),
+        .text(1, constraints: Constraints<String>(enum: ["Female", "Male"])),
+    ])
+let batch = try reader.read()!
+for row in batch {
+    let qty =
+        switch row.checked(0, as: Int32.self) {
+        case .success(let passed): "\(passed.value)"
+        case .rejection(.violation(let broken)): "\(broken.value) breaks \(broken.keyword)"
+        case .rejection(.fault(let fault)): "\(fault.reason)"
+        }
+    let sex =
+        switch row.checked(1, as: String.self) {
+        case .success(let passed): passed.value  // "MALE" matches the entry, and reads as "Male"
+        case .rejection(let rejected): "\(rejected)"
+        }
+    print(qty, sex)
+}
+for problem in batch.faults() {
+    print("line \(problem.line) column \(problem.sourceColumn!) \(problem.keyword!)")
+}
+```
+
+A violation isn't a fault: the cell cast, so `fault(_:row:)` is `nil`, `CellVerdict.isViolation` says
+so, the value is kept exactly as cast (never rounded), and the span is the judged text's. A cell
+`multipleOf` rounded passes with `adjusted` set, and a text `enum` match reads as the entry as
+declared, the caller's own string, with `enumIndex` naming it. `faults()` lists a violation with its
+`keyword` and no `reason`. The constraints' type is the door's, so a column can't pair one door with
+another's, and `get`, `text` and `string` stop a constrained column with a precondition failure: they
+would read a violation as passed. `checked(_:row:as:)` reads an unconstrained column too, where every
+cell that cast passes, unadjusted. HyperCast judges the declaration when it is built, and traps only
+on one its core cannot read.
+
 ## The shape
 
 The native core owns no memory and reads no files. `DelimitedReader` and `Sheet` allocate
@@ -225,7 +271,8 @@ once per few thousand rows, not once per cell.
 
 - **One batch type.** `read()` returns a `Batch` — `rows`, `columns`, `line(_:)`,
   `verdicts(_:)` and `values(_:as:)` for a whole column, `get(_:row:as:)` for any one cell
-  as HyperCast's `Verdict`, `string`/`text` for text and `raw` for the text a cell was cast
+  as HyperCast's `Verdict` (`checked(_:row:as:)` and its `CheckedVerdict` for a column that
+  declares constraints), `string`/`text` for text and `raw` for the text a cell was cast
   from — or `nil` when there are no more rows. It is a view of the reader's buffers, valid
   until the next `read()`, and the same type for delimited text and for a sheet.
 - **Whole columns are the primitives.** `values(_:as:)` lends the bool, integer and
@@ -236,7 +283,7 @@ once per few thousand rows, not once per cell.
   core writes the value (`UUID`'s layout is not part of Foundation's ABI), and HyperCast's
   Swift package has no type of its own that is.
 - **Rows, too.** A `Batch` is a `RandomAccessCollection` of `Row` — `index`, `line`,
-  `get(_:as:)`, `verdict(_:)`, `fault(_:)`, `origin(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`,
+  `get(_:as:)`, `checked(_:as:)`, `verdict(_:)`, `fault(_:)`, `origin(_:)`, `text(_:)`, `string(_:)`, `raw(_:)`,
   the batch's accessors with the row fixed, allocating nothing — and `forEachRow` on a reader
   or a sheet reads every row left across batches, the one cursor here that follows the read. A row
   is valid as long as its batch: a `Row`, a slice or `reversed()` of a batch's rows, a walk of them

@@ -159,6 +159,28 @@ fn each_optional_array_is_counted() {
 }
 
 #[test]
+fn a_constrained_columns_checks_are_counted() {
+    // A column that declares constraints is given a check a row beside its verdict, 12 bytes;
+    // one that declares none, nothing.
+    let declared = hypercast::Constraints::<i32>::numeric(hypercast::NumericRules::new(), None)
+        .expect("no rules")
+        .raw();
+    let mut checked = spec(Door::I32);
+    checked.constraints = &declared;
+    let rows = 1000;
+    let table = 2 * rows * Span::SIZE as u64;
+    assert_eq!(needed(&[checked], rows, NONE), (4 + 12 + 12) * rows + table);
+    assert_eq!(
+        needed(&[checked], rows, NOTES),
+        (4 + 12 + 4 + 12) * rows + table
+    );
+    assert_eq!(
+        needed(&[spec(Door::I32)], rows, NOTES),
+        (4 + 12 + 4) * rows + table
+    );
+}
+
+#[test]
 fn the_cell_tables() {
     // Delimited: indexed by source column, the widest ordinal plus two a row, up to the budget.
     let mut far = spec(Door::Bool);

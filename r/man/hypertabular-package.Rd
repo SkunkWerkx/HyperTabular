@@ -40,6 +40,9 @@ Other contributors:
 \itemize{
   \item Skunk Werkx [copyright holder]
   \item Unicode, Inc. (case folding data in the vendored core; see inst/AUTHORS) [copyright holder]
+  \item Hans Kratz (the vendored simdutf8 crate; see inst/AUTHORS) [copyright holder]
+  \item The simd-json.rs developers (the first Rust port of simdutf8's algorithm; see inst/AUTHORS) [copyright holder]
+  \item The simdjson authors (the UTF-8 algorithm simdutf8 is based on; see inst/AUTHORS) [copyright holder]
 }
 
 }

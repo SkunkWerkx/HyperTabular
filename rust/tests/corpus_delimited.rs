@@ -18,10 +18,7 @@ use hypertabular::kernel::exports::{
     hypertabular_delimited_fill, hypertabular_delimited_fill_with, hypertabular_delimited_header,
     hypertabular_delimited_init, hypertabular_faults, hypertabular_suggest,
 };
-use hypertabular::{
-    Column, DelimitedReader, Dialect, Door, Encoding, Error, LongRows, ShortRows, SuggestOptions,
-    SuggestStatus,
-};
+use hypertabular::{Column, DelimitedReader, Door, Error, SuggestOptions, SuggestStatus};
 use serde_json::Value;
 use std::io::Cursor;
 
@@ -62,47 +59,6 @@ fn read(reader: Result<DelimitedReader<'_>, Error>) -> (Value, Vec<Value>, Vec<V
             }
         }
     }
-}
-
-/// A case's dialect, the options it may declare beside the 1.0 four.
-fn dialect_of(entry: &Value) -> Dialect {
-    let mut dialect = Dialect::new(entry["separator"].as_str().expect("separator").as_bytes()[0])
-        .with_quoting(entry["quoting"].as_bool().expect("quoting"))
-        .with_header(entry["has_header"].as_bool().expect("has_header"))
-        .with_blank_lines_skipped(entry["skip_blank_lines"].as_bool().expect("skip"));
-    if let Some(skip) = entry.get("skip") {
-        dialect = dialect.with_skip(skip.as_u64().expect("skip") as u32);
-    }
-    if let Some(row) = entry.get("header_row") {
-        dialect = dialect.with_header_row(row.as_u64().expect("header_row") as u32);
-    }
-    if let Some(policy) = entry.get("short_rows") {
-        dialect = dialect.with_short_rows(match policy.as_str().expect("short_rows") {
-            "reject" => ShortRows::Reject,
-            "pad" => ShortRows::Pad,
-            other => panic!("short_rows {other}"),
-        });
-    }
-    if let Some(policy) = entry.get("long_rows") {
-        dialect = dialect.with_long_rows(match policy.as_str().expect("long_rows") {
-            "reject" => LongRows::Reject,
-            "report" => LongRows::Report,
-            "truncate" => LongRows::Truncate,
-            other => panic!("long_rows {other}"),
-        });
-    }
-    if let Some(tokens) = entry.get("tokens") {
-        dialect = dialect.with_tokens(&strings_of(tokens));
-    }
-    if let Some(encoding) = entry.get("encoding") {
-        dialect = dialect.with_encoding(match encoding.as_str().expect("encoding") {
-            "windows-1252" => Encoding::Windows1252,
-            "latin-1" => Encoding::Latin1,
-            "utf-16le" => Encoding::Utf16Le,
-            other => panic!("encoding {other}"),
-        });
-    }
-    dialect
 }
 
 #[test]
@@ -516,6 +472,7 @@ unsafe fn listed(
             values: std::ptr::null_mut(),
             verdicts: verdicts.as_mut_ptr(),
             notes: std::ptr::null_mut(),
+            checks: core::ptr::null_mut(),
         })
         .collect();
     let mut cursor = 0;
@@ -628,6 +585,7 @@ fn through_the_exports(
                         values: values.as_mut_ptr().cast(),
                         verdicts: verdicts.as_mut_ptr(),
                         notes: std::ptr::null_mut(),
+                        checks: core::ptr::null_mut(),
                     })
                     .collect();
                 hypertabular_delimited_fill_with(
@@ -711,11 +669,11 @@ fn one_point_oh_exports_read_what_the_corpus_says() {
             "tokens",
             "encoding",
         ];
-        let plain_plan = case["plan"]
-            .as_array()
-            .expect("plan")
-            .iter()
-            .all(|column| column.get("tokens").is_none() && column.get("options").is_none());
+        let plain_plan = case["plan"].as_array().expect("plan").iter().all(|column| {
+            ["tokens", "options", "constraints"]
+                .iter()
+                .all(|key| column.get(key).is_none())
+        });
         // The grouping policy, from bit 8, is nothing to `_fill`: `kernel_delimited` holds that.
         let one_point_oh_flags = case["plan"]
             .as_array()

@@ -99,8 +99,8 @@ RSpec.describe HyperTabular::Workbook do
   end
 
   it "has the cases, and the cells it says it does" do
-    expect(CASES.size).to eq(398)
-    expect(CASES.map { |vector| vector["file"] }.uniq.size).to eq(41)
+    expect(CASES.size).to eq(404)
+    expect(CASES.map { |vector| vector["file"] }.uniq.size).to eq(42)
     expect(CASES.count { |vector| vector.key?("suggest") }).to eq(15)
     expect(CASES.select { |vector| vector.key?("sheet") }.sum { |vector| vector["rows"].size * vector["plan"].size })
       .to be >= 12_000

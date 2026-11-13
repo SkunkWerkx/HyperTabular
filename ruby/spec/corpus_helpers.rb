@@ -22,10 +22,16 @@ module CorpusHelpers
   # Every key the replays read, by where it is: what isn't here fails unknown_keys, so a key added
   # to the corpus can't be passed over. A cell, a problem and a failure compare whole.
   CELL_KEYS = %w[expect value text seconds nanos year month day nanos_of_day magnitude scale negative fault raw
-                 raw_hex detail origin].freeze
-  PROBLEM_KEYS = %w[row line plan_column source_column reason fault detail origin expected found].freeze
+                 raw_hex detail origin keyword adjusted enum_index bits].freeze
+  PROBLEM_KEYS = %w[row line plan_column source_column reason fault detail origin expected found keyword].freeze
   FAILURE_KEYS = %w[kind record line byte expected found].freeze
-  PLAN_KEYS = %w[door ordinal precision order epoch format tokens options].freeze
+  PLAN_KEYS = %w[door ordinal precision order epoch format tokens options constraints].freeze
+  # A plan entry's constraints, by the OpenAPI names HyperCast's corpus gives them, as
+  # HyperCast::Constraints.new takes them.
+  CONSTRAINT_KEYS = { "minimum" => :minimum, "exclusiveMinimum" => :exclusive_minimum, "maximum" => :maximum,
+                      "exclusiveMaximum" => :exclusive_maximum, "multipleOf" => :multiple_of,
+                      "minLength" => :min_length, "maxLength" => :max_length, "enum" => :enum, "trim" => :trim,
+                      "caseSensitive" => :case_sensitive, "rounding" => :rounding }.freeze
   FORMAT_KEYS = %w[decimal_sep group_sep flags currency].freeze
   DATE_OPTION_KEYS = %w[flags pivot months].freeze
   DELIMITED_KEYS = %w[name input input_hex dialect plan header rows problems failure suggest].freeze
@@ -64,6 +70,7 @@ module CorpusHelpers
       check.call(column, "#{name}.plan[]", PLAN_KEYS)
       check.call(column["format"], "#{name}.plan[].format", FORMAT_KEYS)
       check.call(column["options"], "#{name}.plan[].options", DATE_OPTION_KEYS)
+      check.call(column["constraints"], "#{name}.plan[].constraints", CONSTRAINT_KEYS.keys)
     end
     vector.fetch("rows", []).flatten(1).each { |cell| check.call(cell, "#{name}.rows[][]", CELL_KEYS) }
     vector.fetch("problems", []).each { |problem| check.call(problem, "#{name}.problems[]", PROBLEM_KEYS) }
@@ -151,9 +158,20 @@ module CorpusHelpers
     column.with_date_options(HyperCast::DateOptions.new(flags: flags, pivot: options.fetch("pivot", 0)), months)
   end
 
+  # A plan entry's constraints as HyperCast's own declaration for the door it names, or nil.
+  def constraints_of(door, entry)
+    declared = entry["constraints"]
+    return nil if declared.nil?
+
+    keywords = declared.to_h { |key, value| [CONSTRAINT_KEYS.fetch(key), value] }
+    keywords[:rounding] = keywords[:rounding].to_sym if keywords.key?(:rounding)
+    HyperCast::Constraints.new(door: door, **keywords)
+  end
+
   def column_of(entry)
     ordinal = entry["ordinal"]
     door = entry["door"].to_sym
+    constraints = constraints_of(door, entry)
     built = case door
             when :unix then HyperTabular::Column.unix(ordinal, HyperCast::UNIX_PRECISIONS.key(entry["precision"]))
             when :excel_serial
@@ -163,8 +181,12 @@ module CorpusHelpers
             when *NUMERIC_DOORS
               # An entry with no format builds a column given none, so that the vector says what a
               # column with no format reads.
-              entry.key?("format") ? HyperTabular::Column.public_send(door, ordinal, format_of(entry)) :
-                HyperTabular::Column.public_send(door, ordinal)
+              if entry.key?("format")
+                HyperTabular::Column.public_send(door, ordinal, format_of(entry), constraints: constraints)
+              else
+                HyperTabular::Column.public_send(door, ordinal, constraints: constraints)
+              end
+            when :text then HyperTabular::Column.text(ordinal, constraints: constraints)
             # A Column refuses a format on a door that reads none, as it has since 1.0; a suggested
             # text column's format in the corpus says nothing a read could show.
             else HyperTabular::Column.public_send(door, ordinal)
@@ -194,13 +216,16 @@ module CorpusHelpers
     end
   end
 
-  # Holds one cell of a batch to what the corpus says of it: the verdict, and where it came from.
+  # Holds one cell of a batch to what the corpus says of it: the verdict, and where it came from. A
+  # cell of a constrained column is held through the checked getter (assert_checked).
   def assert_cell(label, batch, column, row, expected, notes: true)
     door = batch.columns[column].door
     raw = batch.raw(column, row)
     expect(raw.encoding).to eq(Encoding::UTF_8), label
     origin = notes ? expected.fetch("origin", "cell") : "cell"
     expect(batch.origin(column, row).to_s).to eq(origin), "#{label}: origin"
+    return assert_checked(label, batch, column, row, expected, notes: notes) if batch.columns[column].checked?
+
     # The union consumption idiom in action — pattern matching over the two case types.
     case batch.get(column, row)
     in HyperCast::Success(value:)
@@ -212,23 +237,76 @@ module CorpusHelpers
       expect([value.utc?, value.nsec]).to eq([true, expected["nanos"]]), label if value.is_a?(Time)
       expect([value, value.encoding]).to eq([raw, Encoding::UTF_8]), label if door == :text
       expect(batch.values(column)[row]).to equal(value), label
-    in HyperCast::Fault(reason:, offset:, length:, detail:)
-      expect(reason.to_s).to eq(expected["expect"]), "#{label}: faulted #{reason} on #{raw.inspect}"
-      expect(batch.values(column)[row]).to be_nil, label
-      expect(detail&.name&.to_s).to eq(notes ? expected["detail"] : nil), "#{label}: detail #{detail.inspect}"
-      expect(raw).to eq(""), label if expected["expect"] == "empty" && !expected.key?("origin")
-      if (span = expected["fault"])
-        # The cell's own text is still to hand, for the diagnostic a fault deserves.
-        if expected.key?("raw_hex")
-          expect(raw.b).to eq([expected["raw_hex"]].pack("H*")), label
-        else
-          expect(raw).to eq(expected["raw"]), label
-        end
-        expect([offset, length])
-          .to eq([raw.byteslice(0, span[0]).length, raw.byteslice(span[0], span[1]).length]), label
+    in HyperCast::Fault => fault
+      assert_fault(label, batch, column, row, expected, fault, notes: notes)
+    end
+  end
+
+  # Holds a Fault to what the corpus says of the cell: its reason, detail and span, and no value.
+  def assert_fault(label, batch, column, row, expected, fault, notes: true)
+    raw = batch.raw(column, row)
+    reason, offset, length, detail = fault.reason, fault.offset, fault.length, fault.detail
+    expect(reason.to_s).to eq(expected["expect"]), "#{label}: faulted #{reason} on #{raw.inspect}"
+    expect(batch.values(column)[row]).to be_nil, label
+    expect(detail&.name&.to_s).to eq(notes ? expected["detail"] : nil), "#{label}: detail #{detail.inspect}"
+    expect(raw).to eq(""), label if expected["expect"] == "empty" && !expected.key?("origin")
+    if (span = expected["fault"])
+      # The cell's own text is still to hand, for the diagnostic a fault deserves.
+      if expected.key?("raw_hex")
+        expect(raw.b).to eq([expected["raw_hex"]].pack("H*")), label
       else
-        expect([offset, length]).to eq([0, 0]), label
+        expect(raw).to eq(expected["raw"]), label
       end
+      expect([offset, length])
+        .to eq([raw.byteslice(0, span[0]).length, raw.byteslice(span[0], span[1]).length]), label
+    else
+      expect([offset, length]).to eq([0, 0]), label
+    end
+  end
+
+  # Holds one cell of a constrained column to what the corpus says of it, through the checked
+  # getter: what passed, a violation of a constraint the column declares, or the cell's fault. The
+  # plain getter refuses the column, and #values holds a violation's value as cast.
+  def assert_checked(label, batch, column, row, expected, notes: true)
+    plan = batch.columns[column]
+    raw = batch.raw(column, row)
+    expect { batch.get(column, row) }.to raise_error(TypeError, /get_checked/), label
+    verdict = batch.get_checked(column, row)
+    case verdict
+    in HyperCast::Checked(value:, adjusted:, enum_index:)
+      expect(expected["expect"]).to eq("ok"), "#{label}: unexpectedly passed with #{verdict.inspect}"
+      expect([adjusted, enum_index])
+        .to eq([expected["adjusted"], expected["enum_index"]]), "#{label}: #{verdict.inspect}"
+      if enum_index && plan.door == :text
+        # The entry as declared: the very String the declaration holds.
+        expect(value).to equal(plan.constraints.enum[enum_index]), label
+      else
+        expect(batch.values(column)[row]).to eql(value), label
+      end
+      assert_checked_value(label, plan.door, value, expected)
+    in HyperCast::Violation(keyword:, value:, offset:, length:)
+      expect(expected["expect"]).to eq("violation"), "#{label}: unexpectedly broke #{verdict.inspect}"
+      expect(keyword.name).to eq(expected["keyword"]), "#{label}: #{verdict.inspect}"
+      expect(raw).to eq(expected["raw"]), label
+      span = expected["fault"]
+      expect([offset, length])
+        .to eq([raw.byteslice(0, span[0]).length, raw.byteslice(span[0], span[1]).length]), "#{label}: span"
+      expect(batch.values(column)[row]).to eql(value), "#{label}: the value as cast"
+      assert_checked_value(label, plan.door, value, expected)
+    in HyperCast::Fault => fault
+      assert_fault(label, batch, column, row, expected, fault, notes: notes)
+    end
+  end
+
+  # A checked cell's value, passed or as cast: a float to its exact bits, anything else as
+  # expected_value says, of the same class.
+  def assert_checked_value(label, door, value, expected)
+    if %i[f32 f64].include?(door)
+      bits = "0x#{[value].pack(door == :f32 ? 'g' : 'G').unpack1('H*')}"
+      expect([value.class, bits]).to eq([Float, expected["bits"]]), "#{label}: #{value.inspect}"
+    else
+      wanted = expected_value(door, expected)
+      expect([value, value.class]).to eq([wanted, wanted.class]), "#{label}: #{value.inspect}, want #{wanted.inspect}"
     end
   end
 
@@ -251,9 +329,20 @@ module CorpusHelpers
     entry = { "row" => base + problem.row, "line" => problem.line }
     expect(problem.line).to eq(batch.line(problem.row))
     if problem.plan_column.nil?
-      expect([problem.source_column, problem.reason, problem.offset, problem.length]).to eq([nil, nil, 0, 0])
+      expect([problem.source_column, problem.reason, problem.offset, problem.length, problem.keyword])
+        .to eq([nil, nil, 0, 0, nil])
       entry["expected"] = problem.expected
       entry["found"] = problem.found
+    elsif problem.keyword
+      # A violation: the cell cast, so there's no reason, and the span is the judged text's.
+      expect([problem.reason, problem.expected, problem.found]).to eq([nil, 0, 0])
+      entry["plan_column"] = problem.plan_column
+      entry["source_column"] = problem.source_column
+      entry["reason"] = "violation"
+      entry["keyword"] = problem.keyword.name
+      entry["fault"] = [problem.offset, problem.length]
+      verdict = batch.get_checked(problem.plan_column, problem.row)
+      expect([verdict.keyword, verdict.offset, verdict.length]).to eq([problem.keyword, problem.offset, problem.length])
     else
       expect([problem.expected, problem.found]).to eq([0, 0])
       entry["plan_column"] = problem.plan_column
@@ -263,7 +352,7 @@ module CorpusHelpers
         expect([problem.offset, problem.length]).to eq([0, 0])
       else
         entry["fault"] = [problem.offset, problem.length]
-        verdict = batch.get(problem.plan_column, problem.row)
+        verdict = batch.send(:verdict_of, problem.plan_column, problem.row)
         expect([verdict.offset, verdict.length]).to eq([problem.offset, problem.length])
       end
     end
@@ -299,8 +388,14 @@ module CorpusHelpers
     expect(rows.map(&:index)).to eq((0...batch.rows).to_a), label
     rows.each do |row|
       expect(row.line).to eq(batch.line(row.index)), label
+      expect(row.to_a).to eq(plan.each_index.map { |column| batch.send(:verdict_of, column, row.index) }), label
       plan.each_index do |column|
-        expect(row.get(column)).to eq(batch.get(column, row.index)), label
+        if plan[column].checked?
+          expect(row.get_checked(column)).to eq(batch.get_checked(column, row.index)), label
+          expect { row.get(column) }.to raise_error(TypeError, /get_checked/), label
+        else
+          expect(row.get(column)).to eq(batch.get(column, row.index)), label
+        end
         expect(row.raw(column)).to eq(batch.raw(column, row.index)), label
         expect(row.origin(column)).to eq(batch.origin(column, row.index)), label
       end

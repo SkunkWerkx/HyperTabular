@@ -1,6 +1,7 @@
 package hypertabular
 
 import (
+	"encoding/binary"
 	"fmt"
 
 	hypercast "github.com/SkunkWerkx/HyperCast/go"
@@ -117,6 +118,12 @@ type Column struct {
 	tokens    string
 	hasTokens bool
 	date      hypercast.DateOptions
+	// checked says the column declares constraints: the declaration as the core reads it, and its
+	// enum list packed in the guest's little-endian order, held as values so a Column stays
+	// comparable.
+	checked     bool
+	constraints hypercast.RawConstraints
+	enum        string
 }
 
 // Ordinal is the zero-based ordinal of the source column. A column past a record's last
@@ -128,6 +135,10 @@ func (c Column) Door() Door { return c.door }
 
 // Format is the numeric notation a numeric door reads; the zero NumFormat for the others.
 func (c Column) Format() hypercast.NumFormat { return c.format }
+
+// IsChecked reports whether the column declares HyperCast's constraints, and so is read with
+// GetChecked and CellChecked.
+func (c Column) IsChecked() bool { return c.checked }
 
 // WithTokens is the same column answering to these tokens rather than its dialect's or sheet's: a
 // cell whose exact, unquoted bytes are one of them is Empty, whatever its door, and Batch.Origin
@@ -245,6 +256,77 @@ func Span(ordinal int) Column { return Column{ordinal: ordinal, door: DoorSpan} 
 // Text is a text column: the cell's bytes themselves, untrimmed, quotes resolved.
 func Text(ordinal int) Column { return Column{ordinal: ordinal, door: DoorText} }
 
+// Checked is a column of V's door under the declared notation — I32 for int32, Exact for
+// hypercast.Decimal — whose cells must also meet constraints: each is cast, then judged as
+// hypercast.Check judges it. Read it with GetChecked or CellChecked; Get and Cell panic on it.
+// The constraints' type is the door's, so a column can't pair one door with another's, and the
+// zero Constraints, never judged, panics here as a checked door does.
+func Checked[V hypercast.Number](ordinal int, format hypercast.NumFormat, constraints hypercast.Constraints[V]) Column {
+	var door Door
+	switch any(*new(V)).(type) {
+	case int8:
+		door = DoorI8
+	case int16:
+		door = DoorI16
+	case int32:
+		door = DoorI32
+	case int64:
+		door = DoorI64
+	case uint8:
+		door = DoorU8
+	case uint16:
+		door = DoorU16
+	case uint32:
+		door = DoorU32
+	case uint64:
+		door = DoorU64
+	case float32:
+		door = DoorF32
+	case float64:
+		door = DoorF64
+	default:
+		door = DoorExact
+	}
+	column := Column{ordinal: ordinal, door: door, format: format, checked: true, constraints: constraints.Raw()}
+	// The enum's decimals are in the host's order; the guest reads its own.
+	packed := constraints.PackedEnum()
+	for at := 0; at+16 <= len(packed); at += 16 {
+		binary.LittleEndian.PutUint64(packed[at:], binary.NativeEndian.Uint64(packed[at:]))
+		binary.LittleEndian.PutUint32(packed[at+8:], binary.NativeEndian.Uint32(packed[at+8:]))
+	}
+	column.enum = string(packed)
+	return column
+}
+
+// CheckedText is a Text column whose cells must also meet constraints, judged as
+// hypercast.CheckString judges them. Read it with GetChecked or CellChecked, where an enum match
+// reads as the entry as declared; Get, Cell, Text and TextString panic on it.
+func CheckedText(ordinal int, constraints hypercast.Constraints[string]) Column {
+	return Column{
+		ordinal: ordinal, door: DoorText, checked: true, constraints: constraints.Raw(),
+		enum: string(constraints.PackedEnum()),
+	}
+}
+
+// enumEntry is the text enum's entry at index, as declared: the packed list is each entry's
+// little-endian 32-bit length and then its bytes.
+func (c Column) enumEntry(index uint32) string {
+	packed := c.enum
+	for at := uint32(0); ; index-- {
+		if int(at)+4 > len(packed) {
+			panic(contractViolation)
+		}
+		length := binary.LittleEndian.Uint32([]byte(packed[at : at+4]))
+		if int(at)+4+int(length) > len(packed) {
+			panic(contractViolation)
+		}
+		if index == 0 {
+			return packed[at+4 : at+4+length]
+		}
+		at += 4 + length
+	}
+}
+
 // maxOrdinal is the widest ordinal a plan may name: below 2^20 (1,048,576). No workbook
 // format has that many columns (XLSX and ODS stop at 16,384, Numbers at 1,000), and at the
 // cap one row of cell table is at most 8 MiB, so a headerless plan cannot ask for ~16 GiB.
@@ -256,7 +338,9 @@ const maxOrdinal = 1<<20 - 1
 // probe).
 func (c Column) spec() (rawSpec, specExtra, error) {
 	spec := rawSpec{ordinal: uint32(c.ordinal), door: uint32(c.door), param: c.param}
-	extra := specExtra{tokens: c.tokens, hasTokens: c.hasTokens}
+	extra := specExtra{
+		tokens: c.tokens, hasTokens: c.hasTokens, checked: c.checked, constraints: c.constraints, enum: c.enum,
+	}
 	if c.door < DoorBool || c.door > DoorExcelSerial {
 		return spec, extra, fmt.Errorf("door %d is not a door; build a Column with a constructor such as I32 or Text", uint32(c.door))
 	}

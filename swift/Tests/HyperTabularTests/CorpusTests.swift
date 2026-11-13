@@ -75,6 +75,22 @@ final class CorpusTests: XCTestCase {
         let format: Notation?
         let tokens: [String]?
         let options: DatesDeclared?
+        let constraints: ConstraintsDeclared?
+    }
+
+    /// A plan entry's constraints: every bound, step and numeric entry a decimal's text.
+    struct ConstraintsDeclared: Decodable {
+        let minimum: String?
+        let exclusiveMinimum: String?
+        let maximum: String?
+        let exclusiveMaximum: String?
+        let multipleOf: String?
+        let rounding: String?
+        let minLength: Int?
+        let maxLength: Int?
+        let `enum`: [String]?
+        let trim: Bool?
+        let caseSensitive: Bool?
     }
 
     struct DatesDeclared: Decodable {
@@ -107,6 +123,7 @@ final class CorpusTests: XCTestCase {
         var fault: [Int]?
         var expected: Int?
         var found: Int?
+        var keyword: String?
     }
 
     /// What a case says of its suggestion.
@@ -160,6 +177,10 @@ final class CorpusTests: XCTestCase {
         let year: Int?
         let month: Int?
         let day: Int?
+        let keyword: String?
+        let adjusted: Bool?
+        let enum_index: Int?
+        let bits: String?
     }
 
     /// `value` is a boolean, an integer anywhere from i64's minimum to u64's maximum, a
@@ -296,7 +317,7 @@ final class CorpusTests: XCTestCase {
     }
 
     func column(of entry: Entry) -> Column {
-        var column = door(of: entry)
+        var column = entry.constraints.map { checked(entry, $0) } ?? door(of: entry)
         if let tokens = entry.tokens {
             column = column.withTokens(tokens)
         }
@@ -345,6 +366,49 @@ final class CorpusTests: XCTestCase {
         case "duration": return .duration(ordinal)
         case "text": return .text(ordinal)
         case let other: fatalError("unknown door \(other)")
+        }
+    }
+
+    /// A plan entry that declares constraints, through the factory of its door.
+    func checked(_ entry: Entry, _ declared: ConstraintsDeclared) -> Column {
+        func numeric<T: CheckedCastTarget>(_: T.Type) -> Constraints<T> {
+            let rounding: Rounding =
+                switch declared.rounding {
+                case nil, "strict": .strict
+                case "midpoint": .midpoint
+                case "floor": .floor
+                case "ceiling": .ceiling
+                case let other: fatalError("unknown rounding \(other!)")
+                }
+            return Constraints<T>(
+                minimum: declared.minimum.map { ConstraintValue($0) },
+                exclusiveMinimum: declared.exclusiveMinimum.map { ConstraintValue($0) },
+                maximum: declared.maximum.map { ConstraintValue($0) },
+                exclusiveMaximum: declared.exclusiveMaximum.map { ConstraintValue($0) },
+                multipleOf: declared.multipleOf.map { ConstraintValue($0) }, rounding: rounding,
+                enum: declared.enum?.map { ConstraintValue($0) })
+        }
+        let ordinal = entry.ordinal
+        let format = format(of: entry)
+        switch entry.door {
+        case "i8": return .i8(ordinal, format: format, constraints: numeric(Int8.self))
+        case "i16": return .i16(ordinal, format: format, constraints: numeric(Int16.self))
+        case "i32": return .i32(ordinal, format: format, constraints: numeric(Int32.self))
+        case "i64": return .i64(ordinal, format: format, constraints: numeric(Int64.self))
+        case "u8": return .u8(ordinal, format: format, constraints: numeric(UInt8.self))
+        case "u16": return .u16(ordinal, format: format, constraints: numeric(UInt16.self))
+        case "u32": return .u32(ordinal, format: format, constraints: numeric(UInt32.self))
+        case "u64": return .u64(ordinal, format: format, constraints: numeric(UInt64.self))
+        case "f32": return .f32(ordinal, format: format, constraints: numeric(Float.self))
+        case "f64": return .f64(ordinal, format: format, constraints: numeric(Double.self))
+        case "decimal": return .decimal(ordinal, format: format, constraints: numeric(Decimal.self))
+        case "text":
+            return .text(
+                ordinal,
+                constraints: Constraints<String>(
+                    minLength: declared.minLength, maxLength: declared.maxLength, trim: declared.trim ?? false,
+                    caseSensitive: declared.caseSensitive ?? false, enum: declared.enum?.map { ConstraintValue($0) }))
+        case let other: fatalError("no checked door \(other)")
         }
     }
 
@@ -433,6 +497,118 @@ final class CorpusTests: XCTestCase {
         }
     }
 
+    /// A checked cell with its type set aside, so that one comparison serves every door.
+    func erased<T: Hashable>(_ verdict: CheckedVerdict<T>) -> CheckedVerdict<AnyHashable> {
+        switch verdict {
+        case .success(let passed):
+            .success(Checked(value: AnyHashable(passed.value), adjusted: passed.adjusted, enumIndex: passed.enumIndex))
+        case .rejection(.fault(let fault)): .rejection(.fault(fault))
+        case .rejection(.violation(let broken)):
+            .rejection(
+                .violation(
+                    Violation(
+                        keyword: broken.keyword, value: AnyHashable(broken.value), offset: broken.offset,
+                        length: broken.length)))
+        }
+    }
+
+    /// The cell through ``Batch/checked(_:row:as:)``, as the type its door presents.
+    func judged(_ batch: Batch, _ column: Int, _ row: Int) -> CheckedVerdict<AnyHashable> {
+        switch batch.columns[column].door {
+        case .i8: erased(batch.checked(column, row: row, as: Int8.self))
+        case .i16: erased(batch.checked(column, row: row, as: Int16.self))
+        case .i32: erased(batch.checked(column, row: row, as: Int32.self))
+        case .i64: erased(batch.checked(column, row: row, as: Int64.self))
+        case .u8: erased(batch.checked(column, row: row, as: UInt8.self))
+        case .u16: erased(batch.checked(column, row: row, as: UInt16.self))
+        case .u32: erased(batch.checked(column, row: row, as: UInt32.self))
+        case .u64: erased(batch.checked(column, row: row, as: UInt64.self))
+        case .f32: erased(batch.checked(column, row: row, as: Float.self))
+        case .f64: erased(batch.checked(column, row: row, as: Double.self))
+        case .decimal: erased(batch.checked(column, row: row, as: Decimal.self))
+        case .text: erased(batch.checked(column, row: row, as: String.self))
+        case let other: fatalError("no checked door \(other)")
+        }
+    }
+
+    /// The row's cell through ``Row/checked(_:as:)``, as ``judged(_:_:_:)`` reads the batch's.
+    func judged(_ row: Row, _ column: Int, door: Door) -> CheckedVerdict<AnyHashable> {
+        switch door {
+        case .i8: erased(row.checked(column, as: Int8.self))
+        case .i16: erased(row.checked(column, as: Int16.self))
+        case .i32: erased(row.checked(column, as: Int32.self))
+        case .i64: erased(row.checked(column, as: Int64.self))
+        case .u8: erased(row.checked(column, as: UInt8.self))
+        case .u16: erased(row.checked(column, as: UInt16.self))
+        case .u32: erased(row.checked(column, as: UInt32.self))
+        case .u64: erased(row.checked(column, as: UInt64.self))
+        case .f32: erased(row.checked(column, as: Float.self))
+        case .f64: erased(row.checked(column, as: Double.self))
+        case .decimal: erased(row.checked(column, as: Decimal.self))
+        case .text: erased(row.checked(column, as: String.self))
+        case let other: fatalError("no checked door \(other)")
+        }
+    }
+
+    /// A value the corpus states, compared as it states it: a float by its exact bits.
+    func assertValue(_ label: String, _ door: Door, _ value: AnyHashable, _ expected: Cell) {
+        switch door {
+        case .f32:
+            XCTAssertEqual(
+                "0x" + String(format: "%08x", (value as! Float).bitPattern), expected.bits, "\(label): bits")
+        case .f64:
+            XCTAssertEqual(
+                "0x" + String(format: "%016llx", (value as! Double).bitPattern), expected.bits, "\(label): bits")
+        default:
+            XCTAssertEqual(value, expectedValue(door, expected), label)
+        }
+    }
+
+    /// Holds a constrained column's cell to what the corpus says of it, through the checked getter:
+    /// a value with its `adjusted` flag and `enum` match, a fault, or a violation with its keyword
+    /// and the value as cast.
+    func assertChecked(_ label: String, _ batch: Batch, _ column: Int, _ row: Int, _ expected: Cell) {
+        let verdict = batch.verdict(column, row: row)
+        let door = batch.columns[column].door
+        XCTAssertEqual(verdict.isViolation, expected.expect == "violation", label)
+        switch judged(batch, column, row) {
+        case .success(let passed):
+            XCTAssertEqual(expected.expect, "ok", label)
+            XCTAssertTrue(verdict.isOk, label)
+            XCTAssertEqual(passed.adjusted, expected.adjusted, "\(label): adjusted")
+            XCTAssertEqual(passed.enumIndex, expected.enum_index, "\(label): enum index")
+            assertValue(label, door, passed.value, expected)
+        case .rejection(.violation(let broken)):
+            XCTAssertEqual(expected.expect, "violation", label)
+            XCTAssertNil(batch.fault(column, row: row), "\(label): a violation is no fault")
+            XCTAssertNil(verdict.reason, label)
+            XCTAssertEqual(broken.keyword.name, expected.keyword, "\(label): keyword")
+            XCTAssertEqual([broken.offset, broken.length], expected.fault, "\(label): span")
+            XCTAssertEqual([verdict.offset, verdict.length], expected.fault, "\(label): verdict span")
+            XCTAssertEqual(String(decoding: batch.raw(column, row: row), as: UTF8.self), expected.raw, "\(label): raw")
+            assertValue(label, door, broken.value, expected)
+        case .rejection(.fault(let fault)):
+            let reason: CastFailure? =
+                switch expected.expect {
+                case "empty": .empty
+                case "malformed": .malformed
+                case "out_of_range": .outOfRange
+                default: nil
+                }
+            XCTAssertEqual(fault.reason, reason, label)
+            XCTAssertEqual(fault, batch.fault(column, row: row), label)
+            if let span = expected.fault {
+                XCTAssertEqual([fault.offset, fault.length], span, "\(label): fault span")
+                if let hex = expected.raw_hex {
+                    XCTAssertEqual(Array(batch.raw(column, row: row)), Self.hex(hex), "\(label): raw bytes")
+                } else {
+                    XCTAssertEqual(
+                        String(decoding: batch.raw(column, row: row), as: UTF8.self), expected.raw, "\(label): raw")
+                }
+            }
+        }
+    }
+
     /// Holds one cell of the batch in hand to what the corpus says of it.
     func assertCell(
         _ label: String, _ batch: Batch, _ column: Int, _ row: Int, _ expected: Cell, notes: Bool = true
@@ -449,6 +625,11 @@ final class CorpusTests: XCTestCase {
         XCTAssertEqual(
             Self.originName(batch.origin(column, row: row)), notes ? expected.origin ?? "cell" : "cell",
             "\(label): origin")
+        if batch.columns[column].isChecked {
+            assertChecked(label, batch, column, row, expected)
+            return
+        }
+        XCTAssertFalse(verdict.isViolation, label)
         XCTAssertEqual(batch.fault(column, row: row) == nil, expected.expect == "ok", label)
         if let listed = batch.fault(column, row: row) {
             XCTAssertEqual(listed, verdict.fault, label)
@@ -531,7 +712,13 @@ final class CorpusTests: XCTestCase {
             if let plan = problem.planColumn {
                 entry.plan_column = plan
                 entry.source_column = problem.sourceColumn
+                // A violation names its keyword and has no reason; anything else has a reason and no keyword.
+                XCTAssertEqual(problem.reason == nil, problem.keyword != nil, label)
                 switch problem.reason {
+                case nil:
+                    entry.reason = "violation"
+                    entry.keyword = problem.keyword?.name
+                    entry.fault = [problem.offset, problem.length]
                 case .empty:
                     entry.reason = "empty"
                     XCTAssertEqual(problem.offset, 0, label)
@@ -585,6 +772,11 @@ final class CorpusTests: XCTestCase {
                 XCTAssertEqual(row.fault(column), batch.fault(column, row: index), label)
                 XCTAssertEqual(row.fault(column)?.detailCode, batch.fault(column, row: index)?.detailCode, label)
                 XCTAssertEqual(Array(row.raw(column)), Array(batch.raw(column, row: index)), label)
+                if batch.columns[column].isChecked {
+                    XCTAssertEqual(
+                        judged(row, column, door: batch.columns[column].door), judged(batch, column, index), label)
+                    continue
+                }
                 if batch.columns[column].door == .text {
                     XCTAssertEqual(row.string(column), batch.string(column, row: index), label)
                     XCTAssertEqual(

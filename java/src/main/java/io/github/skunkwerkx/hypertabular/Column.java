@@ -1,11 +1,14 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.Constraints;
 import io.github.skunkwerkx.hypercast.DateOptions;
 import io.github.skunkwerkx.hypercast.DateOrder;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
 import io.github.skunkwerkx.hypercast.MonthNames;
 import io.github.skunkwerkx.hypercast.NumFormat;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
+import java.math.BigDecimal;
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -19,6 +22,12 @@ import java.util.Objects;
  * {@link NumFormat#INVARIANT}; the doors that declare something — a Unix precision, a date
  * order, an Excel date system — take HyperCast's own enum for it. Immutable, and equal to
  * another column that reads the same source column the same way.
+ *
+ * <p>A numeric or text column may declare HyperCast's {@link Constraints}, the OpenAPI keywords,
+ * through the factory of its door that takes them: each cell is then cast and judged, and read with
+ * {@link Batch#getChecked}. A declaration built for another door is refused: Java's type alone can't
+ * tell {@code Constraints.u8()}'s from {@code Constraints.i32()}'s, so the factory reads
+ * {@link Constraints#door()}.
  */
 public final class Column {
     private final int ordinal;
@@ -30,9 +39,11 @@ public final class Column {
 
     private final DateOptions dateOptions;
     private final MonthNames months;
+    /** The column's constraints, built for its door; {@code null} for none. */
+    private final Constraints<?> constraints;
 
     private Column(int ordinal, Door door, int declared, NumFormat format) {
-        this(ordinal, door, declared, format, null, null, null);
+        this(ordinal, door, declared, format, null, null, null, null);
     }
 
     private Column(
@@ -42,7 +53,8 @@ public final class Column {
             NumFormat format,
             Tokens tokens,
             DateOptions dateOptions,
-            MonthNames months) {
+            MonthNames months,
+            Constraints<?> constraints) {
         if (ordinal < 0) {
             throw new IllegalArgumentException("ordinal must not be negative; got " + ordinal);
         }
@@ -57,6 +69,41 @@ public final class Column {
         this.tokens = tokens;
         this.dateOptions = dateOptions;
         this.months = months;
+        this.constraints = constraints;
+    }
+
+    /** {@code column}, judged against {@code constraints}, which must have been built for its door. */
+    private static Column checked(Column column, Constraints<?> constraints) {
+        Objects.requireNonNull(constraints, "constraints");
+        String door = column.door.name().toLowerCase(Locale.ROOT);
+        if (!constraints.door().equals(door)) {
+            throw new IllegalArgumentException(
+                    "Constraints built for the " + constraints.door() + " door were passed to a " + door + " column");
+        }
+        return new Column(
+                column.ordinal,
+                column.door,
+                column.declared,
+                column.format,
+                column.tokens,
+                column.dateOptions,
+                column.months,
+                constraints);
+    }
+
+    /**
+     * Whether the column declares {@link Constraints}: its cells are then read with
+     * {@link Batch#getChecked}, and {@link Batch#get} refuses it.
+     *
+     * @return {@code true} for a column that declares constraints
+     */
+    public boolean isChecked() {
+        return constraints != null;
+    }
+
+    /** The column's constraints, or {@code null} for none. */
+    Constraints<?> constraints() {
+        return constraints;
     }
 
     /** The column a suggestion plans: a door and what it declares, as the core numbers them. */
@@ -105,7 +152,7 @@ public final class Column {
      * @return the changed column
      */
     public Column withTokens(String... tokens) {
-        return new Column(ordinal, door, declared, format, Tokens.of(tokens), dateOptions, months);
+        return new Column(ordinal, door, declared, format, Tokens.of(tokens), dateOptions, months, constraints);
     }
 
     /**
@@ -125,7 +172,15 @@ public final class Column {
      * @return the changed column
      */
     public Column withDateOptions(DateOptions options) {
-        return new Column(ordinal, door, declared, format, tokens, Objects.requireNonNull(options, "options"), months);
+        return new Column(
+                ordinal,
+                door,
+                declared,
+                format,
+                tokens,
+                Objects.requireNonNull(options, "options"),
+                months,
+                constraints);
     }
 
     /**
@@ -143,7 +198,8 @@ public final class Column {
                 format,
                 tokens,
                 Objects.requireNonNull(options, "options"),
-                Objects.requireNonNull(months, "months"));
+                Objects.requireNonNull(months, "months"),
+                constraints);
     }
 
     /**
@@ -201,6 +257,31 @@ public final class Column {
     }
 
     /**
+     * A signed 8-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.i8()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i8(int ordinal, Constraints<Byte> constraints) {
+        return checked(i8(ordinal), constraints);
+    }
+
+    /**
+     * A signed 8-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.i8()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i8(int ordinal, NumFormat format, Constraints<Byte> constraints) {
+        return checked(i8(ordinal, format), constraints);
+    }
+
+    /**
      * A signed 16-bit column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -219,6 +300,31 @@ public final class Column {
      */
     public static Column i16(int ordinal, NumFormat format) {
         return new Column(ordinal, Door.I16, 0, format);
+    }
+
+    /**
+     * A signed 16-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.i16()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i16(int ordinal, Constraints<Short> constraints) {
+        return checked(i16(ordinal), constraints);
+    }
+
+    /**
+     * A signed 16-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.i16()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i16(int ordinal, NumFormat format, Constraints<Short> constraints) {
+        return checked(i16(ordinal, format), constraints);
     }
 
     /**
@@ -243,6 +349,31 @@ public final class Column {
     }
 
     /**
+     * A signed 32-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.i32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i32(int ordinal, Constraints<Integer> constraints) {
+        return checked(i32(ordinal), constraints);
+    }
+
+    /**
+     * A signed 32-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.i32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i32(int ordinal, NumFormat format, Constraints<Integer> constraints) {
+        return checked(i32(ordinal, format), constraints);
+    }
+
+    /**
      * A signed 64-bit column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -261,6 +392,31 @@ public final class Column {
      */
     public static Column i64(int ordinal, NumFormat format) {
         return new Column(ordinal, Door.I64, 0, format);
+    }
+
+    /**
+     * A signed 64-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.i64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i64(int ordinal, Constraints<Long> constraints) {
+        return checked(i64(ordinal), constraints);
+    }
+
+    /**
+     * A signed 64-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.i64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column i64(int ordinal, NumFormat format, Constraints<Long> constraints) {
+        return checked(i64(ordinal, format), constraints);
     }
 
     /**
@@ -285,6 +441,31 @@ public final class Column {
     }
 
     /**
+     * An unsigned 8-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.u8()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u8(int ordinal, Constraints<Integer> constraints) {
+        return checked(u8(ordinal), constraints);
+    }
+
+    /**
+     * An unsigned 8-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.u8()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u8(int ordinal, NumFormat format, Constraints<Integer> constraints) {
+        return checked(u8(ordinal, format), constraints);
+    }
+
+    /**
      * An unsigned 16-bit column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -303,6 +484,31 @@ public final class Column {
      */
     public static Column u16(int ordinal, NumFormat format) {
         return new Column(ordinal, Door.U16, 0, format);
+    }
+
+    /**
+     * An unsigned 16-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.u16()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u16(int ordinal, Constraints<Integer> constraints) {
+        return checked(u16(ordinal), constraints);
+    }
+
+    /**
+     * An unsigned 16-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.u16()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u16(int ordinal, NumFormat format, Constraints<Integer> constraints) {
+        return checked(u16(ordinal, format), constraints);
     }
 
     /**
@@ -327,6 +533,31 @@ public final class Column {
     }
 
     /**
+     * An unsigned 32-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.u32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u32(int ordinal, Constraints<Long> constraints) {
+        return checked(u32(ordinal), constraints);
+    }
+
+    /**
+     * An unsigned 32-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.u32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u32(int ordinal, NumFormat format, Constraints<Long> constraints) {
+        return checked(u32(ordinal, format), constraints);
+    }
+
+    /**
      * An unsigned 64-bit column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -345,6 +576,31 @@ public final class Column {
      */
     public static Column u64(int ordinal, NumFormat format) {
         return new Column(ordinal, Door.U64, 0, format);
+    }
+
+    /**
+     * An unsigned 64-bit column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.u64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u64(int ordinal, Constraints<Long> constraints) {
+        return checked(u64(ordinal), constraints);
+    }
+
+    /**
+     * An unsigned 64-bit column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.u64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column u64(int ordinal, NumFormat format, Constraints<Long> constraints) {
+        return checked(u64(ordinal, format), constraints);
     }
 
     /**
@@ -369,6 +625,31 @@ public final class Column {
     }
 
     /**
+     * A 32-bit floating-point column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.f32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column f32(int ordinal, Constraints<Float> constraints) {
+        return checked(f32(ordinal), constraints);
+    }
+
+    /**
+     * A 32-bit floating-point column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.f32()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column f32(int ordinal, NumFormat format, Constraints<Float> constraints) {
+        return checked(f32(ordinal, format), constraints);
+    }
+
+    /**
      * A {@code double} column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -390,6 +671,31 @@ public final class Column {
     }
 
     /**
+     * A 64-bit floating-point column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.f64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column f64(int ordinal, Constraints<Double> constraints) {
+        return checked(f64(ordinal), constraints);
+    }
+
+    /**
+     * A 64-bit floating-point column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.f64()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column f64(int ordinal, NumFormat format, Constraints<Double> constraints) {
+        return checked(f64(ordinal, format), constraints);
+    }
+
+    /**
      * An exact decimal column under the invariant notation.
      *
      * @param ordinal zero-based ordinal of the source column
@@ -408,6 +714,31 @@ public final class Column {
      */
     public static Column decimal(int ordinal, NumFormat format) {
         return new Column(ordinal, Door.DECIMAL, 0, format);
+    }
+
+    /**
+     * An exact decimal column under the invariant notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.decimal()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column decimal(int ordinal, Constraints<BigDecimal> constraints) {
+        return checked(decimal(ordinal), constraints);
+    }
+
+    /**
+     * An exact decimal column under a declared notation, judged against {@code constraints}.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param format the declared numeric notation
+     * @param constraints the constraints, built by {@code Constraints.decimal()}
+     * @return the column
+     * @throws IllegalArgumentException if {@code constraints} were built for another door
+     */
+    public static Column decimal(int ordinal, NumFormat format, Constraints<BigDecimal> constraints) {
+        return checked(decimal(ordinal, format), constraints);
     }
 
     /**
@@ -527,6 +858,18 @@ public final class Column {
         return plain(ordinal, Door.TEXT);
     }
 
+    /**
+     * A text column judged against {@code constraints}: the lengths and {@code enum}, after the
+     * {@code trim} they declare. An {@code enum} match reads as the entry as declared.
+     *
+     * @param ordinal zero-based ordinal of the source column
+     * @param constraints the constraints, built by {@code Constraints.text()}
+     * @return the column
+     */
+    public static Column text(int ordinal, Constraints<String> constraints) {
+        return checked(text(ordinal), constraints);
+    }
+
     @Override
     public boolean equals(Object other) {
         return other instanceof Column that
@@ -536,12 +879,13 @@ public final class Column {
                 && format.equals(that.format)
                 && Objects.equals(tokens, that.tokens)
                 && Objects.equals(dateOptions, that.dateOptions)
-                && Objects.equals(months, that.months);
+                && Objects.equals(months, that.months)
+                && Objects.equals(constraints, that.constraints);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(ordinal, door, declared, format, tokens, dateOptions, months);
+        return Objects.hash(ordinal, door, declared, format, tokens, dateOptions, months, constraints);
     }
 
     @Override
@@ -551,6 +895,7 @@ public final class Column {
                 + (format.equals(NumFormat.INVARIANT) ? "" : ", format=" + format)
                 + (tokens == null ? "" : ", tokens=" + tokens)
                 + (dateOptions == null ? "" : ", dateOptions=" + dateOptions)
-                + (months == null ? "" : ", months=" + months) + "]";
+                + (months == null ? "" : ", months=" + months)
+                + (constraints == null ? "" : ", constraints=" + constraints) + "]";
     }
 }

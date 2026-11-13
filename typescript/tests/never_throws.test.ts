@@ -159,6 +159,23 @@ function verdict(ctx: string, result: unknown, raw?: Uint8Array): void {
   if (raw !== undefined) assert.ok(fault.offset + fault.length <= raw.length, ctx)
 }
 
+// A checked cell's verdict: a checked success, a fault, or a violation whose span is in range.
+function checkedVerdict(ctx: string, result: unknown, raw?: Uint8Array): void {
+  assert.equal(typeof result, 'object', ctx)
+  const v = result as { ok: unknown; violation?: Record<string, unknown> }
+  if (v.ok === true) {
+    assert.ok('value' in v && typeof (v as { adjusted?: unknown }).adjusted === 'boolean', ctx)
+    return
+  }
+  if (!('violation' in v)) {
+    verdict(ctx, result, raw)
+    return
+  }
+  const violation = v.violation as { keyword: string; offset: number; length: number }
+  assert.equal(typeof violation.keyword, 'string', ctx)
+  if (raw !== undefined) assert.ok(violation.offset + violation.length <= raw.length, ctx)
+}
+
 // Calls `f` and hands back what it returned, failing the test if it threw.
 function call(ctx: string, f: () => unknown): unknown {
   let result: unknown
@@ -217,6 +234,27 @@ test('no Column factory throws, and a column it cannot honour is refused at bind
     }
   }
   assert.ok(calls >= factories.length * hostile.length * hostile.length)
+})
+
+test('Column.checked never throws, and a column it cannot honour is refused at bind', () => {
+  const checked = Column.checked as unknown as Loose
+  const declared = hypercast.Constraints.declare({ door: hypercast.Door.I32, maximum: '9' })
+  assert.ok(declared.ok)
+  const withDeclaration: [string, unknown][] = [['a declaration', declared.value], ...hostile]
+  for (const [first, a] of hostile) {
+    for (const [second, b] of withDeclaration) {
+      for (const [third, c] of [hostile[0], hostile[17], hostile[30]]) {
+        const ctx = `Column.checked(${first}, ${second}, ${third})`
+        const column = call(ctx, () => checked(a, b, c)) as InstanceType<typeof Column>
+        assert.ok(column instanceof Column && column.checked, ctx)
+        assert.ok(column.door === null || column.door === 'i32', ctx)
+        if (!column.valid) {
+          const bound = DelimitedReader.fromBytes('a\n1\n', null, [column])
+          assert.ok(!bound.ok && bound.error.kind === 'plan' && bound.error.column === 0, ctx)
+        }
+      }
+    }
+  }
 })
 
 test('no opener throws, for any argument in any position', () => {
@@ -344,7 +382,13 @@ test('no reader, sheet, batch, row or header method throws', () => {
   assert.equal(closedReader.value.records, null)
   assert.equal(closedReader.value.columnCount, null)
 
-  const read = DelimitedReader.fromBytes('id,n\n1,x\n2,\n', null, [Column.i32(0), Column.u8(1)])
+  const atMost = hypercast.Constraints.declare({ door: hypercast.Door.U8, maximum: '9' })
+  assert.ok(atMost.ok)
+  const read = DelimitedReader.fromBytes('id,n\n1,x\n2,\n', null, [
+    Column.i32(0),
+    Column.u8(1),
+    Column.checked(0, atMost.value),
+  ])
   assert.ok(read.ok)
   const batch = read.value.read()
   assert.ok(batch.ok && batch.value !== null)
@@ -355,6 +399,10 @@ test('no reader, sheet, batch, row or header method throws', () => {
     verdict(
       `row.get(${first})`,
       call(first, () => (row.get as Loose).call(row, a)),
+    )
+    checkedVerdict(
+      `row.getChecked(${first})`,
+      call(first, () => (row.getChecked as Loose).call(row, a)),
     )
     assert.ok(call(first, () => (row.raw as Loose).call(row, a)) instanceof Uint8Array)
     assert.equal(typeof call(first, () => (row.rawString as Loose).call(row, a)), 'string')
@@ -371,6 +419,11 @@ test('no reader, sheet, batch, row or header method throws', () => {
       verdict(
         ctx,
         call(ctx, () => (b.get as Loose).call(b, a, c)),
+        raw,
+      )
+      checkedVerdict(
+        `batch.getChecked(${first}, ${second})`,
+        call(ctx, () => (b.getChecked as Loose).call(b, a, c)),
         raw,
       )
       assert.equal(typeof call(ctx, () => (b.rawString as Loose).call(b, a, c)), 'string')
@@ -392,6 +445,17 @@ test('a cell asked for where the batch has none is the contract violation', () =
   assert.deepEqual(b.get(0, 1), contract)
   assert.deepEqual(b.get(-1, 0), contract)
   assert.deepEqual(b.get(0.5, 0), contract)
+  for (const [column, row] of [
+    [1, 0],
+    [0, 1],
+    [-1, 0],
+    [0.5, 0],
+  ]) {
+    assert.deepEqual(b.getChecked(column, row), contract)
+  }
+  const first = b.row(0)
+  assert.deepEqual(first?.getChecked(0), { ok: true, value: 1, adjusted: false, enumIndex: null })
+  for (const column of [1, -1, 0.5]) assert.deepEqual(first?.getChecked(column), contract)
   assert.deepEqual(b.raw(0, 1), new Uint8Array(0))
   assert.equal(b.line(9), 0)
   assert.deepEqual(b.column(3), [])

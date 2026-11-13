@@ -37,14 +37,15 @@ use crate::kernel::abi::{
     ERR_CELLS, ERR_CONTRACT, ERR_STRUCTURE, Failure, Filled, OK, RawDelimitedOptions, Span,
     no_format,
 };
+use crate::kernel::checked::{Checks, resolved_constraints, text_checked};
 use crate::kernel::delimited::engine::{self, Kind};
 use crate::kernel::delimited::scan::{Flow, Scanner, Sink, Stop};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
-use hypercast::detailed;
+use hypercast::detailed::{self, Rejection};
 use hypercast::{
-    CivilDateTime, Date, DateOptions, Decimal, Duration, Fault, MonthNames, NumFormat,
-    RawDateOptions, Reason, Timestamp, ValidDateOptions, ValidNumFormat,
+    Checked, CivilDateTime, Date, DateOptions, Decimal, Duration, Fault, MonthNames, NumFormat,
+    RawCheck, RawDateOptions, Reason, Timestamp, ValidDateOptions, ValidNumFormat,
 };
 
 /// The dialect as the caller declares it. Nothing is sniffed.
@@ -769,6 +770,40 @@ pub(crate) fn is_token(mut list: &[u8], text: &[u8]) -> bool {
     false
 }
 
+/// The cell at `ordinal` of `row`, as a door is asked of it: its text and the span a `Text`
+/// value carries, or the origin of the `Empty` it is without asking one, a cell the row doesn't
+/// have or a cell that's one of `tokens`.
+#[inline(always)]
+fn routed<'t>(
+    run: &'t mut Run<'_>,
+    row: usize,
+    ordinal: usize,
+    tokens: &[u8],
+) -> Result<(&'t [u8], Span), u16> {
+    let cell = run
+        .cells
+        .get(row * run.per_row + ordinal)
+        .copied()
+        .unwrap_or_default();
+    // A cell the row has, past its first, starts after the separator before it, so only a
+    // blanked table entry says offset 0 there.
+    if ordinal > 0 && cell == Span::default() {
+        return Err(CellNote::ORIGIN_PADDED);
+    }
+    // The byte before an unquoted cell is a separator or a line ending, or there is none.
+    let quoted = !tokens.is_empty()
+        && (cell.flagged()
+            || (cell.offset as usize)
+                .checked_sub(1)
+                .and_then(|before| run.data.get(before))
+                == Some(&b'"'));
+    let (text, span) = text(run.data, &mut *run.arena, &mut run.used, cell);
+    if !tokens.is_empty() && !quoted && is_token(tokens, text) {
+        return Err(CellNote::ORIGIN_TOKEN);
+    }
+    Ok((text, span))
+}
+
 /// One column with what a verdict doesn't say: `door` over every row's cell, but a cell the row
 /// doesn't have and a cell that's a token are `Empty` without asking it. A note goes beside each
 /// verdict when `buffer` has somewhere for it.
@@ -803,37 +838,18 @@ unsafe fn noted_column<T: Copy>(
         }
     };
     for row in 0..run.rows {
-        let cell = run
-            .cells
-            .get(row * run.per_row + ordinal)
-            .copied()
-            .unwrap_or_default();
-        // A cell the row has, past its first, starts after the separator before it, so only a
-        // blanked table entry says offset 0 there.
-        let (value, verdict) = if ordinal > 0 && cell == Span::default() {
-            note_at(row, 0, CellNote::ORIGIN_PADDED);
-            (zero, EMPTY)
-        } else {
-            // The byte before an unquoted cell is a separator or a line ending, or there is none.
-            let quoted = !tokens.is_empty()
-                && (cell.flagged()
-                    || (cell.offset as usize)
-                        .checked_sub(1)
-                        .and_then(|before| run.data.get(before))
-                        == Some(&b'"'));
-            let (text, span) = text(run.data, &mut *run.arena, &mut run.used, cell);
-            if !tokens.is_empty() && !quoted && is_token(tokens, text) {
-                note_at(row, 0, CellNote::ORIGIN_TOKEN);
+        let (value, verdict) = match routed(run, row, ordinal, tokens) {
+            Err(origin) => {
+                note_at(row, 0, origin);
                 (zero, EMPTY)
-            } else {
-                match door(text, span) {
-                    Ok(value) => (value, CellVerdict::OK),
-                    Err(failure) => {
-                        note_at(row, failure.detail.code() as u16, CellNote::ORIGIN_CELL);
-                        (zero, CellVerdict::from_fault(failure.fault()))
-                    }
-                }
             }
+            Ok((text, span)) => match door(text, span) {
+                Ok(value) => (value, CellVerdict::OK),
+                Err(failure) => {
+                    note_at(row, failure.detail.code() as u16, CellNote::ORIGIN_CELL);
+                    (zero, CellVerdict::from_fault(failure.fault()))
+                }
+            },
         };
         // SAFETY: per the function contract; neither array need be aligned.
         unsafe {
@@ -975,6 +991,150 @@ unsafe fn cast_noted(
                         detailed::cast_text(text).map(|_| span)
                     }
                 },
+            ),
+        }
+    }
+}
+
+/// One column under its constraints: as [`noted_column`], each cell asked of a checked door,
+/// whose verdict the column's `checks` also takes. A value that passed is written with
+/// [`CellVerdict::OK`] and `adjusted` and `enum_index` beside it; one that broke a constraint is
+/// written exactly as cast, with [`CellVerdict::VIOLATION`] spanning it and the keyword beside it.
+/// A cell that did not cast, and one that's `Empty` without asking, leave its `checks` as they
+/// were: there is nothing to judge.
+///
+/// # Safety
+/// `buffer`'s arrays each have room for `run.rows` elements, its notes unless they're null, and
+/// its `checks` is aligned and not null.
+#[inline(always)]
+unsafe fn checked_column<T: Copy>(
+    run: &mut Run<'_>,
+    ordinal: usize,
+    buffer: &ColumnBufferWith,
+    tokens: &[u8],
+    zero: T,
+    door: impl Fn(&[u8], Span) -> Result<Checked<T>, Rejection<T>>,
+) {
+    let values = buffer.values.cast::<T>();
+    let notes = buffer.notes;
+    if !notes.is_null() {
+        // SAFETY: per the function contract; as bytes, since the array need not be aligned.
+        unsafe {
+            notes
+                .cast::<u8>()
+                .write_bytes(0, run.rows * size_of::<CellNote>());
+        }
+    }
+    let note_at = |row: usize, detail: u16, origin: u16| {
+        if !notes.is_null() {
+            // SAFETY: per the function contract; the array need not be aligned.
+            unsafe { notes.add(row).write_unaligned(CellNote { detail, origin }) };
+        }
+    };
+    let check_at = |row: usize, check: RawCheck| {
+        // SAFETY: per the function contract.
+        unsafe { buffer.checks.add(row).write(check) };
+    };
+    for row in 0..run.rows {
+        let (value, verdict) = match routed(run, row, ordinal, tokens) {
+            Err(origin) => {
+                note_at(row, 0, origin);
+                (zero, EMPTY)
+            }
+            Ok((text, span)) => match door(text, span) {
+                Ok(passed) => {
+                    check_at(
+                        row,
+                        RawCheck {
+                            keyword: 0,
+                            adjusted: u32::from(passed.adjusted),
+                            enum_index: passed.enum_index.unwrap_or(u32::MAX),
+                        },
+                    );
+                    (passed.value, CellVerdict::OK)
+                }
+                // A violation's note is the default, a detail of 0 at the cell, as written.
+                Err(Rejection::Violation(broken)) => {
+                    check_at(
+                        row,
+                        RawCheck {
+                            keyword: broken.keyword.code(),
+                            adjusted: 0,
+                            enum_index: u32::MAX,
+                        },
+                    );
+                    let verdict = CellVerdict {
+                        offset: broken.offset,
+                        len: broken.len,
+                        reason: CellVerdict::VIOLATION,
+                    };
+                    (broken.value, verdict)
+                }
+                Err(Rejection::Failure(failure)) => {
+                    note_at(row, failure.detail.code() as u16, CellNote::ORIGIN_CELL);
+                    (zero, CellVerdict::from_fault(failure.fault()))
+                }
+            },
+        };
+        // SAFETY: per the function contract; neither array need be aligned.
+        unsafe {
+            values.add(row).write_unaligned(value);
+            buffer.verdicts.add(row).write_unaligned(verdict);
+        }
+    }
+}
+
+/// [`cast_noted`] for a column that declares constraints: HyperCast's checked doors, numeric and
+/// text, with tokens, notes and `checks`.
+///
+/// # Safety
+/// As [`checked_column`], for the door's types.
+#[inline(always)]
+unsafe fn cast_checked_column(
+    run: &mut Run<'_>,
+    ordinal: usize,
+    column: &Resolved<'_>,
+    checks: Checks<'_>,
+    buffer: &ColumnBufferWith,
+) {
+    let format = &column.format;
+    let tokens = column.tokens;
+    macro_rules! numeric {
+        ($constraints:expr, $zero:expr) => {
+            checked_column(run, ordinal, buffer, tokens, $zero, |text, _| {
+                detailed::cast_checked(text, format, &$constraints)
+            })
+        };
+    }
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        match checks {
+            Checks::I8(c) => numeric!(c, 0),
+            Checks::I16(c) => numeric!(c, 0),
+            Checks::I32(c) => numeric!(c, 0),
+            Checks::I64(c) => numeric!(c, 0),
+            Checks::U8(c) => numeric!(c, 0),
+            Checks::U16(c) => numeric!(c, 0),
+            Checks::U32(c) => numeric!(c, 0),
+            Checks::U64(c) => numeric!(c, 0),
+            Checks::F32(c) => numeric!(c, 0.0),
+            Checks::F64(c) => numeric!(c, 0.0),
+            Checks::Decimal(c) => numeric!(
+                c,
+                Decimal {
+                    lo: 0,
+                    hi: 0,
+                    scale: 0,
+                    negative: false,
+                }
+            ),
+            Checks::Text(c) => checked_column(
+                run,
+                ordinal,
+                buffer,
+                tokens,
+                Span::default(),
+                |text, span| text_checked(text, span, &c),
             ),
         }
     }
@@ -1534,6 +1694,8 @@ struct Resolved<'a> {
     date: Option<ValidDateOptions<'a>>,
     /// The tokens this column answers to; empty for none.
     tokens: &'a [u8],
+    /// The constraints its cells must also meet, when it declares any.
+    checks: Option<Checks<'a>>,
 }
 
 /// A column's format, judged.
@@ -1607,26 +1769,31 @@ pub(crate) unsafe fn resolved_tokens<'a>(
 
 impl<'a> Resolved<'a> {
     /// # Safety
-    /// `spec`'s `months` and `tokens` point to as many live bytes as the length beside each says,
-    /// when they aren't null. `inherited` is a list [`tokens_are_whole`] accepted.
+    /// `spec`'s `months`, `tokens` and `enum_ptr` point to as many live bytes as the length beside
+    /// each says, when they aren't null, and its `constraints` is null or readable. `inherited` is
+    /// a list [`tokens_are_whole`] accepted.
     unsafe fn of(spec: &'a ColumnSpecWith, inherited: &'a [u8]) -> Option<Resolved<'a>> {
+        let door = Door::from_code(spec.door, spec.param)?;
         Some(Resolved {
-            door: Door::from_code(spec.door, spec.param)?,
+            door,
             format: resolved_format(spec)?,
             // SAFETY: per the function contract.
             date: unsafe { resolved_date(spec) }?,
             // SAFETY: per the function contract.
             tokens: unsafe { resolved_tokens(spec, inherited) }?,
+            // SAFETY: per the function contract.
+            checks: unsafe { resolved_constraints(spec, door) }.ok()?,
         })
     }
 }
 
 /// Whether [`fill_with`] would take this column, given no list of its dialect's to inherit: what
-/// a caller can ask before any read.
+/// a caller can ask before any read. A column that declares constraints also needs `checks` in
+/// its buffer, which this can't see.
 ///
 /// # Safety
-/// `spec`'s `months` and `tokens` point to as many live bytes as the length beside each says, when
-/// they aren't null.
+/// `spec`'s `months`, `tokens` and `enum_ptr` point to as many live bytes as the length beside
+/// each says, when they aren't null, and its `constraints` is null or readable.
 pub unsafe fn honours(spec: &ColumnSpecWith) -> bool {
     // SAFETY: per the function contract, and an empty list is whole.
     unsafe { Resolved::of(spec, &[]) }.is_some()
@@ -1670,9 +1837,12 @@ pub unsafe fn fill_with(
     let mut width = 0usize;
     for (spec, buffer) in specs.iter().zip(columns) {
         // SAFETY: the caller's contract, and the inherited list was judged above.
-        if unsafe { Resolved::of(spec, tokens) }.is_none()
-            || buffer.values.is_null()
+        let Some(column) = (unsafe { Resolved::of(spec, tokens) }) else {
+            return ERR_CONTRACT;
+        };
+        if buffer.values.is_null()
             || buffer.verdicts.is_null()
+            || (column.checks.is_some() && (buffer.checks.is_null() || !buffer.checks.is_aligned()))
         {
             return ERR_CONTRACT;
         }
@@ -1723,7 +1893,9 @@ pub unsafe fn fill_with(
         let ordinal = spec.ordinal as usize;
         // SAFETY: the caller's contract, passed on a column at a time.
         unsafe {
-            if buffer.notes.is_null() && column.tokens.is_empty() && column.date.is_none() {
+            if let Some(checks) = column.checks {
+                cast_checked_column(&mut run, ordinal, &column, checks, buffer);
+            } else if buffer.notes.is_null() && column.tokens.is_empty() && column.date.is_none() {
                 let plain = ColumnBuffer {
                     values: buffer.values,
                     verdicts: buffer.verdicts,
@@ -1744,7 +1916,8 @@ pub unsafe fn fill_with(
 
     if let Some(vouched) = vouched.filter(|vouched| !vouched.all(walked.rows)) {
         for (spec, buffer) in specs.iter().zip(columns) {
-            if spec.door == Door::Text.code() {
+            // A checked text column's door asked for every cell already.
+            if spec.door == Door::Text.code() && spec.constraints.is_null() {
                 // SAFETY: the caller's contract, passed on; the loop above cast the column.
                 unsafe {
                     rejudge(

@@ -18,6 +18,7 @@ const { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } =
   require('node:fs') as typeof import('node:fs')
 const { tmpdir }: typeof import('node:os') = require('node:os')
 const path: typeof import('node:path') = require('node:path')
+const { inspect }: typeof import('node:util') = require('node:util')
 const { test }: typeof import('node:test') = require('node:test')
 const hypercast = require('@skunkwerkx/hypercast') as typeof import('@skunkwerkx/hypercast')
 const api = require('../index.js') as typeof import('../index.js')
@@ -34,6 +35,9 @@ type Batch = import('../index.js').Batch
 type Outcome<T> = import('../index.js').Outcome<T>
 type Value = import('../index.js').Value
 type Verdict<T> = import('../index.js').Verdict<T>
+type CheckedVerdict<T> = import('../index.js').CheckedVerdict<T>
+type Fault = import('../index.js').Fault
+type Constraints = InstanceType<typeof hypercast.Constraints>
 type Problem = import('../index.js').Problem
 type Suggestion = import('../index.js').Suggestion
 type Dialect = import('../index.js').Dialect
@@ -97,6 +101,10 @@ const CELL_KEYS = new Set([
   'raw_hex',
   'detail',
   'origin',
+  'keyword',
+  'adjusted',
+  'enum_index',
+  'bits',
 ])
 const PROBLEM_KEYS = new Set([
   'row',
@@ -109,6 +117,7 @@ const PROBLEM_KEYS = new Set([
   'origin',
   'expected',
   'found',
+  'keyword',
 ])
 const FAILURE_KEYS = new Set(['kind', 'record', 'line', 'byte', 'expected', 'found'])
 const PLAN_KEYS = new Set([
@@ -120,6 +129,22 @@ const PLAN_KEYS = new Set([
   'format',
   'tokens',
   'options',
+  'constraints',
+])
+// A plan entry's constraints, by the OpenAPI names HyperCast's corpus gives them, which are
+// `Constraints.declare`'s own.
+const CONSTRAINT_KEYS = new Set([
+  'minimum',
+  'exclusiveMinimum',
+  'maximum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'rounding',
+  'minLength',
+  'maxLength',
+  'trim',
+  'caseSensitive',
+  'enum',
 ])
 const FORMAT_KEYS = new Set(['decimal_sep', 'group_sep', 'flags', 'currency'])
 const DATE_OPTION_KEYS = new Set(['flags', 'pivot', 'months'])
@@ -199,6 +224,7 @@ function unknownKeys(c: Json, workbook: boolean): string[] {
     check(column, `${name}.plan[]`, PLAN_KEYS)
     check(column?.format, `${name}.plan[].format`, FORMAT_KEYS)
     check(column?.options, `${name}.plan[].options`, DATE_OPTION_KEYS)
+    check(column?.constraints, `${name}.plan[].constraints`, CONSTRAINT_KEYS)
   }
   for (const row of c.rows ?? []) for (const cell of row) check(cell, `${name}.rows[][]`, CELL_KEYS)
   for (const problem of c.problems ?? []) check(problem, `${name}.problems[]`, PROBLEM_KEYS)
@@ -291,40 +317,72 @@ const NUMERIC = new Set([
   'decimal',
 ])
 
+const declarations = new Map<string, Constraints>()
+// A plan entry's constraints as HyperCast's own declaration for the door it names, or
+// `undefined`.
+function constraintsOf(entry: Json): Constraints | undefined {
+  if (entry.constraints === undefined) return undefined
+  const key = JSON.stringify([entry.door, entry.constraints])
+  const cached = declarations.get(key)
+  if (cached) return cached
+  const { rounding, ...rest } = entry.constraints
+  const name = `${entry.door[0].toUpperCase()}${entry.door.slice(1)}` as 'I32'
+  const declared = hypercast.Constraints.declare({
+    door: hypercast.Door[name],
+    ...rest,
+    ...(rounding === undefined
+      ? {}
+      : {
+          rounding:
+            hypercast.Rounding[`${rounding[0].toUpperCase()}${rounding.slice(1)}` as 'Floor'],
+        }),
+  })
+  assert.ok(declared.ok, `${key}: ${JSON.stringify(declared)}`)
+  declarations.set(key, declared.value)
+  return declared.value
+}
+
 // A plan entry names its door as HyperCast's corpus names its types; Column's factories carry
-// the same names, in camel case. Every door can carry a format (a suggested plan's text
+// the same names, in camel case, and an entry that declares constraints is `Column.checked`,
+// whose door is the declaration's. Every door can carry a format (a suggested plan's text
 // columns do), which only a number's reads: a factory takes one for a number door only, so an
 // entry's format on another door is checked to be one HyperCast declares, and read no further.
 function columnOf(entry: Json): ColumnT {
   const { door, ordinal } = entry
   let column: ColumnT
-  switch (door) {
-    case 'unix':
-      column = Column.unix(ordinal, entry.precision)
-      break
-    case 'excel_serial':
-      column = Column.excelSerial(ordinal, entry.epoch)
-      break
-    case 'date_ordered':
-      column = Column.dateOrdered(ordinal, entry.order)
-      break
-    case 'datetime':
-      column = Column.datetime(ordinal, entry.order)
-      break
-    case 'bool':
-    case 'uuid':
-    case 'timestamp':
-    case 'date':
-    case 'time':
-    case 'duration':
-    case 'text':
-      formatOf(entry.format)
-      column = Column[door as 'text'](ordinal)
-      break
-    default:
-      assert.ok(NUMERIC.has(door), door)
-      column = Column[door as 'i32'](ordinal, formatOf(entry.format))
-  }
+  const declared = constraintsOf(entry)
+  if (declared !== undefined) {
+    column = Column.checked(ordinal, declared, formatOf(entry.format))
+    assert.ok(column.checked && column.door === camel(door), JSON.stringify(entry))
+  } else
+    switch (door) {
+      case 'unix':
+        column = Column.unix(ordinal, entry.precision)
+        break
+      case 'excel_serial':
+        column = Column.excelSerial(ordinal, entry.epoch)
+        break
+      case 'date_ordered':
+        column = Column.dateOrdered(ordinal, entry.order)
+        break
+      case 'datetime':
+        column = Column.datetime(ordinal, entry.order)
+        break
+      case 'bool':
+      case 'uuid':
+      case 'timestamp':
+      case 'date':
+      case 'time':
+      case 'duration':
+      case 'text':
+        formatOf(entry.format)
+        column = Column[door as 'text'](ordinal)
+        break
+      default:
+        assert.ok(NUMERIC.has(door), door)
+        column = Column[door as 'i32'](ordinal, formatOf(entry.format))
+        assert.ok(!column.checked, door)
+    }
   if (entry.tokens !== undefined) column = column.withTokens(entry.tokens)
   if (entry.options !== undefined) {
     const options = entry.options
@@ -419,6 +477,14 @@ function expectedValue(door: string, cell: Json): unknown {
   }
 }
 
+// What HyperCast's own checked door says of a cell's text under the column's declaration.
+function judgeChecked(entry: Json, raw: Uint8Array): CheckedVerdict<unknown> {
+  const declared = constraintsOf(entry) as Constraints
+  return entry.door === 'text'
+    ? hypercast.castText(raw, declared)
+    : hypercast.castChecked(raw, declared, formatOf(entry.format))
+}
+
 // What HyperCast's own package says of a cell's text through the column's door.
 function judge(entry: Json, raw: Uint8Array): Verdict<unknown> {
   switch (entry.door) {
@@ -465,8 +531,13 @@ function assertCell(
   judged: boolean,
   notes: boolean,
 ): void {
+  if (entry.constraints !== undefined) {
+    assertCheckedCell(label, entry, batch, column, row, cell, judged, notes)
+    return
+  }
   const verdict = batch.get<Value>(column, row)
   const raw = batch.raw(column, row)
+  assertNotes(label, batch, column, row, cell, notes)
   if (verdict.ok) {
     assert.equal(cell.expect, 'ok', `${label}: unexpectedly cast to ${String(verdict.value)}`)
     assert.deepEqual(verdict.value, expectedValue(entry.door, cell), label)
@@ -481,32 +552,116 @@ function assertCell(
     }
     if (entry.door === 'text') assert.deepEqual(raw, encoder.encode(cell.text), label)
   } else {
-    const { reason, offset, length } = verdict.fault
-    assert.notEqual(cell.expect, 'ok', `${label}: faulted ${reason}`)
-    assert.equal(reason, REASONS[cell.expect], label)
-    assert.ok(
-      offset + length <= raw.length,
-      `${label}: span ${offset}+${length} past ${raw.length}`,
-    )
-    if (cell.fault !== undefined) {
-      assert.deepEqual([offset, length], cell.fault, `${label}: span`)
-      if (cell.raw_hex !== undefined) assert.deepEqual(raw, hex(cell.raw_hex), `${label}: raw`)
-      else assert.equal(decoder.decode(raw), cell.raw, `${label}: raw`)
-    }
-    if (cell.expect === 'empty') {
-      assert.deepEqual([offset, length], [0, 0], label)
-      if (cell.origin === undefined) assert.equal(raw.length, 0, label)
-    }
+    assertFault(label, verdict.fault, raw, cell)
   }
-  // What failed, and where the verdict came from.
-  const detail = notes && cell.detail !== undefined ? camel(cell.detail) : null
-  assert.equal(batch.detail(column, row), detail, `${label}: detail`)
-  const origin = notes ? (cell.origin ?? 'cell') : 'cell'
-  assert.equal(batch.origin(column, row), origin, `${label}: origin`)
   // HyperCast is the judge: the cell is what its own package makes of the same text. A cell no
   // door was asked about is the read's word, not HyperCast's.
   if (judged && entry.door !== 'text' && cell.origin === undefined) {
     assert.deepEqual(verdict, judge(entry, raw), `${label}: disagrees with hypercast`)
+  }
+}
+
+// A cell's fault, held to the corpus.
+function assertFault(label: string, fault: Fault, raw: Uint8Array, cell: Json): void {
+  const { reason, offset, length } = fault
+  assert.notEqual(cell.expect, 'ok', `${label}: faulted ${reason}`)
+  assert.notEqual(cell.expect, 'violation', `${label}: faulted ${reason}`)
+  assert.equal(reason, REASONS[cell.expect], label)
+  assert.ok(offset + length <= raw.length, `${label}: span ${offset}+${length} past ${raw.length}`)
+  if (cell.fault !== undefined) {
+    assert.deepEqual([offset, length], cell.fault, `${label}: span`)
+    if (cell.raw_hex !== undefined) assert.deepEqual(raw, hex(cell.raw_hex), `${label}: raw`)
+    else assert.equal(decoder.decode(raw), cell.raw, `${label}: raw`)
+  }
+  if (cell.expect === 'empty') {
+    assert.deepEqual([offset, length], [0, 0], label)
+    if (cell.origin === undefined) assert.equal(raw.length, 0, label)
+  }
+}
+
+// What failed in a cell, and where its verdict came from.
+function assertNotes(
+  label: string,
+  batch: Batch,
+  column: number,
+  row: number,
+  cell: Json,
+  notes: boolean,
+): void {
+  const detail = notes && cell.detail !== undefined ? camel(cell.detail) : null
+  assert.equal(batch.detail(column, row), detail, `${label}: detail`)
+  const origin = notes ? (cell.origin ?? 'cell') : 'cell'
+  assert.equal(batch.origin(column, row), origin, `${label}: origin`)
+}
+
+// A float to its exact bits, as the corpus writes them: a float32 door's as a float32.
+function bitsOf(door: string, value: number): string {
+  const bytes = Buffer.alloc(door === 'f32' ? 4 : 8)
+  if (door === 'f32') bytes.writeFloatBE(value)
+  else bytes.writeDoubleBE(value)
+  return `0x${bytes.toString('hex')}`
+}
+
+// A checked cell's value, passed or as cast: a float to its exact bits, anything else as a
+// cast one is held.
+function assertCheckedValue(label: string, door: string, value: unknown, cell: Json): void {
+  if (door === 'f32' || door === 'f64') {
+    assert.equal(typeof value, 'number', label)
+    assert.equal(bitsOf(door, value as number), cell.bits, `${label}: ${String(value)}`)
+    return
+  }
+  assert.deepEqual(value, expectedValue(door, cell), label)
+}
+
+// A cell of a column that declares constraints, through `getChecked`: what passed, a violation of
+// a constraint the column declares, or the cell's fault. The plain getters answer HyperCast's
+// contract violation for the column.
+function assertCheckedCell(
+  label: string,
+  entry: Json,
+  batch: Batch,
+  column: number,
+  row: number,
+  cell: Json,
+  judged: boolean,
+  notes: boolean,
+): void {
+  const contract = { ok: false, fault: { reason: 'malformed', offset: 0, length: 0 } }
+  assert.deepEqual(batch.get(column, row), contract, `${label}: get read a constrained column`)
+  const verdict = batch.getChecked<Value>(column, row)
+  const raw = batch.raw(column, row)
+  if ('fault' in verdict) {
+    assertNotes(label, batch, column, row, cell, notes)
+    assertFault(label, verdict.fault, raw, cell)
+  } else {
+    // A cell that cast has no detail, and came from the cell itself.
+    assert.equal(batch.detail(column, row), null, `${label}: detail`)
+    assert.equal(batch.origin(column, row), 'cell', `${label}: origin`)
+    if (verdict.ok) {
+      assert.equal(cell.expect, 'ok', `${label}: passed with ${inspect(verdict)}`)
+      assert.deepEqual(
+        [verdict.adjusted, verdict.enumIndex],
+        [cell.adjusted, cell.enum_index ?? null],
+        label,
+      )
+      const index = verdict.enumIndex
+      if (index !== null && entry.door === 'text') {
+        // The entry as declared: the declaration's own string.
+        const declared = constraintsOf(entry) as Constraints
+        assert.equal(verdict.value, declared.enum?.[index], label)
+      }
+      assertCheckedValue(label, entry.door, verdict.value, cell)
+    } else {
+      const { keyword, value, offset, length } = verdict.violation
+      assert.equal(cell.expect, 'violation', `${label}: broke ${keyword}`)
+      assert.equal(keyword, cell.keyword, label)
+      assert.equal(decoder.decode(raw), cell.raw, `${label}: raw text`)
+      assert.deepEqual([offset, length], cell.fault, `${label}: span`)
+      assertCheckedValue(label, entry.door, value, cell)
+    }
+  }
+  if (judged && cell.origin === undefined) {
+    assert.deepEqual(verdict, judgeChecked(entry, raw), `${label}: disagrees with hypercast`)
   }
 }
 
@@ -515,9 +670,19 @@ function problemJson(problem: Problem, base: number): Json {
   const entry: Json = { row: base + problem.row, line: problem.line }
   if (problem.planColumn === null) {
     assert.ok(problem.sourceColumn === null && problem.reason === null)
+    assert.equal(problem.keyword, null)
     assert.deepEqual([problem.offset, problem.length], [0, 0])
     entry.expected = problem.expected
     entry.found = problem.found
+  } else if (problem.keyword !== null) {
+    // A violation: the cell cast, so there's no reason, and the span is the judged text's.
+    assert.ok(problem.sourceColumn !== null && problem.reason === null)
+    assert.deepEqual([problem.expected, problem.found], [0, 0])
+    entry.plan_column = problem.planColumn
+    entry.source_column = problem.sourceColumn
+    entry.reason = 'violation'
+    entry.keyword = problem.keyword
+    entry.fault = [problem.offset, problem.length]
   } else {
     assert.ok(problem.sourceColumn !== null && problem.reason !== null)
     assert.deepEqual([problem.expected, problem.found], [0, 0])
@@ -584,7 +749,7 @@ function assertBatch(
       const verdict = batch.get(column, row)
       assert.deepEqual(whole[row], verdict, at)
       assert.equal(batch.rawString(column, row), decoder.decode(batch.raw(column, row)), at)
-      if (!verdict.ok) faults++
+      if ('fault' in batch.getChecked(column, row)) faults++
     }
     assert.equal(batch.faultCount(column), faults, label)
   }
@@ -595,6 +760,7 @@ function assertBatch(
     if (numbers !== undefined) assert.equal(row.line, numbers[seen + index], `${label}: line`)
     for (let column = 0; column < plan.length; column++) {
       assert.deepEqual(row.get(column), batch.get(column, index), label)
+      assert.deepEqual(row.getChecked(column), batch.getChecked(column, index), label)
       assert.deepEqual(row.raw(column), batch.raw(column, index), label)
       assert.equal(row.detail(column), batch.detail(column, index), label)
       assert.equal(row.origin(column), batch.origin(column, index), label)
@@ -687,9 +853,9 @@ const delimited = load('delimited.json')
 const workbooks = load('workbook.json')
 
 test('the corpus is the whole contract, and every key in it is read', () => {
-  assert.equal(delimited.length, 123)
-  assert.equal(workbooks.length, 398)
-  assert.equal(new Set(workbooks.map((c) => c.file)).size, 41)
+  assert.equal(delimited.length, 137)
+  assert.equal(workbooks.length, 404)
+  assert.equal(new Set(workbooks.map((c) => c.file)).size, 42)
   const doors = new Set(delimited.flatMap((c) => c.plan.map((entry: Json) => entry.door)))
   assert.equal(doors.size, 22, 'a door the corpus never opens')
   assertKeysAreKnown(delimited, false)
