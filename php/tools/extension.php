@@ -42,21 +42,28 @@ function hypertabular_extensions(string $root): array
     $flags = [];
     $hypercast = getenv('HYPERCAST_PHP_EXTENSION');
     // The sibling checkout's build: in development (HyperForge's workspace/), where every binding
-    // builds against its peers, it is the one, ahead of an install. The child PHP reads this one's
-    // ini files, so an extension they already load can't be replaced, only refused. Never in CI,
-    // where companion mode names its pin in HYPERCAST_PHP_EXTENSION, and the Forge's release
-    // guard fails a leg with a HyperCast checkout beside it.
-    $sibling = \dirname($root, 2) . '/HyperCast/rust/target/php/release/' . hypertabular_library('hypercast');
+    // builds against its peers, it is the one, ahead of an install. The checkout decides, not its
+    // build: with the checkout there, a missing build is an error, never a quiet fall back to an
+    // installed release. The child PHP reads this one's ini files, so an extension they already
+    // load can't be replaced, only refused. Never in CI, where companion mode names its pin in
+    // HYPERCAST_PHP_EXTENSION, and the Forge's release guard fails a leg with a HyperCast checkout
+    // beside it.
+    $peer = \dirname($root, 2) . '/HyperCast';
+    $sibling = $peer . '/rust/target/php/release/' . hypertabular_library('hypercast');
     if (\is_string($hypercast) && $hypercast !== '') {
         $flags[] = hypertabular_resolve('HYPERCAST_PHP_EXTENSION', $hypercast, 'HYPERCAST_PHP_EXTENSION');
-    } elseif (getenv('CI') === false && is_file($sibling)) {
+    } elseif (getenv('CI') === false && is_file($peer . '/rust/Cargo.toml')) {
         if (\extension_loaded('hypercast')) {
             fwrite(STDERR, 'this PHP\'s ini files load ext-hypercast ' . phpversion('hypercast') . ', which would '
                 . "stand in for the sibling checkout's build ({$sibling}): disable it for this run, or name a "
                 . 'build in HYPERCAST_PHP_EXTENSION' . PHP_EOL);
             exit(1);
         }
-        $flags[] = hypertabular_resolve('HYPERCAST_PHP_EXTENSION', $sibling, 'the sibling checkout\'s build');
+        $flags[] = hypertabular_resolve(
+            'HYPERCAST_PHP_EXTENSION',
+            $sibling,
+            "the HyperCast checkout beside this one is not built: run cargo php-ext in {$peer}/rust"
+        );
     } elseif (!\extension_loaded('hypercast')) {
         $flags[] = hypertabular_resolve(
             'HYPERCAST_PHP_EXTENSION',

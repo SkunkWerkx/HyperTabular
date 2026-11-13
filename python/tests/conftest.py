@@ -15,6 +15,7 @@ the pinned package and release mode the index's.
 """
 
 import importlib
+import importlib.machinery
 import importlib.util
 import os
 import subprocess
@@ -28,8 +29,12 @@ sys.path.insert(0, str(PYTHON / "src"))
 
 if "CI" not in os.environ and (PEER_HYPERCAST / "hypercast").is_dir():
     # Its extension is staged the way CI stages this one's, never quietly replaced by the
-    # index's release, which lacks what this package is written against.
-    if not any((PEER_HYPERCAST / "hypercast").glob("_native*")):
+    # index's release, which lacks what this package is written against. A loadable module only:
+    # a `_native.pyi` stub beside a missing build is no extension.
+    if not any(
+        (PEER_HYPERCAST / "hypercast" / f"_native{suffix}").is_file()
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES
+    ):
         raise SystemExit(
             f"{PEER_HYPERCAST / 'hypercast'} has no _native extension: in ../HyperCast/rust run "
             "`cargo rustc --release --crate-type cdylib --features python`, then copy "

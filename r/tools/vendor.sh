@@ -81,13 +81,17 @@ package_into_vendor() {
   version="$(core_version "$dir")"
   pkgdir="$(mktemp -d)"
   # The patches resolve against the crate's own lock, and cargo writes them into it (a path
-  # source, or [[patch.unused]]): the committed lock is put back however packaging ends.
+  # source, or [[patch.unused]]): the committed lock is put back however packaging ends, an
+  # interrupt included. A subshell, so the traps are its own and leave the script's alone; an
+  # INT or TERM becomes an exit, which runs the EXIT trap. Only a SIGKILL gets past it.
   cp "$dir/Cargo.lock" "$pkgdir/Cargo.lock.saved"
-  local status=0
-  cargo package -q --no-verify --allow-dirty "${PATCHES[@]}" --manifest-path "$dir/Cargo.toml" \
-    --target-dir "$pkgdir" || status=$?
-  cp "$pkgdir/Cargo.lock.saved" "$dir/Cargo.lock"
-  [ "$status" -eq 0 ] || exit "$status"
+  (
+    trap 'cp "$pkgdir/Cargo.lock.saved" "$dir/Cargo.lock"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    cargo package -q --no-verify --allow-dirty "${PATCHES[@]}" --manifest-path "$dir/Cargo.toml" \
+      --target-dir "$pkgdir"
+  )
   mkdir -p "vendor/$name"
   tar -xzf "$pkgdir/package/$name-$version.crate" --strip-components=1 -C "vendor/$name"
   rm -rf "$pkgdir"
