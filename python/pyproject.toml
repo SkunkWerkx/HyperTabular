@@ -25,11 +25,12 @@ authors = [{ name = "Brian Buvinghausen" }]
 requires-python = ">=3.11"
 # HyperCast is the judge, in Python as in the core: a cell is `hypercast.Success` or
 # `hypercast.Fault` — that package's own classes, built by calling them — and a plan
-# column's notation is its `NumFormat`. 1.1.0 or later within the major: the first
+# column's notation is its `NumFormat`. 1.0.0, the newest HyperCast release, while 1.1.0 is in
+# development (see rust/Cargo.toml). 1.1.0 or later within the major is the real floor: the first
 # HyperCast with an sdist, so wherever this package builds from its own sdist (no wheel
 # fits), pip can build HyperCast's from source too, at the same Rust floor; and from 1.0.0
 # only a new major may break the surface.
-dependencies = ["hypercast>=1.1.0,<2"]
+dependencies = ["hypercast>=1.0.0,<2"]
 keywords = ["csv", "tsv", "parsing", "verdict", "pyo3"]
 # No `License ::` classifier: PEP 639 deprecates them in favour of the `license` expression
 # above, and the two are not meant to be declared together.

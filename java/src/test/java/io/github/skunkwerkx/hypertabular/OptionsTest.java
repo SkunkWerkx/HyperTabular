@@ -694,7 +694,8 @@ final class OptionsTest {
             assertEquals(2 * rows, listed);
             assertEquals(0, batch.faults().iterator().next().row());
             int again = 0;
-            for (Problem ignored : batch.faults()) {
+            for (Problem fault : batch.faults()) {
+                assertNotNull(fault);
                 again++;
             }
             assertEquals(2 * rows, again);

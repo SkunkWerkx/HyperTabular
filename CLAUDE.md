@@ -296,15 +296,19 @@ classifies a `filename<TAB>previous_filename` list from stdin the way the `chang
 (`--all` is the release board), and `python3 .github/scripts/pr_board.py` with `NEEDS`,
 `CHANGES` and `GITHUB_EVENT_NAME` set gives the verdict.
 
-Until HyperCast's next version is on its registries, every binding verifies against
-`../HyperCast`'s working tree through overrides that stay out of the tree: a cargo
-`[patch.crates-io]`, a `go.work` with a `replace`, a local NuGet feed, Maven repository, npm
-tarballs, pip and R installs. The pin's own artifacts do the same for every binding at once: a board
-run's `companion-hypercast` artifact (`gh run download`), then the Forge's `companion_fetch.py`
-`stage`, `env` and `wire` per leg, in a scratch clone and never the main checkout (it rewrites
-manifests and lockfiles). That wiring writes where a runner's home is: set `CARGO_HOME`,
-`GRADLE_USER_HOME`, `R_LIBS_USER`, `GITHUB_ENV` and `HYPER_COMPANION_PYTHON` (a venv) to scratch
-first, or it patches `~/.cargo/config.toml` and `~/.gradle/init.d`.
+Development builds every binding against `../HyperCast`'s working tree, never its published
+packages: this repository is cloned under HyperForge's `workspace/`, whose committed files
+(Cargo's `paths` override, `go.work`, the Bun workspace, `Gemfile.peers` through
+`ruby/Gemfile`'s hook, MSBuild's `Directory.Build.targets`) and this repository's own CI-guarded
+switches (`java/settings.gradle.kts`, both `Package.swift`, `python/tests/conftest.py`,
+`r/tools/vendor.sh`) take the peer. HyperForge's
+`workspace/README.md` has the table. CI never sees them: companion mode wires the pinned
+HyperCast and release mode the registries'. The pin's own artifacts do the same for every
+binding at once: a board run's `companion-hypercast` artifact (`gh run download`), then the
+Forge's `companion_fetch.py` `stage`, `env` and `wire` per leg, in a scratch clone and never the
+main checkout (it rewrites manifests and lockfiles). That wiring writes where a runner's home is:
+set `CARGO_HOME`, `GRADLE_USER_HOME`, `R_LIBS_USER`, `GITHUB_ENV` and `HYPER_COMPANION_PYTHON`
+(a venv) to scratch first, or it patches `~/.cargo/config.toml` and `~/.gradle/init.d`.
 
 `cd rust && cargo test`, then `./check-core.sh`, which is Linux-only (`.so`, `nm -D`,
 `readelf`): on a Mac run it in Docker (`rust:latest`, the three `cargo check` targets and

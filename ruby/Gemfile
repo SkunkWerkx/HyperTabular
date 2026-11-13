@@ -12,3 +12,9 @@ group :development do
   # The formatter: .rubocop.yml enables the layout cops only, over every Ruby file in the gem.
   gem "rubocop", "~> 1.91", require: false
 end
+
+# Development builds against the HyperCast checkout beside this one: HyperForge's workspace/Gemfile.peers names its
+# gem by path. The Forge allows exactly these two lines and fails a CI leg in which the file they name exists
+# (companion_fetch.py, gemfile_evals); a CI checkout never has it.
+peers = File.expand_path("../../Gemfile.peers", __dir__)
+eval_gemfile peers if File.exist?(peers) && ENV["CI"].nil?

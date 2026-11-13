@@ -26,12 +26,18 @@
 # HYPERCAST_PATH, when set, names a hypercast crate directory (its rust/) to take in place of
 # crates.io's, the same way as the core: for a HyperTabular that requires a hypercast release
 # still being packed. It is a local check only; CI and the release vendor crates.io's.
+# Outside CI it defaults to the HyperCast checkout beside this one, when there is one
+# (HyperForge's workspace/, where each Hyper* repo builds against its peers' working trees);
+# HYPERCAST_PATH= (set, empty) takes crates.io's instead.
 set -euo pipefail
 
 CRATE=hypertabular
 
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "$PKG/.." && pwd)"
+if [ -z "${HYPERCAST_PATH+set}" ] && [ -z "${CI:-}" ] && [ -f "$REPO/../HyperCast/rust/Cargo.toml" ]; then
+  HYPERCAST_PATH="$REPO/../HyperCast/rust"
+fi
 # The two corpus files, and every workbook package workbook.json reads: the replay
 # (tests/testthat/test-corpus-*.R) reads each one by name, and a file missing from the tarball
 # is a test failure, never a skip.
@@ -74,8 +80,14 @@ package_into_vendor() {
   name="$(sed -n 's/^name = "\(.*\)"/\1/p' "$dir/Cargo.toml" | head -1)"
   version="$(core_version "$dir")"
   pkgdir="$(mktemp -d)"
+  # The patches resolve against the crate's own lock, and cargo writes them into it (a path
+  # source, or [[patch.unused]]): the committed lock is put back however packaging ends.
+  cp "$dir/Cargo.lock" "$pkgdir/Cargo.lock.saved"
+  local status=0
   cargo package -q --no-verify --allow-dirty "${PATCHES[@]}" --manifest-path "$dir/Cargo.toml" \
-    --target-dir "$pkgdir"
+    --target-dir "$pkgdir" || status=$?
+  cp "$pkgdir/Cargo.lock.saved" "$dir/Cargo.lock"
+  [ "$status" -eq 0 ] || exit "$status"
   mkdir -p "vendor/$name"
   tar -xzf "$pkgdir/package/$name-$version.crate" --strip-components=1 -C "vendor/$name"
   rm -rf "$pkgdir"

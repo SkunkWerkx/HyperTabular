@@ -62,6 +62,20 @@ let coreDependencies: [Target.Dependency] =
         .target(name: "HyperTabularCoreApple", condition: .when(platforms: [.iOS, .macCatalyst])),
     ] : ["HyperTabularCore"]
 
+// Development builds against the HyperCast checkout beside this one (HyperForge's workspace/, where
+// each Hyper* repo builds against its peers' working trees). Never in CI (GitHub Actions sets CI),
+// where companion mode rewrites the requirement below to the pinned package and release mode
+// resolves it from GitHub, and never in a consumer's build, whose checkouts sit side by side
+// under .build/checkouts/ or Xcode's SourcePackages/checkouts/. The path is computed, so the
+// Forge's manifest rewriting (companion_wire, companion_gate) sees only the requirement, and its
+// release guard and companion wiring fail a leg with a HyperCast checkout beside this one
+// (companion_fetch.py, peer_findings). HyperCast links its own local core when it has one: run its
+// .github/scripts/local-core.sh as well as this repository's.
+let peerHyperCast = "\(Context.packageDirectory)/../HyperCast"
+let usesPeerHyperCast =
+    Context.environment["CI"] == nil && !Context.packageDirectory.contains("/checkouts/")
+    && FileManager.default.fileExists(atPath: "\(peerHyperCast)/Package.swift")
+
 let package = Package(
     name: "HyperTabular",
     // macOS 13, iOS 16 and Mac Catalyst 16 floors: kept in sync with swift/Package.swift,
@@ -75,10 +89,13 @@ let package = Package(
         .library(name: "HyperTabular", targets: ["HyperTabular"])
     ],
     dependencies: [
-        // 1.1.0, whose Swift core comes from its release by URL and checksum. A version range,
+        // 1.0.0, the newest HyperCast release, while 1.1.0 (the real floor) is in development:
+        // see rust/Cargo.toml. Its Swift core comes from its release by URL and checksum. A version range,
         // never a revision or a branch: SwiftPM refuses a tagged package that depends on one to
         // every consumer, so the release guard refuses a tag that does.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.1.0")
+        usesPeerHyperCast
+            ? .package(path: peerHyperCast)
+            : .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.0.0")
     ],
     targets: [
         .target(

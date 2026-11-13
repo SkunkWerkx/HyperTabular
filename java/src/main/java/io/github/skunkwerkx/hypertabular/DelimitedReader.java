@@ -102,7 +102,6 @@ public final class DelimitedReader implements AutoCloseable {
     static final long CELL_BUDGET = 4096L * 257;
 
     private static final ValueLayout.OfByte BYTE = ValueLayout.JAVA_BYTE;
-    private static final ValueLayout.OfShort SHORT = ValueLayout.JAVA_SHORT;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
 
@@ -297,7 +296,6 @@ public final class DelimitedReader implements AutoCloseable {
     private Source source;
     private Block buffer;
     private MemorySegment memory;
-    private MemorySegment memoryReadOnly;
     /** What decodes a declared encoding into {@code buffer}: {@code null} for UTF-8. */
     private Decoder decoder;
 
@@ -378,7 +376,9 @@ public final class DelimitedReader implements AutoCloseable {
         try {
             MemorySegment copy = reader.arena.allocate(utf8.length);
             MemorySegment.copy(utf8, 0, copy, BYTE, 0, utf8.length);
-            return reader.overMemory(copy, MAX_WINDOW_BYTES).begin(dialect);
+            reader.overMemory(copy, MAX_WINDOW_BYTES);
+            reader.begin(dialect);
+            return reader;
         } catch (RuntimeException | Error failure) {
             reader.abandon(failure);
             throw failure;
@@ -456,7 +456,9 @@ public final class DelimitedReader implements AutoCloseable {
                 text = reader.arena.allocate(utf8.byteSize());
                 text.copyFrom(utf8);
             }
-            return reader.overMemory(text, windowBytes).begin(dialect);
+            reader.overMemory(text, windowBytes);
+            reader.begin(dialect);
+            return reader;
         } catch (RuntimeException | Error failure) {
             reader.abandon(failure);
             throw failure;
@@ -555,7 +557,9 @@ public final class DelimitedReader implements AutoCloseable {
             }
             throw failure;
         }
-        return reader.overSource(new StreamSource(utf8, start), start).begin(dialect);
+        reader.overSource(new StreamSource(utf8, start), start);
+        reader.begin(dialect);
+        return reader;
     }
 
     /**
@@ -645,7 +649,9 @@ public final class DelimitedReader implements AutoCloseable {
             reader.abandon(failure);
             throw failure;
         }
-        return reader.overSource(new FileSource(channel), start).begin(dialect);
+        reader.overSource(new FileSource(channel), start);
+        reader.begin(dialect);
+        return reader;
     }
 
     /**
@@ -842,25 +848,23 @@ public final class DelimitedReader implements AutoCloseable {
         return columns != null;
     }
 
-    private DelimitedReader overMemory(MemorySegment text, long windowBytes) {
+    private void overMemory(MemorySegment text, long windowBytes) {
         memory = text;
-        memoryReadOnly = text.asReadOnly();
         maxWindow = windowBytes;
         if (dialect.encoding() == Encoding.UTF_8) {
             end = text.byteSize();
             eof = true;
-            return this;
+            return;
         }
         // Under a declared encoding the memory is the decoder's, and what it decodes to lands in a
         // buffer.
         decoder = new Decoder(dialect.encoding().code(), text);
         buffer = new Block(DEFAULT_BUFFER_BYTES, 1);
         transcoded = arena.allocate(Abi.TRANSCODED_BYTES, 8);
-        return this;
     }
 
     /** Takes the source over: from here it is closed with the reader, on failure included. */
-    private DelimitedReader overSource(Source from, int bufferBytes) {
+    private void overSource(Source from, int bufferBytes) {
         source = from;
         try {
             buffer = new Block(bufferBytes, 1);
@@ -872,7 +876,6 @@ public final class DelimitedReader implements AutoCloseable {
             abandon(failure);
             throw failure;
         }
-        return this;
     }
 
     /** Closes a reader that is not going to be handed out, keeping the failure that ended it. */
@@ -884,7 +887,7 @@ public final class DelimitedReader implements AutoCloseable {
         }
     }
 
-    private DelimitedReader begin(Dialect dialect) {
+    private void begin(Dialect dialect) {
         try {
             if (dialect.hasHeader()) {
                 enter();
@@ -898,7 +901,6 @@ public final class DelimitedReader implements AutoCloseable {
                     refusePastWidth(columns.plan);
                 }
             }
-            return this;
         } catch (RuntimeException | Error failure) {
             abandon(failure);
             throw failure;

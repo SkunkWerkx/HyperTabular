@@ -17,7 +17,7 @@ hypertabular = { path = "../rust", default-features = false, features = ["std"] 
 # The judge, for the two things the Rust binding does not re-export: the `RawNumFormat` a
 # HyperCast `NumFormat` crosses as (its `packed` bytes), and the version it reports. The same
 # crate the core links (Cargo unifies them), so a cell's verdict is that HyperCast's.
-hypercast = { version = "1.1.0", default-features = false }
+hypercast = { version = "1.0.0", default-features = false }
 # napi10, the Node-API version every Node `engines` admits supports: BigInt (napi6), so the i64
 # and u64 doors answer a `bigint` as HyperCast's own package does, and type tags (napi8), so a
 # method called on another class's instance is refused by Node before the native cast.
