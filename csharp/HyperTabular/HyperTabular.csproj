@@ -44,9 +44,10 @@
 
   <ItemGroup>
     <!-- HyperCast is the judge: Verdict, Fault, NumFormat and the declared-option enums are
-         its types, not copies of them. 1.1.0 is the first HyperCast with lib/net10.0/ and the
-         browser-wasm archive both frameworks link. -->
-    <PackageReference Include="HyperCast" Version="1.1.0" />
+         its types, not copies of them. 1.0.0, the newest HyperCast release, while 1.1.0 is in
+         development (see rust/Cargo.toml): 1.1.0 is the real floor, the first HyperCast with
+         lib/net10.0/ and the browser-wasm archive both frameworks link. -->
+    <PackageReference Include="HyperCast" Version="1.0.0" />
   </ItemGroup>
 
   <ItemGroup>

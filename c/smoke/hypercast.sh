@@ -11,7 +11,7 @@
 # Otherwise the archive is downloaded from HyperCast's GitHub Release for that version and
 # unpacked under the caller's work directory.
 
-# The version rust/Cargo.toml requires of HyperCast: "1.1.0" of `hypercast = { version = "1.1.0"`.
+# The version rust/Cargo.toml requires of HyperCast: "1.0.0" of `hypercast = { version = "1.0.0"`.
 hypercast_version() {
   sed -n -E 's/^hypercast = \{ *version = "[=^~]?([0-9][^"]*)".*/\1/p' "$1/rust/Cargo.toml" | head -n 1
 }

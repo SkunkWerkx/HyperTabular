@@ -16,7 +16,7 @@
     },
     "require": {
         "php": ">=8.3",
-        "ext-hypercast": "^1.1"
+        "ext-hypercast": "^1.0"
     },
     "php-ext": {
         "extension-name": "hypertabular",

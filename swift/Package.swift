@@ -42,6 +42,13 @@ let coreDependencies: [Target.Dependency] =
     + (linksAppleCore
         ? [.target(name: "HyperTabularCoreApple", condition: .when(platforms: [.iOS, .macCatalyst]))] : [])
 
+// Development builds against the HyperCast checkout beside this repository, never in CI or a
+// consumer's checkout: the root Package.swift carries the story.
+let peerHyperCast = "\(Context.packageDirectory)/../../HyperCast"
+let usesPeerHyperCast =
+    Context.environment["CI"] == nil && !Context.packageDirectory.contains("/checkouts/")
+    && FileManager.default.fileExists(atPath: "\(peerHyperCast)/Package.swift")
+
 let package = Package(
     name: "HyperTabular",
     // macOS 13 floor: the duration door presents Swift's own Duration type, as HyperCast's
@@ -60,10 +67,13 @@ let package = Package(
         // HyperCast is the judge: every cell is one of its verdicts, and the verdict, the
         // fault, the number format and the declared enums are its own Swift types, from its
         // own package — never copies of them.
-        // 1.1.0, whose Swift core comes from its release by URL and checksum. A version range,
+        // 1.0.0, the newest HyperCast release, while 1.1.0 (the real floor) is in development:
+        // see rust/Cargo.toml. Its Swift core comes from its release by URL and checksum. A version range,
         // never a revision or a branch: SwiftPM refuses a tagged package that depends on one to
         // every consumer, so the release guard refuses a tag that does.
-        .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.1.0")
+        usesPeerHyperCast
+            ? .package(path: peerHyperCast)
+            : .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.0.0")
     ],
     targets: [
         .target(

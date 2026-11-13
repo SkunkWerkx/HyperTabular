@@ -4,6 +4,7 @@ import org.gradle.external.javadoc.StandardJavadocDocletOptions
 plugins {
     `java-library`
     `maven-publish`
+    eclipse
     id("com.vanniktech.maven.publish") version "0.37.0"
     id("com.diffplug.spotless") version "8.11.0"
 }
@@ -45,9 +46,10 @@ dependencies {
     // UnixPrecision, DateOrder and ExcelEpoch are its own types, from its own published
     // jar, and they are this binding's public API — hence `api`, so a consumer gets them
     // transitively. Nothing here calls HyperCast's doors: the core this binding loads has
-    // HyperCast compiled in, and casts every cell itself. 1.1.0 is the floor: the first
+    // HyperCast compiled in, and casts every cell itself. 1.0.0, the newest HyperCast release,
+    // while 1.1.0 is in development (see rust/Cargo.toml): 1.1.0 is the real floor, the first
     // HyperCast jar that runs on JDK 21 (a multi-release jar of its own).
-    api("io.github.skunkwerkx:hypercast:1.1.0")
+    api("io.github.skunkwerkx:hypercast:1.0.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("com.google.code.gson:gson:2.15.0")
@@ -177,6 +179,16 @@ sourceSets.main {
 val java25 = sourceSets.create("java25") {
     java.setSrcDirs(listOf("src/main/java25"))
     compileClasspath += sourceSets.main.get().output + configurations.compileClasspath.get()
+}
+
+// The editor only: VS Code's Java support (Buildship) folds every source set into one project, where the
+// base tree's JNI Native and java25's FFM one are two definitions of one class. It checks the FFM one,
+// which is what runs on JDK 25. The Gradle build itself never reads the Eclipse model.
+eclipse.classpath.file.whenMerged {
+    (this as org.gradle.plugins.ide.eclipse.model.Classpath).entries
+        .filterIsInstance<org.gradle.plugins.ide.eclipse.model.SourceFolder>()
+        .filter { it.path == "src/main/java" }
+        .forEach { it.excludes = it.excludes + "io/github/skunkwerkx/hypertabular/Native.java" }
 }
 
 tasks.processResources {
