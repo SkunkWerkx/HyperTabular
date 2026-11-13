@@ -23,7 +23,7 @@ use super::hypercast::{
 };
 use super::results::{ambiguous_column, suggested_column, suggestion};
 use super::values::{ColumnFields, column, tabular_exception_of};
-use crate::column::MAX_ORDINAL;
+use crate::column::{MAX_ORDINAL, Undeclarable};
 use crate::kernel::abi::ColumnSpec;
 use crate::kernel::door::Door as Kernel;
 use crate::kernel::suggest::{COMMA_DECIMAL, COMMA_GROUPS};
@@ -144,6 +144,52 @@ fn str_refs(tokens: &[String]) -> Vec<&str> {
 }
 
 /// One plan column as the crate takes it, checked: the door it names and everything it declares.
+/// A plan column that declares HyperCast's `Constraints`, refused unless they are for its own door:
+/// a factory refuses any other pairing, and a column that got past one is refused here.
+fn checked_of(
+    index: usize,
+    fields: &ColumnFields,
+    ordinal: usize,
+    door: Kernel,
+) -> PhpResult<crate::Column> {
+    let constraints = &fields.constraints;
+    if !instance_of(constraints, b"HyperCast\\Constraints") {
+        return Err(invalid_argument(format!(
+            "Plan column {index}'s constraints must be a HyperCast\\Constraints"
+        )));
+    }
+    let declared = read_own(constraints, "door")?;
+    let code = enum_value(&declared)
+        .and_then(|code| u32::try_from(code).ok())
+        .ok_or_else(contract_violation)?;
+    let bytes = |method: &str| -> PhpResult<Vec<u8>> {
+        let packed = super::classes::call(Some(constraints), method, &mut [])?;
+        Ok(packed
+            .zend_str()
+            .map(|text| text.as_bytes().to_vec())
+            .unwrap_or_default())
+    };
+    let (packed, entries) = (bytes("packed")?, bytes("packedEnum")?);
+    crate::column::checked_from_packed(ordinal, door, code, &packed, &entries).map_err(|refusal| {
+        match refusal {
+            Undeclarable::NotPacked => contract_violation(),
+            Undeclarable::Mismatched => {
+                let named = Door::from_code(fields.door)
+                    .ok_or_else(contract_violation)
+                    .and_then(|door| door.into_zval(false).map_err(|_| pending("Door case")))
+                    .and_then(|door| super::values::mismatched(&declared, &door));
+                match named {
+                    Ok(message) => invalid_argument(format!("Plan column {index}: {message}")),
+                    Err(failure) => failure,
+                }
+            }
+            Undeclarable::Refused => invalid_argument(format!(
+                "Plan column {index}'s constraints cannot be honoured"
+            )),
+        }
+    })
+}
+
 pub(crate) fn column_of(
     index: usize,
     fields: &ColumnFields,
@@ -165,7 +211,12 @@ pub(crate) fn column_of(
                 "Plan column {index} names no door; build it with Column's factories"
             ))
         })?;
-    let mut made = crate::Column::new(ordinal, door).format(format);
+    let mut made = if fields.constraints.is_null() {
+        crate::Column::new(ordinal, door)
+    } else {
+        checked_of(index, fields, ordinal, door)?
+    }
+    .format(format);
     if !fields.tokens.is_null() {
         let tokens = token_strings(&fields.tokens, &format!("Plan column {index}'s tokens"))?;
         made = made.tokens(&str_refs(&tokens));
@@ -437,6 +488,7 @@ pub(crate) fn suggestion_of(found: &crate::Suggestion, options: Option<&Zval>) -
             door(planned.door)?,
             Some(format_zval(planned.format, wanted.as_ref())?),
             door_param(planned.door),
+            None,
         )?);
         let mut candidates = Vec::with_capacity(column_found.candidates.len());
         for candidate in &column_found.candidates {

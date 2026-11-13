@@ -293,6 +293,76 @@ grouping bit `256` (the words `351` and `863`), which only a literal or a reflec
 an error when the plan is bound, before any cell, and in a suggest's options before it opens anything. Go has no locale bridge, so nothing reads a locale's
 name. HyperCast's [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`Minimum`, `ExclusiveMinimum`, `Maximum`, `ExclusiveMaximum`, `MultipleOf` with `WithRounding`,
+`MinLength`, `MaxLength`, `Enum`, with `Trim` and `CaseSensitive` for text), through `Checked` (the
+door is the constraints' type) or `CheckedText`. Each cell is cast first, so text that isn't the type
+is a `*hypercast.Fault` as ever, and then judged:
+
+```go
+package main
+
+import (
+	"fmt"
+
+	hypercast "github.com/SkunkWerkx/HyperCast/go"
+	hypertabular "github.com/SkunkWerkx/HyperTabular/go"
+)
+
+func main() {
+	csv := []byte("qty,sex\n12,MALE\n7,x\n")
+	reader, err := hypertabular.NewDelimitedReaderBytes(csv, hypertabular.CSV, []hypertabular.Column{
+		hypertabular.Checked(0, hypercast.Invariant,
+			hypercast.MustConstraints[int32](hypercast.Minimum(1), hypercast.Maximum(10))),
+		hypertabular.CheckedText(1, hypercast.MustConstraints[string](hypercast.Enum("Female", "Male"))),
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer reader.Close()
+	batch, err := reader.Read()
+	if err != nil {
+		panic(err)
+	}
+	for row := range batch.All() {
+		qty, rejection := hypertabular.CellChecked[int32](row, 0)
+		switch r := rejection.(type) {
+		case nil:
+			fmt.Print(qty.Value)
+		case *hypercast.Violation[int32]:
+			fmt.Print(r.Value, " breaks ", r.Keyword)
+		case *hypercast.Fault:
+			fmt.Print(r.Reason)
+		}
+		// "MALE" matches the entry, and reads as "Male".
+		sex, rejection := hypertabular.CellChecked[string](row, 1)
+		if rejection != nil {
+			fmt.Println(" " + rejection.Error())
+		} else {
+			fmt.Println(" " + sex.Value)
+		}
+	}
+	for problem := range batch.Faults() {
+		fmt.Println("line", problem.Line, "column", problem.SourceColumn, problem.Keyword)
+	}
+}
+```
+
+It prints `12 breaks maximum Male`, `7 hypercast: breaks enum at byte 0..1`, `line 2 column 0 maximum`
+and `line 3 column 1 enum`. A violation isn't a fault: the cell cast, so `Fault(column, row)` is nil and
+the `CellVerdict`'s `Reason()` 0, its `Violation()` says so, the value is kept exactly as cast (never
+rounded), and the span is the judged text's. A cell `MultipleOf` rounded passes with `Adjusted` set,
+and a text `Enum` match reads as the entry as declared, with `EnumIndex` naming it. `Faults()` lists a
+violation with its `Keyword` and a zero `Reason`. `Get`, `Cell`, `Text` and `TextString` panic on a
+constrained column, as does `GetChecked` asked for a type other than the door's: they would read a
+violation as passed. `GetChecked` reads an unconstrained column too, where every cell that cast
+passes, unadjusted. A door that takes no constraints has no `Constraints` type to give `Checked`, so
+the mistake doesn't compile. HyperCast judges the declaration when `NewConstraints` builds it, and
+refuses only one its core cannot read; `Checked` panics on the zero `Constraints`, which was never
+judged.
+
 ## The shape
 
 The core owns no memory and reads no files. The reader sizes the buffers — one value array
@@ -303,7 +373,7 @@ fills them in one call per batch: once per few thousand rows, not once per cell.
   `Verdicts(column)`, a typed slice per door (`I32`, `F64`, `Exact`, `Timestamp`,
   `DateOnly`, `Text`, …), `Fault(column, row)`, `Raw(column, row)`, `Detail(column, row)`,
   `Origin(column, row)`, `Faults()` (a list ranged over past the next `Read()` panics) and the generic
-  `Get[T](batch, column, row)` (a free function, since a Go method cannot take type
+  `Get[T](batch, column, row)` and `GetChecked[T]` (free functions, since a Go method cannot take type
   parameters) — or `io.EOF` once there are no more rows. It is a view of the reader's
   buffers, valid until the next `Read()`, and the same type for delimited text and for a
   sheet. The integer, float and bool slices, `Exact`, `Uuid`, `TimeOfDay` and `Span` are the
@@ -329,7 +399,7 @@ fills them in one call per batch: once per few thousand rows, not once per cell.
   `reader.All()` / `sheet.All()` an `iter.Seq2[Row, error]` that reads batch after batch.
   A `Row` — `Index()`, `Line()`, `Verdict(column)`, `Fault(column)`, `Detail(column)`,
   `Origin(column)`, `Text(column)`, `TextString(column)`, `Raw(column)`, and
-  `Cell[T](row, column)` — is a (batch, index) pair
+  `Cell[T](row, column)` and `CellChecked[T]` — is a (batch, index) pair
   and allocates nothing; like the batch, it is valid until the next read. A `batch.All()` ranged
   over past the next `Read()` or a `Close()`, and a `reader.All()` or `sheet.All()` with a `Read()`
   or a `Close()` in its loop's body, panic as a stale `Faults()` does, rather than yield the next
@@ -383,7 +453,7 @@ and `NativeVersion()` reports the version compiled into that file from the crate
 
 - **An instance a reader.** The core keeps a reader's position in a state block it is
   handed and its buffers between calls, so every `DelimitedReader` and every `Sheet` owns an
-  instance of the translated module — its code's linear memory, four 64 KiB pages to
+  instance of the translated module — its code's linear memory, three 64 KiB pages to
   start — with the reader's buffers allocated in it once and grown in place. Readers share
   nothing, so readers on different goroutines run at once, and none takes a lock. A
   `Workbook` opens in an instance it drops once its sheets, shared strings and styles are
@@ -514,7 +584,7 @@ go generate     # in go/: builds rust/ for wasm32-wasip1 and rewrites internal/c
 
 [`internal/wasm2go`](internal/wasm2go) is the generator: it builds the crate's `cargo cdylib`
 with the rustc named in its `rust-toolchain.toml` (1.99.1), a 64 KiB guest stack
-(`-C link-arg=-zstack-size=65536`) and wasi-libc for `memcmp`, `memcpy` and `memset` (`-l
+(`-C link-arg=-zstack-size=65536`), `-C opt-level=s` (a correctness workaround, below) and wasi-libc for `memcmp`, `memcpy` and `memset` (`-l
 c`), then runs the wasm2go pinned in its own `go.mod` with `-unsafe`, which replaces the memory helpers with `unsafe.Add` access behind a check of
 the access's last byte (CPUs without unaligned access keep the `encoding/binary` path). The rustc is pinned as a
 reproducibility constraint, not a floor: the wasm's bytes follow rustc's codegen, so one named
@@ -525,6 +595,16 @@ file and diffs it against the committed one (without the variable the test skips
 toolchain is missing); CI runs it on every pull request that touches the Go binding, the
 core or the workflows, and release preparation regenerates the core at the new version,
 since the version is a literal in the file.
+
+The core is built at opt-level `s`, not the release profile's 3. At 3 (and at 2), the
+translation reads two cells of `corpus/workbook/constraints.xlsx` as `Empty` on arm64 and
+`GOARCH=wasm`, where the same wasm under wasmtime, every native binding and amd64 read them
+right; translated without `-unsafe`, built without Go's inlining, or at opt-level 1 or `s`, it
+reads them right too (2026-11-13, wasm2go v0.4.21, Go 1.26.10 and 1.27.4). Whether Go's optimizer
+or an assumption of wasm2go's unsafe helpers is at fault is not settled, so this is a workaround
+held by the corpus replay on those targets, not a fix. The generator returns to the profile's
+opt-level once the cause is fixed upstream and the corpus passes there at 3. It costs speed:
+see [Benchmarks](#benchmarks).
 
 ## Benchmarks
 
@@ -575,6 +655,16 @@ counts stay a few dozen a read and none a batch.
 interleaved runs in one session on the same day, gives delimited from memory 34.4 ms against 61.3
 ms, the xlsx read 485 ms against 700 ms, the ods read 1.16 s against 1.33 s and the Numbers read
 1.13 s against 1.31 s. The ods open is level, and memory and allocations don't move.
+
+**Opt-level `s` costs 8.8% (geomean) against 3.** The table above was taken at opt-level 3;
+the shipped core is built at `s` ([Building and regenerating](#building-and-regenerating)). The
+same session's comparison, Apple M6, Go 1.27.4, 2026-11-13, six interleaved runs each, benchstat
+medians, load average 2.7 to 4.6: delimited from memory 36.2 ms at 3 against 38.9 ms at `s`
+(+7.6%), from a stream 35.8 against 38.7 ms (+8.2%); the xlsx open 28.0 against 36.0 ms
+(+28.5%) and read 478 against 566 ms (+18.5%); the ods open 366 against 402 ms (+10.0%) and read
+1.15 against 1.26 s (+9.6%); the Numbers open 794 against 751 ms (5.5% faster) and read 1.12
+against 1.10 s (1.6% faster). Memory a read allocates falls 0.3% to 8%, and allocation counts
+don't move. Opt-level 1 read the corpus right as well, and cost 26% (geomean).
 
 The Go row of the "Through every binding" table in [`docs/workbook.md`](../docs/workbook.md)
 is this binding, measured in the same session as the table above.

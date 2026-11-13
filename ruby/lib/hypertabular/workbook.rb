@@ -363,7 +363,8 @@ module HyperTabular
       notes = @options.notes ? Array.new(@plan.size) { |column| columns.notes(column, rows) } : nil
       @handing = Batch.new(@plan, rows, values, Array.new(@plan.size) { |column| columns.verdicts(column, rows) },
                            cells, @reading.per_row, @book.strings, 0, arena,
-                           workbook: true, notes: notes, first_column: @options.first_column)
+                           workbook: true, notes: notes, checks: Batch.checks_of(@plan, columns, rows),
+                           first_column: @options.first_column)
       true
     rescue Exception => e
       unless e.equal?(@failure)

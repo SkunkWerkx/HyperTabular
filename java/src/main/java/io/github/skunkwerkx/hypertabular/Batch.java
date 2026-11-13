@@ -1,10 +1,14 @@
 package io.github.skunkwerkx.hypertabular;
 
 import io.github.skunkwerkx.hypercast.CastFailure;
+import io.github.skunkwerkx.hypercast.Checked;
+import io.github.skunkwerkx.hypercast.CheckedVerdict;
 import io.github.skunkwerkx.hypercast.Fault;
 import io.github.skunkwerkx.hypercast.FaultDetail;
+import io.github.skunkwerkx.hypercast.Keyword;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.Verdict;
+import io.github.skunkwerkx.hypercast.Violation;
 import io.github.skunkwerkx.hypercast.interop.NativeValues;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -233,12 +237,12 @@ public final class Batch implements Iterable<Row> {
     }
 
     /**
-     * Whether the cell at ({@code column}, {@code row}) cast, whatever its door — the
-     * allocation-free question.
+     * Whether the cell at ({@code column}, {@code row}) cast and broke no constraint, whatever its
+     * door — the allocation-free question.
      *
      * @param column index into the plan
      * @param row row of the batch
-     * @return {@code true} when the cell cast
+     * @return {@code true} when the cell cast and broke no constraint
      */
     public boolean isOk(int column, int row) {
         return code(column, row) == 0;
@@ -256,6 +260,11 @@ public final class Batch implements Iterable<Row> {
         int code = code(column, row);
         if (code == 0) {
             return new CellVerdict(null, 0, 0);
+        }
+        if (code == Abi.VERDICT_VIOLATION) {
+            MemorySegment verdict = columns.verdicts[column];
+            long at = row * Abi.VERDICT_BYTES;
+            return new CellVerdict(null, verdict.get(INT, at), verdict.get(INT, at + 4), keyword(column, row));
         }
         Fault<Object> fault = fault(column, row);
         return new CellVerdict(fault.reason(), fault.offset(), fault.length());
@@ -408,8 +417,11 @@ public final class Batch implements Iterable<Row> {
         int offset = raw.get(INT, at + Abi.PROBLEM_OFFSET);
         int length = raw.get(INT, at + Abi.PROBLEM_LENGTH);
         int detail = Short.toUnsignedInt(raw.get(SHORT, at + Abi.PROBLEM_DETAIL));
-        CastFailure reason = NativeValues.<Object>fault(raw.get(INT, at + Abi.PROBLEM_REASON), offset, length)
-                .reason();
+        int code = raw.get(INT, at + Abi.PROBLEM_REASON);
+        // A violation names its keyword and has no reason.
+        boolean broke = code == Abi.VERDICT_VIOLATION;
+        CastFailure reason =
+                broke ? null : NativeValues.<Object>fault(code, offset, length).reason();
         return new Problem(
                 row,
                 line,
@@ -421,12 +433,15 @@ public final class Batch implements Iterable<Row> {
                 offset,
                 length,
                 expectedWidth,
-                found);
+                found,
+                broke ? new Keyword(raw.get(INT, at + Abi.PROBLEM_KEYWORD)) : null);
     }
 
     /**
      * A column's verdicts, exactly as the core wrote them: one {@link CellVerdict#LAYOUT}
-     * entry per row. Read-only.
+     * entry per row. Read-only. A reason of 0 is a value. On a column that declares
+     * constraints, a reason of 4 is a value that broke one, which {@link #getChecked} names.
+     * Any other is the cell's fault, its span in the cell's text.
      *
      * @param column index into the plan
      * @return the column's verdict array
@@ -445,7 +460,7 @@ public final class Batch implements Iterable<Row> {
      * {@code NativeValues.decimal(values, row * NativeValues.DECIMAL_BYTES)} is what
      * {@link #get} makes of a {@link Door#DECIMAL} cell, and likewise {@code uuid},
      * {@code instant}, {@code date}, {@code civil}, {@code time} and {@code duration}. The value
-     * of a row whose verdict is not ok is zero. A text column is read a cell at a time, with
+     * of a row whose verdict is a fault is zero; a violation's is the value as cast. A text column is read a cell at a time, with
      * {@link #text}. Read-only.
      *
      * @param column index into the plan
@@ -514,10 +529,12 @@ public final class Batch implements Iterable<Row> {
      * @param row row of the batch
      * @param type the value's type, which must be the one the column's door is presented as
      * @return the value, or the fault
-     * @throws IllegalStateException if the column's door is not presented as {@code type}
+     * @throws IllegalStateException if the column's door is not presented as {@code type}, or the
+     *     column declares constraints, whose cells {@link #getChecked} reads
      * @throws IndexOutOfBoundsException if the row is not in the batch
      */
     public <T> Verdict<T> get(int column, int row, Class<T> type) {
+        unchecked(column);
         Door door = door(column);
         if (!reads(type, door)) {
             throw new IllegalStateException("Column " + column + " is cast through " + door
@@ -526,8 +543,86 @@ public final class Batch implements Iterable<Row> {
         if (code(column, row) != 0) {
             return fault(column, row);
         }
+        return new Success<>(type.cast(cell(column, row, door)));
+    }
+
+    /**
+     * Refuses a column that declares constraints: a violation is no fault, so a plain getter would
+     * read it as passed.
+     */
+    private void unchecked(int column) {
+        if (columns.plan[column].isChecked()) {
+            throw new IllegalStateException("Column " + column + " declares constraints: read it with getChecked.");
+        }
+    }
+
+    /** The keyword the cell at ({@code column}, {@code row}) broke, a violation's. */
+    private Keyword keyword(int column, int row) {
+        return new Keyword(columns.checks[column].get(INT, row * Abi.CHECK_BYTES));
+    }
+
+    /**
+     * The cell at ({@code column}, {@code row}) as HyperCast cast and judged it: the value, flagged
+     * when {@code multipleOf}'s rounding adjusted it and naming the {@code enum} entry it matched, or
+     * the rejection, a {@link Fault} as {@link #get} gives it or a {@link Violation} naming the keyword
+     * broken and carrying the value as cast. {@code type} is the type {@link #get} presents the door
+     * as, for the numeric doors and {@link Door#TEXT}, where an {@code enum} match reads as the entry
+     * as declared, the caller's own string. A column that declares no constraints reads too: every
+     * cell that cast passes, unadjusted.
+     *
+     * @param <T> the value's type
+     * @param column index into the plan
+     * @param row row of the batch
+     * @param type the value's type, which must be the one the column's door is presented as
+     * @return the value, or the rejection
+     * @throws IllegalStateException if the column's door has no checked door presented as {@code type}
+     * @throws IndexOutOfBoundsException if the row is not in the batch
+     */
+    public <T> CheckedVerdict<T> getChecked(int column, int row, Class<T> type) {
+        Door door = door(column);
+        boolean checkable = switch (door) {
+            case I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, DECIMAL, TEXT -> true;
+            default -> false;
+        };
+        if (!checkable || !reads(type, door)) {
+            throw new IllegalStateException("Column " + column + " is cast through " + door
+                    + ", which has no checked door read as a " + type.getSimpleName() + ".");
+        }
+        int code = code(column, row);
+        if (code != 0 && code != Abi.VERDICT_VIOLATION) {
+            return fault(column, row);
+        }
+        T value = type.cast(cell(column, row, door));
+        MemorySegment checks = columns.checks[column];
+        if (checks == null) {
+            return new Checked<>(value, false, OptionalInt.empty());
+        }
+        if (code == Abi.VERDICT_VIOLATION) {
+            MemorySegment verdict = columns.verdicts[column];
+            long at = row * Abi.VERDICT_BYTES;
+            return new Violation<>(keyword(column, row), value, verdict.get(INT, at), verdict.get(INT, at + 4));
+        }
+        long at = row * Abi.CHECK_BYTES;
+        boolean adjusted = checks.get(INT, at + Abi.CHECK_ADJUSTED) != 0;
+        int index = checks.get(INT, at + Abi.CHECK_ENUM_INDEX);
+        if (index == Abi.CHECK_NO_ENUM_INDEX) {
+            return new Checked<>(value, adjusted, OptionalInt.empty());
+        }
+        if (door == Door.TEXT) {
+            // The entry as declared, the caller's own string.
+            value = type.cast(columns.plan[column]
+                    .constraints()
+                    .enumValues()
+                    .orElseThrow()
+                    .get(index));
+        }
+        return new Checked<>(value, adjusted, OptionalInt.of(index));
+    }
+
+    /** The value the core wrote for the cell at ({@code column}, {@code row}), as {@link #get} presents it. */
+    private Object cell(int column, int row, Door door) {
         MemorySegment value = columns.values[column];
-        Object cell = switch (door) {
+        return switch (door) {
             case BOOL -> value.get(BYTE, row) != 0;
             case I8 -> value.get(BYTE, row);
             case I16 -> value.get(SHORT, row * 2L);
@@ -545,9 +640,8 @@ public final class Batch implements Iterable<Row> {
             case DATETIME -> NativeValues.civil(value, row * NativeValues.CIVIL_BYTES);
             case TIME -> NativeValues.time(value, row * NativeValues.TIME_BYTES);
             case DURATION -> NativeValues.duration(value, row * NativeValues.DURATION_BYTES);
-            case TEXT -> string(column, row);
+            case TEXT -> decode(bytes(value.get(INT, row * 8L), value.get(INT, row * 8L + 4)));
         };
-        return new Success<>(type.cast(cell));
     }
 
     /** The bytes a span names, read-only: the arena's when it is flagged, the base's when not. */
@@ -562,6 +656,7 @@ public final class Batch implements Iterable<Row> {
     }
 
     private void requireText(int column) {
+        unchecked(column);
         if (door(column) != Door.TEXT) {
             throw new IllegalStateException("Column " + column + " is cast through " + door(column) + ", not TEXT.");
         }
@@ -577,7 +672,8 @@ public final class Batch implements Iterable<Row> {
      * @param column index into the plan
      * @param row row of the batch
      * @return the cell's UTF-8 bytes, or {@code null} for an empty cell or one that is not UTF-8
-     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}, or declares
+     *     constraints, whose cells {@link #getChecked} reads
      */
     public MemorySegment text(int column, int row) {
         requireText(column);
@@ -595,7 +691,8 @@ public final class Batch implements Iterable<Row> {
      * @param column index into the plan
      * @param row row of the batch
      * @return the cell's text, or {@code null} for an empty cell or one that is not UTF-8
-     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}, or declares
+     *     constraints, whose cells {@link #getChecked} reads
      */
     public String string(int column, int row) {
         MemorySegment text = text(column, row);
@@ -613,7 +710,8 @@ public final class Batch implements Iterable<Row> {
      * @param column index into the plan
      * @param row row of the batch
      * @return the cell's text, or {@code null} for a cell {@link #string} says it of
-     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}, or declares
+     *     constraints, whose cells {@link #getChecked} reads
      */
     public CharBuffer chars(int column, int row) {
         requireText(column);
@@ -655,7 +753,8 @@ public final class Batch implements Iterable<Row> {
      * @param offset where in {@code destination} it starts
      * @return the chars written, or {@code -1} if they do not fit between {@code offset} and
      *     the end of {@code destination} — in which case what is there is unspecified
-     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}
+     * @throws IllegalStateException if the column is not read through {@link Door#TEXT}, or declares
+     *     constraints, whose cells {@link #getChecked} reads
      * @throws IndexOutOfBoundsException if {@code offset} is not within {@code destination}
      */
     public int getChars(int column, int row, char[] destination, int offset) {

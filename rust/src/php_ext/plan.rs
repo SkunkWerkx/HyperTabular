@@ -17,6 +17,8 @@ pub(crate) struct Plan {
     pub(crate) columns: Vec<crate::Column>,
     pub(crate) doors: Vec<Door>,
     pub(crate) ordinals: Vec<usize>,
+    /// Each column's HyperCast `Constraints`, or null: a text `enum` match is the entry it holds.
+    pub(crate) constraints: Vec<Zval>,
 }
 
 impl Plan {
@@ -41,18 +43,21 @@ impl Plan {
         let mut columns = Vec::with_capacity(fields.len());
         let mut doors = Vec::with_capacity(fields.len());
         let mut ordinals = Vec::with_capacity(fields.len());
+        let mut constraints = Vec::with_capacity(fields.len());
         for (index, column) in fields.iter().enumerate() {
             let door = Door::from_code(column.door).ok_or_else(contract_violation)?;
             let ordinal = usize::try_from(column.ordinal).map_err(|_| contract_violation())?;
             columns.push(column_of(index, column, ordinal)?);
             doors.push(door);
             ordinals.push(ordinal);
+            constraints.push(column.constraints.shallow_clone());
         }
         Ok(Plan {
             list: list_zval(entries)?,
             columns,
             doors,
             ordinals,
+            constraints,
         })
     }
 }

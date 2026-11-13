@@ -191,7 +191,8 @@ func OpenDelimitedUnbound(path string, dialect Dialect, opts ...Option) (*Delimi
 
 func openFile(path string, dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, error) {
 	// The core's answer on the sizes, ahead of touching the file.
-	if _, _, err := judged(dialect, sizeSpecs(plan), opts); err != nil {
+	specs, extras := sizeSpecs(plan)
+	if _, _, err := judged(dialect, specs, extras, opts); err != nil {
 		return nil, err
 	}
 	file, err := os.Open(path)
@@ -210,7 +211,7 @@ func openFile(path string, dialect Dialect, plan []Column, bound bool, opts []Op
 // judged is opts in force, and the core's answer on their sizes for specs: the size to start an input
 // buffer at. With no plan yet it can only judge what a read holds whatever the plan; Bind asks
 // again with one.
-func judged(dialect Dialect, specs []rawSpec, opts []Option) (options, int, error) {
+func judged(dialect Dialect, specs []rawSpec, extras []specExtra, opts []Option) (options, int, error) {
 	o := options{batchRows: DefaultBatchRows, bufferBytes: DefaultBufferBytes, maxRowBytes: MaxRowBytes, notes: true}
 	for _, opt := range opts {
 		opt(&o)
@@ -222,7 +223,7 @@ func judged(dialect Dialect, specs []rawSpec, opts []Option) (options, int, erro
 	if dialect.LongRows == LongRowsReport {
 		flags |= batchWidths
 	}
-	start, err := checkSizes(specs, o.batchRows, o.bufferBytes, flags)
+	start, err := checkSizes(specs, extras, o.batchRows, o.bufferBytes, flags)
 	return o, start, err
 }
 
@@ -230,7 +231,7 @@ func judged(dialect Dialect, specs []rawSpec, opts []Option) (options, int, erro
 // as the core reads it and every buffer the core fills, bound before any input is read so
 // that a plan's error comes before the header's.
 func newReader(dialect Dialect, plan []Column, bound bool, opts []Option) (*DelimitedReader, options, error) {
-	o, start, err := judged(dialect, nil, opts)
+	o, start, err := judged(dialect, nil, nil, opts)
 	if err != nil {
 		return nil, o, err
 	}

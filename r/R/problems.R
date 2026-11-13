@@ -4,9 +4,10 @@ problem_kinds <- c("cell", "row", "host_conversion")
 #'
 #' `problems()` lists what went wrong in a batch or a table, one row per problem, computed when
 #' it is called from the verdict columns the batch already holds, so a read pays nothing for
-#' it. It lists every cell that is `malformed` or `out_of_range`, every workbook formula with
-#' no cached value, every record `long_rows = "report"` cut to the width, and every cell the
-#' core accepted whose text R can't hold. It leaves out blanks, cells a declared `na` matched,
+#' it. It lists every cell that is `malformed` or `out_of_range`, every cell that broke a
+#' constraint its column declares, every workbook formula with no cached value, every record
+#' `long_rows = "report"` cut to the width, and every cell the core accepted whose text R can't
+#' hold. It leaves out blanks, cells a declared `na` matched,
 #' and cells a short record lacked under `fill = TRUE`: those are declared, not wrong.
 #'
 #' The columns are `row` (the row's place among the rows the read delivered, from 1), `line`
@@ -14,10 +15,12 @@ problem_kinds <- c("cell", "row", "host_conversion")
 #' delimited text), `column` (the output column's name; `NA` for a row), `source_column` (the
 #' column in the source, from 1: a delimited plan column's position, a sheet column's own, `A`
 #' being 1, wherever a range starts; `NA` for a row), `kind` (`"cell"`, `"row"` for a record cut
-#' to the width, or `"host_conversion"` for a cell `ok` with an `NA` value), `reason`, `detail`
-#' and `origin` (the verdict's; `NA` for a row), `offset`, `length` and `raw` (the verdict's
-#' span and text; `NA` for a row and a host conversion, which has no span), and `expected` and
-#' `found` (a cut record's width and its own; `NA` otherwise).
+#' to the width, or `"host_conversion"` for a cell `ok` with an `NA` value), `reason`, `keyword`,
+#' `detail` and `origin` (the verdict's; `NA` for a row), `offset`, `length` and `raw` (the
+#' verdict's span and text; `NA` for a row and a host conversion, which has no span), and
+#' `expected` and `found` (a cut record's width and its own; `NA` otherwise). A violation has the
+#' OpenAPI `keyword` it broke and no `reason`, since its cell cast; every other row has no
+#' `keyword`.
 #'
 #' @param x A `hypertabular_batch` or `hypertabular_table`.
 #' @return A data frame, one row per problem, in the order the rows were read.
@@ -38,7 +41,11 @@ problems <- function(x) {
   codes <- lapply(x$columns, function(v) {
     origin <- as.integer(v$origin) - 1L
     origin[!is.na(origin) & origin >= length(origins)] <- 0L
-    list(as.integer(v$reason), as.integer(v$detail_code), origin)
+    reason <- as.integer(v$reason)
+    keyword <- if (!is.null(v$keyword)) keyword_code(v$keyword)
+    # A violation is the core's verdict 4, beside its keyword.
+    reason[!is.na(keyword)] <- 4L
+    list(reason, as.integer(v$detail_code), origin, keyword)
   })
   listed <- .Call(C_faults, unname(codes), rows,
                   if (!is.null(x$widths) && length(x$widths) == rows) as.numeric(x$widths),
@@ -76,6 +83,7 @@ problems <- function(x) {
     for (j in unique(plan_column[cell])) {
       at <- cell & plan_column == j
       values <- x$columns[[j]][[field]]
+      if (is.null(values)) next
       if (is.factor(values)) values <- as.integer(values)
       out[at] <- values[row[at]]
     }
@@ -98,6 +106,7 @@ problems <- function(x) {
     kind = structure(as.integer(kind), levels = problem_kinds, class = "factor"),
     reason = structure(as.integer(ifelse(cell, pick("reason", NA_integer_), NA_integer_)),
                        levels = reasons, class = "factor"),
+    keyword = as.character(ifelse(cell, pick("keyword", NA_character_), NA_character_)),
     detail = detail_factor(as.integer(ifelse(cell, pick("detail_code", NA_integer_),
                                              NA_integer_))),
     origin = origin_factor(as.integer(ifelse(cell, pick("origin", NA_integer_) - 1L,
@@ -111,4 +120,12 @@ problems <- function(x) {
   )
   rownames(out) <- NULL
   out
+}
+
+# Keyword names back to the core's codes: "keyword N" is N.
+keyword_code <- function(name) {
+  code <- match(name, keywords)
+  unknown <- !is.na(name) & is.na(code)
+  code[unknown] <- as.integer(sub("^keyword ", "", name[unknown]))
+  code
 }

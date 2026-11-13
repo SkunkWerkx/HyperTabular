@@ -27,9 +27,19 @@ export declare class Batch {
   line(row: number): number
   /**
    * The cell at `row` of `column` as HyperCast judged it. A column or row the batch does
-   * not have is HyperCast's contract violation: `malformed`, offset 0, length 0.
+   * not have is HyperCast's contract violation: `malformed`, offset 0, length 0; so is every
+   * cell of a column that declares constraints, which only `getChecked` can say.
    */
   get<T extends Value = Value>(column: number, row: number): Verdict<T>
+  /**
+   * The cell at `row` of `column` as HyperCast's checked door judged it: the value, flagged
+   * `adjusted` when `multipleOf`'s rounding changed it (at the text door, a matched `enum`
+   * entry as declared, `enumIndex` naming it); a violation of a constraint the column
+   * declares, carrying the value as cast and the judged text's span; or the cell's fault. A
+   * column that declares none reads as `get` does, never adjusted. A column or row the batch
+   * does not have is HyperCast's contract violation.
+   */
+  getChecked<T extends Value = Value>(column: number, row: number): CheckedVerdict<T>
   /**
    * What failed in the cell, by HyperCast's `Detail` name: `null` for a cell that cast,
    * one no door was asked about (a token, padding, a formula with no cached value), a read
@@ -57,8 +67,17 @@ export declare class Batch {
    * a fault's span counts bytes of `raw`, not UTF-16 code units of this.
    */
   rawString(column: number, row: number): string
-  /** The whole column, a verdict a row; empty for a column the batch does not have. */
+  /**
+   * The whole column, a verdict a row, as `get` reads each cell; empty for a column the batch
+   * does not have. Every cell of a column that declares constraints is HyperCast's contract
+   * violation: `columnChecked` reads it.
+   */
   column<T extends Value = Value>(column: number): Array<Verdict<T>>
+  /**
+   * The whole column, a verdict a row, as `getChecked` reads each cell: a constrained column
+   * and one that declares nothing alike. Empty for a column the batch does not have.
+   */
+  columnChecked<T extends Value = Value>(column: number): Array<CheckedVerdict<T>>
   /** How many cells of the column did not cast; 0 for a column the batch does not have. */
   faultCount(column: number): number
   /** The row at `row`, read across; `null` for a row the batch does not have. */
@@ -128,6 +147,19 @@ export declare class Column {
   /** A zone-less civil date-time whose date fields come in the declared `DateOrder`. */
   static datetime(ordinal: number, order: number): Column
   /**
+   * Source column `ordinal` through the door a HyperCast `Constraints` is bound to (an
+   * integer, float or decimal door, or the text door), whose cells must also meet it: read
+   * through `getChecked`, a cell that casts and breaks a declared rule is a violation carrying
+   * the value as cast, one that casts and meets them all passes, flagged `adjusted` when
+   * `multipleOf`'s rounding changed it, and one that doesn't cast is its fault. A numeric
+   * door reads its numbers in `format`, as the plain factories do. As with every factory, an
+   * argument that is not what it says (no `Constraints`, a failed `Constraints.declare`'s
+   * missing `.value` among them) makes a column that is not `valid`, refused when its plan is
+   * bound: never a column with no rules. Each distinct declaration is kept for the life of
+   * the process.
+   */
+  static checked(ordinal: number, constraints: DeclaredConstraints, format?: PackedNumFormat | undefined | null): Column
+  /**
    * The same column answering to these tokens rather than its dialect's or sheet's: a
    * cell whose exact unquoted text is one of them is `empty`, its origin `token`. An empty
    * list means none, so a column can opt out of its dialect's. Each distinct list is kept
@@ -142,8 +174,16 @@ export declare class Column {
    * process.
    */
   withDateOptions(options: DeclaredDateOptions): Column
-  /** The door its cells go through. */
-  get door(): Door
+  /**
+   * The door its cells go through: for `Column.checked`, its declaration's, so `null` there
+   * for a declaration that is none.
+   */
+  get door(): Door | null
+  /**
+   * Whether it declares HyperCast's constraints: made by `Column.checked`, and read through
+   * `getChecked`.
+   */
+  get checked(): boolean
   /** The source column it reads, as it was given (`NaN` for an ordinal that is no number). */
   get ordinal(): number
   /**
@@ -278,6 +318,8 @@ export declare class Row {
    * contract violation.
    */
   get<T extends Value = Value>(column: number): Verdict<T>
+  /** The cell in `column` as HyperCast's checked door judged it, as `Batch.getChecked`. */
+  getChecked<T extends Value = Value>(column: number): CheckedVerdict<T>
   /** What failed in the cell in `column`, as `Batch.detail`. */
   detail(column: number): Detail | null
   /** Where the verdict of the cell in `column` came from, as `Batch.origin`. */
@@ -362,6 +404,9 @@ export declare function __makeBatchesWith(make: (store: unknown, rows: number, d
 /** `Batch.column`, over a store. */
 export declare function batchColumn(store: unknown, column: number): Array<Verdict<Value>>
 
+/** `Batch.columnChecked`, over a store. */
+export declare function batchColumnChecked(store: unknown, column: number): Array<CheckedVerdict<Value>>
+
 /** `Batch.detail`, over a store. */
 export declare function batchDetail(store: unknown, column: number, row: number): Detail | null
 
@@ -373,6 +418,9 @@ export declare function batchFaults(store: unknown): Array<Problem>
 
 /** `Batch.get`, over a store. */
 export declare function batchGet(store: unknown, column: number, row: number): Verdict<Value>
+
+/** `Batch.getChecked`, over a store. */
+export declare function batchGetChecked(store: unknown, column: number, row: number): CheckedVerdict<Value>
 
 /** `Batch.line`, over a store. */
 export declare function batchLine(store: unknown, row: number): number
@@ -415,6 +463,26 @@ export type CandidateKind = 'dateOrder' | 'numFormat'
 /** The closed set of reasons a cell can fail its door: HyperCast's own. */
 export type CastFailure = 'empty' | 'malformed' | 'outOfRange'
 
+/**
+ * The success case of a checked cell: `ok` is `true`; `value` is the value (rounded to
+ * `multipleOf` when the declaration rounds; at the text door with an `enum`, the declared entry
+ * it matched); `adjusted` is true only when rounding changed it; `enumIndex` is the index of the
+ * entry a text matched, `null` otherwise. The same type `@skunkwerkx/hypercast` exports.
+ */
+export interface Checked<T> {
+  ok: true
+  value: T
+  adjusted: boolean
+  enumIndex: number | null
+}
+
+/**
+ * A cell of a column that declares constraints, as HyperCast's checked door judged it: exactly
+ * one of `Checked<T>`, `Failure` or `Violated<T>`, told apart by `ok` and then by
+ * `'fault' in verdict`. The same type `@skunkwerkx/hypercast` exports.
+ */
+export type CheckedVerdict<T> = Checked<T> | Failure | Violated<T>
+
 /** A civil date and time with no zone. */
 export interface CivilDateTime {
   year: number
@@ -424,6 +492,19 @@ export interface CivilDateTime {
   minute: number
   second: number
   nanos: number
+}
+
+/**
+ * A HyperCast `Constraints` (`@skunkwerkx/hypercast`'s, made by `Constraints.declare`), as this
+ * package reads it: the door it is bound to and the bytes it crosses a C ABI as.
+ */
+export interface DeclaredConstraints {
+  /** The door the declaration is bound to, by HyperCast's `Door` code. */
+  door: number
+  /** Its 104 bytes. */
+  packed: Uint8Array
+  /** Its `enum` list, empty for none. */
+  packedEnum: Uint8Array
 }
 
 /**
@@ -559,8 +640,9 @@ export interface PackedNumFormat {
 
 /**
  * One thing that went wrong in a batch (`Batch.faults`): a cell at `malformed` or
- * `outOfRange`, a formula with no cached value, or a row longer than the width under
- * `longRows: 'report'`. Blanks, tokens and padding are not problems.
+ * `outOfRange`, a formula with no cached value, a cell that broke its column's constraints, or
+ * a row longer than the width under `longRows: 'report'`. Blanks, tokens and padding are not
+ * problems.
  */
 export interface Problem {
   /** The row in the batch, from zero. */
@@ -571,7 +653,7 @@ export interface Problem {
   planColumn: number | null
   /** The source column, from zero (a sheet's own, `A` being 0), or `null` for a row. */
   sourceColumn: number | null
-  /** The verdict's reason, or `null` for a row. */
+  /** The verdict's reason, or `null` for a row and for a violation, which `keyword` names. */
   reason: CastFailure | null
   /** What failed, by HyperCast's `Detail` name, or `null`. */
   detail: Detail | null
@@ -583,6 +665,11 @@ export interface Problem {
   /** For a long row, the width the first record fixed and the cells it had; otherwise 0. */
   expected: number
   found: number
+  /**
+   * For a cell that broke its column's constraints, the keyword it broke, in the OpenAPI
+   * spelling (a `Violation`'s); otherwise `null`.
+   */
+  keyword: 'minimum' | 'exclusiveMinimum' | 'maximum' | 'exclusiveMaximum' | 'multipleOf' | 'minLength' | 'maxLength' | 'enum' | (string & {}) | null | null
 }
 
 /** One sheet of a workbook, as its listing names it. */
@@ -759,6 +846,30 @@ export type Value = boolean | number | bigint | string | Timestamp | CalendarDat
  * `ok`. The same type `@skunkwerkx/hypercast` exports.
  */
 export type Verdict<T> = Success<T> | Failure
+
+/**
+ * The failure case of a checked cell whose value broke a declared rule: `ok` is `false` and
+ * `violation` says which rule, where, and the value. The same type `@skunkwerkx/hypercast`
+ * exports.
+ */
+export interface Violated<T> {
+  ok: false
+  violation: Violation<T>
+}
+
+/**
+ * A rule a cell's value broke, in the OpenAPI spelling, with that value exactly as the door
+ * cast it (never rounded; at the text door, the judged text, never an `enum` entry) and the
+ * span of the judged text, in bytes of the cell's raw text. Keywords are open to additions, so
+ * a `switch` over them needs a `default` arm; a code this package does not name yet arrives
+ * as `"keyword N"`. The same type `@skunkwerkx/hypercast` exports.
+ */
+export interface Violation<T> {
+  keyword: 'minimum' | 'exclusiveMinimum' | 'maximum' | 'exclusiveMaximum' | 'multipleOf' | 'minLength' | 'maxLength' | 'enum' | (string & {})
+  value: T
+  offset: number
+  length: number
+}
 
 /** The kind of workbook a container holds, told by what is in it. */
 export type WorkbookFormat = 'xlsx' | 'ods' | 'numbers'

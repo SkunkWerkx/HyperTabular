@@ -29,13 +29,16 @@ module HyperTabular
   # HyperCast::NumFormat::INVARIANT is, and Indian grouping is declared per column. +tokens+ is
   # the list this column answers to in place of its dialect's or sheet's (#with_tokens), nil to
   # inherit theirs. +date_options+ and +months+ are the HyperCast::DateOptions and
-  # HyperCast::MonthNames the date doors read (#with_date_options), or nil.
-  Column = Data.define(:ordinal, :door, :declared, :format, :tokens, :date_options, :months) do
+  # HyperCast::MonthNames the date doors read (#with_date_options), or nil. +constraints+ is the
+  # HyperCast::Constraints every cell of a numeric or text column must also meet, declared for this
+  # column's door, or nil: a constrained column is read with Batch#get_checked.
+  Column = Data.define(:ordinal, :door, :declared, :format, :tokens, :date_options, :months, :constraints) do
     # Checks the column as the caller bug it would otherwise become at the first read: an
-    # ordinal that is not a non-negative Integer or a format that is not a
-    # HyperCast::NumFormat (ArgumentError), an unknown door or an undeclared option
-    # (KeyError, as HyperCast raises for the same).
-    def initialize(ordinal:, door:, declared: nil, format: nil, tokens: nil, date_options: nil, months: nil)
+    # ordinal that is not a non-negative Integer, a format that is not a HyperCast::NumFormat or
+    # constraints that are not a HyperCast::Constraints for this door (ArgumentError), an unknown
+    # door or an undeclared option (KeyError, as HyperCast raises for the same).
+    def initialize(ordinal:, door:, declared: nil, format: nil, tokens: nil, date_options: nil, months: nil,
+                   constraints: nil)
       raise ArgumentError, "ordinal must be an Integer at least 0, and an ordinal must be below 2^20 " \
                            "(1,048,576); got #{ordinal.inspect}" unless
         ordinal.is_a?(Integer) && ordinal.between?(0, Column::MAX_ORDINAL)
@@ -59,8 +62,18 @@ module HyperTabular
       raise ArgumentError, "months must be a HyperCast::MonthNames; got #{months.inspect}" unless
         months.nil? || months.is_a?(HyperCast::MonthNames)
 
+      unless constraints.nil?
+        raise ArgumentError, "constraints must be a HyperCast::Constraints; got #{constraints.inspect}" unless
+          constraints.is_a?(HyperCast::Constraints)
+
+        # One that never went through Constraints.new raises what HyperCast raises for it.
+        constraints.send(:declaration) if constraints.door.nil?
+        raise ArgumentError, Column.mismatched(constraints.door, door) unless constraints.door == door
+      end
+
       super(ordinal: ordinal, door: door, declared: declared, format: format,
-            tokens: tokens.nil? ? nil : Declared.tokens(tokens), date_options: date_options, months: months)
+            tokens: tokens.nil? ? nil : Declared.tokens(tokens), date_options: date_options, months: months,
+            constraints: constraints)
     end
 
     # The same column answering to these tokens rather than its dialect's or its sheet's: a cell
@@ -84,41 +97,61 @@ module HyperTabular
     def self.bool(ordinal) = new(ordinal: ordinal, door: :bool)
 
     # A signed 8-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.i8(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :i8, format: format)
+    def self.i8(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :i8, format: format, constraints: constraints)
+    end
 
     # A signed 16-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.i16(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :i16, format: format)
+    def self.i16(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :i16, format: format, constraints: constraints)
+    end
 
     # A signed 32-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.i32(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :i32, format: format)
+    def self.i32(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :i32, format: format, constraints: constraints)
+    end
 
     # A signed 64-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.i64(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :i64, format: format)
+    def self.i64(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :i64, format: format, constraints: constraints)
+    end
 
     # An unsigned 8-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.u8(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :u8, format: format)
+    def self.u8(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :u8, format: format, constraints: constraints)
+    end
 
     # An unsigned 16-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.u16(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :u16, format: format)
+    def self.u16(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :u16, format: format, constraints: constraints)
+    end
 
     # An unsigned 32-bit column, as an Integer. Invariant notation unless one is declared.
-    def self.u32(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :u32, format: format)
+    def self.u32(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :u32, format: format, constraints: constraints)
+    end
 
     # An unsigned 64-bit column, as the true unsigned Integer. Invariant notation unless
     # one is declared.
-    def self.u64(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :u64, format: format)
+    def self.u64(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :u64, format: format, constraints: constraints)
+    end
 
     # An IEEE single column, widened losslessly to a Float. Invariant notation unless one
     # is declared.
-    def self.f32(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :f32, format: format)
+    def self.f32(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :f32, format: format, constraints: constraints)
+    end
 
     # An IEEE double column, as a Float. Invariant notation unless one is declared.
-    def self.f64(ordinal, format = HyperCast::NumFormat::INVARIANT) = new(ordinal: ordinal, door: :f64, format: format)
+    def self.f64(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :f64, format: format, constraints: constraints)
+    end
 
     # An exact decimal column, as a HyperCast::Decimal; no float is ever formed. Invariant
     # notation unless one is declared.
-    def self.decimal(ordinal, format = HyperCast::NumFormat::INVARIANT)
-      new(ordinal: ordinal, door: :decimal, format: format)
+    def self.decimal(ordinal, format = HyperCast::NumFormat::INVARIANT, constraints: nil)
+      new(ordinal: ordinal, door: :decimal, format: format, constraints: constraints)
     end
 
     # A UUID column, as the lowercase hyphenated String.
@@ -158,7 +191,7 @@ module HyperTabular
 
     # A text column: the cell's bytes themselves, untrimmed, quotes resolved, as a UTF-8
     # String. A cell with no bytes at all is the one way text fails (an :empty Fault).
-    def self.text(ordinal) = new(ordinal: ordinal, door: :text)
+    def self.text(ordinal, constraints: nil) = new(ordinal: ordinal, door: :text, constraints: constraints)
 
     # +plan+ as a reader holds it: a frozen Array of its own, every entry a Column — what
     # DelimitedReader and Sheet check a plan with. ArgumentError naming the first entry that
@@ -172,13 +205,14 @@ module HyperTabular
       plan
     end
 
-    # +plan+ as the runtime takes it: for each column its fixed bytes, its month vocabulary and
-    # its tokens (see #packed_with). What a column declares is judged here, ahead of any input,
-    # so a plan the core would refuse is an ArgumentError naming the column at bind or open, a
-    # retired grouping word among them, and never a read that fails later.
+    # +plan+ as the runtime takes it: for each column its fixed bytes, its month vocabulary, its
+    # tokens (see #packed_with), and its constraints' packed bytes and packed enum, or nils. What a
+    # column declares is judged here, ahead of any input, so a plan the core would refuse is an
+    # ArgumentError naming the column at bind or open, a retired grouping word among them, and never
+    # a read that fails later.
     def self.specs(plan)
       specs = plan.each_with_index.map do |column, index|
-        [column.packed_with, column.months&.packed, column.packed_tokens]
+        [column.packed_with, column.months&.packed, column.packed_tokens, *column.packed_constraints]
       rescue ArgumentError => e
         raise ArgumentError, "plan column #{index} cannot be honoured: #{e.message}"
       end
@@ -223,6 +257,26 @@ module HyperTabular
       tokens.nil? ? nil : Declared.packed_tokens(tokens)
     end
 
+    # The constraints as the core takes them: HyperCast's 104 packed bytes and its packed enum, or
+    # two nils for none. HyperCast judges the declaration again here, so one that never went
+    # through Constraints.new, or a column whose door is not the declaration's however it was
+    # built, is the ArgumentError Constraints.new or Column.new raises.
+    def packed_constraints
+      return [nil, nil] if constraints.nil?
+      raise ArgumentError, "constraints must be a HyperCast::Constraints; got #{constraints.inspect}" unless
+        constraints.is_a?(HyperCast::Constraints)
+
+      code, packed, packed_enum = constraints.send(:declaration)
+      raise ArgumentError, Column.mismatched(constraints.door, door) unless code == DOORS[door]
+
+      [packed, packed_enum]
+    end
+
+    # Whether the column declares constraints, and so is read with Batch#get_checked.
+    def checked?
+      !constraints.nil?
+    end
+
     # The 104 little-endian bytes of the core's 1.0 ColumnSpec, which no read takes and the 1.0
     # exports stay proved with: ordinal, door code, what the
     # door declares (numbered as HyperCast numbers it), then the notation in HyperCast's
@@ -232,6 +286,11 @@ module HyperTabular
       param = declared.nil? ? 0 : Column::DECLARES.fetch(door).fetch(declared)
       [ordinal, DOORS.fetch(door), param].pack("L<3") + (format.nil? ? Column::NO_FORMAT : format.packed)
     end
+  end
+
+  # The words a declaration for one door given to a column of another is refused in.
+  def Column.mismatched(declared, door)
+    "Constraints for :#{declared} were given to a :#{door} column"
   end
 
   # The widest source ordinal a column can name: an ordinal must be below 2^20. No workbook
@@ -264,7 +323,8 @@ module HyperTabular
   # the date options.
   Column::SPEC_WITH_FIXED = 16 + HyperCast::NumFormat::PACKED_BYTES + HyperCast::DateOptions::PACKED_BYTES
 
-  # Bytes in a whole ColumnSpecWith, what its first word carries: the fixed part, then two
-  # pointers and their lengths.
-  Column::SPEC_WITH_BYTES = Column::SPEC_WITH_FIXED + 4 * [0].pack("J").bytesize
+  # Bytes in a whole ColumnSpecWith, what its first word carries: the fixed part, then the month
+  # names and tokens, each a pointer and its length, then the constraints' pointer and the packed
+  # enum's pointer and length.
+  Column::SPEC_WITH_BYTES = Column::SPEC_WITH_FIXED + 7 * [0].pack("J").bytesize
 end

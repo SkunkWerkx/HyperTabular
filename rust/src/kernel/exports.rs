@@ -410,13 +410,14 @@ export! {
     /// `row_widths`, which would be a list that leaves out what it was asked to name.
     ///
     /// A column whose notes are null still lists every refused cell, at `detail` `0`, but can't tell
-    /// a formula with no cached value from a blank, so lists none. A workbook row that the empty-row
+    /// a formula with no cached value from a blank, so lists none. A violation is listed with the
+    /// keyword its column's `checks` names, so a column whose `checks` are null lists none. A workbook row that the empty-row
     /// filter left out isn't in the batch, so nothing here can name it: `skip_empty_rows` says when
     /// that happens.
     ///
     /// # Safety
     /// `columns` is `column_count` aligned entries (or as far as the first wrong `size`), each
-    /// column's `verdicts` and `notes`, unless they're null, hold `rows` elements; `row_widths`, when
+    /// column's `verdicts`, and its `notes` and `checks` unless they're null, hold `rows` elements; `row_widths`, when
     /// required, holds `rows` counts; `out` is `cap` writable entries; `cursor` and `written` are
     /// writable and don't overlap them.
     fn hypertabular_faults(

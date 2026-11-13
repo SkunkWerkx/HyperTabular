@@ -1298,7 +1298,7 @@ func TestARowPastTheLimitNamesItsWidth(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec.ordinal = math.MaxUint32
-	_, err = checkSizes([]rawSpec{spec}, 1, 1, batchSheet)
+	_, err = checkSizes([]rawSpec{spec}, nil, 1, 1, batchSheet)
 	const message = "hypertabular: a row of 4294967296 columns asks for 68719476768 bytes, past the limit of 4294967296"
 	if err == nil || err.Error() != message {
 		t.Errorf("%v", err)

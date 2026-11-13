@@ -33,7 +33,9 @@ import pytest
 
 from hypertabular import (
     CastFailure,
+    Checked,
     Column,
+    Constraints,
     DateOptions,
     DateOrder,
     Batch,
@@ -49,6 +51,7 @@ from hypertabular import (
     NumFormat,
     Origin,
     Problem,
+    Rounding,
     ShortRows,
     Success,
     SuggestOptions,
@@ -57,6 +60,7 @@ from hypertabular import (
     TabularError,
     TabularFailure,
     UnixPrecision,
+    Violation,
 )
 
 
@@ -118,6 +122,10 @@ _CELL_KEYS = {
     "raw_hex",
     "detail",
     "origin",
+    "keyword",
+    "adjusted",
+    "enum_index",
+    "bits",
 }
 _PROBLEM_KEYS = {
     "row",
@@ -130,9 +138,34 @@ _PROBLEM_KEYS = {
     "origin",
     "expected",
     "found",
+    "keyword",
 }
 _FAILURE_KEYS = {"kind", "record", "line", "byte", "expected", "found"}
-_PLAN_KEYS = {"door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"}
+_PLAN_KEYS = {
+    "door",
+    "ordinal",
+    "precision",
+    "order",
+    "epoch",
+    "format",
+    "tokens",
+    "options",
+    "constraints",
+}
+# A plan entry's constraints, by the OpenAPI names HyperCast's corpus gives them.
+_CONSTRAINT_KEYS = {
+    "minimum": "minimum",
+    "exclusiveMinimum": "exclusive_minimum",
+    "maximum": "maximum",
+    "exclusiveMaximum": "exclusive_maximum",
+    "multipleOf": "multiple_of",
+    "minLength": "min_length",
+    "maxLength": "max_length",
+    "enum": "enum",
+    "trim": "trim",
+    "caseSensitive": "case_sensitive",
+    "rounding": "rounding",
+}
 _FORMAT_KEYS = {"decimal_sep", "group_sep", "flags", "currency"}
 _DATE_OPTION_KEYS = {"flags", "pivot", "months"}
 _DELIMITED_KEYS = {
@@ -202,6 +235,7 @@ def _unknown_keys(case: dict[str, Any], workbook: bool = False) -> list[str]:
         check(column, f"{name}.plan[]", _PLAN_KEYS)
         check(column.get("format"), f"{name}.plan[].format", _FORMAT_KEYS)
         check(column.get("options"), f"{name}.plan[].options", _DATE_OPTION_KEYS)
+        check(column.get("constraints"), f"{name}.plan[].constraints", set(_CONSTRAINT_KEYS))
     for row in case.get("rows", []):
         for cell in row:
             check(cell, f"{name}.rows[][]", _CELL_KEYS)
@@ -280,7 +314,9 @@ def _column_of(entry: dict[str, Any]) -> Column:
     # the vector says what a column with no format reads.
     door, ordinal = entry["door"], entry["ordinal"]
     factory = getattr(Column, door)
-    if door == "unix":
+    if "constraints" in entry:
+        column = factory(ordinal, constraints=_constraints_of(door, entry["constraints"]))
+    elif door == "unix":
         column = factory(ordinal, UnixPrecision(entry["precision"]))
     elif door == "excel_serial":
         column = factory(ordinal, ExcelEpoch(entry["epoch"]))
@@ -292,6 +328,14 @@ def _column_of(entry: dict[str, Any]) -> Column:
     if "format" in entry:
         column = dataclasses.replace(column, format=_format_of(entry))
     return _declared_options(column, entry)
+
+
+def _constraints_of(door: str, entry: dict[str, Any]) -> Constraints[Any]:
+    """A plan entry's constraints as HyperCast's own declaration for the door it names."""
+    declared = {_CONSTRAINT_KEYS[key]: value for key, value in entry.items()}
+    if "rounding" in declared:
+        declared["rounding"] = Rounding[declared["rounding"].upper()]
+    return Constraints(hypercast.Door[door.upper()], **declared)
 
 
 def _input_of(case: dict[str, Any]) -> bytes:
@@ -465,6 +509,128 @@ def _assert_column(label: str, column: Column, data: Any, expected: list[dict[st
     ], label
 
 
+def _assert_checked_value(label: str, column: Column, value: Any, expected: dict[str, Any]) -> None:
+    """A checked cell's value, passed or as cast: a float to its exact bits, a decimal to its
+    digits and scale."""
+    match column.door:
+        case Door.F32 | Door.F64:
+            packed = struct.pack(">f" if column.door is Door.F32 else ">d", value)
+            assert type(value) is float and f"0x{packed.hex()}" == expected["bits"], (
+                f"{label}: {value!r}, want bits {expected['bits']}"
+            )
+        case Door.DECIMAL:
+            sign, digits, exponent = value.as_tuple()
+            assert (sign, digits, exponent) == (
+                int(expected["negative"]),
+                tuple(int(d) for d in str(int(expected["magnitude"]))),
+                -expected["scale"],
+            ), f"{label}: {value!r}"
+        case _:
+            want = _expected_value(column, expected)
+            assert value == want and type(value) is type(want), f"{label}: {value!r}, want {want!r}"
+
+
+def _assert_checked(
+    label: str,
+    column: Column,
+    batch: Batch,
+    index: int,
+    row: int,
+    expected: dict[str, Any],
+    notes: bool,
+) -> None:
+    """Holds one cell of a constrained column to what the corpus says of it, through the checked
+    getter: what passed, a violation of a constraint the column declares, or the cell's fault."""
+    verdict = batch.get_checked(index, row)
+    verdicts = batch.column(index).verdicts
+    offset, length, reason = verdicts[row, 0], verdicts[row, 1], verdicts[row, 2]
+    raw = batch.raw(index, row)
+    expect = expected["expect"]
+    assert column.constraints is not None
+    match verdict:
+        case Checked(value, adjusted, enum_index):
+            assert expect == "ok", f"{label}: unexpectedly passed with {value!r}"
+            assert (adjusted, enum_index) == (expected["adjusted"], expected.get("enum_index")), (
+                f"{label}: {verdict!r}"
+            )
+            assert reason == 0, label
+            if enum_index is not None and column.door is Door.TEXT:
+                # The entry as declared: the caller's own string.
+                entries = column.constraints.enum
+                assert entries is not None and value is entries[enum_index], label
+            _assert_checked_value(label, column, value, expected)
+        case Violation(keyword, value, at, span):
+            assert expect == "violation", f"{label}: unexpectedly broke {verdict!r}"
+            assert keyword.name == expected["keyword"], f"{label}: {verdict!r}"
+            assert [at, span] == expected["fault"] and (at, span, reason) == (offset, length, 4), (
+                f"{label}: violation span"
+            )
+            assert raw.decode("utf-8") == expected["raw"], label
+            _assert_checked_value(label, column, value, expected)
+        case Fault(reason=why, offset=at, length=span):
+            assert expect in _REASON, f"{label}: expected {expect} but faulted with {verdict!r}"
+            assert why is _REASON[expect] and (at, span, int(why)) == (offset, length, reason), (
+                f"{label}: {verdict!r}"
+            )
+            if "fault" in expected:
+                assert [at, span] == expected["fault"], f"{label}: fault span"
+                if "raw_hex" in expected:
+                    assert raw == bytes.fromhex(expected["raw_hex"]), label
+                else:
+                    assert raw.decode("utf-8") == expected["raw"], label
+            said = expected.get("detail") if notes else None
+            assert _detail_name(verdict) == said, f"{label}: detail {verdict.detail}"
+        case other:  # pragma: no cover - the union is closed
+            raise AssertionError(f"{label}: produced no case: {other!r}")
+    origin = expected.get("origin", "cell") if notes else "cell"
+    assert batch.origin(index, row) is Origin[origin.upper()], label
+
+
+def _assert_checked_column(
+    label: str,
+    column: Column,
+    batch: Batch,
+    index: int,
+    seen: int,
+    expected: list[dict[str, Any]],
+    notes: bool,
+) -> None:
+    """A constrained column: each cell through the checked getter, the plain getters refusing
+    it, and its whole-batch views as the core wrote them, a violation's value kept as cast."""
+    data = batch.column(index)
+    for row, cell in enumerate(expected):
+        _assert_checked(
+            f"{label}, row {seen + row}, column {index}", column, batch, index, row, cell, notes
+        )
+        assert batch.raw(index, row) == data.raw(row), label
+    refusals = [lambda: data[0], lambda: list(data), lambda: batch.get(index, 0)]
+    if column.door is Door.TEXT:
+        refusals.append(lambda: batch.text(index, 0))
+    for refused in refusals:
+        with pytest.raises(TypeError, match="get_checked"):
+            refused()
+    verdicts = [batch.get_checked(index, row) for row in range(len(expected))]
+    faults = [(row, verdict) for row, verdict in enumerate(verdicts) if isinstance(verdict, Fault)]
+    assert data.faults() == faults and data.fault_count == len(faults), label
+    assert [reason for _, _, reason in data.verdicts.tolist()] == [
+        4
+        if isinstance(verdict, Violation)
+        else int(verdict.reason)
+        if isinstance(verdict, Fault)
+        else 0
+        for verdict in verdicts
+    ], label
+    values = data.values
+    for row, verdict in enumerate(verdicts):
+        match verdict:
+            case Violation(value=value):
+                assert values[row] == value, f"{label}, row {row}: the value as cast"
+            case Checked(value=value, enum_index=None):
+                assert values[row] == value, f"{label}, row {row}"
+            case Fault():
+                assert values[row] == (0 if isinstance(values, memoryview) else None), label
+
+
 def _assert_failure(label: str, actual: TabularError | None, case: dict[str, Any]) -> None:
     expected = case.get("failure")
     if expected is None:
@@ -490,6 +656,15 @@ def _problem_json(problem: Problem, base: int) -> dict[str, Any]:
         assert problem.source_column is None and problem.reason is None
         assert (problem.offset, problem.length) == (0, 0)
         entry["expected"], entry["found"] = problem.expected, problem.found
+    elif problem.keyword is not None:
+        # A violation: the cell cast, so there's no reason, and the span is the judged text's.
+        assert problem.source_column is not None and problem.reason is None
+        assert (problem.expected, problem.found) == (0, 0)
+        entry["plan_column"] = problem.plan_column
+        entry["source_column"] = problem.source_column
+        entry["reason"] = "violation"
+        entry["keyword"] = problem.keyword.name
+        entry["fault"] = [problem.offset, problem.length]
     else:
         assert problem.source_column is not None and problem.reason is not None
         assert (problem.expected, problem.found) == (0, 0)
@@ -529,6 +704,14 @@ def _assert_rows(label: str, plan: list[Column], batch: Batch) -> None:
         assert row.line == batch.line(row.index), label
         assert batch.row(row.index).index == row.index, label
         for index, column in enumerate(plan):
+            assert row.get_checked(index) == batch.get_checked(index, row.index), label
+            if column.constraints is not None:
+                # The plain getters refuse a constrained column: they'd read a violation as passed.
+                for refused in (row.get, row.text):
+                    with pytest.raises(TypeError, match="get_checked"):
+                        refused(index)
+                assert row.raw(index) == batch.raw(index, row.index), label
+                continue
             assert row.get(index) == batch.get(index, row.index), label
             assert row.get(index) == batch.column(index)[row.index], label
             assert row.raw(index) == batch.raw(index, row.index), label
@@ -560,6 +743,9 @@ def _assert_batch(
         assert len(row) == len(plan), f"{label}: a corpus row of another width"
     for index, (column, data) in enumerate(zip(plan, columns)):
         expected = [row[index] for row in rows[seen : seen + batch.rows]]
+        if column.constraints is not None:
+            _assert_checked_column(label, column, batch, index, seen, expected, notes)
+            continue
         judged = notes and _plain_verdict(column)
         for row, cell in enumerate(expected):
             _assert_cell(
@@ -682,7 +868,7 @@ def test_the_corpus_is_the_whole_contract():
 
 def test_every_corpus_key_is_read():
     """A key this replay doesn't know fails it, wherever in a case it is."""
-    assert len(CORPUS) == 123
+    assert len(CORPUS) == 137
     _assert_keys_are_known(CORPUS, workbook=False)
 
 

@@ -24,6 +24,12 @@
   `hypercast_verdict` row with its `detail` and `origin`, and the faulted cell's text beside its
   span. Text R can't hold is `ok` with an `NA` value: checking `ok` alone doesn't guarantee a usable
   character value.
+* The numeric and text factories take `constraints`, a `hypercast::hypercast_constraints()`
+  declaration for the column's door (refused for another door when the column is made and again
+  when the plan is bound). A constrained column's verdict is hypercast's
+  `hypercast_checked_verdict`: a violation keeps the value as cast and names its `keyword`, a
+  `multiple_of` rounding is flagged `adjusted`, and a text `enum` match reads as the declared
+  entry. `problems()` lists a violation with its `keyword`.
 * `problems()` lists a batch's or a table's problems when asked, a read paying nothing for it.
 * `suggest_plan()` samples a source and prints a plan to paste; its `$plan` reads back.
 * `close()` on readers and workbooks, safe twice. A call into a reader from inside its own read

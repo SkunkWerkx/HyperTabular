@@ -413,7 +413,9 @@ Intel Core i9-11900H, with the core at `00a511d`, and its rows aren't comparable
   native core. Measured in the same session against the cgo binding it replaced, over 1.0's core
   and over this one: the xlsx read 483 ms against 259 and 269 ms, the ods read 1.17 s against 586
   and 600 ms, the Numbers read 1.14 s against 683 and 686 ms, with several times the memory.
-  [`go/README.md`](../go/README.md#benchmarks) has every row.
+  [`go/README.md`](../go/README.md#benchmarks) has every row. The row was taken at opt-level 3;
+  the shipped core is now built at `s`, a correctness workaround, which in a later session
+  (2026-11-13) read xlsx 18.5% and ods 9.6% slower and Numbers 1.6% faster than 3.
 - **Ruby's Fiddle path is the slower one now** on the files with more cells to decode: 704 ms
   against Magnus's 458 ms on the xlsx read and 1.02 s against 787 ms on the ods read, level on the
   Numbers read (887 against 875 ms). A second run of both, Fiddle first, gave 704 and 458 ms, and

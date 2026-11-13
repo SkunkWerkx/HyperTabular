@@ -491,12 +491,12 @@ func newSheet(book *Workbook, info *SheetInfo, declared SheetOptions, plan []Col
 	if o.notes {
 		flags |= batchNotes
 	}
-	if _, err := checkSizes(nil, o.batchRows, 1, flags); err != nil {
+	if _, err := checkSizes(nil, nil, o.batchRows, 1, flags); err != nil {
 		return nil, err
 	}
 	// A sheet has no input buffer and the core doesn't judge one, but this option is shared with a
 	// reader, so it's asked as a reader's.
-	if _, err := checkSizes(nil, 1, o.bufferBytes, 0); err != nil {
+	if _, err := checkSizes(nil, nil, 1, o.bufferBytes, 0); err != nil {
 		return nil, err
 	}
 	s := &Sheet{book: book, info: info, options: declared, notes: o.notes}

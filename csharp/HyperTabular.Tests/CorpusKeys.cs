@@ -11,15 +11,20 @@ namespace HyperTabular.Tests;
 static class CorpusKeys
 {
 	static readonly HashSet<string> _format = ["decimal_sep", "group_sep", "flags", "currency"];
-	static readonly HashSet<string> _plan = ["door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"];
+	static readonly HashSet<string> _plan = ["door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options", "constraints"];
+	static readonly HashSet<string> _constraints =
+	[
+		"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf", "rounding", "minLength", "maxLength",
+		"enum", "trim", "caseSensitive",
+	];
 	static readonly HashSet<string> _dateOptions = ["flags", "pivot", "months"];
 	static readonly HashSet<string> _cell =
 	[
 		"expect", "fault", "raw", "raw_hex", "detail", "origin", "value", "text", "magnitude", "negative", "scale",
-		"seconds", "nanos", "year", "month", "day", "nanos_of_day",
+		"seconds", "nanos", "year", "month", "day", "nanos_of_day", "keyword", "adjusted", "enum_index", "bits",
 	];
 	static readonly HashSet<string> _problem =
-		["row", "line", "plan_column", "source_column", "reason", "detail", "origin", "fault", "expected", "found"];
+		["row", "line", "plan_column", "source_column", "reason", "detail", "origin", "fault", "expected", "found", "keyword"];
 	static readonly HashSet<string> _failure = ["kind", "record", "line", "byte", "expected", "found"];
 	static readonly HashSet<string> _suggest = ["columns", "truncated", "sample_rows", "format"];
 	static readonly HashSet<string> _suggested = ["door", "param", "status", "matched", "sampled"];
@@ -83,6 +88,8 @@ static class CorpusKeys
 					Check(format, $"{name}.plan[].format", _format, unknown);
 				if (entry.TryGetProperty("options", out var options))
 					Check(options, $"{name}.plan[].options", _dateOptions, unknown);
+				if (entry.TryGetProperty("constraints", out var constraints))
+					Check(constraints, $"{name}.plan[].constraints", _constraints, unknown);
 			}
 		if (@case.TryGetProperty("rows", out var rows))
 			foreach (var row in rows.EnumerateArray())

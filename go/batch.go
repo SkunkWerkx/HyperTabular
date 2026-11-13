@@ -3,6 +3,7 @@ package hypertabular
 import (
 	"fmt"
 	"iter"
+	"math"
 	"time"
 	"unsafe"
 
@@ -14,8 +15,8 @@ import (
 // and for a sheet of a workbook.
 //
 // A column is handed out whole — I32, F64, Text and the rest, one element per row, with
-// Verdicts beside them — or a cell at a time through Get, or a row at a time through Row and
-// All. Everything it hands out points into its reader's own buffers (and, for text in
+// Verdicts beside them — or a cell at a time through Get (GetChecked for a column that declares
+// constraints), or a row at a time through Row and All. Everything it hands out points into its reader's own buffers (and, for text in
 // memory, into that text itself) and is valid until the reader's next Read: views, not
 // copies, so do not write through them. The reader hands out the same *Batch every time,
 // with the next rows in it.
@@ -85,7 +86,9 @@ func (b *Batch) checkRow(row int) {
 	}
 }
 
-// Verdicts is a column's verdicts, one per row, as the core wrote them.
+// Verdicts is a column's verdicts, one per row, as the core wrote them. A verdict that is OK is
+// a value. On a column that declares constraints, one whose Violation reports true cast and broke
+// one, and GetChecked names it. Any other is the cell's fault (Fault), its span in the cell's text.
 func (b *Batch) Verdicts(column int) []CellVerdict {
 	return b.columns.columns[column].verdicts[:b.rows:b.rows]
 }
@@ -169,7 +172,8 @@ type Problem struct {
 	// being 0, wherever a range starts.
 	SourceColumn int
 	// Reason is the verdict's reason: Malformed, OutOfRange, or Empty for a formula with no cached
-	// value. It's zero, which is no CastFailure, for an entry about the row as a whole.
+	// value. It's zero, which is no CastFailure, for an entry about the row as a whole and for a
+	// violation, which Keyword names.
 	Reason hypercast.CastFailure
 	// Detail is what failed in the cell, as Batch.Detail says.
 	Detail hypercast.Detail
@@ -184,10 +188,14 @@ type Problem struct {
 	// it had: 0 otherwise.
 	Expected int
 	Found    int
+	// Keyword is the constraint a cell broke, in a column that declares them: zero, which is no
+	// Keyword, for anything else.
+	Keyword hypercast.Keyword
 }
 
 // Faults is what went wrong in this batch, in order by row and then by column, a row's own entry
-// first: cells at Malformed or OutOfRange, formulas with no cached value (OriginUncached), and rows
+// first: cells at Malformed or OutOfRange, cells that broke a constraint their column declares
+// (Problem.Keyword), formulas with no cached value (OriginUncached), and rows
 // longer than the width under LongRowsReport. Blanks, declared tokens, padding and a row cut under
 // LongRowsTruncate aren't problems, and aren't listed.
 //
@@ -254,6 +262,10 @@ func (b *Batch) problem(raw *rawProblem) Problem {
 		Length:       int(raw.len),
 		Expected:     int(raw.expected),
 		Found:        int(raw.found),
+	}
+	if raw.reason == verdictViolation {
+		problem.Reason = 0
+		problem.Keyword = hypercast.Keyword(raw.keyword)
 	}
 	if raw.planColumn != rowLevel {
 		problem.PlanColumn = int(raw.planColumn)
@@ -413,14 +425,23 @@ func (b *Batch) bytes(span rawSpan) []byte {
 // buffer, or the caller's own memory under NewDelimitedReaderBytes) or of a workbook's shared
 // strings, and only a cell that had an escaped quote in it, or a typed workbook cell, is a
 // slice of the reader's arena instead.
+//
+// A Text column that declares constraints panics here: read it with GetChecked, which would not
+// read a violation as passed.
 func (b *Batch) Text(column int) [][]byte {
+	b.unchecked(column, "Text")
+	return b.text(column)
+}
+
+// text is a Text column's cells, a constrained one's included: a violation has its bytes.
+func (b *Batch) text(column int) [][]byte {
 	c := b.of(column, "Text", DoorText, DoorText, DoorText)
 	out := c.texts[:b.rows:b.rows]
 	if c.batch != b.generation {
 		c.batch = b.generation
 		spans := unsafe.Slice((*rawSpan)(c.values), b.rows)
 		for row := range out {
-			if c.verdicts[row].reason != 0 {
+			if !c.verdicts[row].OK() && !c.verdicts[row].Violation() {
 				out[row] = nil
 				continue
 			}
@@ -480,8 +501,12 @@ type Value interface {
 // for the same text. T is the Go type of the column's door (see Value); asking for another
 // panics, as the column accessors do. A string is the one T that allocates, and a fault.
 //
+// A column that declares constraints panics here: read it with GetChecked, which would not read a
+// violation as passed.
+//
 // Get is a function rather than a method because Go methods cannot take type parameters.
 func Get[T Value](b *Batch, column, row int) (T, *hypercast.Fault) {
+	b.unchecked(column, "Get")
 	var value T
 	switch p := any(&value).(type) {
 	case *bool:
@@ -530,4 +555,77 @@ func Get[T Value](b *Batch, column, row int) (T, *hypercast.Fault) {
 		return zero, verdict.Fault()
 	}
 	return value, nil
+}
+
+// unchecked panics when a column declares constraints: a plain getter would read a violation as
+// passed.
+func (b *Batch) unchecked(column int, accessor string) {
+	if b.columns.columns[column].plan.checked {
+		panic(fmt.Sprintf("hypertabular: column %d declares constraints; %s does not read it: use GetChecked", column, accessor))
+	}
+}
+
+// GetChecked is the cell at (column, row) as HyperCast's checked doors judge it — the same pair
+// hypercast.Check (or CheckString) returns for the same text: the value, with whether
+// MultipleOf rounding adjusted it and the enum entry a text matched, and a nil rejection; or the
+// zero Checked and the rejection, a *hypercast.Fault for text that isn't the type or a
+// *hypercast.Violation[T] naming the keyword broken, with the value as cast. A text enum match
+// reads as the entry as declared. A column that declares no constraints reads too: every cell
+// that cast passes, unadjusted. T is the Go type of the column's door, one HyperCast checks (a
+// numeric door's, or string for Text); asking for another panics, as Get does.
+//
+// GetChecked is a function rather than a method because Go methods cannot take type parameters.
+func GetChecked[T hypercast.CheckedTarget](b *Batch, column, row int) (hypercast.Checked[T], hypercast.Rejection) {
+	var value T
+	switch p := any(&value).(type) {
+	case *int8:
+		*p = b.I8(column)[row]
+	case *int16:
+		*p = b.I16(column)[row]
+	case *int32:
+		*p = b.I32(column)[row]
+	case *int64:
+		*p = b.I64(column)[row]
+	case *uint8:
+		*p = b.U8(column)[row]
+	case *uint16:
+		*p = b.U16(column)[row]
+	case *uint32:
+		*p = b.U32(column)[row]
+	case *uint64:
+		*p = b.U64(column)[row]
+	case *float32:
+		*p = b.F32(column)[row]
+	case *float64:
+		*p = b.F64(column)[row]
+	case *hypercast.Decimal:
+		*p = b.Exact(column)[row]
+	case *string:
+		*p = string(b.text(column)[row])
+	}
+	c := &b.columns.columns[column]
+	verdict := b.Verdicts(column)[row]
+	switch {
+	case verdict.Violation():
+		check := c.checks[row]
+		if check.Keyword == 0 {
+			panic(contractViolation)
+		}
+		return hypercast.Checked[T]{EnumIndex: -1}, &hypercast.Violation[T]{
+			Keyword: hypercast.Keyword(check.Keyword), Value: value, Offset: verdict.Offset(), Length: verdict.Length(),
+		}
+	case !verdict.OK():
+		return hypercast.Checked[T]{EnumIndex: -1}, verdict.Fault()
+	case c.checks == nil:
+		return hypercast.Checked[T]{Value: value, EnumIndex: -1}, nil
+	}
+	check := c.checks[row]
+	passed := hypercast.Checked[T]{Value: value, Adjusted: check.Adjusted != 0, EnumIndex: -1}
+	if check.EnumIndex != math.MaxUint32 {
+		passed.EnumIndex = int(check.EnumIndex)
+		if entry, ok := any(c.plan.enumEntry(check.EnumIndex)).(T); ok {
+			passed.Value = entry
+		}
+	}
+	return passed, nil
 }

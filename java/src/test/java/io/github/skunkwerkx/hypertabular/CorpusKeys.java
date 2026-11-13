@@ -27,7 +27,19 @@ final class CorpusKeys {
 
     private static final Set<String> FORMAT = Set.of("decimal_sep", "group_sep", "flags", "currency");
     private static final Set<String> PLAN =
-            Set.of("door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options");
+            Set.of("door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options", "constraints");
+    private static final Set<String> CONSTRAINTS = Set.of(
+            "minimum",
+            "exclusiveMinimum",
+            "maximum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "rounding",
+            "minLength",
+            "maxLength",
+            "enum",
+            "trim",
+            "caseSensitive");
     private static final Set<String> DATE_OPTIONS = Set.of("flags", "pivot", "months");
     private static final Set<String> CELL = Set.of(
             "expect",
@@ -46,9 +58,23 @@ final class CorpusKeys {
             "year",
             "month",
             "day",
-            "nanos_of_day");
+            "nanos_of_day",
+            "keyword",
+            "adjusted",
+            "enum_index",
+            "bits");
     private static final Set<String> PROBLEM = Set.of(
-            "row", "line", "plan_column", "source_column", "reason", "detail", "origin", "fault", "expected", "found");
+            "row",
+            "line",
+            "plan_column",
+            "source_column",
+            "reason",
+            "detail",
+            "origin",
+            "fault",
+            "expected",
+            "found",
+            "keyword");
     private static final Set<String> FAILURE = Set.of("kind", "record", "line", "byte", "expected", "found");
     private static final Set<String> SUGGEST = Set.of("columns", "truncated", "sample_rows", "format");
     private static final Set<String> SUGGESTED = Set.of("door", "param", "status", "matched", "sampled");
@@ -132,6 +158,9 @@ final class CorpusKeys {
                 }
                 if (entry.has("options")) {
                     check(entry.getAsJsonObject("options"), name + ".plan[].options", DATE_OPTIONS, unknown);
+                }
+                if (entry.has("constraints")) {
+                    check(entry.getAsJsonObject("constraints"), name + ".plan[].constraints", CONSTRAINTS, unknown);
                 }
             }
         }

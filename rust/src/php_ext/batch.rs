@@ -20,15 +20,19 @@ use ext_php_rs::types::{ZendClassObject, ZendHashTable, Zval};
 use ext_php_rs::zend::ce;
 
 use super::args::{Int, OptInt};
-use super::classes::{array_zval, bool_zval, bytes_zval, call, float_zval, int_zval, list_zval};
+use super::classes::{
+    array_zval, bool_zval, bytes_zval, call, float_zval, int_zval, list_zval, maybe_int_zval,
+    new_named, read_own,
+};
 use super::enums::{Door, Origin};
 use super::errors::{contract_violation, logic, out_of_range, pending};
 use super::guard;
 use super::hypercast::{Judge, detailed_fault};
 use super::plan::Plan;
+use super::results::keyword;
 use super::results::problem;
 use crate::kernel::abi::{
-    CellNote, CellVerdict, ColumnBufferWith, OK, RawDelimitedOptions, RawProblem, Span,
+    CellNote, CellVerdict, ColumnBufferWith, OK, RawCheck, RawDelimitedOptions, RawProblem, Span,
 };
 use crate::kernel::delimited::unescape::unescape_into;
 
@@ -65,6 +69,12 @@ typed_return!(
     /// `Success|Fault`.
     Verdict,
     "HyperCast\\Success|HyperCast\\Fault",
+    false
+);
+typed_return!(
+    /// `Checked|Fault|Violation`.
+    CheckedVerdict,
+    "HyperCast\\Checked|HyperCast\\Fault|HyperCast\\Violation",
     false
 );
 typed_return!(
@@ -211,6 +221,10 @@ pub(crate) struct BatchCore {
     verdicts: Vec<Vec<CellVerdict>>,
     /// Each column's notes, or none for a column that has no fault or a read that takes no notes.
     notes: Vec<Vec<CellNote>>,
+    /// Each column's checks, one per row for a column that declares constraints, none otherwise.
+    checks: Vec<Vec<RawCheck>>,
+    /// Each column's HyperCast `Constraints`, or null.
+    constraints: Vec<Zval>,
     cells: Vec<Span>,
     per_row: usize,
     base: Base,
@@ -260,6 +274,7 @@ impl BatchCore {
         let mut values = Vec::with_capacity(count);
         let mut verdicts = Vec::with_capacity(count);
         let mut notes = Vec::with_capacity(count);
+        let mut checks = Vec::with_capacity(count);
         let mut sources = Vec::with_capacity(count);
         for (index, door) in plan.doors.iter().enumerate() {
             let (bytes, judged) = batch.column_bytes(index);
@@ -278,6 +293,7 @@ impl BatchCore {
             } else {
                 batch.notes(index).to_vec()
             });
+            checks.push(batch.checks(index).to_vec());
             sources.push(batch.source_column(index));
         }
         if workbook {
@@ -312,6 +328,8 @@ impl BatchCore {
             values,
             verdicts,
             notes,
+            checks,
+            constraints: plan.constraints.iter().map(Zval::shallow_clone).collect(),
             cells: cells.to_vec(),
             per_row,
             base,
@@ -390,7 +408,8 @@ impl BatchCore {
         let mut fault_of: Vec<Option<Zval>> = Vec::with_capacity(rows);
         let mut faults = ZendHashTable::new();
         for (row, verdict) in verdicts.iter().enumerate().take(rows) {
-            if verdict.reason != 0 {
+            // A cell that broke a declared constraint cast: its value is kept, and it's no fault.
+            if verdict.fault().is_some() {
                 let fault = judge.fault(verdict.reason, verdict.offset, verdict.len)?;
                 faults
                     .insert_at_index(row as i64, fault.shallow_clone())
@@ -504,6 +523,7 @@ impl BatchCore {
     }
 
     pub(crate) fn verdicts(&self, column: i64) -> PhpResult<Zval> {
+        self.unchecked(column)?;
         let decoded = self.decode(column)?;
         let judge = Judge::find()?;
         let mut verdicts = Vec::with_capacity(self.rows);
@@ -517,12 +537,86 @@ impl BatchCore {
     }
 
     pub(crate) fn get(&self, column: i64, row: i64) -> PhpResult<Zval> {
+        self.unchecked(column)?;
         let decoded = self.decode(column)?;
         let row = self.check_row(row)?;
         match &decoded.fault_of[row] {
             Some(fault) => Ok(fault.shallow_clone()),
             None => Judge::find()?.success(decoded.cells[row].shallow_clone()),
         }
+    }
+
+    /// Refuses a column that declares constraints to a reader that would read a violation as
+    /// passed.
+    fn unchecked(&self, column: i64) -> PhpResult<()> {
+        let at = self.check_column(column)?;
+        if self.constraints[at].is_null() {
+            return Ok(());
+        }
+        Err(logic(format!(
+            "Column {column} declares constraints: read it with getChecked()"
+        )))
+    }
+
+    /// The cell at (`column`, `row`) as HyperCast's checked door judges it: `Checked`, its
+    /// `Fault`, or the `Violation` of a constraint its column declares.
+    pub(crate) fn get_checked(&self, column: i64, row: i64) -> PhpResult<Zval> {
+        let decoded = self.decode(column)?;
+        let at = self.check_column(column)?;
+        let row = self.check_row(row)?;
+        if let Some(fault) = &decoded.fault_of[row] {
+            return Ok(fault.shallow_clone());
+        }
+        let value = decoded.cells[row].shallow_clone();
+        let Some(check) = self.checks[at].get(row) else {
+            // A column that declares nothing: every cell that cast passes, unadjusted.
+            return new_named(
+                "HyperCast\\Checked",
+                &mut [value, bool_zval(false), Zval::new()],
+            );
+        };
+        let verdict = self.verdicts[at][row];
+        if verdict.reason == CellVerdict::VIOLATION {
+            return new_named(
+                "HyperCast\\Violation",
+                &mut [
+                    keyword(check.keyword)?,
+                    value,
+                    int_zval(i64::from(verdict.offset)),
+                    int_zval(i64::from(verdict.len)),
+                ],
+            );
+        }
+        let index = (check.enum_index != u32::MAX).then_some(i64::from(check.enum_index));
+        let value = match index {
+            // The entry as declared: the caller's own string.
+            Some(index) if matches!(self.doors[at], Door::Text) => {
+                read_own(&self.constraints[at], "enum")?
+                    .array()
+                    .and_then(|entries| {
+                        entries
+                            .values()
+                            .nth(index as usize)
+                            .map(Zval::shallow_clone)
+                    })
+                    .ok_or_else(contract_violation)?
+            }
+            _ => value,
+        };
+        new_named(
+            "HyperCast\\Checked",
+            &mut [value, bool_zval(check.adjusted != 0), maybe_int_zval(index)],
+        )
+    }
+
+    /// A column as `get_checked` reads each of its cells, one per row.
+    pub(crate) fn checked_verdicts(&self, column: i64) -> PhpResult<Zval> {
+        self.check_column(column)?;
+        let mut verdicts = Vec::with_capacity(self.rows);
+        for row in 0..self.rows {
+            verdicts.push(self.get_checked(column, row as i64)?);
+        }
+        list_zval(verdicts)
     }
 
     /// The row's entry of `values($column)`.
@@ -579,7 +673,8 @@ impl BatchCore {
             .verdicts
             .iter()
             .zip(&self.notes)
-            .map(|(verdicts, notes)| ColumnBufferWith {
+            .zip(&self.checks)
+            .map(|((verdicts, notes), checks)| ColumnBufferWith {
                 size: ColumnBufferWith::SIZE,
                 values: std::ptr::null_mut(),
                 verdicts: verdicts.as_ptr().cast_mut(),
@@ -587,6 +682,11 @@ impl BatchCore {
                     std::ptr::null_mut()
                 } else {
                     notes.as_ptr().cast_mut()
+                },
+                checks: if checks.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    checks.as_ptr().cast_mut()
                 },
             })
             .collect();
@@ -603,8 +703,9 @@ impl BatchCore {
         let mut held = [RawProblem::default(); 64];
         loop {
             let mut written = 0;
-            // SAFETY: each column's verdicts are this batch's `rows` of them, and its notes either
-            // as many or null; the core only reads them, and a batch's copies are fixed once made.
+            // SAFETY: each column's verdicts are this batch's `rows` of them, and its notes and
+            // checks either as many or null; the core only reads them, and a batch's copies are
+            // fixed once made.
             let code = unsafe {
                 crate::kernel::faults::faults(
                     &columns,
@@ -778,15 +879,17 @@ impl Batch {
     }
 
     /// A column, one value per row, each the PHP carrier of the column's door (`Door`) — and null
-    /// where the cell did not cast, whatever the reason; `faults()` says why. Built in one piece
-    /// the first time it is asked for.
+    /// where the cell did not cast, whatever the reason; `faults()` says why. A cell that broke a
+    /// constraint its column declares cast, so its value is here as cast, never rounded. Built in
+    /// one piece the first time it is asked for.
     pub fn values(&self, column: Int) -> PhpResult<Array> {
         guard(|| self.core.values(column.0).map(Array))
     }
 
     /// With no column, everything wrong in this batch, by row and then by column, a row's own entry
-    /// first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, a workbook's
-    /// formulas with no cached value, and rows a `LongRows::Report` dialect cut. Blanks, declared
+    /// first: a list of `Problem`. Listed are cells at `Malformed` or `OutOfRange`, cells that broke
+    /// a constraint their column declares (with its `keyword`), a workbook's formulas with no cached
+    /// value, and rows a `LongRows::Report` dialect cut. Blanks, declared
     /// tokens, padding and a row cut under `LongRows::Truncate` aren't. With notes off a refused
     /// cell has no detail and a formula with no cached value isn't listed. A row the empty-row
     /// filter dropped isn't in the batch to be named. Made the first time it is asked for.
@@ -804,15 +907,39 @@ impl Batch {
     }
 
     /// A column as verdicts, one per row: HyperCast's `Success` around the value, or its `Fault`.
+    /// A `\LogicException` for a column that declares constraints: read it with
+    /// `checkedVerdicts()`.
     pub fn verdicts(&self, column: Int) -> PhpResult<Array> {
         guard(|| self.core.verdicts(column.0).map(Array))
     }
 
+    /// A column as HyperCast's checked door judges it, one verdict per row: each cell as
+    /// `getChecked()` reads it. Any column can be read this way, a constrained one and one that
+    /// declares nothing alike.
+    pub fn checked_verdicts(&self, column: Int) -> PhpResult<Array> {
+        guard(|| self.core.checked_verdicts(column.0).map(Array))
+    }
+
     /// The cell at (`$column`, `$row`) as HyperCast judged it: its `Success` around the value —
     /// the PHP carrier of the column's door (`Door`) — or its `Fault`, whose span indexes the
-    /// cell's own text (`raw()`).
+    /// cell's own text (`raw()`). A `\LogicException` for a column that declares constraints,
+    /// which this would read a violation of as passed: read it with `getChecked()`.
     pub fn get(&self, column: Int, row: Int) -> PhpResult<Verdict> {
         guard(|| self.core.get(column.0, row.0).map(|v| Verdict(Some(v))))
+    }
+
+    /// The cell at (`$column`, `$row`) as HyperCast's checked door judges it, for a column that
+    /// declares `Constraints`: `Checked` when it cast and met them (`adjusted` when a `multipleOf`
+    /// rounding changed the value, and a text `enum` match the entry as declared, with its
+    /// `enumIndex`), its `Violation` when it cast and broke one (the keyword, the value as cast and
+    /// the judged text's span), or its `Fault` when it didn't cast. A column that declares none is
+    /// read too: every cell that cast passes, unadjusted.
+    pub fn get_checked(&self, column: Int, row: Int) -> PhpResult<CheckedVerdict> {
+        guard(|| {
+            self.core
+                .get_checked(column.0, row.0)
+                .map(|v| CheckedVerdict(Some(v)))
+        })
     }
 
     /// Where the verdict of the cell at (`$column`, `$row`) came from: a door, a declared token,
@@ -911,6 +1038,15 @@ impl Row {
             self.core
                 .get(column.0, self.index as i64)
                 .map(|v| Verdict(Some(v)))
+        })
+    }
+
+    /// The cell in `$column` as HyperCast's checked door judged it: `Batch::getChecked()`.
+    pub fn get_checked(&self, column: Int) -> PhpResult<CheckedVerdict> {
+        guard(|| {
+            self.core
+                .get_checked(column.0, self.index as i64)
+                .map(|v| CheckedVerdict(Some(v)))
         })
     }
 

@@ -195,6 +195,16 @@ them. A plan is a slice of columns, in the order to produce them — a projectio
 inference, no separator detection, no header heuristics. Culture stays out of the core
 exactly as in HyperCast — `NumFormat` is declared per column.
 
+A column of a numeric door or of `Text` may also declare HyperCast's constraints, the OpenAPI 3.2
+keywords (bounds, `multipleOf` with a rounding, lengths, `enum`, `trim`): `Column::checked(ordinal,
+constraints)`, whose door is the declaration's, so no binding can pair one door with another's
+declaration. Its cells go through HyperCast's checked door instead of the plain one, and a cell that
+casts is then judged: it passes (flagged when rounding to `multipleOf` adjusted it, and naming the
+`enum` entry a text matched), or it is a violation, the value as cast with the keyword it broke. The
+declaration is HyperCast's own `RawConstraints` and packed `enum`, judged once by HyperCast when it is
+declared and again by the core when the plan is bound, so a declaration the core refuses is the
+plan's error, never a column with no rules.
+
 ### The cast matrix
 
 Every `(Cell, Door)` pair has one defined outcome. `Empty` is `Reason::Empty` for every
@@ -255,14 +265,24 @@ per cell saying where the cell's text is, and `Batch::raw` reads it — for any 
 delimited text, and for a workbook's text cells and its typed cells that did not cast.
 `Empty` has no text and no span.
 
+A column that declares constraints writes one more verdict, `CellVerdict::VIOLATION` (`4`): the
+cell cast, its value is written as cast, never rounded, and its span is the value's, as HyperCast's
+checked door reports it (a typed workbook number has no text, so its violation spans nothing). Beside
+each verdict such a column writes HyperCast's 12-byte `RawCheck`: on a violation the keyword, on a
+cell that passed whether rounding adjusted it and the `enum` entry it matched. A cell that didn't
+cast, and one no door was asked about, is what it is in any other column, and has no check. The
+plain getters can't say a violation, which is no fault, so every binding refuses them on such a
+column and reads it through its checked getter, which reads an unconstrained column too.
+
 ### Problems — the verdicts read across
 
 `hypertabular_faults` lists what went wrong in a batch, into a caller's array of `RawProblem`
-(32 bytes): row, plan column (`u32::MAX` for a row-level entry), reason, detail, origin, span, and
-the expected and found widths. It reads what the fill already wrote, so a read pays nothing for it
+(36 bytes): row, plan column (`u32::MAX` for a row-level entry), reason, detail, origin, span, the
+expected and found widths, and the keyword a violation broke. It reads what the fill already wrote, so a read pays nothing for it
 until it's called. It runs by row, then a row's own entry first, then by plan column, and it holds a
 cell a door refused (`Malformed`, `OutOfRange`), a formula with no cached value (`Empty` at origin
-`uncached`), and a row longer than the width under `long_rows = report`. A blank, a declared token,
+`uncached`), a cell that broke a constraint its column declares (reason `4`, with its keyword and
+the value's span), and a row longer than the width under `long_rows = report`. A blank, a declared token,
 padding and a row cut under `truncate` were all asked for or are nothing wrong, so they aren't
 listed.
 
@@ -444,10 +464,10 @@ A cell that does not cast is never an error.
 
 The core decides how much memory a batch may ask for, in one function, `kernel/size.rs`'s
 `check_batch`, and no binding holds a size rule of its own. It counts each column's values and
-verdicts, its notes when they're on, each row's width when a read reports long rows, and the cell
-table, in checked `u64` arithmetic, and allocates nothing, so any size can be asked about. A batch
-past 4 GiB is refused, as is a `batch_rows` or a `buffer_bytes` of `0`, at open and again when a plan
-is bound, before anything is allocated. The limit is fixed: there is no way to raise it. 4 GiB holds
+verdicts, its notes when they're on, its checks when it declares constraints, each row's width
+when a read reports long rows, and the cell table, in checked `u64` arithmetic, and allocates
+nothing, so any size can be asked about. A batch past 4 GiB is refused, as is a `batch_rows` or a
+`buffer_bytes` of `0`, at open and again when a plan is bound, before anything is allocated. The limit is fixed: there is no way to raise it. 4 GiB holds
 214 million rows of one `i32` column with notes, or 1.8 million rows of 100 text columns. A plan
 that can't be honoured stays the plan's own error, at bind. A delimited read with no plan and no row
 widths has no arrays and a cell table the budget stops, so it reads at any `batch_rows`; a sheet's
@@ -689,6 +709,41 @@ The optional `ordinal` in Rust, C++ and TypeScript, `Find` and `FindBytes` in Go
 in Ruby and `find` in PHP keep the first match: they can't carry an error, and their caller asked for
 the first. R has no optional lookup. A plan by position reads either column. 1.0's strict lookups took
 the first match; the refusal is a change of behaviour, and the CHANGELOG says so.
+
+A column that declares constraints, mapped. The declaration is HyperCast's `Constraints` in every
+binding, typed by its door where the language can say so; where it can't (Java's boxed types,
+Python, Ruby, PHP, TypeScript and R), the column reads the declaration's door and refuses one for
+another, at the factory or, for R's editable list and TypeScript's plain object, when the plan is
+bound:
+
+| | Declaring | The checked getter | A plain getter on it | A problem's keyword |
+|---|---|---|---|---|
+| Rust | `Column::checked(ordinal, constraints)` | `get_checked`, `text_checked` | panics | `Problem.keyword` |
+| C# | `Column.Int32(ordinal, [format,] constraints)`, one per door | `GetChecked<T>` | `InvalidOperationException` | `Problem.Keyword` |
+| Java | `Column.i32(ordinal, [format,] constraints)`, one per door | `getChecked` | `IllegalStateException` | `Problem.keyword()` |
+| Go | `Checked[V](ordinal, format, constraints)`, `CheckedText` | `GetChecked`, `CellChecked` | panics | `Problem.Keyword` |
+| Swift | `Column.i32(_:format:constraints:)`, one per door | `checked(_:row:as:)` | precondition failure | `Problem.keyword` |
+| Python | `Column.i32(ordinal, fmt, constraints=)`, one per door | `get_checked` | `TypeError` | `Problem.keyword` |
+| Ruby | `Column.i32(ordinal, format, constraints:)`, one per door | `get_checked` | `TypeError` | `Problem#keyword` |
+| PHP | `Column::i32($ordinal, $format, $constraints)`, one per door | `getChecked` | `LogicException` | `Problem->keyword` |
+| TypeScript | `Column.checked(ordinal, constraints, format?)` | `getChecked` | the contract violation, a `malformed` verdict at 0/0 | `Problem.keyword` |
+| R | `col_i32(..., constraints = )`, one per door | — (the column is a `hypercast_checked_verdict`) | — | `problems()`'s `keyword` |
+| C++ | `Column::checked(ordinal, constraints)` | `get_checked<T>` | `std::abort()` | `Problem::keyword` |
+| C | `ColumnSpecWith`'s `constraints` and `enum_ptr`, `ColumnBufferWith`'s `checks` | the verdict and its `RawCheck` | — | `RawProblem.keyword` |
+
+A text column's `enum` match is the entry as declared, the caller's own string, in every binding but
+C, whose check names the entry's index. R reads a whole batch as columns, so a constrained column is
+HyperCast's checked verdict as its own `cast_checked()` returns it, and there is no per-cell getter to
+refuse.
+
+A whole column comes two ways, and every binding keeps one rule for each. A raw view of the verdicts
+the core wrote (Rust's `verdicts`, C#'s `Verdicts`, Java's `verdicts`, Go's `Verdicts`, Swift's
+`verdicts(_:)`, Python's `ColumnData.verdicts`, C's buffer) builds nothing, so it reads any column:
+reason `4` is the violation, and the checks say which keyword. A list of HyperCast verdicts (Ruby's and
+PHP's `verdicts`, TypeScript's `column`) refuses a constrained column as the plain getter does, and its
+checked twin (Ruby's `checked_verdicts`, PHP's `checkedVerdicts`, TypeScript's `columnChecked`) reads
+any column, each cell as the checked getter reads it. R's column is already the checked list. The
+other bindings have no list of verdicts to pair: their raw view is the whole column.
 
 A dash is a decision, not a gap. Swift, Python, Ruby, PHP, TypeScript and R strings are
 their own allocations, and their text accessors already hand out the native string or a

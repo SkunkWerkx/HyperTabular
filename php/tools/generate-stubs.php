@@ -50,6 +50,11 @@ const REWRITES = [
     // ext-php-rs's argument info names a union of classes in one string, which cargo-php
     // prefixes with one backslash.
     ['\\HyperCast\\Success|HyperCast\\Fault', '\\HyperCast\\Success|\\HyperCast\\Fault', 4],
+    [
+        '\\HyperCast\\Checked|HyperCast\\Fault|HyperCast\\Violation',
+        '\\HyperCast\\Checked|\\HyperCast\\Fault|\\HyperCast\\Violation',
+        4,
+    ],
     // `Door::valueSize()` is registered by hand beside the cases (enums.rs), outside
     // cargo-php's view.
     [
@@ -115,7 +120,8 @@ const VALUE_CLASSES = <<<'PHP'
 
         /**
          * One output column of a plan: which source column it reads, the door it casts through,
-         * and the numeric notation. Built with the factory named after its door.
+         * the numeric notation, and the HyperCast `Constraints` it declares, if any. Built with the
+         * factory named after its door.
          */
         final readonly class Column {
             private function __construct(
@@ -126,6 +132,7 @@ const VALUE_CLASSES = <<<'PHP'
                 public ?array $tokens = null,
                 public ?\HyperCast\DateOptions $dateOptions = null,
                 public ?\HyperCast\MonthNames $months = null,
+                public ?\HyperCast\Constraints $constraints = null,
             ) {}
 
             /**
@@ -150,57 +157,101 @@ const VALUE_CLASSES = <<<'PHP'
             /**
              * A signed 8-bit integer column, as `int`.
              */
-            public static function i8(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function i8(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * A signed 16-bit integer column, as `int`.
              */
-            public static function i16(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function i16(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * A signed 32-bit integer column, as `int`.
              */
-            public static function i32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function i32(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * A signed 64-bit integer column, as `int`.
              */
-            public static function i64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function i64(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An unsigned 8-bit integer column, as `int`.
              */
-            public static function u8(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function u8(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An unsigned 16-bit integer column, as `int`.
              */
-            public static function u16(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function u16(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An unsigned 32-bit integer column, as `int`.
              */
-            public static function u32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function u32(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An unsigned 64-bit integer column, as `int`'s two's-complement bit pattern (sprintf('%u')).
              */
-            public static function u64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function u64(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An IEEE single column, as `float` (widened losslessly).
              */
-            public static function f32(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function f32(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An IEEE double column, as `float`.
              */
-            public static function f64(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function f64(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * An exact decimal column, as HyperCast's `Decimal` triple.
              */
-            public static function decimal(int $ordinal, ?\HyperCast\NumFormat $format = null): \HyperTabular\Column {}
+            public static function decimal(
+                int $ordinal,
+                ?\HyperCast\NumFormat $format = null,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
 
             /**
              * A UUID column, as the lowercase hyphenated string.
@@ -250,7 +301,10 @@ const VALUE_CLASSES = <<<'PHP'
             /**
              * A text column: the cell's bytes themselves, untrimmed, quotes resolved.
              */
-            public static function text(int $ordinal): \HyperTabular\Column {}
+            public static function text(
+                int $ordinal,
+                ?\HyperCast\Constraints $constraints = null,
+            ): \HyperTabular\Column {}
         }
 
         /**
@@ -299,7 +353,8 @@ const VALUE_CLASSES = <<<'PHP'
         }
 
         /**
-         * One entry of a batch's faults: a cell that did not cast, or a record of the wrong width.
+         * One entry of a batch's faults: a cell that did not cast, a cell that broke a constraint its
+         * column declares, or a record of the wrong width.
          */
         final readonly class Problem {
             public function __construct(
@@ -315,6 +370,8 @@ const VALUE_CLASSES = <<<'PHP'
                 public int $length,
                 public int $expected,
                 public int $found,
+                public ?\HyperCast\Keyword $keyword = null,
+                public int $keywordCode = 0,
             ) {}
         }
 

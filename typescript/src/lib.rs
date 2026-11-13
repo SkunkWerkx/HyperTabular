@@ -13,6 +13,10 @@
 //! a result, or an exception a caller's own setter or getter throws past an outcome) and
 //! `new` on a class, which has no constructor.
 //!
+//! A column that declares HyperCast's constraints (`Column.checked`) is read through
+//! `getChecked`, whose verdict is HyperCast's checked one: `{ ok: true, value, adjusted,
+//! enumIndex }`, `{ ok: false, fault }` or `{ ok: false, violation }`.
+//!
 //! A batch is copied out of the reader as it is read, as Python's, Ruby's and PHP's are: a
 //! garbage-collected caller cannot be held to "valid until the next read". A fault's span is
 //! in bytes of the cell's raw text, which `raw` hands back as a `Uint8Array`.
@@ -31,8 +35,8 @@
 use hypercast as hc;
 use hypertabular as ht;
 use napi::bindgen_prelude::{
-    Array, BigInt, ClassInstance, Either, Either9, JavaScriptClassExt, Null, Object, ToNapiValue,
-    Uint8Array, Unknown, sys,
+    Array, BigInt, ClassInstance, Either, Either3, Either9, JavaScriptClassExt, Null, Object,
+    ToNapiValue, Uint8Array, Unknown, sys,
 };
 use napi::{Env, JsValue, Result, ValueType};
 use napi_derive::napi;
@@ -96,6 +100,84 @@ pub struct Failure {
 /// `ok`. The same type `@skunkwerkx/hypercast` exports.
 #[napi(js_name = "Verdict<T>")]
 pub type VerdictType = Either<SuccessCase, Failure>;
+
+/// The success case of a checked cell: `ok` is `true`; `value` is the value (rounded to
+/// `multipleOf` when the declaration rounds; at the text door with an `enum`, the declared entry
+/// it matched); `adjusted` is true only when rounding changed it; `enumIndex` is the index of the
+/// entry a text matched, `null` otherwise. The same type `@skunkwerkx/hypercast` exports.
+#[napi(
+    object,
+    object_to_js = false,
+    object_from_js = false,
+    js_name = "Checked<T>"
+)]
+pub struct CheckedCase {
+    #[napi(ts_type = "true")]
+    pub ok: bool,
+    #[napi(ts_type = "T")]
+    pub value: bool,
+    pub adjusted: bool,
+    #[napi(ts_type = "number | null")]
+    pub enum_index: u32,
+}
+
+/// A rule a cell's value broke, in the OpenAPI spelling, with that value exactly as the door
+/// cast it (never rounded; at the text door, the judged text, never an `enum` entry) and the
+/// span of the judged text, in bytes of the cell's raw text. Keywords are open to additions, so
+/// a `switch` over them needs a `default` arm; a code this package does not name yet arrives
+/// as `"keyword N"`. The same type `@skunkwerkx/hypercast` exports.
+#[napi(
+    object,
+    object_to_js = false,
+    object_from_js = false,
+    js_name = "Violation<T>"
+)]
+pub struct ViolationCase {
+    #[napi(
+        ts_type = "'minimum' | 'exclusiveMinimum' | 'maximum' | 'exclusiveMaximum' | 'multipleOf' | 'minLength' | 'maxLength' | 'enum' | (string & {})"
+    )]
+    pub keyword: String,
+    #[napi(ts_type = "T")]
+    pub value: bool,
+    pub offset: u32,
+    pub length: u32,
+}
+
+/// The failure case of a checked cell whose value broke a declared rule: `ok` is `false` and
+/// `violation` says which rule, where, and the value. The same type `@skunkwerkx/hypercast`
+/// exports.
+#[napi(
+    object,
+    object_to_js = false,
+    object_from_js = false,
+    js_name = "Violated<T>"
+)]
+pub struct ViolatedCase {
+    #[napi(ts_type = "false")]
+    pub ok: bool,
+    #[napi(ts_type = "Violation<T>")]
+    pub violation: bool,
+}
+
+/// A cell of a column that declares constraints, as HyperCast's checked door judged it: exactly
+/// one of `Checked<T>`, `Failure` or `Violated<T>`, told apart by `ok` and then by
+/// `'fault' in verdict`. The same type `@skunkwerkx/hypercast` exports.
+#[napi(js_name = "CheckedVerdict<T>")]
+pub type CheckedVerdictType = Either3<CheckedCase, Failure, ViolatedCase>;
+
+/// A HyperCast `Constraints` (`@skunkwerkx/hypercast`'s, made by `Constraints.declare`), as this
+/// package reads it: the door it is bound to and the bytes it crosses a C ABI as.
+#[napi(object, object_to_js = false, object_from_js = false)]
+pub struct DeclaredConstraints {
+    /// The door the declaration is bound to, by HyperCast's `Door` code.
+    pub door: u32,
+    /// Its 104 bytes.
+    #[napi(ts_type = "Uint8Array")]
+    pub packed: bool,
+    /// Its `enum` list, empty for none.
+    #[napi(ts_type = "Uint8Array")]
+    pub packed_enum: bool,
+}
 
 /// What a cell holds once it has cast: the value of the door it was read through.
 #[napi(js_name = "Value")]
@@ -661,8 +743,9 @@ pub enum Detail {
 }
 
 /// One thing that went wrong in a batch (`Batch.faults`): a cell at `malformed` or
-/// `outOfRange`, a formula with no cached value, or a row longer than the width under
-/// `longRows: 'report'`. Blanks, tokens and padding are not problems.
+/// `outOfRange`, a formula with no cached value, a cell that broke its column's constraints, or
+/// a row longer than the width under `longRows: 'report'`. Blanks, tokens and padding are not
+/// problems.
 #[napi(object, object_from_js = false, use_nullable = true)]
 pub struct Problem {
     /// The row in the batch, from zero.
@@ -673,7 +756,7 @@ pub struct Problem {
     pub plan_column: Option<u32>,
     /// The source column, from zero (a sheet's own, `A` being 0), or `null` for a row.
     pub source_column: Option<u32>,
-    /// The verdict's reason, or `null` for a row.
+    /// The verdict's reason, or `null` for a row and for a violation, which `keyword` names.
     pub reason: Option<CastFailure>,
     /// What failed, by HyperCast's `Detail` name, or `null`.
     pub detail: Option<Detail>,
@@ -685,6 +768,12 @@ pub struct Problem {
     /// For a long row, the width the first record fixed and the cells it had; otherwise 0.
     pub expected: u32,
     pub found: u32,
+    /// For a cell that broke its column's constraints, the keyword it broke, in the OpenAPI
+    /// spelling (a `Violation`'s); otherwise `null`.
+    #[napi(
+        ts_type = "'minimum' | 'exclusiveMinimum' | 'maximum' | 'exclusiveMaximum' | 'multipleOf' | 'minLength' | 'maxLength' | 'enum' | (string & {}) | null"
+    )]
+    pub keyword: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1462,8 +1551,11 @@ fn shared<T, R>(cell: &RefCell<T>, call: impl FnOnce(&T) -> R) -> Option<R> {
 /// past the core's limit, a format or date options HyperCast refuses).
 #[napi]
 pub struct Column {
-    door: Door,
+    /// `None` only for `Column.checked` given no declaration, whose door is the declaration's.
+    door: Option<Door>,
     ordinal: f64,
+    /// Whether it was made by `Column.checked`.
+    checked: bool,
     resolved: Option<ht::Column>,
 }
 
@@ -1491,16 +1583,18 @@ impl Column {
             _ => None,
         };
         Column {
-            door,
+            door: Some(door),
             ordinal: given,
+            checked: false,
             resolved,
         }
     }
 
     fn of(column: ht::Column) -> Column {
         Column {
-            door: door_name(column.door),
+            door: Some(door_name(column.door)),
             ordinal: column.ordinal as f64,
+            checked: column.is_checked(),
             resolved: Some(column),
         }
     }
@@ -1509,6 +1603,7 @@ impl Column {
         Column {
             door: self.door,
             ordinal: self.ordinal,
+            checked: self.checked,
             resolved: self.resolved.and_then(change),
         }
     }
@@ -1625,6 +1720,51 @@ impl Column {
         Column::make(env, Door::Datetime, &ordinal, door, Ok(None))
     }
 
+    /// Source column `ordinal` through the door a HyperCast `Constraints` is bound to (an
+    /// integer, float or decimal door, or the text door), whose cells must also meet it: read
+    /// through `getChecked`, a cell that casts and breaks a declared rule is a violation carrying
+    /// the value as cast, one that casts and meets them all passes, flagged `adjusted` when
+    /// `multipleOf`'s rounding changed it, and one that doesn't cast is its fault. A numeric
+    /// door reads its numbers in `format`, as the plain factories do. As with every factory, an
+    /// argument that is not what it says (no `Constraints`, a failed `Constraints.declare`'s
+    /// missing `.value` among them) makes a column that is not `valid`, refused when its plan is
+    /// bound: never a column with no rules. Each distinct declaration is kept for the life of
+    /// the process.
+    #[napi(
+        catch_unwind,
+        ts_args_type = "ordinal: number, constraints: DeclaredConstraints, format?: PackedNumFormat | undefined | null"
+    )]
+    pub fn checked(
+        env: &Env,
+        ordinal: Unknown<'_>,
+        constraints: Unknown<'_>,
+        format: Unknown<'_>,
+    ) -> Column {
+        let declared = declaration_of(env, &constraints);
+        let format = format_of(env, &format);
+        let given = match ordinal.get_type() {
+            Ok(ValueType::Number) => unsafe { ordinal.cast::<f64>() }.unwrap_or(f64::NAN),
+            _ => f64::NAN,
+        };
+        clear_pending_exception(env);
+        let door = declared.as_ref().and_then(|(door, ..)| checked_door(*door));
+        let resolved = match (index(&ordinal), declared, format) {
+            (Some(at), Some((door, packed, entries)), Ok(format)) => {
+                checked_column(at, door, &packed, &entries).map(|column| match format {
+                    Some(format) => column.format(format),
+                    None => column,
+                })
+            }
+            _ => None,
+        };
+        Column {
+            door: door.map(door_name),
+            ordinal: given,
+            checked: true,
+            resolved,
+        }
+    }
+
     /// The same column answering to these tokens rather than its dialect's or sheet's: a
     /// cell whose exact unquoted text is one of them is `empty`, its origin `token`. An empty
     /// list means none, so a column can opt out of its dialect's. Each distinct list is kept
@@ -1655,10 +1795,18 @@ impl Column {
         })
     }
 
-    /// The door its cells go through.
+    /// The door its cells go through: for `Column.checked`, its declaration's, so `null` there
+    /// for a declaration that is none.
     #[napi(getter, catch_unwind)]
-    pub fn door(&self) -> Door {
+    pub fn door(&self) -> Option<Door> {
         self.door
+    }
+
+    /// Whether it declares HyperCast's constraints: made by `Column.checked`, and read through
+    /// `getChecked`.
+    #[napi(getter, catch_unwind, js_name = "checked")]
+    pub fn is_checked(&self) -> bool {
+        self.checked
     }
 
     /// The source column it reads, as it was given (`NaN` for an ordinal that is no number).
@@ -1710,6 +1858,113 @@ fn date_options_of(env: &Env, value: &Unknown<'_>) -> Option<(hc::DateOptions, O
         }
     };
     Some((hc::DateOptions::from_flags(flags).with_pivot(pivot), months))
+}
+
+/// A HyperCast `Constraints`: the code of the door it is bound to, its 104 `packed` bytes and
+/// its `packedEnum`. `None` for anything else, a failed declaration's missing `.value` included.
+fn declaration_of(env: &Env, value: &Unknown<'_>) -> Option<(u32, Vec<u8>, Vec<u8>)> {
+    let object = match value.get_type() {
+        Ok(ValueType::Object) => unsafe { value.cast::<Object>() }.ok(),
+        _ => None,
+    }?;
+    let what = "constraints";
+    let door = field(env, &object, what, "door").ok()??;
+    let door = code(&door)?;
+    let bytes = |name: &str| -> Option<Vec<u8>> {
+        let field = field(env, &object, what, name).ok()??;
+        match field.get_type() {
+            Ok(ValueType::Object) => unsafe { field.cast::<Uint8Array>() }
+                .ok()
+                .map(|bytes| bytes.to_vec()),
+            _ => None,
+        }
+    };
+    let packed = bytes("packed")?;
+    let entries = bytes("packedEnum")?;
+    Some((door, packed, entries))
+}
+
+/// The doors a HyperCast `Constraints` can be bound to, by HyperCast's `Door` code.
+fn checked_door(code: u32) -> Option<ht::Door> {
+    [
+        (hc::Door::I8, ht::Door::I8),
+        (hc::Door::I16, ht::Door::I16),
+        (hc::Door::I32, ht::Door::I32),
+        (hc::Door::I64, ht::Door::I64),
+        (hc::Door::U8, ht::Door::U8),
+        (hc::Door::U16, ht::Door::U16),
+        (hc::Door::U32, ht::Door::U32),
+        (hc::Door::U64, ht::Door::U64),
+        (hc::Door::F32, ht::Door::F32),
+        (hc::Door::F64, ht::Door::F64),
+        (hc::Door::Decimal, ht::Door::Decimal),
+        (hc::Door::Text, ht::Door::Text),
+    ]
+    .into_iter()
+    .find(|(declared, _)| declared.code() == code)
+    .map(|(_, door)| door)
+}
+
+/// A column reading `ordinal` that declares the constraints a HyperCast `Constraints` packed
+/// for the door whose code is `door`; `None` for bytes that aren't its layout and for a
+/// declaration HyperCast refuses.
+fn checked_column(ordinal: usize, door: u32, packed: &[u8], entries: &[u8]) -> Option<ht::Column> {
+    let raw = raw_constraints(packed)?;
+    macro_rules! typed {
+        ($ty:ty) => {
+            ht::Column::checked(
+                ordinal,
+                hc::Constraints::<$ty>::from_raw(raw, entries).ok()?,
+            )
+        };
+    }
+    Some(match checked_door(door)? {
+        ht::Door::I8 => typed!(i8),
+        ht::Door::I16 => typed!(i16),
+        ht::Door::I32 => typed!(i32),
+        ht::Door::I64 => typed!(i64),
+        ht::Door::U8 => typed!(u8),
+        ht::Door::U16 => typed!(u16),
+        ht::Door::U32 => typed!(u32),
+        ht::Door::U64 => typed!(u64),
+        ht::Door::F32 => typed!(f32),
+        ht::Door::F64 => typed!(f64),
+        ht::Door::Decimal => typed!(hc::Decimal),
+        _ => typed!(hc::Text),
+    })
+}
+
+/// A `Constraints`' `packed` bytes as HyperCast lays them out, in the host's byte order: six
+/// words, then the five decimals, each its magnitude's low 64 bits and high 32, its scale and
+/// its sign. `None` for bytes of another length.
+fn raw_constraints(packed: &[u8]) -> Option<hc::RawConstraints> {
+    if packed.len() != hc::RawConstraints::SIZE as usize {
+        return None;
+    }
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_ne_bytes(packed.get(at..at + 4)?.try_into().ok()?))
+    };
+    let decimal = |at: usize| -> Option<hc::Decimal> {
+        Some(hc::Decimal {
+            lo: u64::from_ne_bytes(packed.get(at..at + 8)?.try_into().ok()?),
+            hi: word(at + 8)?,
+            scale: *packed.get(at + 12)?,
+            negative: *packed.get(at + 13)? != 0,
+        })
+    };
+    Some(hc::RawConstraints {
+        size: word(0)?,
+        flags: word(4)?,
+        rounding: word(8)?,
+        min_length: word(12)?,
+        max_length: word(16)?,
+        _reserved: word(20)?,
+        minimum: decimal(24)?,
+        maximum: decimal(40)?,
+        multiple_of: decimal(56)?,
+        exclusive_minimum: decimal(72)?,
+        exclusive_maximum: decimal(88)?,
+    })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1866,22 +2121,26 @@ impl Range {
 //
 // - a head: rows, columns, where the lines are, where the widths are (0 for none), the width a
 //   read that reports long rows expected;
-// - each column's 10 words: how its values are kept (`KIND_*`), its source column, how many of
-//   its cells did not cast, where its verdicts (0 for a column whose every cell cast), notes (0
-//   for none), values, raw spans and heap are, the heap's length, and whether the column is
-//   wide (a heap past what a `u32` reaches);
+// - each column's 11 words: how its values are kept (`KIND_*`), its source column, how many of
+//   its cells did not cast, where its verdicts (0 for a column whose every cell passed), notes
+//   (0 for none), values, raw spans and heap are, the heap's length, whether the column is wide
+//   (a heap past what a `u32` reaches), and where its checks are (0 for a column that declares
+//   no constraints);
 // - then the sections, each starting on 8 bytes: the lines and the widths (`u32` a row), and
-//   for each column its verdicts (`CellVerdict`, 12 bytes a row) and notes (`CellNote`, 4
-//   bytes a row), both kept only for a column with a cell that did not cast, its values (a
-//   `Shape` a row: one word, two, or a text's place in the heap), its raw spans (a place in
-//   the heap a row: two `u32`s, or two `u64`s in a wide column) and its heap (each cell's raw
-//   text, back to back, then each text value that is not its raw text).
+//   for each column its verdicts (`CellVerdict`, 12 bytes a row), kept only for a column with a
+//   cell that did not pass (a fault or a violation), its notes (`CellNote`, 4 bytes a row),
+//   kept only for a column with a cell that did not cast, its values (a `Shape` a row: one
+//   word, two, or a text's place in the heap), its raw spans (a place in the heap a row: two
+//   `u32`s, or two `u64`s in a wide column), its heap (each cell's raw text, back to back, then
+//   each text value that is not its raw text) and its checks (`RawCheck`, 12 bytes a row), kept
+//   only for a column that declares constraints. A constrained column's value is the checked
+//   door's: on a violation, the value as cast; at the text door, a matched `enum` entry.
 //
-// The faults list is worked out from the verdicts and notes when it is asked for, through the
-// Rust binding's `KeptBatch`.
+// The faults list is worked out from the verdicts, notes and checks when it is asked for,
+// through the Rust binding's `KeptBatch`.
 
 const HEAD: usize = 5;
-const COLUMN_WORDS: usize = 10;
+const COLUMN_WORDS: usize = 11;
 
 /// How a column's values are kept: the value of each `Value` variant.
 const KIND_BOOL: u64 = 0;
@@ -2043,8 +2302,9 @@ fn unpack_date(word: u64) -> hc::Date {
 }
 
 /// One cell's value as two words, read through the accessor its door's type is read with
-/// (the only one the Rust binding answers for that door); a text or a decimal written to
-/// `heap`, unless it is the cell's raw text, already there at `raw`.
+/// (the only one the Rust binding answers for that door), its checked one for a column that
+/// declares constraints, where a violation's value is the value as cast; a text or a decimal
+/// written to `heap`, unless it is the cell's raw text, already there at `raw`.
 fn cell(
     batch: &ht::Batch<'_>,
     kind: u64,
@@ -2053,6 +2313,20 @@ fn cell(
     raw: (usize, usize),
     heap: &mut Vec<u8>,
 ) -> std::result::Result<[u64; 2], hc::Fault> {
+    let checked = batch.columns()[column].is_checked();
+    macro_rules! get {
+        ($ty:ty) => {
+            if checked {
+                match batch.get_checked::<$ty>(column, row) {
+                    Ok(passed) => passed.value,
+                    Err(ht::Rejection::Violation(broken)) => broken.value,
+                    Err(ht::Rejection::Fault(fault)) => return Err(fault),
+                }
+            } else {
+                batch.get::<$ty>(column, row)?
+            }
+        };
+    }
     let mut text = |text: &[u8]| -> [u64; 2] {
         if heap.get(raw.0..raw.0 + raw.1) == Some(text) {
             return [raw.0 as u64, raw.1 as u64];
@@ -2063,26 +2337,26 @@ fn cell(
     };
     let one = |word: u64| [word, 0];
     Ok(match kind {
-        KIND_BOOL => one(u64::from(batch.get::<bool>(column, row)?)),
+        KIND_BOOL => one(u64::from(get!(bool))),
         KIND_INT => one(match batch.columns()[column].door {
-            ht::Door::I8 => i64::from(batch.get::<i8>(column, row)?),
-            ht::Door::I16 => i64::from(batch.get::<i16>(column, row)?),
-            _ => i64::from(batch.get::<i32>(column, row)?),
+            ht::Door::I8 => i64::from(get!(i8)),
+            ht::Door::I16 => i64::from(get!(i16)),
+            _ => i64::from(get!(i32)),
         } as u64),
         KIND_UINT => one(match batch.columns()[column].door {
-            ht::Door::U8 => u64::from(batch.get::<u8>(column, row)?),
-            ht::Door::U16 => u64::from(batch.get::<u16>(column, row)?),
-            _ => u64::from(batch.get::<u32>(column, row)?),
+            ht::Door::U8 => u64::from(get!(u8)),
+            ht::Door::U16 => u64::from(get!(u16)),
+            _ => u64::from(get!(u32)),
         }),
-        KIND_BIG => one(batch.get::<i64>(column, row)? as u64),
-        KIND_UBIG | KIND_TIME => one(batch.get::<u64>(column, row)?),
+        KIND_BIG => one(get!(i64) as u64),
+        KIND_UBIG | KIND_TIME => one(get!(u64)),
         KIND_REAL => one(match batch.columns()[column].door {
-            ht::Door::F32 => f64::from(batch.get::<f32>(column, row)?),
-            _ => batch.get::<f64>(column, row)?,
+            ht::Door::F32 => f64::from(get!(f32)),
+            _ => get!(f64),
         }
         .to_bits()),
         KIND_DECIMAL => {
-            let value = batch.get::<hc::Decimal>(column, row)?;
+            let value = get!(hc::Decimal);
             [
                 value.lo,
                 u64::from(value.hi)
@@ -2091,7 +2365,7 @@ fn cell(
             ]
         }
         KIND_UUID => {
-            let value = batch.get::<[u8; 16]>(column, row)?;
+            let value = get!([u8; 16]);
             let (high, low) = value.split_at(8);
             [
                 u64::from_ne_bytes(high.try_into().unwrap_or_default()),
@@ -2099,18 +2373,23 @@ fn cell(
             ]
         }
         KIND_INSTANT => {
-            let value = batch.get::<hc::Timestamp>(column, row)?;
+            let value = get!(hc::Timestamp);
             [value.seconds as u64, i64::from(value.nanos) as u64]
         }
-        KIND_DATE => one(pack_date(batch.get::<hc::Date>(column, row)?)),
+        KIND_DATE => one(pack_date(get!(hc::Date))),
         KIND_CIVIL => {
-            let value = batch.get::<hc::CivilDateTime>(column, row)?;
+            let value = get!(hc::CivilDateTime);
             [pack_date(value.date), value.nanos_of_day]
         }
         KIND_SPAN => {
-            let value = batch.get::<hc::Duration>(column, row)?;
+            let value = get!(hc::Duration);
             [value.seconds as u64, i64::from(value.nanos) as u64]
         }
+        KIND_TEXT if checked => match batch.text_checked(column, row) {
+            Ok(passed) => text(passed.value.as_bytes()),
+            Err(ht::Rejection::Violation(broken)) => text(broken.value.as_bytes()),
+            Err(ht::Rejection::Fault(fault)) => return Err(fault),
+        },
         KIND_TEXT => text(batch.text_str(column, row)?.as_bytes()),
         _ => return Err(CONTRACT),
     })
@@ -2126,6 +2405,8 @@ struct ColumnCopy {
     values: Vec<[u64; 2]>,
     spans: Vec<[u64; 2]>,
     heap: Vec<u8>,
+    /// The checks of a column that declares constraints.
+    checks: Option<Vec<ht::RawCheck>>,
 }
 
 /// A batch as the read copied it.
@@ -2160,13 +2441,16 @@ impl BatchCopy {
                     values: Vec::with_capacity(rows),
                     spans: Vec::with_capacity(rows),
                     heap: Vec::new(),
+                    checks: spec.is_checked().then(|| batch.checks(column).to_vec()),
                 };
                 for row in 0..rows {
                     let raw = batch.raw(column, row);
                     let span = (copied.heap.len(), raw.len());
                     copied.heap.extend_from_slice(&raw);
                     copied.spans.push([span.0 as u64, span.1 as u64]);
-                    let ok = copied.verdicts[row].is_ok();
+                    // A violation cast: its value is kept too.
+                    let verdict = copied.verdicts[row];
+                    let ok = verdict.is_ok() || verdict.reason == ht::CellVerdict::VIOLATION;
                     let value = if ok {
                         cell(batch, kind, column, row, span, &mut copied.heap)
                     } else {
@@ -2185,7 +2469,7 @@ impl BatchCopy {
                             copied.values.push([0; 2]);
                         }
                     }
-                    copied.faults += u64::from(!copied.verdicts[row].is_ok());
+                    copied.faults += u64::from(copied.verdicts[row].fault().is_some());
                 }
                 if copied.faults > 0 {
                     copied.notes = batch.notes(column).to_vec();
@@ -2208,7 +2492,7 @@ impl BatchCopy {
     /// each column's verdicts, notes, values, spans and heap.
     fn layout(&self) -> (usize, Vec<usize>) {
         let mut at = (HEAD + COLUMN_WORDS * self.columns.len()) * 8;
-        let mut starts = Vec::with_capacity(2 + 5 * self.columns.len());
+        let mut starts = Vec::with_capacity(2 + 6 * self.columns.len());
         let mut section = |at: &mut usize, len: usize| {
             *at = eight(*at);
             starts.push(*at);
@@ -2223,7 +2507,7 @@ impl BatchCopy {
         );
         for column in &self.columns {
             let rows = column.values.len();
-            let verdicts = if column.faults > 0 { rows } else { 0 };
+            let verdicts = if column.passed() { 0 } else { rows };
             section(&mut at, verdicts * ht::CellVerdict::SIZE as usize);
             section(&mut at, column.notes.len() * size_of::<ht::CellNote>());
             section(
@@ -2238,6 +2522,13 @@ impl BatchCopy {
                 .width(),
             );
             section(&mut at, column.heap.len());
+            section(
+                &mut at,
+                column
+                    .checks
+                    .as_ref()
+                    .map_or(0, |checks| checks.len() * size_of::<ht::RawCheck>()),
+            );
         }
         (eight(at), starts)
     }
@@ -2263,13 +2554,13 @@ impl BatchCopy {
         }
         for (index, column) in self.columns.iter().enumerate() {
             let head = HEAD + COLUMN_WORDS * index;
-            let at = &starts[2 + 5 * index..2 + 5 * index + 5];
+            let at = &starts[2 + 6 * index..2 + 6 * index + 6];
             let wide = column.wide();
             let words = [
                 column.kind,
                 column.source,
                 column.faults,
-                if column.faults > 0 { at[0] as u64 } else { 0 },
+                if column.passed() { 0 } else { at[0] as u64 },
                 if column.notes.is_empty() {
                     0
                 } else {
@@ -2280,11 +2571,16 @@ impl BatchCopy {
                 at[4] as u64,
                 column.heap.len() as u64,
                 u64::from(wide),
+                if column.checks.is_some() {
+                    at[5] as u64
+                } else {
+                    0
+                },
             ];
             for (offset, value) in words.iter().enumerate() {
                 put(word(head + offset), &value.to_ne_bytes());
             }
-            if column.faults > 0 {
+            if !column.passed() {
                 put(at[0], as_bytes(&column.verdicts));
             }
             put(at[1], as_bytes(&column.notes));
@@ -2298,11 +2594,19 @@ impl BatchCopy {
                 }
             }
             put(at[4], &column.heap);
+            if let Some(checks) = &column.checks {
+                put(at[5], as_bytes(checks));
+            }
         }
     }
 }
 
 impl ColumnCopy {
+    /// Whether every cell passed: cast, and met the column's constraints.
+    fn passed(&self) -> bool {
+        self.verdicts.iter().all(ht::CellVerdict::is_ok)
+    }
+
     /// Whether the column's heap is past what a `u32` offset reaches, so that its spans and
     /// texts are kept in two `u64`s rather than two `u32`s.
     fn wide(&self) -> bool {
@@ -2389,7 +2693,7 @@ struct StoredColumn<'a> {
     kind: u64,
     source: usize,
     faults: u64,
-    /// The verdicts, none kept for a column whose every cell cast.
+    /// The verdicts, none kept for a column whose every cell passed.
     verdicts: Option<&'a [ht::CellVerdict]>,
     notes: &'a [ht::CellNote],
     values: &'a [u8],
@@ -2397,6 +2701,8 @@ struct StoredColumn<'a> {
     heap: &'a [u8],
     wide: bool,
     rows: usize,
+    /// The checks of a column that declares constraints.
+    checks: Option<&'a [ht::RawCheck]>,
 }
 
 impl<'a> Store<'a> {
@@ -2454,6 +2760,12 @@ impl<'a> Store<'a> {
             0 => &[][..],
             at => self.section(at, rows.checked_mul(size_of::<ht::CellNote>())?)?,
         };
+        let checks = match word(10)? {
+            0 => None,
+            at => Some(as_slice(
+                self.section(at, rows.checked_mul(size_of::<ht::RawCheck>())?)?,
+            )?),
+        };
         Some(StoredColumn {
             kind,
             source: usize::try_from(word(1)?).ok()?,
@@ -2465,6 +2777,7 @@ impl<'a> Store<'a> {
             heap: self.section(word(7)?, usize::try_from(word(8)?).ok()?)?,
             wide,
             rows,
+            checks,
         })
     }
 
@@ -2477,7 +2790,7 @@ impl<'a> Store<'a> {
         else {
             return Vec::new();
         };
-        // A column whose every cell cast keeps no verdicts: its own are all `OK`.
+        // A column whose every cell passed keeps no verdicts: its own are all `OK`.
         let cast = if stored.iter().any(|column| column.verdicts.is_none()) {
             vec![ht::CellVerdict::OK; rows]
         } else {
@@ -2491,6 +2804,7 @@ impl<'a> Store<'a> {
                     column.notes,
                     column.source,
                 )
+                .with_checks(column.checks.unwrap_or_default())
             })
             .collect();
         let widths = match self.word(3) {
@@ -2511,6 +2825,7 @@ impl StoredColumn<'_> {
     /// The column as the Rust binding reads a kept one, for one look at a cell.
     fn kept(&self) -> ht::KeptColumn<'_> {
         ht::KeptColumn::new(self.verdicts.unwrap_or_default(), self.notes, self.source)
+            .with_checks(self.checks.unwrap_or_default())
     }
 
     /// The bytes of the heap at a place a pair names.
@@ -2535,8 +2850,10 @@ impl StoredColumn<'_> {
         self.kept().origin(row)
     }
 
+    /// The cell at `row` as the plain getters read it: HyperCast's contract violation for a
+    /// column that declares constraints, whose verdicts only `getChecked` can say.
     fn value(&self, row: usize) -> std::result::Result<Value, hc::Fault> {
-        if row >= self.rows {
+        if row >= self.rows || self.checks.is_some() {
             return Err(CONTRACT);
         }
         if self.verdicts.is_some() {
@@ -2546,6 +2863,53 @@ impl StoredColumn<'_> {
                 None => return Err(CONTRACT),
             }
         }
+        self.stored(row)
+    }
+
+    /// The cell at `row` as HyperCast's checked door judged it. A column that declares no
+    /// constraints reads as `value` does, never adjusted.
+    fn checked(&self, row: usize) -> CheckedCell {
+        if row >= self.rows {
+            return CheckedCell::Fault(CONTRACT);
+        }
+        let verdict = self.verdicts.map_or(Some(ht::CellVerdict::OK), |verdicts| {
+            verdicts.get(row).copied()
+        });
+        let check = self.checks.and_then(|checks| checks.get(row).copied());
+        let Some(verdict) = verdict else {
+            return CheckedCell::Fault(CONTRACT);
+        };
+        if verdict.reason == ht::CellVerdict::VIOLATION {
+            return match (self.stored(row), check) {
+                (Ok(value), Some(check)) => CheckedCell::Broke {
+                    keyword: check.keyword,
+                    value,
+                    offset: verdict.offset,
+                    length: verdict.len,
+                },
+                _ => CheckedCell::Fault(CONTRACT),
+            };
+        }
+        if let Some(fault) = verdict.fault() {
+            return CheckedCell::Fault(fault);
+        }
+        if !verdict.is_ok() {
+            return CheckedCell::Fault(CONTRACT);
+        }
+        match self.stored(row) {
+            Ok(value) => CheckedCell::Passed {
+                value,
+                adjusted: check.is_some_and(|check| check.adjusted != 0),
+                enum_index: check
+                    .map(|check| check.enum_index)
+                    .filter(|index| *index != u32::MAX),
+            },
+            Err(fault) => CheckedCell::Fault(fault),
+        }
+    }
+
+    /// The value kept at `row`, whatever its verdict.
+    fn stored(&self, row: usize) -> std::result::Result<Value, hc::Fault> {
         let [first, second] = Shape::of(self.kind, self.wide)
             .read(self.values, row)
             .ok_or(CONTRACT)?;
@@ -2591,15 +2955,34 @@ impl StoredColumn<'_> {
     }
 }
 
-/// A plain-integer ABI type a store keeps as bytes: `CellVerdict`, `CellNote` and `u32` (a line,
-/// a width). Each is `repr(C)` integers with no padding, so every byte pattern is a value.
+/// A cell of a store as HyperCast's checked door judged it.
+enum CheckedCell {
+    Passed {
+        value: Value,
+        adjusted: bool,
+        enum_index: Option<u32>,
+    },
+    Broke {
+        keyword: u32,
+        value: Value,
+        offset: u32,
+        length: u32,
+    },
+    Fault(hc::Fault),
+}
+
+/// A plain-integer ABI type a store keeps as bytes: `CellVerdict`, `CellNote`, `RawCheck` and
+/// `u32` (a line, a width). Each is `repr(C)` integers with no padding, so every byte pattern
+/// is a value.
 trait Plain: Copy {}
 impl Plain for ht::CellVerdict {}
 impl Plain for ht::CellNote {}
+impl Plain for ht::RawCheck {}
 impl Plain for u32 {}
 
 const _: () = assert!(size_of::<ht::CellVerdict>() == 12 && align_of::<ht::CellVerdict>() == 4);
 const _: () = assert!(size_of::<ht::CellNote>() == 4 && align_of::<ht::CellNote>() == 2);
+const _: () = assert!(size_of::<ht::RawCheck>() == 12 && align_of::<ht::RawCheck>() == 4);
 
 /// `bytes` as the elements they hold, in this host's byte order; `None` when `bytes` isn't a
 /// whole number of them or isn't aligned for them. No bytes are no elements, wherever they are.
@@ -2788,27 +3171,103 @@ fn batch_maker(env: &Env) -> Option<sys::napi_value> {
     (status == sys::Status::napi_ok && !make.is_null()).then_some(make)
 }
 
+/// A value as JavaScript holds it.
+fn value_js(env: &Env, value: Value) -> Result<sys::napi_value> {
+    match value {
+        Value::Bool(value) => js(env, value),
+        Value::Int(value) => js(env, value),
+        Value::Uint(value) => js(env, value),
+        Value::Big(value) => js(env, BigInt::from(value)),
+        Value::UBig(value) => js(env, BigInt::from(value)),
+        Value::Real(value) => js(env, value),
+        Value::Decimal(value) => js(env, value.to_string()),
+        Value::Uuid(value) => js(env, uuid_text(value)),
+        Value::Instant(value) => js(env, timestamp(value)),
+        Value::Date(value) => js(env, calendar(value)),
+        Value::Civil(value) => js(env, civil(value)),
+        Value::Time(value) => js(env, time_of_day(value)),
+        Value::Span(value) => js(env, duration(value)),
+        Value::Text(value) => js(env, value),
+    }
+}
+
 /// A value as JavaScript holds it, in a success.
 fn verdict(env: &Env, value: std::result::Result<Value, hc::Fault>) -> Result<Object<'_>> {
     match value {
         Err(fault) => failure(env, fault),
-        Ok(value) => match value {
-            Value::Bool(value) => success(env, value),
-            Value::Int(value) => success(env, value),
-            Value::Uint(value) => success(env, value),
-            Value::Big(value) => success(env, BigInt::from(value)),
-            Value::UBig(value) => success(env, BigInt::from(value)),
-            Value::Real(value) => success(env, value),
-            Value::Decimal(value) => success(env, value.to_string()),
-            Value::Uuid(value) => success(env, uuid_text(value)),
-            Value::Instant(value) => success(env, timestamp(value)),
-            Value::Date(value) => success(env, calendar(value)),
-            Value::Civil(value) => success(env, civil(value)),
-            Value::Time(value) => success(env, time_of_day(value)),
-            Value::Span(value) => success(env, duration(value)),
-            Value::Text(value) => success(env, value),
-        },
+        Ok(value) => {
+            let value = value_js(env, value)?;
+            record(env, &[(c"ok", js(env, true)?), (c"value", value)])
+        }
     }
+}
+
+/// A checked cell as JavaScript holds it: HyperCast's `Checked`, `Failure` or `Violated`.
+fn checked_verdict(env: &Env, cell: CheckedCell) -> Result<Object<'_>> {
+    match cell {
+        CheckedCell::Fault(fault) => failure(env, fault),
+        CheckedCell::Passed {
+            value,
+            adjusted,
+            enum_index,
+        } => {
+            let value = value_js(env, value)?;
+            let enum_index = match enum_index {
+                Some(index) => js(env, index)?,
+                None => js(env, Null)?,
+            };
+            record(
+                env,
+                &[
+                    (c"ok", js(env, true)?),
+                    (c"value", value),
+                    (c"adjusted", js(env, adjusted)?),
+                    (c"enumIndex", enum_index),
+                ],
+            )
+        }
+        CheckedCell::Broke {
+            keyword,
+            value,
+            offset,
+            length,
+        } => {
+            let value = value_js(env, value)?;
+            let violation = record(
+                env,
+                &[
+                    (c"keyword", js(env, keyword_name(keyword))?),
+                    (c"value", value),
+                    (c"offset", js(env, offset)?),
+                    (c"length", js(env, length)?),
+                ],
+            )?;
+            record(
+                env,
+                &[(c"ok", js(env, false)?), (c"violation", violation.raw())],
+            )
+        }
+    }
+}
+
+/// A keyword's OpenAPI spelling, `"keyword N"` for a code this package does not name yet.
+fn keyword_name(code: u32) -> String {
+    [
+        hc::Keyword::Minimum,
+        hc::Keyword::ExclusiveMinimum,
+        hc::Keyword::Maximum,
+        hc::Keyword::ExclusiveMaximum,
+        hc::Keyword::MultipleOf,
+        hc::Keyword::MinLength,
+        hc::Keyword::MaxLength,
+        hc::Keyword::Enum,
+    ]
+    .into_iter()
+    .find(|keyword| keyword.code() == code)
+    .map_or_else(
+        || format!("keyword {code}"),
+        |keyword| keyword.name().to_owned(),
+    )
 }
 
 /// Bytes as a `Uint8Array` the caller owns: under Node, Bun and Deno over a buffer V8
@@ -2856,6 +3315,7 @@ fn problem(problem: &ht::Problem) -> Problem {
         length: problem.len,
         expected: problem.expected,
         found: problem.found,
+        keyword: problem.keyword.map(|keyword| keyword.name().to_owned()),
     }
 }
 
@@ -2936,6 +3396,19 @@ fn value_at(
     })
 }
 
+/// The cell at `column` and `row` of `source`'s store as HyperCast's checked door judged it:
+/// HyperCast's contract violation for one it does not have.
+fn checked_at(source: &StoreAt<'_, '_>, column: Option<usize>, row: Option<usize>) -> CheckedCell {
+    let (Some(column), Some(row)) = (column, row) else {
+        return CheckedCell::Fault(CONTRACT);
+    };
+    with_store(source, |store| {
+        store
+            .column(column)
+            .map_or(CheckedCell::Fault(CONTRACT), |stored| stored.checked(row))
+    })
+}
+
 fn detail_at(
     source: &StoreAt<'_, '_>,
     column: Option<usize>,
@@ -3011,6 +3484,28 @@ fn column_at<'env>(
     Ok(list)
 }
 
+fn column_checked_at<'env>(
+    env: &'env Env,
+    source: &StoreAt<'_, '_>,
+    column: Option<usize>,
+) -> Result<Array<'env>> {
+    let rows = column.map_or(0, |column| {
+        with_store(source, |store| {
+            if column < store.columns() {
+                store.rows()
+            } else {
+                0
+            }
+        })
+    });
+    let mut list = Array::from_vec(env, Vec::<bool>::new())?;
+    for row in 0..rows {
+        // The store is looked at afresh for each row: making a verdict can run JavaScript.
+        list.insert(checked_verdict(env, checked_at(source, column, Some(row)))?)?;
+    }
+    Ok(list)
+}
+
 // What `index.js`'s batch calls, its store in hand. Internal to the package: what they take is
 // what `__makeBatchesWith`'s function is given.
 
@@ -3034,6 +3529,22 @@ pub fn batch_get<'env>(
 ) -> Result<Object<'env>> {
     let value = value_at(&StoreAt::Given(env, &store), index(&column), index(&row));
     verdict(env, value)
+}
+
+/// `Batch.getChecked`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number, row: number",
+    ts_return_type = "CheckedVerdict<Value>"
+)]
+pub fn batch_get_checked<'env>(
+    env: &'env Env,
+    store: Unknown<'env>,
+    column: Unknown<'env>,
+    row: Unknown<'env>,
+) -> Result<Object<'env>> {
+    let cell = checked_at(&StoreAt::Given(env, &store), index(&column), index(&row));
+    checked_verdict(env, cell)
 }
 
 /// `Batch.detail`, over a store.
@@ -3115,6 +3626,20 @@ pub fn batch_column<'env>(
     column_at(env, &StoreAt::Given(env, &store), index(&column))
 }
 
+/// `Batch.columnChecked`, over a store.
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown, column: number",
+    ts_return_type = "Array<CheckedVerdict<Value>>"
+)]
+pub fn batch_column_checked<'env>(
+    env: &'env Env,
+    store: Unknown<'env>,
+    column: Unknown<'env>,
+) -> Result<Array<'env>> {
+    column_checked_at(env, &StoreAt::Given(env, &store), index(&column))
+}
+
 /// `Batch.faultCount`, over a store.
 #[napi(catch_unwind, ts_args_type = "store: unknown, column: number")]
 pub fn batch_fault_count(env: &Env, store: Unknown<'_>, column: Unknown<'_>) -> u32 {
@@ -3158,7 +3683,8 @@ impl Batch {
     }
 
     /// The cell at `row` of `column` as HyperCast judged it. A column or row the batch does
-    /// not have is HyperCast's contract violation: `malformed`, offset 0, length 0.
+    /// not have is HyperCast's contract violation: `malformed`, offset 0, length 0; so is every
+    /// cell of a column that declares constraints, which only `getChecked` can say.
     #[napi(
         catch_unwind,
         ts_generic_types = "T extends Value = Value",
@@ -3174,6 +3700,30 @@ impl Batch {
         verdict(
             env,
             value_at(&StoreAt::Held(&self.held), index(&column), index(&row)),
+        )
+    }
+
+    /// The cell at `row` of `column` as HyperCast's checked door judged it: the value, flagged
+    /// `adjusted` when `multipleOf`'s rounding changed it (at the text door, a matched `enum`
+    /// entry as declared, `enumIndex` naming it); a violation of a constraint the column
+    /// declares, carrying the value as cast and the judged text's span; or the cell's fault. A
+    /// column that declares none reads as `get` does, never adjusted. A column or row the batch
+    /// does not have is HyperCast's contract violation.
+    #[napi(
+        catch_unwind,
+        ts_generic_types = "T extends Value = Value",
+        ts_args_type = "column: number, row: number",
+        ts_return_type = "CheckedVerdict<T>"
+    )]
+    pub fn get_checked<'env>(
+        &self,
+        env: &'env Env,
+        column: Unknown<'env>,
+        row: Unknown<'env>,
+    ) -> Result<Object<'env>> {
+        checked_verdict(
+            env,
+            checked_at(&StoreAt::Held(&self.held), index(&column), index(&row)),
         )
     }
 
@@ -3227,7 +3777,9 @@ impl Batch {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    /// The whole column, a verdict a row; empty for a column the batch does not have.
+    /// The whole column, a verdict a row, as `get` reads each cell; empty for a column the batch
+    /// does not have. Every cell of a column that declares constraints is HyperCast's contract
+    /// violation: `columnChecked` reads it.
     #[napi(
         catch_unwind,
         ts_generic_types = "T extends Value = Value",
@@ -3236,6 +3788,22 @@ impl Batch {
     )]
     pub fn column<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Array<'env>> {
         column_at(env, &StoreAt::Held(&self.held), index(&column))
+    }
+
+    /// The whole column, a verdict a row, as `getChecked` reads each cell: a constrained column
+    /// and one that declares nothing alike. Empty for a column the batch does not have.
+    #[napi(
+        catch_unwind,
+        ts_generic_types = "T extends Value = Value",
+        ts_args_type = "column: number",
+        ts_return_type = "Array<CheckedVerdict<T>>"
+    )]
+    pub fn column_checked<'env>(
+        &self,
+        env: &'env Env,
+        column: Unknown<'env>,
+    ) -> Result<Array<'env>> {
+        column_checked_at(env, &StoreAt::Held(&self.held), index(&column))
     }
 
     /// How many cells of the column did not cast; 0 for a column the batch does not have.
@@ -3287,6 +3855,20 @@ impl Row {
         verdict(
             env,
             value_at(&StoreAt::Held(&self.held), index(&column), Some(self.index)),
+        )
+    }
+
+    /// The cell in `column` as HyperCast's checked door judged it, as `Batch.getChecked`.
+    #[napi(
+        catch_unwind,
+        ts_generic_types = "T extends Value = Value",
+        ts_args_type = "column: number",
+        ts_return_type = "CheckedVerdict<T>"
+    )]
+    pub fn get_checked<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Object<'env>> {
+        checked_verdict(
+            env,
+            checked_at(&StoreAt::Held(&self.held), index(&column), Some(self.index)),
         )
     }
 

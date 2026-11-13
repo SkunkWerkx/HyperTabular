@@ -176,15 +176,58 @@ in bytes.
 
 A batch's `line` is each row's 1-based line (delimited text) or row number in the sheet, and
 `row` its place among the rows the read delivered. `as.data.frame()` gives the values alone,
-`NA` where a cell did not cast.
+`NA` where a cell did not cast; a cell that broke its column's constraints keeps its value
+there, as cast.
+
+## Constraints
+
+A numeric or text column can declare hypercast's constraints, the OpenAPI 3.2 keywords
+(`minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, `multiple_of` with `rounding`,
+`min_length`, `max_length`, `enum`, with `trim` and `case_sensitive` for text), through the
+column factory's `constraints`, a `hypercast::hypercast_constraints()` declaration for the
+column's door. A declaration for `"i32"` on a `col_u8()` is an R error when the column is made,
+and an R column being a list anyone can edit, the declaration is judged again, from its fields,
+when the plan is bound. A door that takes no constraints has no argument for them. Each cell is
+cast first, so text that isn't the type is a fault as ever, and then judged:
+
+```r
+plan <- list(
+  qty = col_i32("qty", constraints = hypercast::hypercast_constraints(
+    "i32", minimum = 1L, maximum = 10L)),
+  sex = col_text("sex", constraints = hypercast::hypercast_constraints(
+    "text", enum = c("Female", "Male")))
+)
+t <- read_delimited(charToRaw("qty,sex\n12,MALE\n7,x\n"), plan = plan)
+t$columns$qty[, c("value", "adjusted", "ok", "reason", "keyword", "raw")]
+#> <hypercast_checked_verdict> 1 ok, 0 faulted, 1 violated, 0 missing
+#>   value adjusted    ok reason keyword  raw
+#> 1    12       NA FALSE   <NA> maximum   12
+#> 2     7    FALSE  TRUE   <NA>    <NA> <NA>
+t$columns$sex$value
+#> [1] "Male" "x"
+problems(t)[, c("row", "column", "kind", "reason", "keyword", "raw")]
+#>   row column kind reason keyword raw
+#> 1   1    qty cell   <NA> maximum  12
+#> 2   2    sex cell   <NA>    enum   x
+```
+
+A constrained column's verdict is hypercast's `hypercast_checked_verdict`, the data frame
+`hypercast::cast_checked()` returns, read by `hypercast::violations()` as theirs is, with
+`raw` and `origin` beside it as above. A violation isn't a fault: the cell cast, so its value
+is kept exactly as cast (never rounded), `ok` is `FALSE`, `reason` is `NA` and `keyword` names
+the keyword it broke, and its span is the judged text's. A cell `multiple_of` rounded is `ok`
+with `adjusted` `TRUE`, and a text `enum` match reads as the entry as declared, with
+`enum_index` naming it (`"MALE"` reads as `"Male"`). An unconstrained column keeps its plain
+`hypercast_verdict`.
 
 ## Problems
 
 `problems()` lists what went wrong in a batch or a table, computed when it is called, so a
 read pays nothing for it: one row per cell `malformed` or `out_of_range`, per workbook
 formula with no cached value, per record `long_rows = "report"` cut to the width (`kind`
-`"row"`, with its `expected` and `found` widths), and per cell `ok` with an `NA` value
-(`"host_conversion"`). Blanks, `na` matches and `fill` padding are declared, not wrong, and
+`"row"`, with its `expected` and `found` widths), per cell `ok` with an `NA` value
+(`"host_conversion"`), and per cell that broke its column's constraints (`reason` `NA`, its
+`keyword` named). Blanks, `na` matches and `fill` padding are declared, not wrong, and
 are left out.
 
 ```r

@@ -295,6 +295,8 @@ class NativeTest {
             {"RawRange", Abi.RANGE_BYTES},
             {"RawSuggestion", Abi.SUGGESTION_BYTES},
             {"CellVerdict", Abi.VERDICT_BYTES},
+            {"RawConstraints", NativeValues.CONSTRAINTS_BYTES},
+            {"RawCheck", Abi.CHECK_BYTES},
         };
         for (Object[] size : sizes) {
             Matcher said = Pattern.compile("#define HyperTabular" + size[0] + "_SIZE (\\d+)")
@@ -304,15 +306,19 @@ class NativeTest {
         }
         // Those that hold pointers are a sizeof in the header: the core's asserts say what they come to.
         long word = ValueLayout.ADDRESS.byteSize();
-        assertEquals(120 + 4 * word, Abi.SPEC_WITH_BYTES);
-        assertEquals(4 * word, Abi.BUFFER_WITH_BYTES);
+        assertEquals(120 + 7 * word, Abi.SPEC_WITH_BYTES);
+        assertEquals(5 * word, Abi.BUFFER_WITH_BYTES);
         assertEquals(18 * word, Abi.BUFFERS_WITH_BYTES);
         assertEquals(120, Abi.SPEC_WITH_MONTHS);
         assertEquals(120 + 2 * word, Abi.SPEC_WITH_TOKENS);
+        assertEquals(120 + 4 * word, Abi.SPEC_WITH_CONSTRAINTS);
+        assertEquals(120 + 5 * word, Abi.SPEC_WITH_ENUM);
         assertEquals(3 * word, Abi.BUFFER_WITH_NOTES);
+        assertEquals(4 * word, Abi.BUFFER_WITH_CHECKS);
         assertEquals(15 * word, Abi.BUFFERS_WITH_TOKENS);
         assertEquals(17 * word, Abi.BUFFERS_WITH_ROW_WIDTHS);
         assertEquals(32, Abi.SHEET_OPTIONS_LAST_COLUMN);
+        assertEquals(32, Abi.PROBLEM_KEYWORD);
     }
 
     /**

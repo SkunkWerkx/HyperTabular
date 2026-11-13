@@ -21,13 +21,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// The fixed block and every region start where the module's own memory ends.
-func TestTheModuleIsItsOwnThreePages(t *testing.T) {
-	if got := len(*core.New().Xmemory().Slice()); got != 3*pageSize {
-		t.Fatalf("a fresh module holds %d bytes, want three pages", got)
+// The fixed block and every region start where the module's own memory ends. Two pages: the
+// 64 KiB stack and the data, at the opt-level internal/wasm2go builds the core with (three at
+// the release profile's).
+func TestTheModuleIsItsOwnTwoPages(t *testing.T) {
+	if got := len(*core.New().Xmemory().Slice()); got != 2*pageSize {
+		t.Fatalf("a fresh module holds %d bytes, want two pages", got)
 	}
 	n := newNative()
-	if n.fixed.off != 3*pageSize || len(n.in.mem()) != 4*pageSize {
+	if n.fixed.off != 2*pageSize || len(n.in.mem()) != 3*pageSize {
 		t.Fatalf("the fixed block at %d, in %d bytes", n.fixed.off, len(n.in.mem()))
 	}
 }
@@ -132,8 +134,9 @@ func TestDecodingForABigEndianHost(t *testing.T) {
 	guest := []byte{
 		1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 5, 0,
 		6, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0,
+		10, 0, 0, 0,
 	}
-	want := rawProblem{row: 1, planColumn: 2, reason: 3, detail: 4, origin: 5, offset: 6, len: 7, expected: 8, found: 9}
+	want := rawProblem{row: 1, planColumn: 2, reason: 3, detail: 4, origin: 5, offset: 6, len: 7, expected: 8, found: 9, keyword: 10}
 	if got := decodeProblem(guest); got != want {
 		t.Errorf("a problem: %+v, want %+v", got, want)
 	}

@@ -360,6 +360,7 @@ impl<'c> Harness<'c> {
                 values: column.values,
                 verdicts: column.verdicts,
                 notes: notes.as_mut_ptr(),
+                checks: core::ptr::null_mut(),
             })
             .collect();
         let mut widths = vec![0xAAAA_AAAAu32; max_rows];

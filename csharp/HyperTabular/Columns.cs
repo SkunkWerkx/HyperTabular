@@ -23,10 +23,14 @@ sealed unsafe class Columns
 	internal readonly CellVerdict[][] Verdicts;
 	/// <summary>Each column's notes: <see langword="null"/> with notes off.</summary>
 	internal readonly Native.RawCellNote[][]? Notes;
+	/// <summary>Each column's checks, one a row: <see langword="null"/> for a column that declares no constraints.</summary>
+	internal readonly RawCheck[]?[] Checks;
 	/// <summary>How many cells each row had, for a read that asks: <see langword="null"/> when none does.</summary>
 	internal readonly uint[]? RowWidths;
 	/// <summary>The tokens and month vocabularies the specs point at, held for as long as they do.</summary>
 	readonly List<byte[]> _lists = [];
+	/// <summary>The declarations the specs point at, one slot a column, pinned for as long as the specs are.</summary>
+	readonly RawConstraints[] _declared;
 
 	/// <summary>
 	/// The widest ordinal a plan may name: 2²⁰ − 1. No workbook format has that many columns
@@ -112,6 +116,8 @@ sealed unsafe class Columns
 		Values = new byte[Plan.Length][];
 		Verdicts = new CellVerdict[Plan.Length][];
 		Notes = notes ? new Native.RawCellNote[Plan.Length][] : null;
+		Checks = new RawCheck[Plan.Length][];
+		_declared = GC.AllocateUninitializedArray<RawConstraints>(Plan.Length, pinned: true);
 		for (var index = 0; index < Plan.Length; index++)
 		{
 			var column = Plan[index];
@@ -145,6 +151,14 @@ sealed unsafe class Columns
 				spec.Tokens = Held(tokens.Packed);
 				spec.TokensLen = (nuint)tokens.Packed.Length;
 			}
+			// Judged by HyperCast when the constraints were built, and bound to the door by their type.
+			if (column.Declaration is { } declared)
+			{
+				_declared[index] = declared.Raw;
+				spec.Constraints = Address(_declared) + index;
+				spec.EnumPtr = Held(declared.Enum.Span);
+				spec.EnumLen = (nuint)declared.Enum.Length;
+			}
 			Specs[index] = spec;
 		}
 		CheckSizes(Specs, batchRows, bufferBytes, (notes ? NotesFlag : 0) | (rowWidths ? WidthsFlag : 0) | (sheet ? SheetFlag : 0));
@@ -163,12 +177,16 @@ sealed unsafe class Columns
 			Verdicts[index] = GC.AllocateUninitializedArray<CellVerdict>(batchRows, pinned: true);
 			if (Notes is not null)
 				Notes[index] = GC.AllocateUninitializedArray<Native.RawCellNote>(batchRows, pinned: true);
+			// As many as there are verdicts: the core writes one beside each.
+			if (column.IsChecked)
+				Checks[index] = GC.AllocateUninitializedArray<RawCheck>(batchRows, pinned: true);
 			Buffers[index] = new Native.RawColumnBufferWith
 			{
 				Size = (uint)sizeof(Native.RawColumnBufferWith),
 				Values = Address(Values[index]),
 				Verdicts = Address(Verdicts[index]),
 				Notes = Notes is null ? null : Address(Notes[index]),
+				Checks = Checks[index] is { } checks ? Address(checks) : null,
 			};
 		}
 	}

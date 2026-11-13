@@ -1,8 +1,8 @@
 // Proves the binding under Native AOT for real: this program publishes with PublishAot and
 // crosses every native entry point a read takes — the version probe, the delimited header and
-// size-tagged fill through every door, the unescape behind a raw read, the transcoder behind a
-// declared encoding, the faults list, the suggester, the range parser, and a workbook opened,
-// listed, loaded and read — against the real native library. Exit code 0 only if every cell lands
+// size-tagged fill through every door and through the checked doors, the unescape behind a raw
+// read, the transcoder behind a declared encoding, the faults list, the suggester, the range
+// parser, and a workbook opened, listed, loaded and read — against the real native library. Exit code 0 only if every cell lands
 // as expected. The 1.0 fills and sheet call, which no read takes, are held by
 // HyperTabular.Tests/NativeTests.cs.
 //
@@ -118,6 +118,24 @@ internal static class SmokeTest
 			}
 			Expect("header-first rows", rows == 1);
 			Expect("missing column", !header.TryOrdinal("no such column", out _));
+		}
+
+		// Columns that declare HyperCast's constraints: a value judged and passed, a violation keeping
+		// the value as cast, a text enum match read as its declared entry, and the violation listed.
+		using (var reader = new DelimitedReader("n,sex\n11,MALE\n7.5,x\n"u8.ToArray().AsMemory(), Dialect.Csv,
+			[Column.Decimal(0, new Constraints<decimal>(maximum: 10, multipleOf: 0.5m)), Column.Text(1, new Constraints<string>(@enum: ["Female", "Male"]))]))
+		{
+			var batch = reader.Read();
+			if (batch is { Rows: 2 })
+			{
+				Expect("checked violation", batch.GetChecked<decimal>(0, 0).Value is Rejection<decimal> rejected
+					&& rejected.Value is Violation<decimal> { Value: 11m } broken && broken.Keyword == Keyword.Maximum);
+				Expect("checked passed", batch.GetChecked<decimal>(0, 1).Value is Checked<decimal> { Value: 7.5m, Adjusted: false });
+				Expect("checked enum", batch.GetChecked<string>(1, 0).Value is Checked<string> { Value: "Male", EnumIndex: 1 });
+				Expect("checked listed", batch.Faults().Count(problem => problem.Keyword is not null) == 2);
+			}
+			else
+				Expect("checked read", false);
 		}
 
 		// A structural failure is an exception, after the intact rows.

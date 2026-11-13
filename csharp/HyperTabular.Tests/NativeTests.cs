@@ -232,21 +232,27 @@ public sealed unsafe class NativeTests
 		Said("RawRange").ShouldBe(sizeof(Native.RawRange));
 		Said("RawSuggestion").ShouldBe(sizeof(Native.RawSuggestion));
 		Said("CellVerdict").ShouldBe(sizeof(CellVerdict));
+		Said("RawConstraints").ShouldBe(sizeof(RawConstraints));
+		Said("RawCheck").ShouldBe(sizeof(RawCheck));
 		// A sheet's entry is read as three spans: name, part, and flags and index in the third's two words.
 		Said("SheetInfo").ShouldBe(3 * sizeof(Native.RawSpan));
 
 		// Those that hold pointers are a sizeof in the header: the core's asserts say what they come to.
 		var word = IntPtr.Size;
-		sizeof(Native.RawColumnSpecWith).ShouldBe(120 + 4 * word);
-		sizeof(Native.RawColumnBufferWith).ShouldBe(4 * word);
+		sizeof(Native.RawColumnSpecWith).ShouldBe(120 + 7 * word);
+		sizeof(Native.RawColumnBufferWith).ShouldBe(5 * word);
 		sizeof(Native.RawBuffersWith).ShouldBe(18 * word);
 		Marshal.OffsetOf<Native.RawColumnSpecWith>(nameof(Native.RawColumnSpecWith.Date)).ToInt32().ShouldBe(108);
 		Marshal.OffsetOf<Native.RawColumnSpecWith>(nameof(Native.RawColumnSpecWith.Months)).ToInt32().ShouldBe(120);
 		Marshal.OffsetOf<Native.RawColumnSpecWith>(nameof(Native.RawColumnSpecWith.Tokens)).ToInt32().ShouldBe(120 + 2 * word);
+		Marshal.OffsetOf<Native.RawColumnSpecWith>(nameof(Native.RawColumnSpecWith.Constraints)).ToInt32().ShouldBe(120 + 4 * word);
+		Marshal.OffsetOf<Native.RawColumnSpecWith>(nameof(Native.RawColumnSpecWith.EnumLen)).ToInt32().ShouldBe(120 + 6 * word);
 		Marshal.OffsetOf<Native.RawColumnBufferWith>(nameof(Native.RawColumnBufferWith.Notes)).ToInt32().ShouldBe(3 * word);
+		Marshal.OffsetOf<Native.RawColumnBufferWith>(nameof(Native.RawColumnBufferWith.Checks)).ToInt32().ShouldBe(4 * word);
 		Marshal.OffsetOf<Native.RawBuffersWith>(nameof(Native.RawBuffersWith.Tokens)).ToInt32().ShouldBe(15 * word);
 		Marshal.OffsetOf<Native.RawBuffersWith>(nameof(Native.RawBuffersWith.RowWidths)).ToInt32().ShouldBe(17 * word);
 		Marshal.OffsetOf<Native.RawProblem>(nameof(Native.RawProblem.Row)).ToInt32().ShouldBe(0);
+		Marshal.OffsetOf<Native.RawProblem>(nameof(Native.RawProblem.Keyword)).ToInt32().ShouldBe(32);
 		Marshal.OffsetOf<Native.RawSheetOptions>(nameof(Native.RawSheetOptions.LastColumn)).ToInt32().ShouldBe(32);
 	}
 

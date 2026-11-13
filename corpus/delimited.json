@@ -8668,5 +8668,1712 @@
       ],
       "truncated": false
     }
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "n",
+      "m"
+    ],
+    "input": "n,m\n11,7\n7,12\nx,5\n",
+    "name": "constraints: a violation keeps the value as cast",
+    "plan": [
+      {
+        "constraints": {
+          "maximum": "10"
+        },
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "exclusiveMaximum": "12",
+          "minimum": "6"
+        },
+        "door": "i32",
+        "ordinal": 1
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "maximum",
+        "line": 2,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "exclusiveMaximum",
+        "line": 3,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 1,
+        "source_column": 1
+      },
+      {
+        "detail": "unexpected_character",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 4,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "minimum",
+        "line": 4,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 1
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "maximum",
+          "raw": "11",
+          "value": 11
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 7
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 7
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "exclusiveMaximum",
+          "raw": "12",
+          "value": 12
+        }
+      ],
+      [
+        {
+          "detail": "unexpected_character",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw": "x"
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "minimum",
+          "raw": "5",
+          "value": 5
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n0\n5\n-3\n",
+    "name": "constraints: every numeric keyword over the integers",
+    "plan": [
+      {
+        "constraints": {
+          "minimum": "0"
+        },
+        "door": "i8",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "exclusiveMinimum": "0"
+        },
+        "door": "i16",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "maximum": "-1"
+        },
+        "door": "i64",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "exclusiveMaximum": "5"
+        },
+        "door": "u8",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "multipleOf": "5"
+        },
+        "door": "u16",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "enum": [
+            "0",
+            "5"
+          ]
+        },
+        "door": "u32",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "minimum": "5"
+        },
+        "door": "u64",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "exclusiveMinimum",
+        "line": 2,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "maximum",
+        "line": 2,
+        "plan_column": 2,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "minimum",
+        "line": 2,
+        "plan_column": 6,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "maximum",
+        "line": 3,
+        "plan_column": 2,
+        "reason": "violation",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "exclusiveMaximum",
+        "line": 3,
+        "plan_column": 3,
+        "reason": "violation",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "minimum",
+        "line": 4,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "exclusiveMinimum",
+        "line": 4,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "negative_not_allowed",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 4,
+        "plan_column": 3,
+        "reason": "out_of_range",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "negative_not_allowed",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 4,
+        "plan_column": 4,
+        "reason": "out_of_range",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "negative_not_allowed",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 4,
+        "plan_column": 5,
+        "reason": "out_of_range",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "detail": "negative_not_allowed",
+        "fault": [
+          0,
+          2
+        ],
+        "line": 4,
+        "plan_column": 6,
+        "reason": "out_of_range",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 0
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "exclusiveMinimum",
+          "raw": "0",
+          "value": 0
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "maximum",
+          "raw": "0",
+          "value": 0
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 0
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 0
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 0
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "minimum",
+          "raw": "0",
+          "value": 0
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 5
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 5
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "maximum",
+          "raw": "5",
+          "value": 5
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "exclusiveMaximum",
+          "raw": "5",
+          "value": 5
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 5
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 5
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 5
+        }
+      ],
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "minimum",
+          "raw": "-3",
+          "value": -3
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "exclusiveMinimum",
+          "raw": "-3",
+          "value": -3
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": -3
+        },
+        {
+          "detail": "negative_not_allowed",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            2
+          ],
+          "raw": "-3"
+        },
+        {
+          "detail": "negative_not_allowed",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            2
+          ],
+          "raw": "-3"
+        },
+        {
+          "detail": "negative_not_allowed",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            2
+          ],
+          "raw": "-3"
+        },
+        {
+          "detail": "negative_not_allowed",
+          "expect": "out_of_range",
+          "fault": [
+            0,
+            2
+          ],
+          "raw": "-3"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n-0\n0.3\n1.25\n",
+    "name": "constraints: every numeric keyword over the floats and the decimal",
+    "plan": [
+      {
+        "constraints": {
+          "maximum": "1",
+          "minimum": "0"
+        },
+        "door": "f64",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "exclusiveMaximum": "1",
+          "exclusiveMinimum": "0"
+        },
+        "door": "f32",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "multipleOf": "0.25"
+        },
+        "door": "decimal",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "enum": [
+            "0",
+            "0.3"
+          ]
+        },
+        "door": "f64",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "exclusiveMaximum": "1.25",
+          "minimum": "0.3"
+        },
+        "door": "decimal",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "maximum": "1.2",
+          "multipleOf": "0.1",
+          "rounding": "ceiling"
+        },
+        "door": "f32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "exclusiveMinimum",
+        "line": 2,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "minimum",
+        "line": 2,
+        "plan_column": 4,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          3
+        ],
+        "keyword": "multipleOf",
+        "line": 3,
+        "plan_column": 2,
+        "reason": "violation",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          4
+        ],
+        "keyword": "maximum",
+        "line": 4,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          4
+        ],
+        "keyword": "exclusiveMaximum",
+        "line": 4,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          4
+        ],
+        "keyword": "enum",
+        "line": 4,
+        "plan_column": 3,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          4
+        ],
+        "keyword": "exclusiveMaximum",
+        "line": 4,
+        "plan_column": 4,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          4
+        ],
+        "keyword": "maximum",
+        "line": 4,
+        "plan_column": 5,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "bits": "0x0000000000000000",
+          "expect": "ok",
+          "value": 0.0
+        },
+        {
+          "bits": "0x00000000",
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "exclusiveMinimum",
+          "raw": "-0",
+          "value": 0.0
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "0",
+          "negative": false,
+          "scale": 0,
+          "value": "0"
+        },
+        {
+          "adjusted": false,
+          "bits": "0x0000000000000000",
+          "expect": "ok",
+          "value": 0.0
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "minimum",
+          "magnitude": "0",
+          "negative": false,
+          "raw": "-0",
+          "scale": 0,
+          "value": "0"
+        },
+        {
+          "adjusted": false,
+          "bits": "0x00000000",
+          "expect": "ok",
+          "value": 0.0
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "bits": "0x3fd3333333333333",
+          "expect": "ok",
+          "value": 0.3
+        },
+        {
+          "adjusted": false,
+          "bits": "0x3e99999a",
+          "expect": "ok",
+          "value": 0.30000001192092896
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            3
+          ],
+          "keyword": "multipleOf",
+          "magnitude": "3",
+          "negative": false,
+          "raw": "0.3",
+          "scale": 1,
+          "value": "0.3"
+        },
+        {
+          "adjusted": false,
+          "bits": "0x3fd3333333333333",
+          "expect": "ok",
+          "value": 0.3
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "3",
+          "negative": false,
+          "scale": 1,
+          "value": "0.3"
+        },
+        {
+          "adjusted": false,
+          "bits": "0x3e99999a",
+          "expect": "ok",
+          "value": 0.30000001192092896
+        }
+      ],
+      [
+        {
+          "bits": "0x3ff4000000000000",
+          "expect": "violation",
+          "fault": [
+            0,
+            4
+          ],
+          "keyword": "maximum",
+          "raw": "1.25",
+          "value": 1.25
+        },
+        {
+          "bits": "0x3fa00000",
+          "expect": "violation",
+          "fault": [
+            0,
+            4
+          ],
+          "keyword": "exclusiveMaximum",
+          "raw": "1.25",
+          "value": 1.25
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "125",
+          "negative": false,
+          "scale": 2,
+          "value": "1.25"
+        },
+        {
+          "bits": "0x3ff4000000000000",
+          "expect": "violation",
+          "fault": [
+            0,
+            4
+          ],
+          "keyword": "enum",
+          "raw": "1.25",
+          "value": 1.25
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            4
+          ],
+          "keyword": "exclusiveMaximum",
+          "magnitude": "125",
+          "negative": false,
+          "raw": "1.25",
+          "scale": 2,
+          "value": "1.25"
+        },
+        {
+          "bits": "0x3fa00000",
+          "expect": "violation",
+          "fault": [
+            0,
+            4
+          ],
+          "keyword": "maximum",
+          "raw": "1.25",
+          "value": 1.25
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n1.3\n1.2\n2.5\n",
+    "name": "constraints: multipleOf rounds, or refuses",
+    "plan": [
+      {
+        "constraints": {
+          "multipleOf": "0.5",
+          "rounding": "midpoint"
+        },
+        "door": "f64",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "multipleOf": "0.5"
+        },
+        "door": "f64",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "multipleOf": "0.5",
+          "rounding": "floor"
+        },
+        "door": "decimal",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "maximum": "2.5",
+          "multipleOf": "0.5",
+          "rounding": "ceiling"
+        },
+        "door": "decimal",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          3
+        ],
+        "keyword": "multipleOf",
+        "line": 2,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          3
+        ],
+        "keyword": "multipleOf",
+        "line": 3,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": true,
+          "bits": "0x3ff8000000000000",
+          "expect": "ok",
+          "value": 1.5
+        },
+        {
+          "bits": "0x3ff4cccccccccccd",
+          "expect": "violation",
+          "fault": [
+            0,
+            3
+          ],
+          "keyword": "multipleOf",
+          "raw": "1.3",
+          "value": 1.3
+        },
+        {
+          "adjusted": true,
+          "expect": "ok",
+          "magnitude": "1",
+          "negative": false,
+          "scale": 0,
+          "value": "1"
+        },
+        {
+          "adjusted": true,
+          "expect": "ok",
+          "magnitude": "15",
+          "negative": false,
+          "scale": 1,
+          "value": "1.5"
+        }
+      ],
+      [
+        {
+          "adjusted": true,
+          "bits": "0x3ff0000000000000",
+          "expect": "ok",
+          "value": 1.0
+        },
+        {
+          "bits": "0x3ff3333333333333",
+          "expect": "violation",
+          "fault": [
+            0,
+            3
+          ],
+          "keyword": "multipleOf",
+          "raw": "1.2",
+          "value": 1.2
+        },
+        {
+          "adjusted": true,
+          "expect": "ok",
+          "magnitude": "1",
+          "negative": false,
+          "scale": 0,
+          "value": "1"
+        },
+        {
+          "adjusted": true,
+          "expect": "ok",
+          "magnitude": "15",
+          "negative": false,
+          "scale": 1,
+          "value": "1.5"
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "bits": "0x4004000000000000",
+          "expect": "ok",
+          "value": 2.5
+        },
+        {
+          "adjusted": false,
+          "bits": "0x4004000000000000",
+          "expect": "ok",
+          "value": 2.5
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "25",
+          "negative": false,
+          "scale": 1,
+          "value": "2.5"
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "25",
+          "negative": false,
+          "scale": 1,
+          "value": "2.5"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n127\n",
+    "name": "constraints: a rounding past the type is multipleOf",
+    "plan": [
+      {
+        "constraints": {
+          "multipleOf": "5",
+          "rounding": "ceiling"
+        },
+        "door": "i8",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          3
+        ],
+        "keyword": "multipleOf",
+        "line": 2,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            3
+          ],
+          "keyword": "multipleOf",
+          "raw": "127",
+          "value": 127
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n7\n",
+    "name": "constraints: an empty enum matches nothing",
+    "plan": [
+      {
+        "constraints": {
+          "enum": []
+        },
+        "door": "i32",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "enum",
+        "line": 2,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "enum",
+          "raw": "7",
+          "value": 7
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n10\n10.0\n15\n",
+    "name": "constraints: a numeric enum matches the value, not the text",
+    "plan": [
+      {
+        "constraints": {
+          "enum": [
+            "10",
+            "20"
+          ]
+        },
+        "door": "i32",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "enum": [
+            "10"
+          ]
+        },
+        "door": "decimal",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "fraction_not_allowed",
+        "fault": [
+          2,
+          1
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "enum",
+        "line": 4,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      },
+      {
+        "fault": [
+          0,
+          2
+        ],
+        "keyword": "enum",
+        "line": 4,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 2,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "value": 10
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "10",
+          "negative": false,
+          "scale": 0,
+          "value": "10"
+        }
+      ],
+      [
+        {
+          "detail": "fraction_not_allowed",
+          "expect": "malformed",
+          "fault": [
+            2,
+            1
+          ],
+          "raw": "10.0"
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "magnitude": "10",
+          "negative": false,
+          "scale": 0,
+          "value": "10"
+        }
+      ],
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "enum",
+          "raw": "15",
+          "value": 15
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            2
+          ],
+          "keyword": "enum",
+          "magnitude": "15",
+          "negative": false,
+          "raw": "15",
+          "scale": 0,
+          "value": "15"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "a,b\nx,  ab \n",
+    "name": "constraints: a trimmed text spans the judged text",
+    "plan": [
+      {
+        "constraints": {
+          "maxLength": 1,
+          "trim": true
+        },
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "constraints": {
+          "minLength": 2,
+          "trim": true
+        },
+        "door": "text",
+        "ordinal": 1
+      },
+      {
+        "constraints": {
+          "minLength": 2
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          2,
+          2
+        ],
+        "keyword": "maxLength",
+        "line": 2,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 1
+      },
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "minLength",
+        "line": 2,
+        "plan_column": 2,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            2,
+            2
+          ],
+          "keyword": "maxLength",
+          "raw": "  ab ",
+          "text": "ab"
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "text": "ab"
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "minLength",
+          "raw": "x",
+          "text": "x"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "a"
+    ],
+    "input": "a\n\"  a\"\"b  \"\n",
+    "name": "constraints: a quoted cell is judged unescaped",
+    "plan": [
+      {
+        "constraints": {
+          "enum": [
+            "a\"b"
+          ],
+          "trim": true
+        },
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "maxLength": 1,
+          "trim": true
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          2,
+          3
+        ],
+        "keyword": "maxLength",
+        "line": 2,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "enum_index": 0,
+          "expect": "ok",
+          "text": "a\"b"
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            2,
+            3
+          ],
+          "keyword": "maxLength",
+          "raw": "  a\"b  ",
+          "text": "a\"b"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "short_rows": "pad",
+      "skip_blank_lines": true,
+      "tokens": [
+        "NA"
+      ]
+    },
+    "header": [
+      "a",
+      "b"
+    ],
+    "input": "a,b\nNA,abc\nabc\n",
+    "name": "constraints: tokens and padding stay empty",
+    "plan": [
+      {
+        "constraints": {
+          "minLength": 3
+        },
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "minLength": 3
+        },
+        "door": "text",
+        "ordinal": 1
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "expect": "empty",
+          "origin": "token"
+        },
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "text": "abc"
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "text": "abc"
+        },
+        {
+          "expect": "empty",
+          "origin": "padded"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\n1\n1.0\n",
+    "name": "constraints: a number in a text enum is text",
+    "plan": [
+      {
+        "constraints": {
+          "enum": [
+            "01",
+            "1.0"
+          ]
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          1
+        ],
+        "keyword": "enum",
+        "line": 2,
+        "plan_column": 0,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            1
+          ],
+          "keyword": "enum",
+          "raw": "1",
+          "text": "1"
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "enum_index": 1,
+          "expect": "ok",
+          "text": "1.0"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\nyES\nYes\n",
+    "name": "constraints: an enum folds case unless it is case sensitive",
+    "plan": [
+      {
+        "constraints": {
+          "enum": [
+            "Yes"
+          ]
+        },
+        "door": "text",
+        "ordinal": 0
+      },
+      {
+        "constraints": {
+          "caseSensitive": true,
+          "enum": [
+            "Yes"
+          ]
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "fault": [
+          0,
+          3
+        ],
+        "keyword": "enum",
+        "line": 2,
+        "plan_column": 1,
+        "reason": "violation",
+        "row": 0,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "enum_index": 0,
+          "expect": "ok",
+          "text": "Yes"
+        },
+        {
+          "expect": "violation",
+          "fault": [
+            0,
+            3
+          ],
+          "keyword": "enum",
+          "raw": "yES",
+          "text": "yES"
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "enum_index": 0,
+          "expect": "ok",
+          "text": "Yes"
+        },
+        {
+          "adjusted": false,
+          "enum_index": 0,
+          "expect": "ok",
+          "text": "Yes"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input": "v\na\nA\n",
+    "name": "constraints: of duplicate enum entries the first matches",
+    "plan": [
+      {
+        "constraints": {
+          "enum": [
+            "b",
+            "A",
+            "a"
+          ]
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "enum_index": 1,
+          "expect": "ok",
+          "text": "A"
+        }
+      ],
+      [
+        {
+          "adjusted": false,
+          "enum_index": 1,
+          "expect": "ok",
+          "text": "A"
+        }
+      ]
+    ]
+  },
+  {
+    "dialect": {
+      "has_header": true,
+      "quoting": true,
+      "separator": ",",
+      "skip_blank_lines": true
+    },
+    "header": [
+      "v"
+    ],
+    "input_hex": "760a6f6b0aff0a",
+    "name": "constraints: text that isn't UTF-8 is the door's fault",
+    "plan": [
+      {
+        "constraints": {
+          "maxLength": 9
+        },
+        "door": "text",
+        "ordinal": 0
+      }
+    ],
+    "problems": [
+      {
+        "detail": "invalid_utf8",
+        "fault": [
+          0,
+          1
+        ],
+        "line": 3,
+        "plan_column": 0,
+        "reason": "malformed",
+        "row": 1,
+        "source_column": 0
+      }
+    ],
+    "rows": [
+      [
+        {
+          "adjusted": false,
+          "expect": "ok",
+          "text": "ok"
+        }
+      ],
+      [
+        {
+          "detail": "invalid_utf8",
+          "expect": "malformed",
+          "fault": [
+            0,
+            1
+          ],
+          "raw_hex": "ff"
+        }
+      ]
+    ]
   }
 ]

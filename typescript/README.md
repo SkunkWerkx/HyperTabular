@@ -245,12 +245,14 @@ places when there are two, since a plan should then say which by position.
 
 A batch is column-major, and owns what it shows: the reader's cells are copied out of it, so a
 batch stays valid after the reader has moved on. It has `rows`, `columnCount`, `doors`,
-`line(row)`, `get(column, row)`, `detail(column, row)`, `origin(column, row)`,
-`raw(column, row)`, `rawString(column, row)`, `column(column)` (the whole column's verdicts),
-`faultCount(column)`, `faults()` (worked out when it is asked for, so a read costs nothing for
-it) and `row(row)`, and its rows when iterated. A `Row` reads it across, for code that builds an
-object a row at a time, with `index`, `line`, `get(column)`, `detail(column)`, `origin(column)`,
-`raw(column)` and `rawString(column)`; it is the batch and an index, nothing copied.
+`line(row)`, `get(column, row)`, `getChecked(column, row)` ([below](#constraints)),
+`detail(column, row)`, `origin(column, row)`, `raw(column, row)`, `rawString(column, row)`,
+`column(column)` and `columnChecked(column)` (the whole column's verdicts, as `get` and
+`getChecked` read each cell), `faultCount(column)`, `faults()` (worked out
+when it is asked for, so a read costs nothing for it) and `row(row)`, and its rows when
+iterated. A `Row` reads it across, for code that builds an object a row at a time, with `index`,
+`line`, `get(column)`, `getChecked(column)`, `detail(column)`, `origin(column)`, `raw(column)`
+and `rawString(column)`; it is the batch and an index, nothing copied.
 
 A reader or a sheet is iterable: `for (const read of reader)` (or `reader.batches()`) yields
 each read's outcome, the error that stops it (if one does) once, as the last, and
@@ -356,7 +358,8 @@ A `Fault` is HyperCast's three fields, and what failed in the cell is beside it:
 failed (a blank, a token, padding). `origin` says where a cell's verdict came from: `'cell'`,
 `'token'`, `'padded'` or `'uncached'` (a workbook formula with no cached value).
 `batch.faults()` is an array of `Problem`s, the row, the line, the plan and source columns, the
-reason, detail, origin and span, a long row reported with `null` for what a cell would say. Each
+reason, detail, origin and span, a long row reported with `null` for what a cell would say, and
+a cell that broke its column's constraints with its `keyword` and a `reason` of `null`. Each
 call hands back a new array, the caller's own, worked out when the batch is read; a batch is a
 copy, so it stays right after the next read and after the reader has gone. `notes: false`, in
 `DelimitedOptions` or `SheetOptions`, drops the detail and the origin, which then say `null`
@@ -366,6 +369,56 @@ value.
 **To keep every row of a sheet, set `skipEmptyRows: false`.** By default a row whose only cells
 are formulas with no cached value is filtered out as empty, with nothing to say so; off, those
 rows are delivered, their cells at origin `'uncached'`.
+
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf` with `rounding`,
+`minLength`, `maxLength`, `enum`, with `trim` and `caseSensitive` for text):
+`Column.checked(ordinal, constraints, format?)` reads its source column through the door the
+declaration is bound to, its numbers in `format` as the plain factories read them. Each cell is
+cast first, so text that isn't the type is a fault as ever, and then judged; `getChecked` reads
+it:
+
+```ts
+import { Constraints, Door } from '@skunkwerkx/hypercast'
+import { Column, DelimitedReader, Dialect } from '@skunkwerkx/hypertabular'
+
+const qty = Constraints.declare({ door: Door.I32, minimum: '1', maximum: '10' })
+const sex = Constraints.declare({ door: Door.Text, enum: ['Female', 'Male'] })
+if (!qty.ok || !sex.ok) throw new Error('a declaration HyperCast refuses')
+const plan = [Column.checked(0, qty.value), Column.checked(1, sex.value)]
+const opened = DelimitedReader.fromBytes('qty,sex\n12,MALE\n7,x\n', Dialect.CSV, plan)
+if (!opened.ok) throw new Error(opened.error.message)
+for (const read of opened.value) {
+  if (!read.ok) throw new Error(read.error.message)
+  for (const row of read.value) {
+    const n = row.getChecked<number>(0)
+    const said = n.ok ? n.value : 'fault' in n ? n.fault.reason : `${n.violation.value} breaks ${n.violation.keyword}`
+    // "MALE" matches the entry, and reads as "Male".
+    const s = row.getChecked<string>(1)
+    console.log(said, s.ok ? s.value : 'violation' in s ? s.violation.keyword : s.fault.reason)
+  }
+  for (const problem of read.value.faults()) {
+    console.log(`line ${problem.line} column ${problem.sourceColumn} ${problem.keyword}`)
+  }
+}
+```
+
+It prints `12 breaks maximum Male`, `7 enum`, `line 2 column 0 maximum` and
+`line 3 column 1 enum`. The verdict is HyperCast's `CheckedVerdict`, `castChecked`'s: `{ ok:
+true, value, adjusted, enumIndex }`, `{ ok: false, fault }` or `{ ok: false, violation }`, told
+apart by `ok` and then by `'fault' in verdict`. A violation isn't a fault: the cell cast, so
+`faultCount` leaves it out, its `value` is kept exactly as cast (never rounded), and its span is
+the judged text's. A cell `multipleOf` rounded passes with `adjusted` set, and a text `enum`
+match reads as the entry as declared, with `enumIndex` naming it. A column that declares
+constraints answers `get`, `column` and a row's `get` with HyperCast's contract violation
+(`malformed`, offset 0, length 0), since they would read a violation as passed; `getChecked`,
+and `columnChecked` for the whole column at once, read an unconstrained column too, where every
+cell that cast passes, unadjusted. The column's
+`door` is the declaration's and `checked` is `true`. Anything that is no declaration (a failed
+`Constraints.declare`'s missing `.value` among them) makes a column that is not `valid`, refused
+with its place when its plan is bound: never a column with no rules.
 
 ## Suggesting a plan
 
@@ -436,7 +489,7 @@ the caller's runs in the middle of a read.
   `encoding` and `tokens`; `SheetOptions` states a sheet's header, whether empty rows are
   skipped, the batch size, `skip`, `headerRow`, `range`, `tokens` and `notes`;
   `DelimitedOptions` the batch size, the first input buffer and `notes`; the plan states each
-  column's door and, for numbers, its `NumFormat`. A field left out is the core's default; a
+  column's door and, for numbers, its `NumFormat` and, for numbers and text, any `Constraints`. A field left out is the core's default; a
   size of `0` is the core's to refuse, and does.
 - **HyperCast is the judge.** A text cell means exactly what `@skunkwerkx/hypercast`'s door
   says of the same bytes, a typed workbook cell is converted by the door directly, and its

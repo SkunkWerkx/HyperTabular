@@ -2,7 +2,10 @@
 // repository root, the files every binding's suite replays) through hypertabular.hpp: each
 // case's header and its lookups, its rows' row numbers, every cell's verdict, value, fault span,
 // text, detail and origin, what each batch's faults() lists, its structural failure, whole, and
-// what the case says a suggestion finds. A case that fails is a break in the polyglot contract.
+// what the case says a suggestion finds. A column that declares constraints is read through
+// get_checked(), its value, flag, enum entry or violation held to the case's, and every other
+// column of a checked door's type is read through it too, where it must say what get() and text()
+// say. A case that fails is a break in the polyglot contract.
 // A key the replay doesn't know fails it, at any level, so that one added to the corpus can't be
 // passed over.
 //
@@ -31,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -313,22 +317,27 @@ void known_format_keys(const Json &format, const std::string &path) {
 void known_shared_keys(const Json &item, const std::string &name) {
   for (const Json &column : member(item, "plan").items) {
     known_keys(column, name + ".plan[]",
-               {"door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"});
+               {"door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options",
+                "constraints"});
     known_format_keys(member(column, "format"), name + ".plan[].format");
+    known_keys(member(column, "constraints"), name + ".plan[].constraints",
+               {"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf",
+                "rounding", "minLength", "maxLength", "trim", "caseSensitive", "enum"});
     known_keys(member(column, "options"), name + ".plan[].options", {"flags", "pivot", "months"});
   }
   for (const Json &row : member(item, "rows").items) {
     for (const Json &cell : row.items) {
       known_keys(cell, name + ".rows[][]",
-                 {"expect", "value", "text", "seconds", "nanos", "year", "month", "day",
-                  "nanos_of_day", "magnitude", "scale", "negative", "fault", "raw", "raw_hex",
-                  "detail", "origin"});
+                 {"expect",     "value",   "text",         "seconds",   "nanos",  "year",
+                  "month",      "day",     "nanos_of_day", "magnitude", "scale",  "negative",
+                  "fault",      "raw",     "raw_hex",      "detail",    "origin", "adjusted",
+                  "enum_index", "keyword", "bits"});
     }
   }
   for (const Json &problem : member(item, "problems").items) {
     known_keys(problem, name + ".problems[]",
                {"row", "line", "plan_column", "source_column", "reason", "fault", "detail",
-                "origin", "expected", "found"});
+                "origin", "expected", "found", "keyword"});
   }
   known_keys(member(item, "failure"), name + ".failure",
              {"kind", "record", "line", "byte", "expected", "found"});
@@ -402,8 +411,106 @@ std::optional<hc::NumFormat> format_of(const Json &format) {
   return hc::NumFormat::declare(fields);
 }
 
-// A plan entry as a column: its door, what the door declares, its numeric format, its tokens and
-// its date options. Column::date_options copies the months, so this storage needn't last.
+// A declaration's rounding by the corpus's name: strict, the default, midpoint, floor or ceiling.
+std::optional<hc::Rounding> rounding_of(const Json &rounding) {
+  if (rounding.kind == Json::Kind::null || rounding.text == "strict") {
+    return hc::Rounding::strict;
+  }
+  if (rounding.text == "midpoint") {
+    return hc::Rounding::midpoint;
+  }
+  if (rounding.text == "floor") {
+    return hc::Rounding::floor;
+  }
+  if (rounding.text == "ceiling") {
+    return hc::Rounding::ceiling;
+  }
+  return std::nullopt;
+}
+
+// A column that declares the corpus's constraints, through HyperCast's own Constraints<T>::declare.
+// Column::checked copies the declaration and its enum list, so this storage needn't last.
+template <class T>
+std::optional<ht::Column> checked_column(std::size_t ordinal, const Json &rules) {
+  using Declared = ht::Constraints<T>;
+  typename Declared::Fields fields;
+  const auto bound = [&](const char *key, std::optional<ht::ConstraintValue> &slot) {
+    if (const Json *json = rules.find(key)) {
+      slot = ht::ConstraintValue(std::string_view(json->text));
+    }
+  };
+  bound("minimum", fields.minimum);
+  bound("exclusiveMinimum", fields.exclusive_minimum);
+  bound("maximum", fields.maximum);
+  bound("exclusiveMaximum", fields.exclusive_maximum);
+  bound("multipleOf", fields.multiple_of);
+  const auto rounding = rounding_of(member(rules, "rounding"));
+  if (!rounding) {
+    return std::nullopt;
+  }
+  fields.rounding = *rounding;
+  if (const Json *json = rules.find("minLength")) {
+    fields.min_length = static_cast<std::uint32_t>(json->u64());
+  }
+  if (const Json *json = rules.find("maxLength")) {
+    fields.max_length = static_cast<std::uint32_t>(json->u64());
+  }
+  fields.trim = member(rules, "trim").boolean;
+  fields.case_sensitive = member(rules, "caseSensitive").boolean;
+  std::vector<typename Declared::Entry> entries;
+  const Json *list = rules.find("enum");
+  if (list != nullptr) {
+    for (const Json &entry : list->items) {
+      entries.emplace_back(std::string_view(entry.text));
+    }
+  }
+  std::vector<std::uint8_t> storage(Declared::storage_size(entries.data(), entries.size()));
+  const auto declared = list != nullptr
+                            ? Declared::declare(fields, entries.data(), entries.size(),
+                                                ht::EnumStorage(storage.data(), storage.size()))
+                            : Declared::declare(fields);
+  const Declared *constraints = declared.value_if();
+  if (constraints == nullptr) {
+    return std::nullopt;
+  }
+  return ht::Column::checked(ordinal, *constraints);
+}
+
+// A constrained plan entry's column: the checked door its door names, or nothing for a door that
+// has none.
+std::optional<ht::Column> constrained_column(std::size_t ordinal, std::string_view door,
+                                             const Json &rules) {
+  if (door == "i8") {
+    return checked_column<std::int8_t>(ordinal, rules);
+  } else if (door == "i16") {
+    return checked_column<std::int16_t>(ordinal, rules);
+  } else if (door == "i32") {
+    return checked_column<std::int32_t>(ordinal, rules);
+  } else if (door == "i64") {
+    return checked_column<std::int64_t>(ordinal, rules);
+  } else if (door == "u8") {
+    return checked_column<std::uint8_t>(ordinal, rules);
+  } else if (door == "u16") {
+    return checked_column<std::uint16_t>(ordinal, rules);
+  } else if (door == "u32") {
+    return checked_column<std::uint32_t>(ordinal, rules);
+  } else if (door == "u64") {
+    return checked_column<std::uint64_t>(ordinal, rules);
+  } else if (door == "f32") {
+    return checked_column<float>(ordinal, rules);
+  } else if (door == "f64") {
+    return checked_column<double>(ordinal, rules);
+  } else if (door == "decimal") {
+    return checked_column<hc::Decimal>(ordinal, rules);
+  } else if (door == "text") {
+    return checked_column<std::string_view>(ordinal, rules);
+  }
+  return std::nullopt;
+}
+
+// A plan entry as a column: its door, what the door declares, its constraints, its numeric format,
+// its tokens and its date options. Column::date_options copies the months, so this storage needn't
+// last.
 std::optional<ht::Column> column_of(const Json &entry) {
   const std::size_t ordinal = member(entry, "ordinal").u64();
   const std::string &door = member(entry, "door").text;
@@ -412,7 +519,12 @@ std::optional<ht::Column> column_of(const Json &entry) {
                                                                                        : "order")
                                                     .u64());
   std::optional<ht::Column> column;
-  if (door == "bool") {
+  if (const Json *rules = entry.find("constraints")) {
+    column = constrained_column(ordinal, door, *rules);
+    if (!column) {
+      return std::nullopt;
+    }
+  } else if (door == "bool") {
     column = ht::Column::boolean(ordinal);
   } else if (door == "i8") {
     column = ht::Column::i8(ordinal);
@@ -540,6 +652,174 @@ bool same_number(const Json &expected, double actual) {
   return expected.kind == Json::Kind::number && expected.f64() == actual;
 }
 
+// A float's IEEE bits as the corpus spells them: 0x and eight hex digits for an f32, sixteen for an
+// f64.
+template <class F> std::string bits_of(F value) {
+  using Bits = std::conditional_t<sizeof(F) == 4, std::uint32_t, std::uint64_t>;
+  Bits bits = 0;
+  std::memcpy(&bits, &value, sizeof bits);
+  static const char hex[] = "0123456789abcdef";
+  std::string text = "0x";
+  for (int shift = static_cast<int>(sizeof bits * 8) - 4; shift >= 0; shift -= 4) {
+    text += hex[(bits >> shift) & 0xF];
+  }
+  return text;
+}
+
+// A decimal against the case's text, magnitude, scale and sign.
+bool same_decimal(const Json &want, const hc::Decimal &decimal) {
+  char text[hc::Decimal::max_chars];
+  const auto written = decimal.to_chars(text, text + sizeof text);
+  return member(want, "value").text == std::string(text, written.ptr) &&
+         member(want, "magnitude").text == magnitude(decimal) &&
+         member(want, "scale").u64() == decimal.scale &&
+         member(want, "negative").boolean == decimal.negative;
+}
+
+// A checked door's value, passed or broken, against the case's: an integer exactly, a float by its
+// value and its bits, a decimal whole, text by its bytes.
+template <class T> bool same_checked(const Json &want, const T &value) {
+  const Json &expected = member(want, "value");
+  if constexpr (std::is_same_v<T, std::string_view>) {
+    return member(want, "text").text == value;
+  } else if constexpr (std::is_same_v<T, hc::Decimal>) {
+    return same_decimal(want, value);
+  } else if constexpr (std::is_floating_point_v<T>) {
+    return same_number(expected, static_cast<double>(value)) &&
+           member(want, "bits").text == bits_of(value);
+  } else if constexpr (std::is_signed_v<T>) {
+    return expected.i64() == value;
+  } else {
+    return expected.kind == Json::Kind::number && expected.text[0] != '-' &&
+           expected.u64() == value;
+  }
+}
+
+// A constrained column's cell through get_checked(), the batch's and the row's: a value that
+// passed, with its flag and enum entry, or a violation, its keyword, value, span and text, as the
+// case has them. A cell that didn't cast is the fault fault() gives.
+template <class T>
+bool check_checked(const ht::Batch &batch, std::size_t column, std::size_t row, const Json &want,
+                   const std::string &where) {
+  const ht::Checked<T> checked = batch.get_checked<T>(column, row);
+  if (!(batch.row(row).get_checked<T>(column) == checked)) {
+    return failed(where + ": the row's checked verdict isn't the batch's");
+  }
+  const std::string &expect = member(want, "expect").text;
+  if (const auto fault = batch.fault(column, row)) {
+    const auto *rejection = checked.rejection_if();
+    return (rejection != nullptr && rejection->fault_if() != nullptr &&
+            *rejection->fault_if() == *fault) ||
+           failed(where + ": get_checked() doesn't say the fault fault() does");
+  }
+  if (expect == "ok") {
+    const ht::CheckedValue<T> *passed = checked.value_if();
+    if (passed == nullptr) {
+      return failed(where + ": rejected, expected ok");
+    }
+    const Json *index = want.find("enum_index");
+    const std::optional<std::uint32_t> wanted_index =
+        index != nullptr ? std::optional<std::uint32_t>(static_cast<std::uint32_t>(index->u64()))
+                         : std::nullopt;
+    if (passed->adjusted != member(want, "adjusted").boolean ||
+        passed->enum_index != wanted_index) {
+      return failed(where + ": adjusted or the enum entry");
+    }
+    return same_checked(want, passed->value) || failed(where + ": the checked value");
+  }
+  if (expect != "violation") {
+    return failed(where + ": cast, expected " + expect);
+  }
+  const auto *rejection = checked.rejection_if();
+  const ht::Violation<T> *broken = rejection != nullptr ? rejection->violation_if() : nullptr;
+  if (broken == nullptr) {
+    return failed(where + ": no violation");
+  }
+  const hc::KeywordName keyword = hc::name(broken->keyword);
+  if (keyword != member(want, "keyword").text) {
+    return failed(where + ": broke " + keyword.c_str());
+  }
+  const Json &span = member(want, "fault");
+  if (span.items.size() != 2 || span.items[0].u64() != broken->offset ||
+      span.items[1].u64() != broken->length) {
+    return failed(where + ": the violation's span");
+  }
+  const std::string raw = batch.raw(column, row);
+  if (raw != member(want, "raw").text || broken->offset + broken->length > raw.size()) {
+    return failed(where + ": raw text \"" + raw + "\"");
+  }
+  return same_checked(want, broken->value) || failed(where + ": the violation's value");
+}
+
+// A column with no constraints read through its checked door, where it has one: what get() or
+// text() says, passed unadjusted with no enum entry, or the same fault.
+template <class T>
+bool unchecked_agrees(const ht::Batch &batch, std::size_t column, std::size_t row) {
+  const ht::Checked<T> checked = batch.get_checked<T>(column, row);
+  const auto plain = [&] {
+    if constexpr (std::is_same_v<T, std::string_view>) {
+      return batch.text(column, row);
+    } else {
+      return batch.get<T>(column, row);
+    }
+  }();
+  if (const hc::Fault *fault = plain.fault_if()) {
+    const auto *rejection = checked.rejection_if();
+    return rejection != nullptr && rejection->fault_if() != nullptr &&
+           *rejection->fault_if() == *fault;
+  }
+  const ht::CheckedValue<T> *passed = checked.value_if();
+  if (passed == nullptr || passed->adjusted || passed->enum_index) {
+    return false;
+  }
+  if constexpr (std::is_floating_point_v<T>) {
+    return bits_of(passed->value) == bits_of(*plain.value_if());
+  } else {
+    return passed->value == *plain.value_if();
+  }
+}
+
+// A cell read through get_checked(), with the type its door makes, constrained or not; nullopt for
+// a door with no checked door.
+std::optional<bool> through_checked(const ht::Batch &batch, std::size_t column, std::size_t row,
+                                    const Json &want, const std::string &where) {
+  const bool constrained = batch.plan()[column].is_checked();
+  const auto judge = [&](auto type) {
+    using T = typename decltype(type)::type;
+    return constrained ? check_checked<T>(batch, column, row, want, where)
+                       : (unchecked_agrees<T>(batch, column, row) ||
+                          failed(where + ": get_checked() doesn't say what get() does"));
+  };
+  switch (batch.plan()[column].door()) {
+  case ht::Door::i8:
+    return judge(std::common_type<std::int8_t>{});
+  case ht::Door::i16:
+    return judge(std::common_type<std::int16_t>{});
+  case ht::Door::i32:
+    return judge(std::common_type<std::int32_t>{});
+  case ht::Door::i64:
+    return judge(std::common_type<std::int64_t>{});
+  case ht::Door::u8:
+    return judge(std::common_type<std::uint8_t>{});
+  case ht::Door::u16:
+    return judge(std::common_type<std::uint16_t>{});
+  case ht::Door::u32:
+    return judge(std::common_type<std::uint32_t>{});
+  case ht::Door::u64:
+    return judge(std::common_type<std::uint64_t>{});
+  case ht::Door::f32:
+    return judge(std::common_type<float>{});
+  case ht::Door::f64:
+    return judge(std::common_type<double>{});
+  case ht::Door::decimal:
+    return judge(std::common_type<hc::Decimal>{});
+  case ht::Door::text:
+    return judge(std::common_type<std::string_view>{});
+  default:
+    return std::nullopt;
+  }
+}
+
 // The note beside a verdict: with notes off there's none, and it says so.
 bool check_note(const ht::Batch &batch, std::size_t column, std::size_t row, const Json &want,
                 bool notes, const std::string &where) {
@@ -567,6 +847,10 @@ bool check_cell(const ht::Batch &batch, std::size_t column, std::size_t row, con
   if (!check_note(batch, column, row, want, notes, where)) {
     return false;
   }
+  const std::optional<bool> checked = through_checked(batch, column, row, want, where);
+  if (checked == false) {
+    return false;
+  }
   if (const auto fault = batch.fault(column, row)) {
     if (expect != reason_name(fault->reason)) {
       return failed(where + ": " + reason_name(fault->reason) + ", expected " + expect);
@@ -588,6 +872,9 @@ bool check_cell(const ht::Batch &batch, std::size_t column, std::size_t row, con
       return failed(where + ": the fault's span is outside the cell");
     }
     return true;
+  }
+  if (batch.plan()[column].is_checked()) {
+    return true; // through_checked() held it to the case
   }
   if (expect != "ok") {
     return failed(where + ": cast, expected " + expect);
@@ -629,16 +916,9 @@ bool check_cell(const ht::Batch &batch, std::size_t column, std::size_t row, con
   case ht::Door::f64:
     same = same_number(value, batch.get<double>(column, row).value());
     break;
-  case ht::Door::decimal: {
-    const hc::Decimal decimal = batch.get<hc::Decimal>(column, row).value();
-    char text[hc::Decimal::max_chars];
-    const auto written = decimal.to_chars(text, text + sizeof text);
-    same = value.text == std::string(text, written.ptr) &&
-           member(want, "magnitude").text == magnitude(decimal) &&
-           member(want, "scale").u64() == decimal.scale &&
-           member(want, "negative").boolean == decimal.negative;
+  case ht::Door::decimal:
+    same = same_decimal(want, batch.get<hc::Decimal>(column, row).value());
     break;
-  }
   case ht::Door::uuid: {
     static const char hex[] = "0123456789abcdef";
     std::string text;
@@ -768,7 +1048,7 @@ std::string problem_text(std::optional<std::uint64_t> row, std::uint64_t line,
                          std::string_view reason, std::optional<std::uint64_t> offset,
                          std::optional<std::uint64_t> length, std::string_view detail,
                          std::string_view origin, std::optional<std::uint64_t> expected,
-                         std::optional<std::uint64_t> found) {
+                         std::optional<std::uint64_t> found, std::string_view keyword) {
   const auto number = [](std::optional<std::uint64_t> value) {
     return value ? std::to_string(*value) : std::string("-");
   };
@@ -779,6 +1059,7 @@ std::string problem_text(std::optional<std::uint64_t> row, std::uint64_t line,
   text += ", detail " + std::string(detail.empty() ? "-" : detail);
   text += ", origin " + std::string(origin.empty() ? "-" : origin);
   text += ", widths " + number(expected) + "/" + number(found);
+  text += ", keyword " + std::string(keyword.empty() ? "-" : keyword);
   return text;
 }
 
@@ -804,7 +1085,7 @@ std::vector<std::string> wanted_problems(const Json &problems, bool notes) {
         span.items.size() == 2 ? std::optional<std::uint64_t>(span.items[1].u64()) : std::nullopt,
         notes ? std::string_view(member(entry, "detail").text) : std::string_view(),
         notes ? std::string_view(origin) : std::string_view(), number_of(entry.find("expected")),
-        number_of(entry.find("found"))));
+        number_of(entry.find("found")), member(entry, "keyword").text));
   }
   return wanted;
 }
@@ -819,24 +1100,31 @@ bool append_problems(const ht::Batch &batch, std::size_t base, std::vector<std::
     }
     using Number = std::optional<std::uint64_t>;
     const bool cell = problem.plan_column.has_value();
-    if (cell ? (problem.expected != 0 || problem.found != 0)
-             : (problem.source_column || problem.reason || problem.offset != 0 ||
+    if (cell ? (problem.expected != 0 || problem.found != 0 ||
+                problem.reason.has_value() == problem.keyword.has_value())
+             : (problem.source_column || problem.reason || problem.keyword || problem.offset != 0 ||
                 problem.length != 0)) {
-      return failed("a problem that's half a cell and half a row");
+      return failed("a problem that's half a cell and half a row, or half a fault and half a "
+                    "violation");
     }
-    const bool spanned = cell && *problem.reason != hc::CastFailure::empty;
+    const bool spanned = cell && (problem.keyword || *problem.reason != hc::CastFailure::empty);
     if (cell && !spanned && (problem.offset != 0 || problem.length != 0)) {
       return failed("an uncached formula's span");
     }
     const std::string detail =
         problem.detail == hc::Detail::none ? "" : hc::name(problem.detail).c_str();
     const std::string origin = problem.origin == ht::Origin::cell ? "" : ht::name(problem.origin);
+    const hc::KeywordName keyword = hc::name(problem.keyword.value_or(hc::Keyword{}));
     found.push_back(problem_text(
         base + problem.row, problem.line, cell ? Number(*problem.plan_column) : Number(),
-        cell ? Number(*problem.source_column) : Number(), cell ? reason_name(*problem.reason) : "",
+        cell ? Number(*problem.source_column) : Number(),
+        !cell             ? ""
+        : problem.keyword ? "violation"
+                          : reason_name(*problem.reason),
         spanned ? Number(problem.offset) : Number(), spanned ? Number(problem.length) : Number(),
         detail, origin, cell ? Number() : Number(problem.expected),
-        cell ? Number() : Number(problem.found)));
+        cell ? Number() : Number(problem.found),
+        problem.keyword ? keyword.view() : std::string_view()));
   }
   return true;
 }

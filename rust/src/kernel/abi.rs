@@ -4,6 +4,7 @@
 
 use core::ffi::c_void;
 use hypercast::{Fault, NumFormat, RawDateOptions, RawNumFormat, Reason};
+pub use hypercast::{RawCheck, RawConstraints};
 
 /// The call did what it could; the result says how far it got.
 pub const OK: i32 = 0;
@@ -58,8 +59,8 @@ pin_layout! {
     SheetInfo => (SheetInfo::SIZE as usize, 4),
     RawDelimitedOptions => (RawDelimitedOptions::SIZE as usize, 4),
     CellNote => (CellNote::SIZE as usize, 2),
-    ColumnSpecWith => (120 + 4 * WORD, WORD),
-    ColumnBufferWith => (4 * WORD, WORD),
+    ColumnSpecWith => (120 + 7 * WORD, WORD),
+    ColumnBufferWith => (5 * WORD, WORD),
     BuffersWith => (18 * WORD, WORD),
     RawSheetOptions => (RawSheetOptions::SIZE as usize, 4),
     RawRange => (RawRange::SIZE as usize, 4),
@@ -93,6 +94,7 @@ const _: () = {
     assert!(offset_of!(RawProblem, len) == 20);
     assert!(offset_of!(RawProblem, expected) == 24);
     assert!(offset_of!(RawProblem, found) == 28);
+    assert!(offset_of!(RawProblem, keyword) == 32);
     assert!(offset_of!(RawSuggestion, door) == 0);
     assert!(offset_of!(RawSuggestion, param) == 4);
     assert!(offset_of!(RawSuggestion, status) == 8);
@@ -162,10 +164,14 @@ const _: () = {
     assert!(offset_of!(ColumnSpecWith, months_len) == 120 + WORD);
     assert!(offset_of!(ColumnSpecWith, tokens) == 120 + 2 * WORD);
     assert!(offset_of!(ColumnSpecWith, tokens_len) == 120 + 3 * WORD);
+    assert!(offset_of!(ColumnSpecWith, constraints) == 120 + 4 * WORD);
+    assert!(offset_of!(ColumnSpecWith, enum_ptr) == 120 + 5 * WORD);
+    assert!(offset_of!(ColumnSpecWith, enum_len) == 120 + 6 * WORD);
     assert!(offset_of!(ColumnBufferWith, size) == 0);
     assert!(offset_of!(ColumnBufferWith, values) == WORD);
     assert!(offset_of!(ColumnBufferWith, verdicts) == 2 * WORD);
     assert!(offset_of!(ColumnBufferWith, notes) == 3 * WORD);
+    assert!(offset_of!(ColumnBufferWith, checks) == 4 * WORD);
     assert!(offset_of!(BuffersWith, size) == 0);
     assert!(offset_of!(BuffersWith, window) == WORD);
     assert!(offset_of!(BuffersWith, window_cap) == 2 * WORD);
@@ -244,13 +250,20 @@ pub struct CellVerdict {
     pub offset: u32,
     /// Byte length of the offending span.
     pub len: u32,
-    /// `0` ok, `1` empty, `2` malformed, `3` out of range — HyperCast's ABI codes.
+    /// `0` ok, `1` empty, `2` malformed, `3` out of range — HyperCast's ABI codes — or, from a
+    /// `_with` fill on a column that declares constraints, [`CellVerdict::VIOLATION`].
     pub reason: u32,
 }
 
 impl CellVerdict {
     /// The layout's size in bytes.
     pub const SIZE: u32 = 12;
+
+    /// `reason`: the cell cast, and broke a constraint its column declares, HyperCast's
+    /// `cast_checked` code. The value slot holds the value exactly as cast, never rounded, the span
+    /// is the judged text's, and the column's [`ColumnBufferWith::checks`] names the keyword.
+    /// [`CellVerdict::fault`] reads it as no fault.
+    pub const VIOLATION: u32 = 4;
 
     /// The success verdict.
     pub const OK: CellVerdict = CellVerdict {
@@ -735,8 +748,9 @@ pub struct RawProblem {
     pub row: u32,
     /// The column of the plan, or [`RawProblem::ROW_LEVEL`] for an entry about the row as a whole.
     pub plan_column: u32,
-    /// The verdict's reason, HyperCast's code: `2` malformed, `3` out of range, or `1` empty for
-    /// a formula with no cached value. `0` on a row-level entry.
+    /// The verdict's reason, HyperCast's code: `2` malformed, `3` out of range,
+    /// [`CellVerdict::VIOLATION`] for a constraint broken, or `1` empty for a formula with no
+    /// cached value. `0` on a row-level entry.
     pub reason: u32,
     /// The note's [`CellNote::detail`]: `0` on a row-level entry, or where the column had no notes.
     pub detail: u16,
@@ -750,11 +764,15 @@ pub struct RawProblem {
     pub expected: u32,
     /// On a row-level entry, the cells the row had; otherwise `0`.
     pub found: u32,
+    /// On a [`CellVerdict::VIOLATION`], the keyword broken, as the column's
+    /// [`ColumnBufferWith::checks`] names it (HyperCast's codes, `1` minimum … `8` enum); otherwise
+    /// `0`.
+    pub keyword: u32,
 }
 
 impl RawProblem {
     /// The layout's size in bytes.
-    pub const SIZE: u32 = 32;
+    pub const SIZE: u32 = 36;
 
     /// What [`RawProblem::plan_column`] says for an entry about the row as a whole.
     pub const ROW_LEVEL: u32 = u32::MAX;
@@ -848,11 +866,23 @@ pub struct ColumnSpecWith {
     pub tokens: *const u8,
     /// Bytes at `tokens`.
     pub tokens_len: usize,
+    /// What the column's cells must also meet: HyperCast's 104-byte `RawConstraints`, judged as
+    /// its `Constraints::from_raw` judges it, at a numeric door or text alone, and with
+    /// [`ColumnBufferWith::checks`] set. Null declares none, and the column casts as it would
+    /// without this field. A declaration refused, at any other door, or without `checks` is
+    /// [`ERR_CONTRACT`] before any cell is read, as is a decimal in it whose sign byte is other
+    /// than `0` or `1`, which is read as a byte before the layout is.
+    pub constraints: *const RawConstraints,
+    /// The `enum` list, packed as HyperCast packs it, read only when `constraints` sets
+    /// `HAS_ENUM`; null and `0` otherwise.
+    pub enum_ptr: *const u8,
+    /// Bytes at `enum_ptr`.
+    pub enum_len: usize,
 }
 
 impl ColumnSpecWith {
     /// The layout's size in bytes: four words, HyperCast's 92-byte `RawNumFormat` and 12-byte
-    /// `RawDateOptions`, then two pointers and their lengths.
+    /// `RawDateOptions`, then three pointers and their lengths, the constraints between them.
     pub const SIZE: u32 = size_of::<ColumnSpecWith>() as u32;
 
     /// A column over `ordinal` through the door `door`/`param`: invariant notation, no options,
@@ -876,6 +906,9 @@ impl ColumnSpecWith {
             months_len: 0,
             tokens: core::ptr::null(),
             tokens_len: 0,
+            constraints: core::ptr::null(),
+            enum_ptr: core::ptr::null(),
+            enum_len: 0,
         }
     }
 }
@@ -894,10 +927,16 @@ pub struct ColumnBufferWith {
     /// `max_rows` notes, not aligned, or null to write none. In delimited text, a column with no
     /// notes, no tokens and no date options runs the same loop `hypertabular_delimited_fill` does.
     pub notes: *mut CellNote,
+    /// `max_rows` checks, aligned, HyperCast's `RawCheck` as its `cast_checked` writes one: on a
+    /// [`CellVerdict::VIOLATION`] the keyword, on a cell that cast whether rounding adjusted it and
+    /// the `enum` entry a text matched. Required when the column declares constraints; never read
+    /// or written when it declares none, so null there. A row whose verdict isn't from a door (a
+    /// token, padding, an uncached formula) or is a fault is left as it was.
+    pub checks: *mut RawCheck,
 }
 
 impl ColumnBufferWith {
-    /// The layout's size in bytes: four words.
+    /// The layout's size in bytes: five words.
     pub const SIZE: u32 = size_of::<ColumnBufferWith>() as u32;
 }
 

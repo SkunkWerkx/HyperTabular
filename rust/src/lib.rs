@@ -180,18 +180,19 @@ mod ruby_ext;
 
 #[cfg(feature = "std")]
 pub use hypercast::{
-    CivilDateTime, CurrencySymbol, Date, DateOptions, DateOrder, Decimal, Detail, Duration,
-    ExcelEpoch, Fault, Grouping, MonthNames, NativeDigits, NumFormat, Reason, Symbol, Timestamp,
-    UnixPrecision,
+    Checked, CivilDateTime, Constraints, CurrencySymbol, Date, DateOptions, DateOrder, Decimal,
+    Detail, Duration, ExcelEpoch, Fault, Grouping, Keyword, MonthNames, NativeDigits, NumFormat,
+    NumericRules, Reason, Rejection, Rounding, Symbol, Text, TextRules, Timestamp, UnixPrecision,
+    Violation,
 };
 
-pub use kernel::abi::{CellNote, CellVerdict, Span};
+pub use kernel::abi::{CellNote, CellVerdict, RawCheck, Span};
 pub use kernel::door::Door;
 
 #[cfg(feature = "std")]
 pub use batch::{Batch, Faults, Origin, Problem, Row, Rows, Value};
 #[cfg(feature = "std")]
-pub use column::Column;
+pub use column::{CheckedDoor, Column};
 #[cfg(feature = "std")]
 pub use delimited::{DelimitedOptions, DelimitedReader, Dialect, Encoding, LongRows, ShortRows};
 #[cfg(feature = "std")]

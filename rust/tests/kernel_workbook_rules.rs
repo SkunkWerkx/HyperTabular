@@ -1819,6 +1819,7 @@ fn fill_with_refuses_before_it_writes() {
         values: values.as_mut_ptr().cast(),
         verdicts: verdicts.as_mut_ptr(),
         notes: notes.as_mut_ptr(),
+        checks: core::ptr::null_mut(),
     };
     let state: *mut _ = &mut *harness.state;
     let fill = |spec: ColumnSpecWith,

@@ -20,6 +20,7 @@ import pytest
 from test_corpus import (
     _AsyncDribble,
     _assert_cell,
+    _assert_checked_column,
     _assert_column,
     _assert_failure,
     _assert_keys_are_known,
@@ -77,8 +78,8 @@ def _openings(case: dict[str, Any]) -> list[tuple[str, Any]]:
 
 def test_the_corpus_is_the_whole_contract():
     """The corpus is as large as it claims, and reaches every cell it says it does."""
-    assert len(CORPUS) == 398
-    assert len({case["file"] for case in CORPUS}) == 41
+    assert len(CORPUS) == 404
+    assert len({case["file"] for case in CORPUS}) == 42
     cells = sum(len(case["rows"]) * len(case["plan"]) for case in CORPUS if "sheet" in case)
     assert cells >= 12_000
 
@@ -133,6 +134,9 @@ def _replay(
             problems += [_problem_json(problem, seen) for problem in batch.faults()]
             for index, (column, data) in enumerate(zip(plan, batch.columns)):
                 expected = [row[index] for row in rows[seen : seen + batch.rows]]
+                if column.constraints is not None:
+                    _assert_checked_column(label, column, batch, index, seen, expected, notes)
+                    continue
                 for row, cell in enumerate(expected):
                     _assert_cell(
                         f"{label}, row {seen + row}, column {index}",

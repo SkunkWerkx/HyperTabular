@@ -34,6 +34,19 @@ import (
 // into rust/.cargo/config.toml, so nothing else built for wasm32-wasip1 changes.
 const defaultStack = 65536
 
+// optLevel is the core's opt-level for this build alone, passed on the command line like the
+// stack size, so nothing else built for wasm32-wasip1 changes. A workaround, not a tuning:
+// at the release profile's opt-level 3 (and at 2), the translation, under wasm2go -unsafe and
+// Go's inlining, reads two workbook cells of corpus/workbook/constraints.xlsx ("text judged
+// with its span" and "typed numbers judged through their typed twins", row 4) as Empty on
+// arm64 and GOARCH=wasm, where the same wasm under wasmtime, every native binding and amd64
+// read them right (2026-11-13, rustc 1.99.1, wasm2go v0.4.21, Go 1.26.10 and 1.27.4). Without
+// -unsafe, without inlining (-gcflags -l) or at opt-level 1 or s, it reads them right too.
+// Which of Go's optimizer and wasm2go's unsafe helpers is at fault is not settled; the corpus
+// replay on those targets is what holds this. Back to the profile's opt-level once the cause
+// is fixed upstream and the corpus passes there at 3.
+const optLevel = "s"
+
 const target = "wasm32-wasip1"
 
 var channelLine = regexp.MustCompile(`(?m)^channel = "([^"]+)"`)
@@ -92,7 +105,7 @@ func run() int {
 	rustDir := filepath.Join(*root, "rust")
 	targetDir := filepath.Join(rustDir, "target")
 	cargo := exec.Command("cargo", "+"+pin, "cdylib", "--target", target, "--target-dir", targetDir,
-		"--", "-C", "link-arg=-zstack-size="+strconv.Itoa(*stack), "-l", "c")
+		"--", "-C", "link-arg=-zstack-size="+strconv.Itoa(*stack), "-C", "opt-level="+optLevel, "-l", "c")
 	cargo.Dir = rustDir
 	if msg, err := cargo.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "wasm2go: cargo failed in %s: %v\n%s", rustDir, err, msg)

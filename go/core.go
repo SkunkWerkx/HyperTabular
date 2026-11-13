@@ -88,16 +88,17 @@ const (
 	buffersSize = 14 * 4
 	// buffersWithSize is a BuffersWith: its size word, those seven, the tokens and row_widths.
 	buffersWithSize = 18 * 4
-	// specWithSize is a ColumnSpecWith: 120 bytes, then two pointers each with its length.
-	specWithSize = 120 + 4*4
-	// bufferWithSize is a ColumnBufferWith.
-	bufferWithSize = 4 * 4
+	// specWithSize is a ColumnSpecWith: 120 bytes, then three pointers, each with its length
+	// but the constraints.
+	specWithSize = 120 + 7*4
+	// bufferWithSize is a ColumnBufferWith: its size word and four pointers.
+	bufferWithSize = 5 * 4
 	// delimitedOptionsSize and sheetOptionsSize are a RawDelimitedOptions and a RawSheetOptions.
 	delimitedOptionsSize = 24
 	sheetOptionsSize     = 36
 	// problemSize, suggestionSize and transcodedSize are a RawProblem, a RawSuggestion and a
 	// RawTranscoded.
-	problemSize    = 32
+	problemSize    = 36
 	suggestionSize = 20
 	transcodedSize = 32
 	// batchCheckSize is a RawBatchCheck, and these what its refused field says of a zero and of a
@@ -304,6 +305,7 @@ func decodeProblem(b []byte) rawProblem {
 		len:        le.Uint32(b[20:]),
 		expected:   le.Uint32(b[24:]),
 		found:      le.Uint32(b[28:]),
+		keyword:    le.Uint32(b[32:]),
 	}
 }
 
@@ -391,6 +393,7 @@ var (
 	fieldsDuration = []uint8{8, 4, 1, 1, 1, 1}
 	fieldsVerdict  = []uint8{4, 4, 4}
 	fieldsNote     = []uint8{2, 2}
+	fieldsCheck    = []uint8{4, 4, 4}
 )
 
 // decodeFields writes src, values of the given fields in the guest's little-endian order,
@@ -559,7 +562,12 @@ func (n *native) attach(set *columns) bool {
 	count := uint64(len(set.specs))
 	listBytes := uint64(0)
 	for index := range set.extras {
-		listBytes += uint64(len(set.extras[index].months)) + uint64(len(set.extras[index].tokens))
+		extra := &set.extras[index]
+		listBytes += uint64(len(extra.months)) + uint64(len(extra.tokens))
+		if extra.checked {
+			// The declaration 8-aligned, as the core reads it, and its enum list behind it.
+			listBytes = (listBytes+7)&^7 + rawConstraintsSize + uint64(len(extra.enum))
+		}
 	}
 	widthBytes := uint64(0)
 	if set.widths {
@@ -580,17 +588,21 @@ func (n *native) attach(set *columns) bool {
 	mem := n.in.mem()
 	lists := n.lists.off
 	for index := range set.specs {
-		values := n.block.off + uint32(set.offsets[3*index])
-		verdicts := n.block.off + uint32(set.offsets[3*index+1])
-		var notes uint32
+		values := n.block.off + uint32(set.offsets[4*index])
+		verdicts := n.block.off + uint32(set.offsets[4*index+1])
+		var notes, checks uint32
 		if set.notes {
-			notes = n.block.off + uint32(set.offsets[3*index+2])
+			notes = n.block.off + uint32(set.offsets[4*index+2])
+		}
+		if set.extras[index].checked {
+			checks = n.block.off + uint32(set.offsets[4*index+3])
 		}
 		buffer := mem[n.colBufs.off+uint32(index)*bufferWithSize:]
 		le.PutUint32(buffer[0:], bufferWithSize)
 		le.PutUint32(buffer[4:], values)
 		le.PutUint32(buffer[8:], verdicts)
 		le.PutUint32(buffer[12:], notes)
+		le.PutUint32(buffer[16:], checks)
 		extra := &set.extras[index]
 		dst := mem[n.specs.off+uint32(index)*specWithSize:]
 		putSpecWith(dst, &set.specs[index], extra)
@@ -611,6 +623,17 @@ func (n *native) attach(set *columns) bool {
 			le.PutUint32(dst[128:], at)
 			le.PutUint32(dst[132:], uint32(len(extra.tokens)))
 		}
+		if extra.checked {
+			lists = (lists + 7) &^ 7
+			putConstraints(mem[lists:lists+rawConstraintsSize], &extra.constraints)
+			le.PutUint32(dst[136:], lists)
+			lists += rawConstraintsSize
+			// The enum list's address is read only when the declaration says it has one.
+			le.PutUint32(dst[140:], lists)
+			le.PutUint32(dst[144:], uint32(len(extra.enum)))
+			copy(mem[lists:], extra.enum)
+			lists += uint32(len(extra.enum))
+		}
 	}
 	n.planned = set
 	set.point(n, 0)
@@ -628,10 +651,38 @@ func putSpecWith(dst []byte, spec *rawSpec, extra *specExtra) {
 	le.PutUint32(dst[108:], extra.date.Size)
 	le.PutUint32(dst[112:], extra.date.Flags)
 	le.PutUint32(dst[116:], extra.date.Pivot)
+	clear(dst[120:specWithSize])
 }
 
 // rawFormatSize is HyperCast's RawNumFormat.
 const rawFormatSize = 92
+
+// rawConstraintsSize is HyperCast's RawConstraints.
+const rawConstraintsSize = 104
+
+// putConstraints writes HyperCast's RawConstraints field by field in the guest's order: its six
+// words, then the five decimals, each its magnitude's low 64 bits and high 32, its scale and sign.
+func putConstraints(dst []byte, c *hypercast.RawConstraints) {
+	le.PutUint32(dst[0:], c.Size)
+	le.PutUint32(dst[4:], c.Flags)
+	le.PutUint32(dst[8:], c.Rounding)
+	le.PutUint32(dst[12:], c.MinLength)
+	le.PutUint32(dst[16:], c.MaxLength)
+	le.PutUint32(dst[20:], c.Reserved)
+	for index, decimal := range []*hypercast.Decimal{
+		&c.Minimum, &c.Maximum, &c.MultipleOf, &c.ExclusiveMinimum, &c.ExclusiveMaximum,
+	} {
+		at := dst[24+16*index:]
+		le.PutUint64(at[0:], decimal.Lo)
+		le.PutUint32(at[8:], decimal.Hi)
+		at[12] = decimal.Scale
+		at[13] = 0
+		if decimal.Negative {
+			at[13] = 1
+		}
+		at[14], at[15] = 0, 0
+	}
+}
 
 // putFormat writes HyperCast's RawNumFormat field by field: its three words in the guest's order,
 // then each symbol's bytes and length.
@@ -666,7 +717,7 @@ func (set *columns) point(n *native, rows int) {
 	host := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(set.block))), set.blockBytes)
 	for index := range set.columns {
 		c := &set.columns[index]
-		values, verdicts, notes := set.offsets[3*index], set.offsets[3*index+1], set.offsets[3*index+2]
+		values, verdicts, notes := set.offsets[4*index], set.offsets[4*index+1], set.offsets[4*index+2]
 		size := uintptr(rows) * c.plan.door.valueSize()
 		decodeFields(host[values:values+size], block[values:values+size], c.plan.door.layout(), binary.NativeEndian)
 		size = uintptr(rows) * unsafe.Sizeof(CellVerdict{})
@@ -675,6 +726,11 @@ func (set *columns) point(n *native, rows int) {
 			size = uintptr(rows) * unsafe.Sizeof(rawNote{})
 			decodeFields(host[notes:notes+size], block[notes:notes+size], fieldsNote, binary.NativeEndian)
 		}
+		if c.plan.checked {
+			checks := set.offsets[4*index+3]
+			size = uintptr(rows) * uintptr(hypercast.RawCheckSize)
+			decodeFields(host[checks:checks+size], block[checks:checks+size], fieldsCheck, binary.NativeEndian)
+		}
 	}
 }
 
@@ -682,10 +738,13 @@ func (set *columns) point(n *native, rows int) {
 func (set *columns) pointAt(base unsafe.Pointer) {
 	for index := range set.columns {
 		c := &set.columns[index]
-		c.values = unsafe.Add(base, set.offsets[3*index])
-		c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, set.offsets[3*index+1])), set.batchRows)
+		c.values = unsafe.Add(base, set.offsets[4*index])
+		c.verdicts = unsafe.Slice((*CellVerdict)(unsafe.Add(base, set.offsets[4*index+1])), set.batchRows)
 		if set.notes {
-			c.notes = unsafe.Slice((*rawNote)(unsafe.Add(base, set.offsets[3*index+2])), set.batchRows)
+			c.notes = unsafe.Slice((*rawNote)(unsafe.Add(base, set.offsets[4*index+2])), set.batchRows)
+		}
+		if c.plan.checked {
+			c.checks = unsafe.Slice((*hypercast.RawCheck)(unsafe.Add(base, set.offsets[4*index+3])), set.batchRows)
 		}
 	}
 }
@@ -1008,19 +1067,41 @@ type sizeChecker struct {
 
 var sizeCheckers = sync.Pool{New: func() any { return &sizeChecker{n: newNative()} }}
 
-// askSizes asks the core about a read's sizes: its code and the RawBatchCheck it wrote.
-func askSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int32, [batchCheckSize]byte, error) {
+// askSizes asks the core about a read's sizes: its code and the RawBatchCheck it wrote. extras is
+// nil or one a spec: a column whose extra declares constraints is given its declaration, since the
+// core counts a check a row for each column whose spec points at one. The size check reads nothing
+// of a declaration but whether there is one, so its enum list stays behind.
+func askSizes(specs []rawSpec, extras []specExtra, batchRows, bufferBytes int, flags uint32) (int32, [batchCheckSize]byte, error) {
 	var found [batchCheckSize]byte
 	checker := sizeCheckers.Get().(*sizeChecker)
 	defer sizeCheckers.Put(checker)
 	n := checker.n
-	if !n.in.ensure(&checker.specs, uint64(len(specs))*specWithSize, false) {
+	specBytes := uint64(len(specs)) * specWithSize
+	declared := 0
+	for index := range extras {
+		if extras[index].checked {
+			declared++
+		}
+	}
+	// Each declaration 8-aligned, as the core reads it, behind the specs.
+	need := specBytes
+	if declared > 0 {
+		need += 7 + uint64(declared)*rawConstraintsSize
+	}
+	if !n.in.ensure(&checker.specs, need, false) {
 		return 0, found, guestMemory(len(specs))
 	}
 	if len(specs) > 0 {
 		mem := n.in.mem()
+		at := (checker.specs.off + uint32(specBytes) + 7) &^ 7
 		for index := range specs {
-			putSpecWith(mem[checker.specs.off+uint32(index)*specWithSize:], &specs[index], &specExtra{})
+			dst := mem[checker.specs.off+uint32(index)*specWithSize:]
+			putSpecWith(dst, &specs[index], &specExtra{})
+			if extras != nil && extras[index].checked {
+				putConstraints(mem[at:at+rawConstraintsSize], &extras[index].constraints)
+				le.PutUint32(dst[136:], at)
+				at += rawConstraintsSize
+			}
 		}
 	}
 	n.in.enter()
@@ -1032,7 +1113,7 @@ func askSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int32,
 
 // checkSizes is the core's answer on a read's sizes: the size to start an input buffer at, or an
 // error naming what was refused, with the bytes and the limit the core gave.
-func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int, error) {
+func checkSizes(specs []rawSpec, extras []specExtra, batchRows, bufferBytes int, flags uint32) (int, error) {
 	// The core takes an unsigned count, which a negative one isn't.
 	if batchRows < 0 {
 		return 0, fmt.Errorf("hypertabular: BatchRows must not be negative, not %d", batchRows)
@@ -1040,7 +1121,7 @@ func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int,
 	if bufferBytes < 0 {
 		return 0, fmt.Errorf("hypertabular: BufferBytes must not be negative, not %d", bufferBytes)
 	}
-	code, b, err := askSizes(specs, batchRows, bufferBytes, flags)
+	code, b, err := askSizes(specs, extras, batchRows, bufferBytes, flags)
 	if err != nil {
 		return 0, err
 	}
@@ -1065,31 +1146,33 @@ func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int,
 // sampleRows is the rows of a sampler's batch for a sampler wanting wanted rows: the core's answer,
 // however many batches that takes. Only a row past the limit is refused, in its words.
 func sampleRows(plan []Column, wanted int, flags uint32) (int, error) {
-	specs := sizeSpecs(plan)
-	_, found, err := askSizes(specs, wanted, 1, flags)
+	specs, extras := sizeSpecs(plan)
+	_, found, err := askSizes(specs, extras, wanted, 1, flags)
 	if err != nil {
 		return 0, err
 	}
 	rows := le.Uint64(found[24:])
 	if rows == 0 {
-		_, err := checkSizes(specs, wanted, 1, flags)
+		_, err := checkSizes(specs, extras, wanted, 1, flags)
 		return 0, err
 	}
 	return int(rows), nil
 }
 
-// sizeSpecs is what the core is told of a plan for its sizes alone. A plan that can't be honoured
-// says so where it always has, so its size is judged without it.
-func sizeSpecs(plan []Column) []rawSpec {
+// sizeSpecs is what the core is told of a plan for its sizes alone, each spec's extra beside it, a
+// declaration among them. A plan that can't be honoured says so where it always has, so its size is
+// judged without it.
+func sizeSpecs(plan []Column) ([]rawSpec, []specExtra) {
 	specs := make([]rawSpec, len(plan))
+	extras := make([]specExtra, len(plan))
 	for index, planned := range plan {
-		spec, _, err := planned.spec()
+		spec, extra, err := planned.spec()
 		if err != nil {
-			return nil
+			return nil, nil
 		}
-		specs[index] = spec
+		specs[index], extras[index] = spec, extra
 	}
-	return specs
+	return specs, extras
 }
 
 // rowsToCore is a batch's rows as the core's 32-bit count takes them. A size past it passes the check

@@ -271,6 +271,24 @@ fn allocation_free_through_every_option() {
         months.extend_from_slice(name.as_bytes());
     }
     let tokens = [2u8, 0, 0, 0, b'N', b'A', 1, 0, 0, 0, b'-'];
+    // Constraints on every door that takes them, an `enum` in each: a bound and a list of numbers,
+    // and a trimmed list of text.
+    let entries: Vec<hypercast::Decimal> = ["1", "2", "7"]
+        .iter()
+        .map(|entry| hypercast::decimal_for_declaration(entry).expect("a decimal"))
+        .collect();
+    let bound = hypercast::NumericRules::new()
+        .maximum(hypercast::decimal_for_declaration("5").expect("a decimal"));
+    let numeric = hypercast::Constraints::<hypercast::Decimal>::numeric(bound, Some(&entries))
+        .expect("it declares");
+    let words: &[&str] = &["a", "x", "hi"];
+    let text = hypercast::Constraints::text(hypercast::TextRules::new().trim(true), Some(words))
+        .expect("it declares");
+    let mut numeric_list = vec![0u8; numeric.pack_enum(&mut []).expect("it packs")];
+    numeric.pack_enum(&mut numeric_list);
+    let mut text_list = vec![0u8; text.pack_enum(&mut []).expect("it packs")];
+    text.pack_enum(&mut text_list);
+    let (numeric_raw, text_raw) = (numeric.raw(), text.raw());
     let with: Vec<ColumnSpecWith> = specs
         .iter()
         .map(|spec| {
@@ -279,9 +297,35 @@ fn allocation_free_through_every_option() {
             with.date.flags = hypertabular::DateOptions::COMPACT_DATE;
             with.months = months.as_ptr();
             with.months_len = months.len();
+            match Door::from_code(spec.door, spec.param) {
+                Some(Door::Text) => {
+                    with.constraints = &text_raw;
+                    with.enum_ptr = text_list.as_ptr();
+                    with.enum_len = text_list.len();
+                }
+                Some(
+                    Door::I8
+                    | Door::I16
+                    | Door::I32
+                    | Door::I64
+                    | Door::U8
+                    | Door::U16
+                    | Door::U32
+                    | Door::U64
+                    | Door::F32
+                    | Door::F64
+                    | Door::Decimal,
+                ) => {
+                    with.constraints = &numeric_raw;
+                    with.enum_ptr = numeric_list.as_ptr();
+                    with.enum_len = numeric_list.len();
+                }
+                _ => {}
+            }
             with
         })
         .collect();
+    let constraints_xlsx = packages::constraints_xlsx();
     let mut values: Vec<Vec<u8>> = specs
         .iter()
         .map(|spec| {
@@ -297,15 +341,24 @@ fn allocation_free_through_every_option() {
         .iter()
         .map(|_| vec![CellNote::default(); ROWS])
         .collect();
+    let unchecked = hypercast::RawCheck {
+        keyword: 0,
+        adjusted: 0,
+        enum_index: 0,
+    };
+    let mut checks: Vec<Vec<hypercast::RawCheck>> =
+        specs.iter().map(|_| vec![unchecked; ROWS]).collect();
     let columns: Vec<ColumnBufferWith> = values
         .iter_mut()
         .zip(verdicts.iter_mut())
         .zip(notes.iter_mut())
-        .map(|((values, verdicts), notes)| ColumnBufferWith {
+        .zip(checks.iter_mut())
+        .map(|(((values, verdicts), notes), checks)| ColumnBufferWith {
             size: ColumnBufferWith::SIZE,
             values: values.as_mut_ptr().cast(),
             verdicts: verdicts.as_mut_ptr(),
             notes: notes.as_mut_ptr(),
+            checks: checks.as_mut_ptr(),
         })
         .collect();
     let mut widths = vec![0u32; ROWS];
@@ -318,7 +371,17 @@ fn allocation_free_through_every_option() {
     }
     let uncached = room.read_with(&uncached_xlsx, &with, &columns, &tokens, &mut widths)
         + room.read_with(&uncached_ods, &with, &columns, &tokens, &mut widths);
+    let constrained = room.read_with(&constraints_xlsx, &with, &columns, &tokens, &mut widths);
     let allocations = ALLOC_COUNT.get() - before;
+    let broken = verdicts
+        .iter()
+        .flat_map(|column| column.iter().take(constrained as usize))
+        .filter(|verdict| verdict.reason == CellVerdict::VIOLATION)
+        .count();
+    assert!(
+        constrained > 0 && broken > 0,
+        "{constrained} rows, {broken} violations"
+    );
 
     assert_eq!(allocations, 0, "the workbook core allocated");
     // Three formats, rows 5 to 12 less the empty one, the header (row 4) read off by `skip` first.

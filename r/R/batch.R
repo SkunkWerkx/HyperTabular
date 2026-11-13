@@ -19,11 +19,59 @@ origin_factor <- function(code) {
   structure(index, levels = levels, class = "factor")
 }
 
+# The OpenAPI keywords by the core's codes, as hypercast names them: a code this hypertabular
+# doesn't know reads as "keyword N".
+keywords <- c("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf",
+              "minLength", "maxLength", "enum")
+
+keyword_name <- function(code) {
+  name <- keywords[code]
+  unknown <- !is.na(code) & is.na(name)
+  name[unknown] <- paste("keyword", code[unknown])
+  name
+}
+
+# Each entry of a text enum as hypercast packed it: a little-endian u32 length, then the bytes.
+text_entries <- function(packed) {
+  out <- list()
+  at <- 1L
+  while (at + 3L <= length(packed)) {
+    n <- sum(as.numeric(packed[at:(at + 3L)]) * 256^(0:3))
+    out[[length(out) + 1L]] <- packed[seq_len(n) + at + 3L]
+    at <- at + 4L + as.integer(n)
+  }
+  out
+}
+
+# A constrained text column's enum matches as the entries declared: the caller's own strings, or
+# with raw = TRUE the bytes hypercast packed for them, the ones the core matched.
+declared_entries <- function(cols, column) {
+  index <- cols$enum_index
+  at <- which(!is.na(index))
+  if (column$door != "text" || !length(at)) {
+    return(cols$value)
+  }
+  value <- cols$value
+  if (isTRUE(column$raw)) {
+    entries <- text_entries(declaration_of(column$constraints, "text")[[2]])
+    value[at] <- entries[index[at]]
+  } else {
+    value[at] <- column$constraints$enum[index[at]]
+  }
+  value
+}
+
 # One plan column's columns, as the C shim wrote them, as a HyperCast verdict: the shape
-# hypercast's own doors return (hypercast::hypercast_verdict), then `raw` and `origin`.
+# hypercast's own doors return (hypercast::hypercast_verdict, or for a column that declares
+# constraints hypercast::hypercast_checked_verdict), then `raw` and `origin`.
 as_verdict <- function(cols, column) {
   n <- length(cols$ok)
+  checked <- !is.null(column$constraints)
   cols$reason <- structure(cols$reason, levels = reasons, class = "factor")
+  if (checked) {
+    cols$keyword <- keyword_name(cols$keyword)
+    cols$value <- declared_entries(cols, column)
+  }
   switch(column$door,
     timestamp = , unix = , excel_serial = {
       cols$value <- .POSIXct(cols$value, tz = "UTC")
@@ -48,7 +96,8 @@ as_verdict <- function(cols, column) {
   cols$raw <- raw
   cols$origin <- origin_factor(origin)
   structure(cols,
-            class = c("hypercast_verdict", "data.frame"),
+            class = c(if (checked) "hypercast_checked_verdict" else "hypercast_verdict",
+                      "data.frame"),
             row.names = .set_row_names(n),
             door = paste0("col_", column$factory))
 }
@@ -116,9 +165,13 @@ empty_columns <- function(column) {
     time = list(nanos = numeric()),
     list()
   )
+  checked <- !is.null(column$constraints)
   c(list(value = value), extras,
-    list(ok = logical(), reason = integer(), offset = integer(), length = integer(),
-         raw = character(), detail = integer(), origin = integer()))
+    if (checked) list(adjusted = logical(), enum_index = integer()),
+    list(ok = logical(), reason = integer()),
+    if (checked) list(keyword = integer()),
+    list(offset = integer(), length = integer(), raw = character(), detail = integer(),
+         origin = integer()))
 }
 
 new_table <- function(reader, raws, plan, names) {
@@ -172,7 +225,8 @@ new_table <- function(reader, raws, plan, names) {
 #' row number in the sheet, and `row` its 1-based place among the rows the read delivered.
 #'
 #' `as.data.frame()` gives the values alone, one column per plan column, `NA` where a cell
-#' did not cast.
+#' did not cast. A cell that cast but broke its column's constraints keeps its value as cast
+#' there; its verdict's `ok` is what says it failed.
 #'
 #' @param x A `hypertabular_batch`.
 #' @param row.names,optional,... As for [as.data.frame()]; `...` is passed on to `print()`.

@@ -232,6 +232,52 @@ options before it opens anything. HyperCast's
 [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
 and the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf` with `rounding`,
+`minLength`, `maxLength`, `enum`, with `trim` and `caseSensitive` for text), through the column
+factory's `constraints`. The declaration is for the column's door: `Constraints` for `Door::I32` on a
+`Column::u8` is an `InvalidArgumentException`, and a door that takes no constraints has no factory
+argument for them. Each cell is cast first, so text that isn't the type is a `Fault` as ever, and then
+judged:
+
+```php
+use HyperCast\{Checked, Constraints, Door, Fault, Violation};
+use HyperTabular\{Column, DelimitedReader, Dialect};
+
+$plan = [
+    Column::i32(0, constraints: new Constraints(Door::I32, minimum: 1, maximum: 10)),
+    Column::text(1, new Constraints(Door::Text, enum: ['Female', 'Male'])),
+];
+$batch = DelimitedReader::fromString("qty,sex\n12,MALE\n7,x\n", Dialect::csv(), $plan)->read();
+foreach ($batch as $row) {
+    $qty = $row->getChecked(0);
+    echo match (true) {
+        $qty instanceof Checked => $qty->value,
+        $qty instanceof Violation => "{$qty->value} breaks {$qty->keywordName()}",
+        $qty instanceof Fault => $qty->reason->name,
+    };
+    // "MALE" matches the entry, and reads as "Male".
+    $sex = $row->getChecked(1);
+    echo ' ', $sex instanceof Checked ? $sex->value : $sex::class, "\n";
+}
+foreach ($batch->faults() as $problem) {
+    echo "line {$problem->line} column {$problem->sourceColumn} {$problem->keyword->name}\n";
+}
+```
+
+It prints `12 breaks maximum Male`, `7 HyperCast\Violation`, `line 2 column 0 Maximum` and
+`line 3 column 1 Enum`. A violation isn't a fault: the cell cast, so `faults($column)` and a row's
+`fault()` leave it out, its value in `values()` and a row's `value()` is kept exactly as cast (never
+rounded), and its span is the judged text's bytes. A cell `multipleOf` rounded passes as `Checked`
+with `adjusted` set, and a text `enum` match reads as the entry as declared, the caller's own string,
+with `enumIndex` naming it. `faults()` lists a violation with its `keyword` (and `keywordCode`) and a
+`reason` of `null`. A batch's `get()` and `verdicts()` and a row's `get()` throw a `\LogicException`
+on a constrained column, since they would read a violation as passed; `getChecked()`, and
+`checkedVerdicts()` for the whole column at once, read an unconstrained column too, where every cell
+that cast passes, unadjusted.
+
 ## The shape
 
 The core owns no memory and reads no files; the Rust reader underneath `DelimitedReader` and `Sheet`
@@ -251,15 +297,16 @@ into PHP values the first time it is asked for.
   that reads at or past its width is refused with an `InvalidArgumentException` naming the
   column: no record has a cell there.
 - **One batch class.** `read()` returns a `Batch` — `rows()`, `columns()`, `line($row)`,
-  `values($column)`, `faults()`, `verdicts($column)`, `get($column, $row)`, `origin($column, $row)`,
-  `detail($column, $row)` and `raw($column, $row)` — or `null` once there are no more rows, for
+  `values($column)`, `faults()`, `verdicts($column)`, `checkedVerdicts($column)`,
+  `get($column, $row)`, `getChecked($column, $row)`, `origin($column, $row)`, `detail($column, $row)` and
+  `raw($column, $row)` — or `null` once there are no more rows, for
   delimited text and a sheet alike. A batch owns what it shows: it stays good after the reader has
   moved on.
 - **Or a row at a time.** A `Batch` iterates its rows as `Row` objects — `index()`,
-  `line()`, `get($column)`, `value($column)`, `fault($column)`, `origin($column)`, `detail($column)`,
-  `raw($column)`, each the batch's own answer for that row — and `rows()` on a reader or a sheet is a
-  `RowIterator` over every row left, reading batch after batch, forward only. A row owns what it
-  shows, as its batch does.
+  `line()`, `get($column)`, `getChecked($column)`, `value($column)`, `fault($column)`,
+  `origin($column)`, `detail($column)`, `raw($column)`, each the batch's own answer for that row —
+  and `rows()` on a reader or a sheet is a `RowIterator` over every row left, reading batch after
+  batch, forward only. A row owns what it shows, as its batch does.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header, and what the
   previous section lists; `SheetOptions` states a sheet's header, whether empty rows are skipped, the
   batch size, its range and the rest; the plan states each column's door and, for numbers, its

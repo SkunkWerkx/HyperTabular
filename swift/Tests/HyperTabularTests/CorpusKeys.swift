@@ -9,15 +9,20 @@ final class CorpusKeysTests: XCTestCase {
 
     private static let format: Keys = ["decimal_sep", "group_sep", "flags", "currency"]
     private static let plan: Keys = [
-        "door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options",
+        "door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options", "constraints",
     ]
     private static let dateOptions: Keys = ["flags", "pivot", "months"]
+    private static let constraints: Keys = [
+        "minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf", "rounding", "minLength",
+        "maxLength", "enum", "trim", "caseSensitive",
+    ]
     private static let cell: Keys = [
         "expect", "fault", "raw", "raw_hex", "detail", "origin", "value", "text", "magnitude", "negative", "scale",
-        "seconds", "nanos", "year", "month", "day", "nanos_of_day",
+        "seconds", "nanos", "year", "month", "day", "nanos_of_day", "keyword", "adjusted", "enum_index", "bits",
     ]
     private static let problem: Keys = [
         "row", "line", "plan_column", "source_column", "reason", "detail", "origin", "fault", "expected", "found",
+        "keyword",
     ]
     private static let failure: Keys = ["kind", "record", "line", "byte", "expected", "found"]
     private static let suggest: Keys = ["columns", "truncated", "sample_rows", "format"]
@@ -78,6 +83,7 @@ final class CorpusKeysTests: XCTestCase {
             let column = column as? [String: Any] ?? [:]
             check(column["format"], "\(name).plan[].format", format, &unknown)
             check(column["options"], "\(name).plan[].options", dateOptions, &unknown)
+            check(column["constraints"], "\(name).plan[].constraints", constraints, &unknown)
         }
         for row in each(entry["rows"]) {
             for value in each(row) {

@@ -32,6 +32,9 @@ public readonly ref struct Row
 	/// <exception cref="InvalidOperationException">The column's door does not make a <typeparamref name="T"/>.</exception>
 	public Verdict<T> Get<T>(int column) where T : struct => _batch.Get<T>(column, Index);
 
+	/// <summary>The cell in <paramref name="column"/> as <see cref="Batch.GetChecked{T}"/> reads it.</summary>
+	public CheckedVerdict<T> GetChecked<T>(int column) where T : notnull => _batch.GetChecked<T>(column, Index);
+
 	/// <summary>The verdict of the cell in <paramref name="column"/>: <see cref="Batch.Verdicts"/> of the column, at this row.</summary>
 	public CellVerdict Verdict(int column) => _batch.Verdicts(column)[Index];
 

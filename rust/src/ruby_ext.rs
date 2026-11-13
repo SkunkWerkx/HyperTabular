@@ -36,8 +36,9 @@ use magnus::{
 use crate::column;
 use crate::kernel::abi::{
     CellNote, CellVerdict, ColumnBufferWith, ColumnSpecWith, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE,
-    ERR_WINDOW, Failure, Filled, OK, Opened as Found, RawBatchCheck, RawDelimitedOptions,
-    RawProblem, RawRange, RawSheetOptions, RawSuggestion, RawTranscoded, Slot, Span,
+    ERR_WINDOW, Failure, Filled, OK, Opened as Found, RawBatchCheck, RawCheck, RawConstraints,
+    RawDelimitedOptions, RawProblem, RawRange, RawSheetOptions, RawSuggestion, RawTranscoded, Slot,
+    Span,
 };
 use crate::kernel::delimited::fill::{self, State};
 use crate::kernel::delimited::unescape::unescape_into;
@@ -67,6 +68,10 @@ const STRINGS_BOUND: u64 = 1 << 28;
 const SPEC_FIXED: usize = 120;
 /// RawProblems one `faults` call lists into, as runtime.rb's `FAULTS_BYTES`.
 const FAULTS: usize = 256;
+/// The `u32`s in one `RawCheck`: the keyword, adjusted and the enum index. Checks are kept as
+/// words, which every bit pattern is a value of.
+const CHECK_WORDS: usize = size_of::<RawCheck>() / 4;
+const _: () = assert!(size_of::<RawCheck>() == 12 && align_of::<RawCheck>() == align_of::<u32>());
 
 /// What the gem's objects need from Ruby, looked up once at load: the error a call raises
 /// for a structural failure, the module that holds the specs' switches, and the message of
@@ -211,6 +216,8 @@ struct Spec {
     fixed: [u8; SPEC_FIXED],
     months: Option<Vec<u8>>,
     tokens: Option<Vec<u8>>,
+    /// HyperCast's packed `Constraints`, and its packed `enum`, for a column that declares them.
+    constraints: Option<(Box<RawConstraints>, Vec<u8>)>,
 }
 
 impl Spec {
@@ -226,10 +233,19 @@ impl Spec {
             // SAFETY: copied out at once.
             Ok(list.map(|list| unsafe { list.as_slice() }.to_vec()))
         };
+        let constraints = match (list(3)?, list(4)?) {
+            (None, None) => None,
+            (Some(packed), Some(packed_enum)) => Some((
+                Box::new(column::raw_constraints(&packed).ok_or_else(|| contract(ruby))?),
+                packed_enum,
+            )),
+            _ => return Err(contract(ruby)),
+        };
         Ok(Spec {
             fixed,
             months: list(1)?,
             tokens: list(2)?,
+            constraints,
         })
     }
 
@@ -267,17 +283,24 @@ impl Spec {
             spec.tokens = tokens.as_ptr();
             spec.tokens_len = tokens.len();
         }
+        if let Some((constraints, packed_enum)) = &self.constraints {
+            spec.constraints = &**constraints;
+            spec.enum_ptr = packed_enum.as_ptr();
+            spec.enum_len = packed_enum.len();
+        }
         spec
     }
 }
 
 /// Each column's value array (8-byte words, so that every door's type is aligned in it), the
-/// bytes one of its values takes, its verdict array and its notes, empty with notes off.
+/// bytes one of its values takes, its verdict array, its notes, empty with notes off, and its
+/// checks, `CHECK_WORDS` a row, empty for a column that declares no constraints.
 struct Store {
     values: Vec<u64>,
     size: usize,
     verdicts: Vec<CellVerdict>,
     notes: Vec<CellNote>,
+    checks: Vec<u32>,
 }
 
 /// A plan as the core takes it, and the arrays the core casts it into: runtime/columns.rb's
@@ -317,6 +340,15 @@ impl Columns {
                 size,
                 verdicts: zeroed::<CellVerdict>(ruby, batch_rows)?,
                 notes: zeroed::<CellNote>(ruby, if notes { batch_rows } else { 0 })?,
+                // As many checks as verdicts, for a column that declares constraints.
+                checks: zeroed::<u32>(
+                    ruby,
+                    if spec.constraints.is_some() {
+                        product(ruby, batch_rows, CHECK_WORDS)?
+                    } else {
+                        0
+                    },
+                )?,
             });
             packed.push(spec);
         }
@@ -346,6 +378,7 @@ impl Columns {
                 } else {
                     store.notes.as_mut_ptr()
                 },
+                checks: checks_of(&mut store.checks),
             })
             .collect()
     }
@@ -369,6 +402,20 @@ impl Columns {
         Ok(binary(ruby, as_bytes(notes)))
     }
 
+    /// A column's checks for the first +rows+ rows, or nil for a column that declares no
+    /// constraints.
+    fn checks(&self, ruby: &Ruby, column: usize, rows: usize) -> Result<Option<RString>, Error> {
+        let store = self.column(ruby, column, rows)?;
+        if store.checks.is_empty() {
+            return Ok(None);
+        }
+        let checks = store
+            .checks
+            .get(..rows * CHECK_WORDS)
+            .ok_or_else(|| contract(ruby))?;
+        Ok(Some(binary(ruby, as_bytes(checks))))
+    }
+
     /// The widths of the first +rows+ rows.
     fn widths(&self, ruby: &Ruby, rows: usize) -> Result<RString, Error> {
         let widths = self.widths.get(..rows).ok_or_else(|| contract(ruby))?;
@@ -385,6 +432,16 @@ impl Columns {
                 format!("column {column} is outside the plan"),
             )
         })
+    }
+}
+
+/// A column's checks as the core takes them: null for none.
+fn checks_of(checks: &mut [u32]) -> *mut RawCheck {
+    if checks.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        // `RawCheck` is three `u32`s, aligned as one (`CHECK_WORDS`).
+        checks.as_mut_ptr().cast()
     }
 }
 
@@ -754,6 +811,19 @@ impl Delimited {
             .notes(ruby, column, rows)
     }
 
+    fn checks(
+        ruby: &Ruby,
+        rb_self: &Self,
+        column: usize,
+        rows: usize,
+    ) -> Result<Option<RString>, Error> {
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .checks(ruby, column, rows)
+    }
+
     fn widths(ruby: &Ruby, rb_self: &Self, rows: usize) -> Result<RString, Error> {
         rb_self.read.borrow().columns(ruby)?.widths(ruby, rows)
     }
@@ -838,11 +908,14 @@ fn aligned<T: AllZero>(ruby: &Ruby, text: RString, count: usize) -> Result<Vec<T
 }
 
 /// `Runtime.faults`: every `RawProblem` of a batch as one binary String, from the columns'
-/// verdicts as the core wrote them, their notes or nil, and the row widths or nil.
+/// verdicts as the core wrote them, their notes or nil, their checks or nil (each column's nil
+/// where it declares no constraints), and the row widths or nil.
+#[allow(clippy::too_many_arguments)] // Magnus takes what the Ruby method takes, one by one.
 fn faults(
     ruby: &Ruby,
     verdicts: RArray,
     notes: Option<RArray>,
+    checks: Option<RArray>,
     rows: usize,
     widths: Option<RString>,
     expected: u32,
@@ -850,10 +923,19 @@ fn faults(
 ) -> Result<RString, Error> {
     let mut verdict_arrays = Vec::with_capacity(verdicts.len());
     let mut note_arrays = Vec::with_capacity(verdicts.len());
+    let mut check_arrays = Vec::with_capacity(verdicts.len());
     for column in 0..verdicts.len() as isize {
         verdict_arrays.push(aligned::<CellVerdict>(ruby, verdicts.entry(column)?, rows)?);
         note_arrays.push(match notes {
             Some(notes) => aligned::<CellNote>(ruby, notes.entry(column)?, rows)?,
+            None => Vec::new(),
+        });
+        let checked: Option<RString> = match checks {
+            Some(checks) => checks.entry(column)?,
+            None => None,
+        };
+        check_arrays.push(match checked {
+            Some(checked) => aligned::<u32>(ruby, checked, product(ruby, rows, CHECK_WORDS)?)?,
             None => Vec::new(),
         });
     }
@@ -864,7 +946,8 @@ fn faults(
     let buffers: Vec<ColumnBufferWith> = verdict_arrays
         .iter_mut()
         .zip(note_arrays.iter_mut())
-        .map(|(verdicts, notes)| ColumnBufferWith {
+        .zip(check_arrays.iter_mut())
+        .map(|((verdicts, notes), checks)| ColumnBufferWith {
             size: ColumnBufferWith::SIZE,
             values: std::ptr::null_mut(),
             verdicts: verdicts.as_mut_ptr(),
@@ -873,6 +956,7 @@ fn faults(
             } else {
                 notes.as_mut_ptr()
             },
+            checks: checks_of(checks),
         })
         .collect();
     let mut cursor = 0u64;
@@ -1505,6 +1589,19 @@ impl Reading {
             .notes(ruby, column, rows)
     }
 
+    fn checks(
+        ruby: &Ruby,
+        rb_self: &Self,
+        column: usize,
+        rows: usize,
+    ) -> Result<Option<RString>, Error> {
+        rb_self
+            .read
+            .borrow()
+            .columns(ruby)?
+            .checks(ruby, column, rows)
+    }
+
     fn widths(ruby: &Ruby, rb_self: &Self, rows: usize) -> Result<RString, Error> {
         rb_self.read.borrow().columns(ruby)?.widths(ruby, rows)
     }
@@ -1607,6 +1704,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     delimited.define_method("values", method!(Delimited::values, 2))?;
     delimited.define_method("verdicts", method!(Delimited::verdicts, 2))?;
     delimited.define_method("notes", method!(Delimited::notes, 2))?;
+    delimited.define_method("checks", method!(Delimited::checks, 2))?;
     delimited.define_method("widths", method!(Delimited::widths, 1))?;
 
     let opened = native.define_class("Opened", ruby.class_object())?;
@@ -1628,6 +1726,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     reading.define_method("values", method!(Reading::values, 2))?;
     reading.define_method("verdicts", method!(Reading::verdicts, 2))?;
     reading.define_method("notes", method!(Reading::notes, 2))?;
+    reading.define_method("checks", method!(Reading::checks, 2))?;
     reading.define_method("widths", method!(Reading::widths, 1))?;
 
     // The entry points the Ruby above calls, now handing out the objects above.
@@ -1636,7 +1735,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     runtime.define_singleton_method("unescape", function!(unescape, 1))?;
     runtime.define_singleton_method("refused", function!(refused, 1))?;
     runtime.define_singleton_method("transcode", function!(transcode, 6))?;
-    runtime.define_singleton_method("faults", function!(faults, 6))?;
+    runtime.define_singleton_method("faults", function!(faults, 7))?;
     runtime.define_singleton_method("suggest", function!(suggest, 6))?;
     runtime.define_singleton_method("range_parse", function!(range_parse, 1))?;
     runtime.define_singleton_method("batch_check", function!(batch_check, 4))?;

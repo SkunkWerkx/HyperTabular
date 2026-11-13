@@ -266,7 +266,38 @@ fn options_and_notes_allocate_nothing() {
         ColumnSpecWith::new(2, 18, 0),
         ColumnSpecWith::new(3, 20, 3),
         ColumnSpecWith::new(0, 15, 0),
+        ColumnSpecWith::new(0, 4, 0),
+        ColumnSpecWith::new(1, 18, 0),
     ];
+    // Constraints, an `enum` in each: a bound and a list over the integers, a trimmed list of text.
+    let numbers: Vec<hypercast::Decimal> = ["1", "2", "3"]
+        .iter()
+        .map(|entry| hypercast::decimal_for_declaration(entry).expect("a decimal"))
+        .collect();
+    let bound = hypercast::NumericRules::new()
+        .maximum(hypercast::decimal_for_declaration("2500").expect("a decimal"));
+    let integers =
+        hypercast::Constraints::<i32>::numeric(bound, Some(&numbers)).expect("it declares");
+    let words: &[&str] = &["NA", "é", "-"];
+    let words_declared =
+        hypercast::Constraints::text(hypercast::TextRules::new().trim(true), Some(words))
+            .expect("it declares");
+    let packed = |len: Option<usize>, pack: &dyn Fn(&mut [u8]) -> Option<usize>| {
+        let mut list = vec![0u8; len.expect("it packs")];
+        pack(&mut list);
+        list
+    };
+    let integer_list = packed(integers.pack_enum(&mut []), &|out| integers.pack_enum(out));
+    let text_list = packed(words_declared.pack_enum(&mut []), &|out| {
+        words_declared.pack_enum(out)
+    });
+    let (integer_raw, text_raw) = (integers.raw(), words_declared.raw());
+    specs[6].constraints = &integer_raw;
+    specs[6].enum_ptr = integer_list.as_ptr();
+    specs[6].enum_len = integer_list.len();
+    specs[7].constraints = &text_raw;
+    specs[7].enum_ptr = text_list.as_ptr();
+    specs[7].enum_len = text_list.len();
     specs[2].tokens = dash.as_ptr();
     specs[2].tokens_len = dash.len();
     specs[4].date = hypercast::RawDateOptions {
@@ -290,15 +321,30 @@ fn options_and_notes_allocate_nothing() {
         .iter()
         .map(|_| vec![CellNote::default(); ROWS])
         .collect();
+    let mut checks: Vec<Vec<hypercast::RawCheck>> = specs
+        .iter()
+        .map(|_| {
+            vec![
+                hypercast::RawCheck {
+                    keyword: 0,
+                    adjusted: 0,
+                    enum_index: 0,
+                };
+                ROWS
+            ]
+        })
+        .collect();
     let columns: Vec<ColumnBufferWith> = values
         .iter_mut()
         .zip(verdicts.iter_mut())
         .zip(notes.iter_mut())
-        .map(|((values, verdicts), notes)| ColumnBufferWith {
+        .zip(checks.iter_mut())
+        .map(|(((values, verdicts), notes), checks)| ColumnBufferWith {
             size: ColumnBufferWith::SIZE,
             values: values.as_mut_ptr().cast(),
             verdicts: verdicts.as_mut_ptr(),
             notes: notes.as_mut_ptr(),
+            checks: checks.as_mut_ptr(),
         })
         .collect();
     let mut cells = vec![Span::default(); ROWS * 5];
@@ -330,7 +376,7 @@ fn options_and_notes_allocate_nothing() {
     buffers.tokens = tokens.as_ptr();
     buffers.tokens_len = tokens.len();
     buffers.row_widths = widths.as_mut_ptr();
-    let (mut rows, mut noted, mut listed) = (0u64, 0u64, 0u64);
+    let (mut rows, mut noted, mut listed, mut broken, mut matched) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut problems = [RawProblem::default(); 3];
     let (init, header);
     // SAFETY: every buffer is the size given beside it, sixteen bytes a row a value.
@@ -368,6 +414,19 @@ fn options_and_notes_allocate_nothing() {
             }
             at += out.consumed as usize;
             rows += out.rows;
+            for column in &verdicts {
+                broken += column
+                    .iter()
+                    .take(out.rows as usize)
+                    .filter(|verdict| verdict.reason == CellVerdict::VIOLATION)
+                    .count() as u64;
+            }
+            matched += checks[7]
+                .iter()
+                .zip(&verdicts[7])
+                .take(out.rows as usize)
+                .filter(|(check, verdict)| verdict.is_ok() && check.enum_index != u32::MAX)
+                .count() as u64;
             for column in &notes {
                 noted += column
                     .iter()
@@ -406,6 +465,11 @@ fn options_and_notes_allocate_nothing() {
     assert_eq!(rows, 5_000);
     assert!(noted > 5_000, "{noted} cells had a note");
     assert!(listed >= 1_000, "{listed} problems were listed");
+    assert!(broken >= 1_000, "{broken} cells broke a constraint");
+    assert!(
+        matched >= 1_000,
+        "{matched} text cells matched an enum entry"
+    );
     assert_eq!(allocations, 0, "the core allocated {allocations} time(s)");
 }
 

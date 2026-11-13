@@ -67,8 +67,16 @@ RSpec.describe "delimited conformance corpus" do
         problems.concat(batch.faults.map { |problem| problem_json(batch, problem, seen) })
         assert_rows(label, plan, batch)
         # A cell at a time first, then the column at once: the two must tell one story.
-        single = plan.each_index.map { |column| Array.new(batch.rows) { |row| batch.get(column, row) } }
-        plan.each_index { |column| expect(batch.verdicts(column)).to eq(single[column]), label }
+        single = plan.each_index.map do |column|
+          Array.new(batch.rows) { |row| batch.send(:verdict_of, column, row) }
+        end
+        plan.each_index do |column|
+          if plan[column].checked?
+            expect { batch.verdicts(column) }.to raise_error(TypeError, /get_checked/), label
+          else
+            expect(batch.verdicts(column)).to eq(single[column]), label
+          end
+        end
         batch.rows.times do |row|
           expect(seen).to be < rows.size, "#{label}: more rows than the corpus lists"
           expect(rows[seen].size).to eq(plan.size), "#{label}: a corpus row of another width"
@@ -95,7 +103,7 @@ RSpec.describe "delimited conformance corpus" do
   end
 
   it "has the cases, and through every door" do
-    expect(CORPUS.size).to eq(123)
+    expect(CORPUS.size).to eq(137)
     expect(CORPUS.count { |vector| vector.key?("suggest") }).to eq(19)
     doors = CORPUS.flat_map { |vector| vector["plan"].map { |entry| entry["door"].to_sym } }.uniq
     expect(doors).to match_array(HyperTabular::DOORS.keys)

@@ -1,5 +1,6 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.CheckedVerdict;
 import io.github.skunkwerkx.hypercast.FaultDetail;
 import io.github.skunkwerkx.hypercast.Verdict;
 import java.lang.foreign.MemorySegment;
@@ -59,6 +60,19 @@ public final class Row {
      */
     public <T> Verdict<T> get(int column, Class<T> type) {
         return batch.get(column, index, type);
+    }
+
+    /**
+     * The cell in {@code column} as {@link Batch#getChecked} reads it.
+     *
+     * @param <T> the value's type
+     * @param column index into the plan
+     * @param type the value's type, which must be the one the column's door is presented as
+     * @return the value, or the rejection
+     * @throws IllegalStateException if the column's door has no checked door presented as {@code type}
+     */
+    public <T> CheckedVerdict<T> getChecked(int column, Class<T> type) {
+        return batch.getChecked(column, index, type);
     }
 
     /**

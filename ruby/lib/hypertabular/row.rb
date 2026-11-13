@@ -13,7 +13,8 @@ module HyperTabular
   #   end
   #
   # It deconstructs as its verdicts, one per plan column, so a whole row can be matched at
-  # once: `in [HyperCast::Success(value: id), HyperCast::Success(value: name)]`.
+  # once: `in [HyperCast::Success(value: id), HyperCast::Success(value: name)]`. A column that
+  # declares constraints is there as #get_checked says it.
   class Row
     # The batch the row is in.
     attr_reader :batch
@@ -35,12 +36,18 @@ module HyperTabular
     end
 
     # The cell in plan column +column+ as HyperCast judged it — Batch#get. IndexError for a
-    # column outside the plan.
+    # column outside the plan, and TypeError for one that declares constraints.
     def get(column)
       @batch.get(column, @index)
     end
     alias [] get
     alias verdict get
+
+    # The cell in plan column +column+ as HyperCast's checked door judged it — Batch#get_checked.
+    # IndexError for a column outside the plan.
+    def get_checked(column)
+      @batch.get_checked(column, @index)
+    end
 
     # The cell's value, or nil where it did not cast — Batch#values' entry for this row.
     # IndexError for a column outside the plan.
@@ -65,9 +72,10 @@ module HyperTabular
     alias length size
 
     # Every cell's verdict, in plan order, as a frozen Array — the Array
-    # DelimitedReader#each_row yields for the same row.
+    # DelimitedReader#each_row yields for the same row: #get_checked's for a column that declares
+    # constraints, #get's for one that doesn't.
     def to_a
-      Array.new(size) { |column| get(column) }.freeze
+      Array.new(size) { |column| @batch.send(:verdict_of, column, @index) }.freeze
     end
     alias deconstruct to_a
 

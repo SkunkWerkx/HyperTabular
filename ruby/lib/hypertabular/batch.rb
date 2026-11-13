@@ -6,12 +6,13 @@ module HyperTabular
   # zero (for delimited text the plan column's ordinal, for a sheet its own column, A being 0,
   # wherever the range starts), each nil for an entry about the row as a whole. +reason+ is the
   # verdict's: :malformed, :out_of_range, or :empty for a formula with no cached value, and nil
-  # for an entry about the row as a whole. +detail+ is what failed in the cell, a HyperCast::Detail
-  # or nil. +origin+ is where the verdict came from, Batch#origin. +offset+ and +length+ are the
-  # fault's span in the characters String#[] slices the cell's text by, 0 where there is none, and
-  # +expected+ and +found+ a long row's widths, otherwise 0.
+  # for a violation or an entry about the row as a whole. +detail+ is what failed in the cell, a
+  # HyperCast::Detail or nil. +origin+ is where the verdict came from, Batch#origin. +offset+ and
+  # +length+ are the fault's or the violation's span in the characters String#[] slices the cell's
+  # text by, 0 where there is none, and +expected+ and +found+ a long row's widths, otherwise 0.
+  # +keyword+ is the HyperCast::Keyword a violation broke, and nil for anything else.
   Problem = Data.define(:row, :line, :plan_column, :source_column, :reason, :detail, :origin, :offset, :length,
-                        :expected, :found)
+                        :expected, :found, :keyword)
 
   # The rows one DelimitedReader#read or Sheet#read delivered, as typed columns: the same
   # class for delimited text and for a sheet of a workbook.
@@ -25,6 +26,11 @@ module HyperTabular
   #       end
   #     end
   #   end
+  #
+  # A column that declares HyperCast::Constraints is read with #get_checked, which says what
+  # passed (a HyperCast::Checked), what broke a rule (a HyperCast::Violation) and what didn't cast
+  # (a HyperCast::Fault). #get and #verdicts would read a violation as passed, so they raise
+  # TypeError for one; #values holds a violation's value as cast.
   #
   # A batch owns what it shows — the arrays the core wrote are copied out of the reader's
   # buffers as it is made — so it stays good after the reader has moved on, and so do its rows
@@ -65,11 +71,12 @@ module HyperTabular
     # Made by a reader from what the core just wrote, copied: +values+ and +verdicts+ per
     # plan column, the cell table (+per_row+ spans a row), what an unflagged span indexes
     # (+base+, from +origin+) and what a flagged one does (+arena+). +notes+ is each column's
-    # CellNote array, or nil with notes off, +widths+ the row widths of a read that reports long
-    # rows, with the +expected+ width and the +long_rows+ code, and +first_column+ the source column
-    # a plan's ordinal 0 is.
+    # CellNote array, or nil with notes off, +checks+ each column's RawCheck array (nil for an
+    # unconstrained column) or nil for a plan that declares no constraints, +widths+ the row widths
+    # of a read that reports long rows, with the +expected+ width and the +long_rows+ code, and
+    # +first_column+ the source column a plan's ordinal 0 is.
     def initialize(plan, rows, values, verdicts, cells, per_row, base, origin, arena, workbook:, notes: nil,
-                   widths: nil, expected: 0, long_rows: 0, first_column: 0)
+                   checks: nil, widths: nil, expected: 0, long_rows: 0, first_column: 0)
       @columns = plan
       @rows = rows
       @bytes = values
@@ -81,13 +88,23 @@ module HyperTabular
       @arena = arena.force_encoding(Encoding::UTF_8)
       @workbook = workbook
       @notes = notes
+      @checks = checks
       @widths = widths
       @expected = expected
       @long_rows = long_rows
       @first_column = first_column
       @values = Array.new(plan.size)
       @verdicts = Array.new(plan.size)
+      @checked_verdicts = Array.new(plan.size)
       @words = Array.new(plan.size)
+    end
+
+    # What a reader hands a Batch as +checks+: each column's RawCheck array for its first +rows+ rows,
+    # from the runtime's +columns+, or nil for a plan that declares no constraints.
+    def self.checks_of(plan, columns, rows)
+      return nil unless plan.any?(&:checked?)
+
+      Array.new(plan.size) { |column| columns.checks(column, rows) }
     end
 
     # Where row +row+ came from: for delimited text the 1-based line its record starts on,
@@ -98,17 +115,28 @@ module HyperTabular
     end
 
     # A column's values, one per row, as a frozen Array: the Ruby value HyperCast's gem
-    # returns from the same door, and nil for a cell that did not cast. Decoded in one pass
-    # the first time it is asked for.
+    # returns from the same door, and nil for a cell that did not cast. A cell of a constrained
+    # column that broke a rule cast, so its value is here as cast, never rounded. Decoded in one
+    # pass the first time it is asked for.
     def values(column)
       @values[column] ||= decode(@columns.fetch(column), column)
     end
 
     # A column's verdicts, one per row, as a frozen Array of HyperCast::Success and
     # HyperCast::Fault. A Fault's span is in the units String#[] slices by on the cell's own
-    # text, as HyperCast's are: `raw(column, row)[offset, length]` is the offending text.
+    # text, as HyperCast's are: `raw(column, row)[offset, length]` is the offending text. TypeError
+    # for a column that declares constraints: read it with #checked_verdicts.
     def verdicts(column)
-      @verdicts[column] ||= judge(column)
+      @verdicts[column] ||= judge(unchecked(column))
+    end
+
+    # A column's verdicts as HyperCast's checked door judges them, one per row, as a frozen Array:
+    # each cell as #get_checked reads it. Any column can be read this way, a constrained one and
+    # one that declares nothing alike. Built in one pass the first time it is asked for.
+    # IndexError for a column outside the plan.
+    def checked_verdicts(column)
+      @columns.fetch(column)
+      @checked_verdicts[column] ||= Array.new(@rows) { |row| get_checked(column, row) }.freeze
     end
 
     # The cell at (+column+, +row+) as HyperCast judged it — made for `case`/`in`:
@@ -120,13 +148,54 @@ module HyperTabular
     #   end
     #
     # Only this cell's verdict is built. IndexError for a column outside the plan or a row
-    # outside the batch.
+    # outside the batch, and TypeError for a column that declares constraints: read it with
+    # #get_checked.
     def get(column, row)
+      unchecked(column)
       index = at(row)
       judged = @verdicts[column]
       return judged[index] if judged
 
       cell(column, index, values(column), verdict_words(column))
+    end
+
+    # The cell at (+column+, +row+) as HyperCast's checked door judges it — made for `case`/`in`:
+    #
+    #   case batch.get_checked(0, row)
+    #   in HyperCast::Checked(value:) then value
+    #   in HyperCast::Violation(keyword:, value:) then warn "#{value} breaks #{keyword}"
+    #   in HyperCast::Fault(reason:) then warn reason.to_s
+    #   end
+    #
+    # A HyperCast::Checked when the cell cast and met every constraint its column declares:
+    # +adjusted+ when a multiple_of rounding changed the value, and for a text enum match the entry
+    # as declared, the very String the Constraints holds, with its +enum_index+. A
+    # HyperCast::Violation when it cast and broke one: the Keyword, the value as cast, and the span
+    # of the judged text. A HyperCast::Fault when it didn't cast, as #get says it. A column that
+    # declares none is read too: every cell that cast passes, unadjusted. IndexError for a column
+    # outside the plan or a row outside the batch.
+    def get_checked(column, row)
+      plan = @columns.fetch(column)
+      index = at(row)
+      faults = verdict_words(column)
+      reason = faults.nil? ? 0 : faults[index * 3 + 2]
+      unless reason.zero? || reason == VIOLATION
+        return fault(column, index, reason, faults[index * 3], faults[index * 3 + 1])
+      end
+
+      value = values(column)[index]
+      return HyperCast::Checked.new(value: value, adjusted: false, enum_index: nil) unless plan.checked?
+
+      keyword, adjusted, enum_index = @checks.fetch(column).unpack("L<3", offset: index * CHECK_BYTES)
+      if reason == VIOLATION
+        offset, length = span(column, index, faults[index * 3], faults[index * 3 + 1])
+        return HyperCast::Violation.new(keyword: HyperCast::Keyword.new(code: keyword), value: value,
+                                        offset: offset, length: length)
+      end
+
+      enum_index = nil if enum_index == NO_ENTRY
+      value = plan.constraints.enum.fetch(enum_index) if enum_index && plan.door == :text
+      HyperCast::Checked.new(value: value, adjusted: adjusted != 0, enum_index: enum_index)
     end
 
     # The text the cell at (+column+, +row+) was cast from, whatever its door and whatever
@@ -194,29 +263,62 @@ module HyperTabular
     # Bytes in one CellNote: a detail code and an origin code, two u16s.
     NOTE_BYTES = 4
     # Bytes in one RawProblem.
-    PROBLEM_BYTES = 32
+    PROBLEM_BYTES = 36
+    # Bytes in one RawCheck: the keyword, adjusted and the enum index, three u32s.
+    CHECK_BYTES = 12
+    # The reason a verdict carries for a cell that cast and broke a declared constraint.
+    VIOLATION = 4
+    # A RawCheck's enum index when no text enum entry matched.
+    NO_ENTRY = 0xFFFF_FFFF
     # What each origin code in a CellNote means.
     ORIGINS = %i[cell token padded uncached].freeze
-    private_constant :NOTE_BYTES, :PROBLEM_BYTES, :ORIGINS
+    private_constant :NOTE_BYTES, :PROBLEM_BYTES, :CHECK_BYTES, :VIOLATION, :NO_ENTRY, :ORIGINS
 
     # What the core lists for this batch, as Problems.
     def listed
-      raw = Runtime.faults(@verdict_bytes, @notes, @rows, @widths, @expected, @long_rows)
+      raw = Runtime.faults(@verdict_bytes, @notes, @checks, @rows, @widths, @expected, @long_rows)
       Array.new(raw.bytesize / PROBLEM_BYTES) do |entry|
-        problem(*raw.unpack("L<3S<2L<4", offset: entry * PROBLEM_BYTES))
+        problem(*raw.unpack("L<3S<2L<5", offset: entry * PROBLEM_BYTES))
       end.freeze
     end
 
     # One RawProblem as a Problem: the source column worked out, the span moved to characters.
-    def problem(row, plan_column, reason, detail, origin, offset, length, expected, found)
+    def problem(row, plan_column, reason, detail, origin, offset, length, expected, found, keyword)
       whole_row = plan_column == ROW_LEVEL
-      if !whole_row && !(offset.zero? && length.zero?)
-        offset, length = HyperCast::Interop.characters(raw(plan_column, row), offset, length)
-      end
+      offset, length = span(plan_column, row, offset, length) unless whole_row
       Problem.new(row: row, line: line(row), plan_column: whole_row ? nil : plan_column,
                   source_column: whole_row ? nil : @columns.fetch(plan_column).ordinal + @first_column,
                   reason: HyperCast::REASONS[reason], detail: detail.zero? ? nil : HyperCast::Detail.of(detail),
-                  origin: ORIGINS.fetch(origin), offset: offset, length: length, expected: expected, found: found)
+                  origin: ORIGINS.fetch(origin), offset: offset, length: length, expected: expected, found: found,
+                  keyword: keyword.zero? ? nil : HyperCast::Keyword.new(code: keyword))
+    end
+
+    # A span the core counts in bytes of the cell's text, in the characters String#[] slices it
+    # by — an identity unless the text has a multi-byte character.
+    def span(column, row, offset, length)
+      return [offset, length] if offset.zero? && length.zero?
+
+      HyperCast::Interop.characters(raw(column, row), offset, length)
+    end
+
+    # +column+, or TypeError for a column that declares constraints, which a reader of verdicts
+    # without them would read a violation of as passed.
+    def unchecked(column)
+      return column unless @columns.fetch(column).checked?
+
+      raise TypeError, "column #{column} declares constraints: read it with get_checked"
+    end
+
+    # The verdict of the cell at (+column+, +row+) as its column is read: #get_checked's for a
+    # column that declares constraints, #get's for one that doesn't. Row#to_a and
+    # DelimitedReader#each_row read with it.
+    def verdict_of(column, row)
+      @columns.fetch(column).checked? ? get_checked(column, row) : get(column, row)
+    end
+
+    # A column's verdicts as #verdict_of reads them.
+    def verdicts_of(column)
+      @columns.fetch(column).checked? ? checked_verdicts(column) : verdicts(column)
     end
 
     # The plan column of an entry about the row as a whole.
@@ -258,14 +360,14 @@ module HyperTabular
       if (directive = SCALARS[door])
         values = bytes.unpack(directive)
         values.map! { |byte| byte != 0 } if door == :bool
-        @rows.times { |row| values[row] = nil unless faults[row * 3 + 2].zero? } if faults
+        @rows.times { |row| values[row] = nil unless cast?(faults, row) } if faults
       elsif door == :text
         values = texts(bytes.unpack("L<*"), faults)
       else
         directive, width, build = RECORDS.fetch(door)
         fields = bytes.unpack(directive * @rows)
         values = Array.new(@rows) do |row|
-          build.call(fields, row * width) if faults.nil? || faults[row * 3 + 2].zero?
+          build.call(fields, row * width) if faults.nil? || cast?(faults, row)
         end
       end
       values.freeze
@@ -275,8 +377,14 @@ module HyperTabular
     # flagged — out of the arena.
     def texts(spans, faults)
       Array.new(@rows) do |row|
-        slice(spans[row * 2], spans[row * 2 + 1]) if faults.nil? || faults[row * 3 + 2].zero?
+        slice(spans[row * 2], spans[row * 2 + 1]) if faults.nil? || cast?(faults, row)
       end
+    end
+
+    # Whether the cell at +row+ cast: it passed, or broke a constraint with the value it cast to.
+    def cast?(faults, row)
+      reason = faults[row * 3 + 2]
+      reason.zero? || reason == VIOLATION
     end
 
     # A column's verdicts: a Success around each value, a Fault where the core says so.
@@ -305,9 +413,7 @@ module HyperTabular
         return BLANK if detail == BLANK.detail.code
       end
 
-      unless offset.zero? && length.zero?
-        offset, length = HyperCast::Interop.characters(raw(column, row), offset, length)
-      end
+      offset, length = span(column, row, offset, length)
       HyperCast::Interop.fault(reason, offset, length, detail)
     end
   end

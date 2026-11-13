@@ -223,8 +223,9 @@ and the locales neither policy matches.
 A batch is column-major; a `Row` reads it across, for code that builds an object a row at a
 time. `for row in batch` (or `batch.iter_rows()`, `batch.row(i)`) gives views — the batch and
 an index, nothing copied — with `index`, `line`, `get(column)` (the cell as `Success` or
-`Fault`), `text(column)` (a text cell's `str`, or `None`), `origin(column)` and `raw(column)`. `reader.rows()`
-and `sheet.rows()` run across batches, reading the next as one runs out. A batch owns what it
+`Fault`), `get_checked(column)` (a [constrained](#constraints) column's cell), `text(column)` (a
+text cell's `str`, or `None`), `origin(column)` and `raw(column)`. `reader.rows()` and
+`sheet.rows()` run across batches, reading the next as one runs out. A batch owns what it
 shows, so a row stays valid after the reader has moved on.
 
 ```python
@@ -295,6 +296,52 @@ is raised before the caller holds it, and that batch is lost. Its rows are missi
 `for batch in reader` loop doesn't check there, so a loop that must not lose rows to Ctrl-C iterates
 with `for`.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, `multiple_of` with `rounding`,
+`min_length`, `max_length`, `enum`, with `trim` and `case_sensitive` for text), through the column
+factory's `constraints`. The declaration is for the column's door: `Constraints` for `Door.I32` on a
+`Column.u8` is a `ValueError`, and a door that takes no constraints has no factory argument for them.
+Each cell is cast first, so text that isn't the type is a `Fault` as ever, and then judged:
+
+```python
+import hypercast
+from hypertabular import Checked, Column, Constraints, DelimitedReader, Dialect, Fault, Violation
+
+plan = [
+    Column.i32(0, constraints=Constraints(hypercast.Door.I32, minimum=1, maximum=10)),
+    Column.text(1, constraints=Constraints(hypercast.Door.TEXT, enum=["Female", "Male"])),
+]
+batch = DelimitedReader(b"qty,sex\n12,MALE\n7,x\n", Dialect.CSV, plan).read()
+for row in batch:
+    match row.get_checked(0):
+        case Checked(value):
+            print(value, end="")
+        case Violation(keyword, value):
+            print(value, "breaks", keyword, end="")
+        case Fault(reason):
+            print(reason, end="")
+    # "MALE" matches the entry, and reads as "Male".
+    match row.get_checked(1):
+        case Checked(value):
+            print("", value)
+        case rejection:
+            print("", rejection)
+for problem in batch.faults():
+    print("line", problem.line, "column", problem.source_column, problem.keyword)
+```
+
+It prints `12 breaks maximum Male`, `7 Violation(keyword=Keyword.ENUM, value='x', offset=0, length=1)`,
+`line 2 column 0 maximum` and `line 3 column 1 enum`. A violation isn't a fault: the cell cast, so the
+column's `fault_count` leaves it out, its `verdicts` reason is 4, its value in `values` is kept exactly
+as cast (never rounded), and the span is the judged text's. A cell `multiple_of` rounded passes as
+`Checked` with `adjusted` set, and a text `enum` match reads as the entry as declared, the caller's own
+string, with `enum_index` naming it. `faults()` lists a violation with its `keyword` and a `reason` of
+`None`. A batch's and a row's `get` and `text`, `column[row]` and iterating the column raise
+`TypeError` on a constrained column, since they would read a violation as passed; `get_checked`
+reads an unconstrained column too, where every cell that cast passes, unadjusted.
+
 ## The shape
 
 The native core owns no memory and reads no files. It is linked straight into a CPython
@@ -306,10 +353,10 @@ Python call per cell.
 
 - **One batch type.** Iterating a reader or a sheet (or calling `read()`) gives a `Batch`:
   `rows`, `columns`, `column(i)`, `line(row)`, `raw(column, row)`, `get(column, row)`,
-  `text(column, row)`, `origin(column, row)` and `faults()`, and its rows when iterated. Each column
-  is a `ColumnData` with `values`, `verdicts`, `fault_count`, `faults()`, `origin(row)`, `raw(row)` and
-  `column[row]` for one cell as `Success` or `Fault`. A batch owns what it shows: it stays
-  valid after the reader has moved on.
+  `get_checked(column, row)`, `text(column, row)`, `origin(column, row)` and `faults()`, and its
+  rows when iterated. Each column is a `ColumnData` with `values`, `verdicts`, `fault_count`,
+  `faults()`, `origin(row)`, `raw(row)` and `column[row]` for one cell as `Success` or `Fault`. A
+  batch owns what it shows: it stays valid after the reader has moved on.
 - **The core decides how much a batch may ask for.** A `batch_rows` or `buffer_bytes` of 0, and a batch
   past 4 GiB (214 million rows of one `i32` column, 1.8 million of 100 text columns), are a `ValueError`
   from the core, when a reader or a sheet opens or a plan is bound, `open_async` included, before

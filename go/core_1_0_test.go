@@ -43,8 +43,8 @@ func lay1Dot0(t *testing.T, n *native, set *columns) (specs, buffers region) {
 		le.PutUint32(spec[8:], set.specs[index].param)
 		putFormat(spec[12:12+rawFormatSize], &set.specs[index].format)
 		buffer := mem[buffers.off+uint32(index)*bufferSize:]
-		le.PutUint32(buffer[0:], n.block.off+uint32(set.offsets[3*index]))
-		le.PutUint32(buffer[4:], n.block.off+uint32(set.offsets[3*index+1]))
+		le.PutUint32(buffer[0:], n.block.off+uint32(set.offsets[4*index]))
+		le.PutUint32(buffer[4:], n.block.off+uint32(set.offsets[4*index+1]))
 	}
 	return specs, buffers
 }

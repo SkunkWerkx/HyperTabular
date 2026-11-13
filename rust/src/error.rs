@@ -65,7 +65,9 @@ pub enum Error {
     /// Plan column `column` cannot be honoured: its numeric format declares the same
     /// decimal and group separator (or no decimal separator at all) or flags HyperCast doesn't
     /// define, among them the retired grouping bit `256` (so the words `351` and `863`), its date
-    /// options or month names are ones HyperCast refuses, its ordinal is 2^20
+    /// options or month names are ones HyperCast refuses, its constraints
+    /// ([`Column::checked`](crate::Column::checked)) were declared for another door than the one it
+    /// now reads through, its ordinal is 2^20
     /// (1,048,576) or more — past any workbook format's columns — or, in delimited text, at
     /// or past the width a header has given every record, or the row slots its reach takes
     /// cannot be allocated.

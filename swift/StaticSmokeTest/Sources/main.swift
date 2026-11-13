@@ -105,6 +105,32 @@ do {
     check(judged == .fault(Fault(reason: .malformed, offset: 0, length: 1)), "a fault says where")
     check(try reader.read() == nil, "end of input")
 
+    // Columns that declare HyperCast's constraints: a value judged and passed, a violation keeping
+    // the value as cast, a text enum match read as its declared entry, and the violation listed.
+    let checkedReader = try DelimitedReader(
+        bytes: Array("n,sex\n11,MALE\n7.5,x\n".utf8), dialect: .csv,
+        plan: [
+            .decimal(0, constraints: Constraints<Decimal>(maximum: 10, multipleOf: "0.5")),
+            .text(1, constraints: Constraints<String>(enum: ["Female", "Male"])),
+        ])
+    if let checked = try checkedReader.read(), checked.rows == 2 {
+        check(
+            checked.checked(0, row: 0, as: Decimal.self)
+                == .rejection(.violation(Violation(keyword: .maximum, value: 11, offset: 0, length: 2))),
+            "checked violation")
+        check(
+            checked.checked(0, row: 1, as: Decimal.self)
+                == .success(Checked(value: Decimal(string: "7.5")!, adjusted: false, enumIndex: nil)),
+            "checked passed")
+        check(
+            checked.checked(1, row: 0, as: String.self)
+                == .success(Checked(value: "Male", adjusted: false, enumIndex: 1)),
+            "checked enum")
+        check(checked.faults().filter { $0.keyword != nil }.count == 2, "checked listed")
+    } else {
+        check(false, "checked read")
+    }
+
     // A structural failure is an error, after the intact rows.
     let broken = try DelimitedReader(bytes: Array("a,b\n1,2\n3\n".utf8), dialect: .csv, plan: [.i32(0)])
     check(try broken.read()?.rows == 1, "the intact row before the break")

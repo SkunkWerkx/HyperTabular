@@ -1,12 +1,16 @@
 package io.github.skunkwerkx.hypertabular.aotsmoketest;
 
 import io.github.skunkwerkx.hypercast.CastFailure;
+import io.github.skunkwerkx.hypercast.Checked;
+import io.github.skunkwerkx.hypercast.Constraints;
 import io.github.skunkwerkx.hypercast.DateOrder;
 import io.github.skunkwerkx.hypercast.ExcelEpoch;
 import io.github.skunkwerkx.hypercast.Fault;
+import io.github.skunkwerkx.hypercast.Keyword;
 import io.github.skunkwerkx.hypercast.Success;
 import io.github.skunkwerkx.hypercast.UnixPrecision;
 import io.github.skunkwerkx.hypercast.Verdict;
+import io.github.skunkwerkx.hypercast.Violation;
 import io.github.skunkwerkx.hypertabular.Batch;
 import io.github.skunkwerkx.hypertabular.Column;
 import io.github.skunkwerkx.hypertabular.DelimitedReader;
@@ -45,7 +49,7 @@ import java.util.UUID;
 
 /**
  * Crosses every native entry point the binding declares — the version probe, the header,
- * the fill through every door, the unescape behind a raw read, and every workbook entry point — against the real
+ * the fill through every door and through the checked doors, the unescape behind a raw read, and every workbook entry point — against the real
  * native library: on an ordinary JVM ({@code ./gradlew :aot-smoke-test:run}, where JDK 25
  * takes the jar's FFM path), on the floor JDK ({@code :aot-smoke-test:runFloor}, where its JNI
  * base loads) and as a GraalVM Native Image binary ({@code :aot-smoke-test:nativeRun}). Exit
@@ -235,6 +239,47 @@ public final class Main {
             expect("header first " + seen, seen.equals(List.of("7 zoë")));
         }
 
+        // Columns that declare HyperCast's constraints: a value judged and passed, a violation keeping
+        // the value as cast, a text enum match read as its declared entry, and the violation listed.
+        try (DelimitedReader reader = DelimitedReader.of(
+                "n,sex\n11,MALE\n7.5,x\n".getBytes(StandardCharsets.UTF_8),
+                Dialect.CSV,
+                List.of(
+                        Column.decimal(
+                                0,
+                                Constraints.decimal()
+                                        .maximum("10")
+                                        .multipleOf("0.5")
+                                        .build()),
+                        Column.text(
+                                1, Constraints.text().enumOf("Female", "Male").build())))) {
+            Batch batch = reader.read();
+            if (batch != null && batch.rows() == 2) {
+                expect(
+                        "checked violation",
+                        batch.getChecked(0, 0, BigDecimal.class) instanceof Violation<BigDecimal> broken
+                                && broken.value().compareTo(new BigDecimal("11")) == 0
+                                && broken.keyword().equals(Keyword.MAXIMUM));
+                expect(
+                        "checked passed",
+                        batch.getChecked(0, 1, BigDecimal.class) instanceof Checked<BigDecimal> passed
+                                && passed.value().compareTo(new BigDecimal("7.5")) == 0
+                                && !passed.adjusted());
+                expect(
+                        "checked enum",
+                        batch.getChecked(1, 0, String.class) instanceof Checked<String> passed
+                                && passed.value().equals("Male")
+                                && passed.enumIndex().orElse(-1) == 1);
+                int listed = 0;
+                for (Problem problem : batch.faults()) {
+                    listed += problem.keyword() == null ? 0 : 1;
+                }
+                expect("checked listed", listed == 2);
+            } else {
+                expect("checked read", false);
+            }
+        }
+
         // A structural failure is an exception, after the intact rows.
         try (DelimitedReader broken = DelimitedReader.of(
                 "a,b\n1,2\n3\n".getBytes(StandardCharsets.UTF_8), Dialect.CSV, List.of(Column.i32(0)))) {
@@ -334,7 +379,7 @@ public final class Main {
         long natives = Arrays.stream(core.getDeclaredMethods())
                 .filter(m -> Modifier.isNative(m.getModifiers()))
                 .count();
-        require(natives == (ffm ? 0 : 23), expected + " expected, but Native declares " + natives + " natives");
+        require(natives == (ffm ? 0 : 24), expected + " expected, but Native declares " + natives + " natives");
         String major = "n/a (image)";
         if (System.getProperty("org.graalvm.nativeimage.imagecode") == null) {
             try (InputStream in = core.getResourceAsStream("Native.class")) {

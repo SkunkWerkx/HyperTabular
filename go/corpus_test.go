@@ -130,6 +130,7 @@ type corpusProblem struct {
 	Origin       *string `json:"origin"`
 	Expected     *int    `json:"expected"`
 	Found        *int    `json:"found"`
+	Keyword      *string `json:"keyword"`
 }
 
 // corpusSuggest is what hypertabular_suggest says of a case's input.
@@ -178,6 +179,23 @@ type corpusColumn struct {
 		Pivot  uint32   `json:"pivot"`
 		Months [][2]any `json:"months"`
 	} `json:"options"`
+	Constraints *corpusConstraints `json:"constraints"`
+}
+
+// corpusConstraints is a plan entry's constraints: every bound, step and numeric entry a decimal's
+// text.
+type corpusConstraints struct {
+	Minimum          *string   `json:"minimum"`
+	ExclusiveMinimum *string   `json:"exclusiveMinimum"`
+	Maximum          *string   `json:"maximum"`
+	ExclusiveMaximum *string   `json:"exclusiveMaximum"`
+	MultipleOf       *string   `json:"multipleOf"`
+	Rounding         *string   `json:"rounding"`
+	MinLength        *int      `json:"minLength"`
+	MaxLength        *int      `json:"maxLength"`
+	Enum             *[]string `json:"enum"`
+	Trim             bool      `json:"trim"`
+	CaseSensitive    bool      `json:"caseSensitive"`
 }
 
 // A cell is a verdict in HyperCast's corpus shape, with `text` for the text door, and — for
@@ -200,6 +218,12 @@ type corpusCell struct {
 	Magnitude  string          `json:"magnitude"`
 	Scale      uint8           `json:"scale"`
 	Negative   bool            `json:"negative"`
+	// A constrained column's: the keyword a violation broke, whether rounding adjusted a value, the
+	// text enum entry it matched, and a float's exact bits.
+	Keyword   *string `json:"keyword"`
+	Adjusted  *bool   `json:"adjusted"`
+	EnumIndex *int    `json:"enum_index"`
+	Bits      *string `json:"bits"`
 }
 
 type corpusFailure struct {
@@ -366,7 +390,12 @@ func (c *corpusColumn) dateOptions(t *testing.T) hypercast.DateOptions {
 // column is the plan entry as this binding declares it, with its tokens and date options.
 func (c *corpusColumn) column(t *testing.T) Column {
 	t.Helper()
-	column := c.door(t)
+	var column Column
+	if c.Constraints != nil {
+		column = c.checked(t)
+	} else {
+		column = c.door(t)
+	}
 	if c.Tokens != nil {
 		column = column.WithTokens(*c.Tokens...)
 	}
@@ -374,6 +403,78 @@ func (c *corpusColumn) column(t *testing.T) Column {
 		column = column.WithDateOptions(c.dateOptions(t))
 	}
 	return column
+}
+
+// checked is a plan entry that declares constraints, through the constructor of its door.
+func (c *corpusColumn) checked(t *testing.T) Column {
+	t.Helper()
+	d := c.Constraints
+	var rules []hypercast.Rule
+	for _, bound := range []struct {
+		rule  func(string) hypercast.Rule
+		value *string
+	}{
+		{hypercast.Minimum[string], d.Minimum}, {hypercast.ExclusiveMinimum[string], d.ExclusiveMinimum},
+		{hypercast.Maximum[string], d.Maximum}, {hypercast.ExclusiveMaximum[string], d.ExclusiveMaximum},
+		{hypercast.MultipleOf[string], d.MultipleOf},
+	} {
+		if bound.value != nil {
+			rules = append(rules, bound.rule(*bound.value))
+		}
+	}
+	if d.Rounding != nil {
+		rounding, known := map[string]hypercast.Rounding{
+			"strict": hypercast.Strict, "midpoint": hypercast.Midpoint, "floor": hypercast.Floor, "ceiling": hypercast.Ceiling,
+		}[*d.Rounding]
+		if !known {
+			t.Fatalf("unknown rounding %q", *d.Rounding)
+		}
+		rules = append(rules, hypercast.WithRounding(rounding))
+	}
+	if d.MinLength != nil {
+		rules = append(rules, hypercast.MinLength(*d.MinLength))
+	}
+	if d.MaxLength != nil {
+		rules = append(rules, hypercast.MaxLength(*d.MaxLength))
+	}
+	if d.Trim {
+		rules = append(rules, hypercast.Trim())
+	}
+	if d.CaseSensitive {
+		rules = append(rules, hypercast.CaseSensitive())
+	}
+	if d.Enum != nil {
+		rules = append(rules, hypercast.Enum(*d.Enum...))
+	}
+	format := c.format()
+	switch c.Door {
+	case "i8":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[int8](rules...))
+	case "i16":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[int16](rules...))
+	case "i32":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[int32](rules...))
+	case "i64":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[int64](rules...))
+	case "u8":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[uint8](rules...))
+	case "u16":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[uint16](rules...))
+	case "u32":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[uint32](rules...))
+	case "u64":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[uint64](rules...))
+	case "f32":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[float32](rules...))
+	case "f64":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[float64](rules...))
+	case "decimal":
+		return Checked(c.Ordinal, format, hypercast.MustConstraints[hypercast.Decimal](rules...))
+	case "text":
+		return CheckedText(c.Ordinal, hypercast.MustConstraints[string](rules...))
+	}
+	t.Fatalf("no checked door %q", c.Door)
+	return Column{}
 }
 
 // door is the plan entry's door: named as HyperCast's corpus names its types, with what the door
@@ -660,12 +761,193 @@ func want(t *testing.T, label string, door Door, cell *corpusCell) any {
 	}
 }
 
-// assertCell holds one cell of the batch in hand to what the corpus says of it.
-func assertCell(t *testing.T, label string, b *Batch, column, row int, expected *corpusCell) {
+// judgement is a checked cell with its type set aside, so that one comparison serves every door.
+type judgement struct {
+	value     any
+	adjusted  bool
+	enumIndex int
+	fault     *hypercast.Fault
+	violation *hypercast.Keyword
+	offset    int
+	length    int
+}
+
+// judgedAs is the cell through GetChecked, with CellChecked held to it.
+func judgedAs[T hypercast.CheckedTarget](t *testing.T, label string, b *Batch, column, row int) judgement {
+	t.Helper()
+	passed, rejection := GetChecked[T](b, column, row)
+	viaRow, rowRejection := CellChecked[T](b.Row(row), column)
+	if !reflect.DeepEqual(passed, viaRow) || !reflect.DeepEqual(rejection, rowRejection) {
+		t.Errorf("%s: CellChecked %v, %v; GetChecked %v, %v", label, viaRow, rowRejection, passed, rejection)
+	}
+	j := judgement{value: passed.Value, adjusted: passed.Adjusted, enumIndex: passed.EnumIndex}
+	switch r := rejection.(type) {
+	case nil:
+	case *hypercast.Fault:
+		j.fault = r
+	case *hypercast.Violation[T]:
+		j.violation, j.value, j.offset, j.length = &r.Keyword, r.Value, r.Offset, r.Length
+	default:
+		t.Fatalf("%s: a rejection of %T", label, rejection)
+	}
+	if rejection != nil && (passed.Adjusted || passed.EnumIndex != -1) {
+		t.Errorf("%s: a rejection beside %+v", label, passed)
+	}
+	return j
+}
+
+// judgedCell is the cell through GetChecked, as the type its door presents.
+func judgedCell(t *testing.T, label string, b *Batch, column, row int) judgement {
+	t.Helper()
+	switch door := b.Columns()[column].Door(); door {
+	case DoorI8:
+		return judgedAs[int8](t, label, b, column, row)
+	case DoorI16:
+		return judgedAs[int16](t, label, b, column, row)
+	case DoorI32:
+		return judgedAs[int32](t, label, b, column, row)
+	case DoorI64:
+		return judgedAs[int64](t, label, b, column, row)
+	case DoorU8:
+		return judgedAs[uint8](t, label, b, column, row)
+	case DoorU16:
+		return judgedAs[uint16](t, label, b, column, row)
+	case DoorU32:
+		return judgedAs[uint32](t, label, b, column, row)
+	case DoorU64:
+		return judgedAs[uint64](t, label, b, column, row)
+	case DoorF32:
+		return judgedAs[float32](t, label, b, column, row)
+	case DoorF64:
+		return judgedAs[float64](t, label, b, column, row)
+	case DoorExact:
+		return judgedAs[hypercast.Decimal](t, label, b, column, row)
+	case DoorText:
+		return judgedAs[string](t, label, b, column, row)
+	default:
+		t.Fatalf("%s: no checked door %v", label, door)
+		return judgement{}
+	}
+}
+
+// assertJudgedValue holds a checked value to the corpus: a float by its exact bits, anything else as
+// want says it, a cell that cast.
+func assertJudgedValue(t *testing.T, label string, door Door, value any, expected *corpusCell) {
+	t.Helper()
+	var bits string
+	switch v := value.(type) {
+	case float32:
+		bits = fmt.Sprintf("0x%08x", math.Float32bits(v))
+	case float64:
+		bits = fmt.Sprintf("0x%016x", math.Float64bits(v))
+	case string:
+		value = []byte(v)
+	}
+	if expected.Bits != nil {
+		if bits != *expected.Bits {
+			t.Errorf("%s: bits %s, want %s", label, bits, *expected.Bits)
+		}
+		return
+	}
+	cast := *expected
+	cast.Expect = "ok"
+	if expectation := want(t, label, door, &cast); !reflect.DeepEqual(value, expectation) {
+		t.Errorf("%s: %v (%T), want %v (%T)", label, value, value, expectation, expectation)
+	}
+}
+
+// assertChecked holds a constrained column's cell to what the corpus says of it, through the
+// checked getters: a value with its adjusted flag and enum match, a fault, or a violation with its
+// keyword and the value as cast. The plain getters refuse the column.
+func assertChecked(t *testing.T, label string, b *Batch, column, row int, expected *corpusCell) {
 	t.Helper()
 	door := b.Columns()[column].Door()
 	verdict := b.Verdicts(column)[row]
+	if verdict.Violation() != (expected.Expect == "violation") {
+		t.Errorf("%s: a violation %v, want %s", label, verdict.Violation(), expected.Expect)
+	}
+	if !panics(func() { viaGet(b, column, row) }) {
+		t.Errorf("%s: Get read a constrained column", label)
+	}
+	j := judgedCell(t, label, b, column, row)
+	switch {
+	case expected.Expect == "ok":
+		if j.fault != nil || j.violation != nil || !verdict.OK() {
+			t.Errorf("%s: expected a value, got %+v", label, j)
+			return
+		}
+		if expected.Adjusted == nil || j.adjusted != *expected.Adjusted {
+			t.Errorf("%s: adjusted %v, want %v", label, j.adjusted, shown(expected.Adjusted))
+		}
+		wantIndex := -1
+		if expected.EnumIndex != nil {
+			wantIndex = *expected.EnumIndex
+		}
+		if j.enumIndex != wantIndex {
+			t.Errorf("%s: enum index %d, want %d", label, j.enumIndex, wantIndex)
+		}
+		assertJudgedValue(t, label, door, j.value, expected)
+	case expected.Expect == "violation":
+		if j.violation == nil || expected.Keyword == nil || j.violation.String() != *expected.Keyword {
+			t.Errorf("%s: violation %v, want %v", label, j.violation, shown(expected.Keyword))
+			return
+		}
+		if b.Fault(column, row) != nil || verdict.Reason() != 0 {
+			t.Errorf("%s: a violation with a fault", label)
+		}
+		if j.offset != expected.Fault[0] || j.length != expected.Fault[1] ||
+			verdict.Offset() != j.offset || verdict.Length() != j.length {
+			t.Errorf("%s: violation span (%d,%d), want %v", label, j.offset, j.length, expected.Fault)
+		}
+		if raw := string(b.Raw(column, row)); expected.Raw == nil || raw != *expected.Raw {
+			t.Errorf("%s: raw text %q, want %v", label, raw, expected.Raw)
+		}
+		assertJudgedValue(t, label, door, j.value, expected)
+	default:
+		reason, known := expectedReason[expected.Expect]
+		if !known {
+			t.Fatalf("%s: unknown expectation %q", label, expected.Expect)
+		}
+		if j.fault == nil || j.fault.Reason != reason || !reflect.DeepEqual(j.fault, b.Fault(column, row)) {
+			t.Errorf("%s: fault %v, want %s", label, j.fault, expected.Expect)
+			return
+		}
+		if expected.Fault != nil {
+			if j.fault.Offset != expected.Fault[0] || j.fault.Length != expected.Fault[1] {
+				t.Errorf("%s: fault span (%d,%d), want %v", label, j.fault.Offset, j.fault.Length, expected.Fault)
+			}
+			switch raw := b.Raw(column, row); {
+			case expected.RawHex != nil:
+				if !bytes.Equal(raw, unhex(t, *expected.RawHex)) {
+					t.Errorf("%s: raw bytes %x, want %s", label, raw, *expected.RawHex)
+				}
+			case expected.Raw == nil || string(raw) != *expected.Raw:
+				t.Errorf("%s: raw text %q, want %v", label, raw, expected.Raw)
+			}
+		}
+	}
+}
+
+// panics reports whether f panics.
+func panics(f func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	f()
+	return false
+}
+
+// assertCell holds one cell of the batch in hand to what the corpus says of it.
+func assertCell(t *testing.T, label string, b *Batch, column, row int, expected *corpusCell) {
+	t.Helper()
+	if b.Columns()[column].IsChecked() {
+		assertChecked(t, label, b, column, row, expected)
+		return
+	}
+	door := b.Columns()[column].Door()
+	verdict := b.Verdicts(column)[row]
 	fault := b.Fault(column, row)
+	if verdict.Violation() {
+		t.Errorf("%s: a violation in a column that declares no constraints", label)
+	}
 
 	if expected.Expect == "ok" {
 		if !verdict.OK() || fault != nil {
@@ -883,10 +1165,18 @@ func appendProblems(t *testing.T, label string, problems []corpusProblem, b *Bat
 		if problem.Line != b.Line(problem.Row) {
 			t.Errorf("%s: a problem on line %d of a row on line %d", label, problem.Line, b.Line(problem.Row))
 		}
+		// A violation names its keyword and has no reason; anything else has a reason and no keyword.
+		if (problem.Keyword != 0) == (problem.Reason != 0) && problem.PlanColumn >= 0 {
+			t.Errorf("%s: a reason %v beside a keyword %v", label, problem.Reason, problem.Keyword)
+		}
 		if problem.PlanColumn >= 0 {
 			plan, source := problem.PlanColumn, problem.SourceColumn
 			reason := map[hypercast.CastFailure]string{hypercast.Empty: "empty", hypercast.Malformed: "malformed", hypercast.OutOfRange: "out_of_range"}[problem.Reason]
 			entry.PlanColumn, entry.SourceColumn, entry.Reason = &plan, &source, &reason
+			if problem.Keyword != 0 {
+				reason, keyword := "violation", problem.Keyword.String()
+				entry.Reason, entry.Keyword = &reason, &keyword
+			}
 			if problem.Reason != hypercast.Empty {
 				entry.Fault = []int{problem.Offset, problem.Length}
 			} else if problem.Offset != 0 || problem.Length != 0 {
@@ -1322,4 +1612,12 @@ func TestSuggestFailsOnlyWhereAReadOfTheCaseFails(t *testing.T) {
 	if planned <= 80 || failed == 0 {
 		t.Errorf("%d planned, %d failed", planned, failed)
 	}
+}
+
+// shown is what a corpus field the case may leave out says: its value, or nil.
+func shown[T any](field *T) any {
+	if field == nil {
+		return nil
+	}
+	return *field
 }

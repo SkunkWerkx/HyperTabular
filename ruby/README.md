@@ -106,8 +106,9 @@ before the header is read.
   row that alone is past the limit is an `ArgumentError` naming its width.
   `reader.column_count` is the header's count, or the first record's once it has been read.
 - **Rows.** `batch.each`, `reader.each` and `sheet.each` yield a `HyperTabular::Row` —
-  `index`, `line`, `get(column)` (also `[]` and `verdict`), `value(column)`, `raw(column)`,
-  `origin(column)`, `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
+  `index`, `line`, `get(column)` (also `[]` and `verdict`), `get_checked(column)` (a
+  [constrained](#constraints) column's cell), `value(column)`, `raw(column)`, `origin(column)`,
+  `to_a` — each answering what the batch's own accessor does for that row. A batch is a copy,
   so a row stays good after the read has moved on. A Row deconstructs as its verdicts, for
   `case row in [HyperCast::Success(value: id), *]`. `reader.each_row` yields each row as
   a frozen Array of verdicts, and `sheet.each_batch` walks a sheet's batches.
@@ -168,7 +169,8 @@ as every row from the fifth. A plan's ordinals count from the range's first colu
 A `Fault` carries HyperCast's `detail`, and `batch.origin(column, row)` and `row.origin(column)` say
 where a cell's verdict came from: `:cell`, `:token`, `:padded` or `:uncached`. `batch.faults` is a
 frozen Array of `HyperTabular::Problem`s, the row, the line, the plan and source columns, the reason,
-detail, origin and span, a long row reported with its `expected` and `found`. It's worked out when
+detail, origin and span, a long row reported with its `expected` and `found`, and a broken constraint
+with its `keyword`. It's worked out when
 it's first asked for and kept. A batch is a copy, so the list and the batch both stay right after the
 next read and after the reader has gone; nothing here goes stale. A span counts characters, as a
 `Fault`'s does, on the verdict and the list alike, so `raw[problem.offset, problem.length]` slices it.
@@ -268,6 +270,51 @@ anything. HyperCast's
 [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
 and the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, `multiple_of` with `rounding`,
+`min_length`, `max_length`, `enum`, with `trim` and `case_sensitive` for text), through the column
+factory's `constraints:`. The declaration is for the column's door: `Constraints` for `:i32` on a
+`Column.u8` is an `ArgumentError`, when the column is made and again when its plan is bound, and a
+door that takes no constraints has no factory keyword for them. Each cell is cast first, so text that
+isn't the type is a `Fault` as ever, and then judged:
+
+```ruby
+require "hypertabular"
+
+plan = [
+  HyperTabular::Column.i32(0, constraints: HyperCast::Constraints.new(door: :i32, minimum: 1, maximum: 10)),
+  HyperTabular::Column.text(1, constraints: HyperCast::Constraints.new(door: :text, enum: %w[Female Male]))
+]
+batch = HyperTabular::DelimitedReader.new("qty,sex\n12,MALE\n7,x\n", HyperTabular::Dialect::CSV, plan).read
+batch.each do |row|
+  case row.get_checked(0)
+  in HyperCast::Checked(value:) then print value
+  in HyperCast::Violation(keyword:, value:) then print "#{value} breaks #{keyword}"
+  in HyperCast::Fault(reason:) then print reason
+  end
+  # "MALE" matches the entry, and reads as "Male".
+  case row.get_checked(1)
+  in HyperCast::Checked(value:) then puts " #{value}"
+  in rejection then puts " #{rejection.inspect}"
+  end
+end
+batch.faults.each { |problem| puts "line #{problem.line} column #{problem.source_column} #{problem.keyword}" }
+```
+
+It prints `12 breaks maximum Male`,
+`7 #<data HyperCast::Violation keyword=HyperCast::Keyword::ENUM, value="x", offset=0, length=1>`,
+`line 2 column 0 maximum` and `line 3 column 1 enum`. A violation isn't a fault: the cell cast, so
+`values(column)` holds its value exactly as cast (never rounded), and the span is the judged text's, in
+characters as a `Fault`'s is. A cell `multiple_of` rounded passes as `Checked` with `adjusted` set, and
+a text `enum` match reads as the entry as declared, the very String the `Constraints` holds, with
+`enum_index` naming it. `faults` lists a violation with its `keyword` and a `reason` of `nil`.
+`batch.get`, `batch.verdicts` and a row's `get` raise `TypeError` on a constrained column, since they
+would read a violation as passed; `get_checked`, and `checked_verdicts(column)` for the whole column
+at once, read an unconstrained column too, where every cell that cast passes, unadjusted. A row's `to_a`, and so `reader.each_row` and a Row's pattern match, give
+each column as its own getter reads it.
+
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
@@ -277,10 +324,10 @@ native call per batch, and a column comes out of its buffer in one `String#unpac
 boundary is crossed once per few thousand rows, not once per cell.
 
 - **One batch class.** `read` returns a `HyperTabular::Batch` — `rows`, `columns`,
-  `line(row)`, `values(column)`, `verdicts(column)`, `get(column, row)`, `raw(column,
-  row)`, `origin(column, row)`, `faults`, and a `Row` for each row through `each` — or `nil` once there are no more rows,
-  for delimited text and a sheet alike. A batch owns what it shows: it stays good after the
-  reader has moved on.
+  `line(row)`, `values(column)`, `verdicts(column)`, `checked_verdicts(column)`, `get(column, row)`,
+  `get_checked(column, row)`, `raw(column, row)`, `origin(column, row)`, `faults`, and a `Row` for each row through `each`
+  — or `nil` once there are no more rows, for delimited text and a sheet alike. A batch owns what
+  it shows: it stays good after the reader has moved on.
 - **Nothing is sniffed.** The `Dialect` states the separator, the quoting, the header and what
   [a messier file](#a-messier-file) needs; `SheetOptions` states a sheet's header, whether empty rows
   are skipped, the batch size and the rest of that; the plan states each column's door and, for

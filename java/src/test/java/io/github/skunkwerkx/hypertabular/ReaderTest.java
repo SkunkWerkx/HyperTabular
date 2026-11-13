@@ -308,7 +308,7 @@ final class ReaderTest {
         assertThrows(NullPointerException.class, () -> Column.date(0, null));
         assertThrows(NullPointerException.class, () -> Column.dateTime(0, null));
         assertThrows(NullPointerException.class, () -> Column.excelSerial(0, null));
-        assertThrows(NullPointerException.class, () -> Column.f64(0, null));
+        assertThrows(NullPointerException.class, () -> Column.f64(0, (NumFormat) null));
     }
 
     @Test

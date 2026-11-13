@@ -98,6 +98,11 @@ type specExtra struct {
 	months    string
 	tokens    string
 	hasTokens bool
+	// The column's constraints, when checked says it declares them, and its enum list, packed as
+	// the guest reads it.
+	checked     bool
+	constraints hypercast.RawConstraints
+	enum        string
 }
 
 type rawFailure struct {
@@ -134,6 +139,7 @@ type rawProblem struct {
 	len        uint32
 	expected   uint32
 	found      uint32
+	keyword    uint32
 }
 
 // rowLevel is a rawProblem's planColumn when the entry is about the row as a whole.
@@ -193,8 +199,8 @@ type (
 	_ [12 - unsafe.Sizeof(CellVerdict{})]struct{}
 	_ [unsafe.Sizeof(rawNote{}) - 4]struct{}
 	_ [4 - unsafe.Sizeof(rawNote{})]struct{}
-	_ [unsafe.Sizeof(rawProblem{}) - 32]struct{}
-	_ [32 - unsafe.Sizeof(rawProblem{})]struct{}
+	_ [unsafe.Sizeof(rawProblem{}) - 36]struct{}
+	_ [36 - unsafe.Sizeof(rawProblem{})]struct{}
 	_ [unsafe.Sizeof(rawSuggestion{}) - 20]struct{}
 	_ [20 - unsafe.Sizeof(rawSuggestion{})]struct{}
 	_ [unsafe.Sizeof(rawTranscoded{}) - 32]struct{}

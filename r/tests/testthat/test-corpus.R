@@ -75,11 +75,15 @@ exact <- function(value) {
 known_keys <- list(
   cell = c("expect", "value", "text", "seconds", "nanos", "year", "month", "day",
            "nanos_of_day", "magnitude", "scale", "negative", "fault", "raw", "raw_hex", "detail",
-           "origin"),
+           "origin", "keyword", "adjusted", "enum_index", "bits"),
   problem = c("row", "line", "plan_column", "source_column", "reason", "fault", "detail",
-              "origin", "expected", "found"),
+              "origin", "expected", "found", "keyword"),
   failure = c("kind", "record", "line", "byte", "expected", "found"),
-  plan = c("door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options"),
+  plan = c("door", "ordinal", "precision", "order", "epoch", "format", "tokens", "options",
+           "constraints"),
+  # A plan entry's constraints, by the OpenAPI names hypercast's corpus gives them.
+  constraints = c("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum", "multipleOf",
+                  "rounding", "minLength", "maxLength", "trim", "caseSensitive", "enum"),
   format = c("decimal_sep", "group_sep", "flags", "currency"),
   date = c("flags", "pivot", "months"),
   delimited = c("name", "input", "input_hex", "dialect", "plan", "header", "rows", "problems",
@@ -115,6 +119,7 @@ unknown_keys <- function(case, workbook) {
     check(column, paste0(name, ".plan[]"), known_keys$plan)
     check(column$format, paste0(name, ".plan[].format"), known_keys$format)
     check(column$options, paste0(name, ".plan[].options"), known_keys$date)
+    check(column$constraints, paste0(name, ".plan[].constraints"), known_keys$constraints)
   }
   for (row in case$rows) for (cell in row) check(cell, paste0(name, ".rows[][]"), known_keys$cell)
   for (p in case$problems) check(p, paste0(name, ".problems[]"), known_keys$problem)
@@ -200,6 +205,21 @@ months_of <- function(options) {
 
 tokens_of <- function(entry) if (is.null(entry$tokens)) NULL else as.character(unlist(entry$tokens))
 
+# A plan entry's constraints as hypercast's declaration for its door, or NULL.
+constraints_of <- function(entry) {
+  c <- entry$constraints
+  if (is.null(c)) return(NULL)
+  whole <- function(x) if (is.null(x)) NULL else as.numeric(x)
+  hypercast::hypercast_constraints(
+    entry$door, minimum = c$minimum, exclusive_minimum = c$exclusiveMinimum,
+    maximum = c$maximum, exclusive_maximum = c$exclusiveMaximum, multiple_of = c$multipleOf,
+    rounding = c$rounding %||% "strict", min_length = whole(c$minLength),
+    max_length = whole(c$maxLength), trim = isTRUE(c$trim),
+    case_sensitive = isTRUE(c$caseSensitive),
+    enum = if (!is.null(c$enum)) as.character(unlist(c$enum))
+  )
+}
+
 # A corpus plan entry as a column; `by_name` reads the source by its header name instead of
 # its position where the header has that name once.
 column_of <- function(entry, header = NULL, by_name = FALSE) {
@@ -211,6 +231,7 @@ column_of <- function(entry, header = NULL, by_name = FALSE) {
   na <- tokens_of(entry)
   options <- date_options_of(entry$options)
   months <- months_of(entry$options)
+  constraints <- constraints_of(entry)
   switch(entry$door,
     unix = col_unix(source, corpus_precisions[[entry$precision]], na = na),
     excel_serial = col_excel_serial(source, corpus_epochs[[entry$epoch]], na = na),
@@ -221,7 +242,9 @@ column_of <- function(entry, header = NULL, by_name = FALSE) {
                             months = months, na = na),
     timestamp = col_timestamp(source, options = options, na = na),
     i8 = , i16 = , i32 = , i64 = , u8 = , u16 = , u32 = , u64 = , f32 = , f64 = ,
-    decimal = get(paste0("col_", entry$door))(source, format_of(entry$format), na = na),
+    decimal = get(paste0("col_", entry$door))(source, format_of(entry$format), na = na,
+                                              constraints = constraints),
+    text = col_text(source, na = na, constraints = constraints),
     get(paste0("col_", entry$door))(source, na = na)
   )
 }
@@ -320,11 +343,19 @@ column_mismatches <- function(v, door, cells, label) {
     return(sprintf("%s: %d rows, want %d", label, nrow(v), length(cells)))
   }
   plain <- unclass(as.data.frame(v))
+  checked <- inherits(v, "hypercast_checked_verdict")
+  if (checked != !is.null(plain$keyword)) {
+    return(sprintf("%s: a checked verdict without its keyword, or the other way about", label))
+  }
   for (i in seq_along(cells)) {
     cell <- cells[[i]]
     origin <- cell$origin %||% "cell"
     if (!identical(as.character(plain$origin[[i]]), origin)) {
       out <- c(out, miss(i, "origin", plain$origin[[i]], origin))
+    }
+    if (checked) {
+      out <- c(out, checked_mismatches(plain, i, door, cell, miss))
+      if (cell$expect %in% c("ok", "violation")) next
     }
     want_ok <- identical(cell$expect, "ok")
     if (!identical(plain$ok[[i]], want_ok)) {
@@ -366,6 +397,58 @@ column_mismatches <- function(v, door, cells, label) {
   out
 }
 
+# A checked verdict's own columns at row i against the corpus's cell: a pass's `adjusted` and
+# `enum_index` and value, a violation's keyword, value as cast, raw text and span, and nothing of
+# either on a fault, which column_mismatches() then holds as any fault.
+checked_mismatches <- function(plain, i, door, cell, miss) {
+  out <- character()
+  passed <- identical(cell$expect, "ok")
+  violated <- identical(cell$expect, "violation")
+  want <- list(ok = if (passed) TRUE else FALSE,
+               adjusted = if (passed) isTRUE(cell$adjusted) else NA,
+               enum_index = if (passed && !is.null(cell$enum_index)) {
+                 as.integer(cell$enum_index) + 1L
+               } else {
+                 NA_integer_
+               },
+               keyword = if (violated) cell$keyword else NA_character_,
+               reason = if (passed || violated) NA_character_ else cell$expect)
+  got <- list(ok = plain$ok[[i]], adjusted = plain$adjusted[[i]],
+              enum_index = plain$enum_index[[i]], keyword = plain$keyword[[i]],
+              reason = as.character(plain$reason[[i]]))
+  for (field in names(want)) {
+    if (!identical(got[[field]], want[[field]])) {
+      out <- c(out, miss(i, field, got[[field]], want[[field]]))
+    }
+  }
+  if (!passed && !violated) {
+    return(out)
+  }
+  if (!is.null(cell$bits)) {
+    size <- if (door == "f32") 4L else 8L
+    bits <- paste0("0x", paste(writeBin(plain$value[[i]], raw(), size = size, endian = "big"),
+                               collapse = ""))
+    if (!identical(bits, cell$bits)) out <- c(out, miss(i, "bits", bits, cell$bits))
+  } else {
+    for (field in names(fields <- expected_fields(door, cell))) {
+      if (!identical(unclass(plain[[field]][[i]]), fields[[field]])) {
+        out <- c(out, miss(i, field, plain[[field]][[i]], fields[[field]]))
+      }
+    }
+  }
+  if (violated) {
+    raw <- plain$raw[[i]]
+    if (is.na(raw) || !identical(charToRaw(raw), cell_bytes(cell))) {
+      out <- c(out, miss(i, "raw", raw, cell$raw %||% cell$raw_hex))
+    }
+    span <- span_of(cell, cell$fault)
+    if (!identical(c(plain$offset[[i]], plain$length[[i]]), span)) {
+      out <- c(out, miss(i, "span", c(plain$offset[[i]], plain$length[[i]]), span))
+    }
+  }
+  out
+}
+
 # Every way table `t` disagrees with `case`'s rows (and its row numbers, when it has them).
 table_mismatches <- function(t, case, label) {
   rows <- case$rows
@@ -399,8 +482,10 @@ said_problems <- function(batches) {
     ifelse(p$kind == "row",
            sprintf("row %s, line %s: width %s, found %s", p$row, p$line, p$expected, p$found),
            sprintf("row %s, line %s, column %s (source %s): %s %s %s, span %s+%s", p$row, p$line,
-                   plan_column, p$source_column, p$reason, p$detail, p$origin, p$offset,
-                   p$length))
+                   plan_column, p$source_column,
+                   ifelse(is.na(p$keyword), as.character(p$reason),
+                          paste0("violation:", p$keyword)),
+                   p$detail, p$origin, p$offset, p$length))
   }))
 }
 
@@ -418,7 +503,9 @@ wanted_problems <- function(case) {
       span_of(case$rows[[p$row + 1]][[p$plan_column + 1]], p$fault)
     }
     sprintf("row %s, line %s, column %s (source %s): %s %s %s, span %s+%s", p$row + 1, p$line,
-            p$plan_column + 1, p$source_column + 1, p$reason, p$detail %||% NA,
+            p$plan_column + 1, p$source_column + 1,
+            if (!is.null(p$keyword)) paste0("violation:", p$keyword) else p$reason,
+            p$detail %||% NA,
             p$origin %||% "cell", span[[1]], span[[2]])
   }, "")
 }
@@ -518,7 +605,7 @@ test_that("the replay reads every key the corpus has, and notices one added anyw
 })
 
 test_that("the corpus has its cases, and reaches every door", {
-  expect_identical(length(delimited_cases), 123L)
+  expect_identical(length(delimited_cases), 137L)
   expect_identical(sum(vapply(delimited_cases, function(case) !is.null(case$suggest), FALSE)),
                    19L)
   doors <- unique(unlist(lapply(delimited_cases, function(case) {
@@ -761,9 +848,9 @@ test_that("the replay reads every key the workbook corpus has, and notices one a
 })
 
 test_that("the corpus has its cases, over every package, through every door", {
-  expect_identical(length(workbook_cases), 398L)
+  expect_identical(length(workbook_cases), 404L)
   files <- unique(vapply(workbook_cases, `[[`, "", "file"))
-  expect_identical(length(files), 41L)
+  expect_identical(length(files), 42L)
   expect_true(all(file.exists(file.path(corpus_dir(), files))))
   doors <- unique(unlist(lapply(workbook_cases, function(case) {
     vapply(case$plan, `[[`, "", "door")

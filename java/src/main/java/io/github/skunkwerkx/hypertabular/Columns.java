@@ -1,5 +1,6 @@
 package io.github.skunkwerkx.hypertabular;
 
+import io.github.skunkwerkx.hypercast.Constraints;
 import io.github.skunkwerkx.hypercast.DateOptions;
 import io.github.skunkwerkx.hypercast.MonthNames;
 import io.github.skunkwerkx.hypercast.interop.NativeValues;
@@ -27,6 +28,8 @@ final class Columns {
     final MemorySegment[] verdicts;
     /** Each column's notes: {@code null} when the read keeps none. */
     final MemorySegment[] notes;
+    /** Each column's checks, one a row: {@code null} for a column that declares no constraints. */
+    final MemorySegment[] checks;
     /** How many cells each row had: {@link MemorySegment#NULL} when the read does not ask. */
     final MemorySegment rowWidths;
 
@@ -149,6 +152,7 @@ final class Columns {
         values = new MemorySegment[count];
         verdicts = new MemorySegment[count];
         notes = keepNotes ? new MemorySegment[count] : null;
+        checks = new MemorySegment[count];
         for (int index = 0; index < count; index++) {
             Column column = plan[index];
             long spec = index * Abi.SPEC_WITH_BYTES;
@@ -178,6 +182,17 @@ final class Columns {
                 specs.set(ValueLayout.ADDRESS, spec + Abi.SPEC_WITH_TOKENS, held(packed, arena));
                 specs.set(ValueLayout.JAVA_LONG, spec + Abi.SPEC_WITH_TOKENS + 8, packed.length);
             }
+            // Judged by HyperCast when they were built, and built for the column's door.
+            Constraints<?> constraints = column.constraints();
+            if (constraints != null) {
+                byte[] raw = constraints.toRaw();
+                MemorySegment declared = arena.allocate(raw.length, 8);
+                MemorySegment.copy(raw, 0, declared, ValueLayout.JAVA_BYTE, 0, raw.length);
+                specs.set(ValueLayout.ADDRESS, spec + Abi.SPEC_WITH_CONSTRAINTS, declared);
+                byte[] entries = constraints.packedEnum();
+                specs.set(ValueLayout.ADDRESS, spec + Abi.SPEC_WITH_ENUM, held(entries, arena));
+                specs.set(ValueLayout.JAVA_LONG, spec + Abi.SPEC_WITH_ENUM + 8, entries.length);
+            }
         }
         checkSizes(
                 specs,
@@ -200,6 +215,11 @@ final class Columns {
             if (notes != null) {
                 notes[index] = arena.allocate(batchRows * Abi.NOTE_BYTES, 4);
                 buffers.set(ValueLayout.ADDRESS, entry + Abi.BUFFER_WITH_NOTES, notes[index]);
+            }
+            // As many as there are verdicts: the core writes one beside each.
+            if (column.isChecked()) {
+                checks[index] = arena.allocate(batchRows * Abi.CHECK_BYTES, 4);
+                buffers.set(ValueLayout.ADDRESS, entry + Abi.BUFFER_WITH_CHECKS, checks[index]);
             }
         }
         this.width = reach(plan);

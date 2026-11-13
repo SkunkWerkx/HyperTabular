@@ -74,7 +74,8 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyMemoryView, PyString, PyTuple};
 
 use crate::column;
 use crate::kernel::abi::{
-    CellNote, CellVerdict, ColumnBufferWith, ColumnSpec, OK, RawDelimitedOptions, RawProblem, Span,
+    CellNote, CellVerdict, ColumnBufferWith, ColumnSpec, OK, RawCheck, RawDelimitedOptions,
+    RawProblem, Span,
 };
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
@@ -99,6 +100,12 @@ const CONTRACT: &str =
 struct Companions {
     success: Py<PyAny>,
     fault: Py<PyAny>,
+    /// HyperCast's `Checked`, `Violation` and `Keyword`: a checked cell's verdict.
+    checked: Py<PyAny>,
+    violation: Py<PyAny>,
+    keyword: Py<PyAny>,
+    /// HyperCast's `Constraints`, which a plan column's `constraints` must be.
+    constraints: Py<PyAny>,
     /// `CastFailure.EMPTY`, `MALFORMED`, `OUT_OF_RANGE` — indexed by reason code less one.
     reasons: [Py<PyAny>; 3],
     num_format: Py<PyAny>,
@@ -241,8 +248,13 @@ struct Slot {
     /// What the core noted of each row, for a column with a cell that did not cast and a read
     /// that takes notes. Otherwise none, and every row's is the default.
     notes: Vec<CellNote>,
-    /// Cells that did not cast — empty ones included.
+    /// Cells that did not cast — empty ones included. A violation cast, so it isn't one.
     faults: usize,
+    /// Whether the plan column declares constraints, and so whether the plain getters refuse it.
+    checked: bool,
+    /// A constrained column's checks, one a row, as the core wrote them beside its verdicts; none
+    /// for a column that declares none.
+    checks: Vec<RawCheck>,
     values_view: PyOnceLock<Py<PyAny>>,
     verdicts_view: PyOnceLock<Py<PyAny>>,
 }
@@ -373,7 +385,14 @@ fn batch_of(
         let verdict_bytes = unsafe {
             std::slice::from_raw_parts(verdicts.as_ptr().cast::<u8>(), size_of_val(verdicts))
         };
-        let faults = verdicts.iter().filter(|verdict| !verdict.is_ok()).count();
+        let faults = verdicts
+            .iter()
+            .filter(|verdict| verdict.fault().is_some())
+            .count();
+        let checked = batch
+            .columns()
+            .get(index)
+            .is_some_and(crate::Column::is_checked);
         slots.push(Slot {
             door: *door,
             ordinal: if workbook {
@@ -393,6 +412,8 @@ fn batch_of(
                 batch.notes(index).to_vec()
             },
             faults,
+            checked,
+            checks: batch.checks(index).to_vec(),
             values_view: PyOnceLock::new(),
             verdicts_view: PyOnceLock::new(),
         });
@@ -450,6 +471,11 @@ impl Batch {
                     std::ptr::null_mut()
                 } else {
                     slot.notes.as_ptr().cast_mut()
+                },
+                checks: if slot.checks.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    slot.checks.as_ptr().cast_mut()
                 },
             })
             .collect();
@@ -663,7 +689,7 @@ impl Batch {
         column: usize,
         row: usize,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let slot = self.slot(column)?;
+        let slot = self.unchecked(column)?;
         if slot.door != Door::Text {
             return Err(PyTypeError::new_err(format!(
                 "column {column} is not read through the text door"
@@ -690,6 +716,66 @@ impl Batch {
         } else {
             slot.fault(py, companions, verdict, row)
         }
+    }
+
+    /// Column `column`'s slot, refused when the column declares constraints: a plain getter would
+    /// read a violation as a value that passed.
+    fn unchecked(&self, column: usize) -> PyResult<&Slot> {
+        let slot = self.slot(column)?;
+        if slot.checked {
+            return Err(PyTypeError::new_err(format!(
+                "column {column} declares constraints: read it with get_checked"
+            )));
+        }
+        Ok(slot)
+    }
+
+    /// A cell as HyperCast's checked verdict: `Checked(value, adjusted, enum_index)`,
+    /// `Violation(keyword, value, offset, length)` carrying the value as cast, or the cell's
+    /// `Fault`. A text `enum` match is the entry as the plan's `Constraints` declare it.
+    fn checked_cell<'py>(
+        &self,
+        py: Python<'py>,
+        column: usize,
+        row: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let slot = self.slot(column)?;
+        let companions = companions(py)?;
+        let verdict = slot.verdict(py, row)?;
+        // A column that declares none has no checks: nothing was adjusted or matched.
+        let check = slot.checks.get(row).copied().unwrap_or(RawCheck {
+            keyword: 0,
+            adjusted: 0,
+            enum_index: u32::MAX,
+        });
+        if verdict.reason == CellVerdict::VIOLATION {
+            let keyword = companions.keyword.bind(py).call1((check.keyword,))?;
+            let value = self.object(py, companions, slot, row)?;
+            return companions.violation.bind(py).call1((
+                keyword,
+                value,
+                verdict.offset,
+                verdict.len,
+            ));
+        }
+        if verdict.fault().is_some() {
+            return slot.fault(py, companions, verdict, row);
+        }
+        let enum_index = (check.enum_index != u32::MAX).then_some(check.enum_index);
+        let value = match enum_index {
+            Some(index) if slot.door == Door::Text => self
+                .plan
+                .bind(py)
+                .get_item(column)?
+                .getattr("constraints")?
+                .getattr("enum")?
+                .get_item(index)?,
+            _ => self.object(py, companions, slot, row)?,
+        };
+        companions
+            .checked
+            .bind(py)
+            .call1((value, check.adjusted != 0, enum_index))
     }
 
     /// Where the verdict of a cell came from, as the package's `Origin`.
@@ -778,14 +864,32 @@ impl Batch {
 
     /// The cell at (``column``, ``row``) as HyperCast's verdict — ``Success(value)`` or
     /// ``Fault(reason, offset, length)`` — as ``batch.column(column)[row]`` gives it.
+    ///
+    /// A column that declares constraints raises ``TypeError``: read it with :meth:`get_checked`.
     fn get<'py>(&self, py: Python<'py>, column: usize, row: isize) -> PyResult<Bound<'py, PyAny>> {
-        let slot = self.slot(column)?;
+        let slot = self.unchecked(column)?;
         self.cell(py, companions(py)?, slot, self.row_index(row)?)
+    }
+
+    /// The cell at (``column``, ``row``) as HyperCast's checked door judged it: ``Checked(value,
+    /// adjusted, enum_index)``, flagged when ``multiple_of``'s rounding adjusted the value, and at
+    /// the text door with an ``enum`` the entry it matched as the plan's ``Constraints`` declare it;
+    /// ``Violation(keyword, value, offset, length)`` of a constraint the column declares, carrying
+    /// the value as cast and the judged text's span; or the cell's ``Fault``. A column that declares
+    /// none reads as :meth:`get` does, never adjusted.
+    fn get_checked<'py>(
+        &self,
+        py: Python<'py>,
+        column: usize,
+        row: isize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.checked_cell(py, column, self.row_index(row)?)
     }
 
     /// The text cell at (``column``, ``row``) as a ``str``, or ``None`` for one that did
     /// not cast (a text cell fails only by being empty) — the same ``str`` ``values``
-    /// holds. A column read through any other door raises ``TypeError``.
+    /// holds. A column read through any other door, or one that declares constraints, raises
+    /// ``TypeError``.
     fn text<'py>(
         &self,
         py: Python<'py>,
@@ -827,27 +931,37 @@ impl Batch {
                 Reason::OutOfRange => companions.reasons[2].bind(py),
             });
             let code = problem.detail.map(hypercast::Detail::code);
+            let keyword = problem
+                .keyword
+                .map(|keyword| companions.keyword.bind(py).call1((keyword.code(),)))
+                .transpose()?;
             let detail = code
                 .map(|code| companions.detail.bind(py).call1((code,)))
                 .transpose()?;
+            // Past the twelve a call takes positionally.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("keyword", keyword)?;
             list.append(
-                companions.problem.bind(py).call1((
-                    problem.row,
-                    problem.line,
-                    problem.plan_column,
-                    problem.source_column,
-                    reason,
-                    detail,
-                    code,
-                    companions
-                        .origin
-                        .bind(py)
-                        .call1((origin_code(problem.origin),))?,
-                    problem.offset,
-                    problem.len,
-                    problem.expected,
-                    problem.found,
-                ))?,
+                companions.problem.bind(py).call(
+                    (
+                        problem.row,
+                        problem.line,
+                        problem.plan_column,
+                        problem.source_column,
+                        reason,
+                        detail,
+                        code,
+                        companions
+                            .origin
+                            .bind(py)
+                            .call1((origin_code(problem.origin),))?,
+                        problem.offset,
+                        problem.len,
+                        problem.expected,
+                        problem.found,
+                    ),
+                    Some(&kwargs),
+                )?,
             )?;
         }
         Ok(list)
@@ -935,7 +1049,8 @@ impl ColumnData {
                 let companions = companions(py)?;
                 let list = PyList::empty(py);
                 for row in 0..batch.rows {
-                    if slot.verdict(py, row)?.is_ok() {
+                    // A violation cast: its value is there, exactly as cast.
+                    if slot.verdict(py, row)?.fault().is_none() {
                         list.append(batch.object(py, companions, slot, row)?)?;
                     } else {
                         list.append(py.None())?;
@@ -949,7 +1064,8 @@ impl ColumnData {
     /// The column's verdicts as the core wrote them: a read-only ``memoryview`` of
     /// unsigned 32-bit integers, shape ``(rows, 3)`` — per row, the offending span's byte
     /// offset and byte length within the cell's text, then the reason: ``0`` for a cell
-    /// that cast, otherwise HyperCast's ``CastFailure`` code.
+    /// that cast, ``4`` for one that cast and broke a constraint the column declares (its span
+    /// the judged text's), otherwise HyperCast's ``CastFailure`` code.
     #[getter]
     fn verdicts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let (batch, slot) = self.parts()?;
@@ -966,7 +1082,8 @@ impl ColumnData {
         Ok(self.parts()?.1.faults)
     }
 
-    /// The cells that did not cast, in row order: ``(row, Fault)`` for each.
+    /// The cells that did not cast, in row order: ``(row, Fault)`` for each. A violation cast, so
+    /// it isn't one; :meth:`Batch.faults` lists it.
     fn faults<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let (batch, slot) = self.parts()?;
         let companions = companions(py)?;
@@ -976,7 +1093,7 @@ impl ColumnData {
         }
         for row in 0..batch.rows {
             let verdict = slot.verdict(py, row)?;
-            if !verdict.is_ok() {
+            if verdict.fault().is_some() {
                 list.append((row, slot.fault(py, companions, verdict, row)?))?;
             }
         }
@@ -996,12 +1113,14 @@ impl ColumnData {
     }
 
     fn __getitem__<'py>(&self, py: Python<'py>, row: isize) -> PyResult<Bound<'py, PyAny>> {
-        let (batch, slot) = self.parts()?;
+        let batch = self.batch.get();
+        let slot = batch.unchecked(self.index)?;
         batch.cell(py, companions(py)?, slot, batch.row_index(row)?)
     }
 
     fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (batch, slot) = self.parts()?;
+        let batch = self.batch.get();
+        let slot = batch.unchecked(self.index)?;
         let companions = companions(py)?;
         let list = PyList::empty(py);
         for row in 0..batch.rows {
@@ -1054,7 +1173,12 @@ impl Row {
     /// The cell in column ``column`` as HyperCast's verdict: ``Batch.get``.
     fn get<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Bound<'py, PyAny>> {
         let batch = self.batch.get();
-        batch.cell(py, companions(py)?, batch.slot(column)?, self.index)
+        batch.cell(py, companions(py)?, batch.unchecked(column)?, self.index)
+    }
+
+    /// The cell in column ``column`` as HyperCast's checked verdict: ``Batch.get_checked``.
+    fn get_checked<'py>(&self, py: Python<'py>, column: usize) -> PyResult<Bound<'py, PyAny>> {
+        self.batch.get().checked_cell(py, column, self.index)
     }
 
     /// The text cell in column ``column`` as a ``str``, or ``None``: ``Batch.text``.
@@ -1480,7 +1604,13 @@ fn column_of(
             "plan[{index}] names no door; build it with Column's factories"
         ))
     })?;
-    let mut made = crate::Column::new(ordinal as usize, door).format(format);
+    let constraints = column.getattr("constraints")?;
+    let mut made = if constraints.is_none() {
+        crate::Column::new(ordinal as usize, door)
+    } else {
+        checked_of(py, companions, index, ordinal as usize, door, &constraints)?
+    }
+    .format(format);
     let tokens = column.getattr("tokens")?;
     if !tokens.is_none() {
         let tokens: Vec<String> = tokens.extract()?;
@@ -1513,6 +1643,40 @@ fn column_of(
         PyValueError::new_err(format!("plan[{index}]'s date options cannot be honoured"))
     })?;
     Ok((door, made))
+}
+
+/// A plan column that declares HyperCast's `Constraints`, refused unless they are for its own
+/// door: a Python column can pair any door with any declaration, so the pairing is held here.
+fn checked_of(
+    py: Python<'_>,
+    companions: &Companions,
+    index: usize,
+    ordinal: usize,
+    door: Door,
+    constraints: &Bound<'_, PyAny>,
+) -> PyResult<crate::Column> {
+    if !constraints.is_instance(companions.constraints.bind(py))? {
+        return Err(PyTypeError::new_err(format!(
+            "plan[{index}].constraints must be a hypercast.Constraints, not {}",
+            constraints.get_type().name()?
+        )));
+    }
+    let declared: u32 = constraints.getattr("door")?.extract()?;
+    let packed: Vec<u8> = constraints.getattr("packed")?.extract()?;
+    let entries: Vec<u8> = constraints.getattr("packed_enum")?.extract()?;
+    let named: String = constraints.getattr("door")?.getattr("name")?.extract()?;
+    column::checked_from_packed(ordinal, door, declared, &packed, &entries).map_err(|refusal| {
+        match refusal {
+            column::Undeclarable::NotPacked => PyRuntimeError::new_err(CONTRACT),
+            column::Undeclarable::Mismatched => PyValueError::new_err(format!(
+                "plan[{index}]: Constraints for Door.{named} were given to a Door.{} column",
+                format!("{door:?}").to_uppercase()
+            )),
+            column::Undeclarable::Refused => {
+                PyValueError::new_err(format!("plan[{index}].constraints cannot be honoured"))
+            }
+        }
+    })
 }
 
 /// The package's `Dialect` as the crate takes it. Each distinct token list is kept for the life of
@@ -3104,6 +3268,10 @@ fn _bind(
     let companions = Companions {
         success: hypercast.getattr("Success")?.unbind(),
         fault: hypercast.getattr("Fault")?.unbind(),
+        checked: hypercast.getattr("Checked")?.unbind(),
+        violation: hypercast.getattr("Violation")?.unbind(),
+        keyword: hypercast.getattr("Keyword")?.unbind(),
+        constraints: hypercast.getattr("Constraints")?.unbind(),
         reasons: [
             reason.getattr("EMPTY")?.unbind(),
             reason.getattr("MALFORMED")?.unbind(),

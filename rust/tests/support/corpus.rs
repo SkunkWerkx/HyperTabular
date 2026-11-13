@@ -259,6 +259,9 @@ pub fn cell_json(batch: &hypertabular::Batch<'_>, column: usize, row: usize) -> 
         }
         return cell;
     }
+    if batch.columns()[column].is_checked() {
+        return checked_cell_json(batch, column, row);
+    }
     let number = |value: Value| json!({"expect": "ok", "value": value});
     let read = "a cell whose verdict is ok has a value";
     match batch.columns()[column].door {
@@ -284,6 +287,182 @@ pub fn cell_json(batch: &hypertabular::Batch<'_>, column: usize, row: usize) -> 
         Door::Duration => duration_json(batch.get::<Duration>(column, row).expect(read)),
         Door::Text => text_json(batch.text(column, row).expect(read)),
         _ => unreachable!("the fixture declares a known door"),
+    }
+}
+
+/// A plan entry's `constraints`, in HyperCast's corpus shape, as the C ABI takes them for `door`:
+/// the layout and the packed `enum`.
+pub fn declaration_of(door: Door, c: &Value) -> (hypercast::RawConstraints, Vec<u8>) {
+    use hypercast::{Constraints, NumericRules, Rounding, TextRules, decimal_for_declaration};
+    let decimal = |key: &str| {
+        c.get(key).map(|text| {
+            decimal_for_declaration(text.as_str().expect("a declared decimal"))
+                .unwrap_or_else(|refusal| panic!("{c}: {key}: {refusal:?}"))
+        })
+    };
+    let strings: Option<Vec<&str>> = c.get("enum").map(strings_of);
+    let declared = if door == Door::Text {
+        let length = |key: &str| c.get(key).map(|n| n.as_u64().expect("a length") as u32);
+        let flag = |key: &str| c.get(key).is_some_and(|f| f.as_bool().expect("a flag"));
+        let rules = TextRules::new()
+            .maybe_min_length(length("minLength"))
+            .maybe_max_length(length("maxLength"))
+            .trim(flag("trim"))
+            .case_sensitive(flag("caseSensitive"));
+        Constraints::text(rules, strings.as_deref()).map(|declared| {
+            (
+                declared.raw(),
+                declared.pack_enum(&mut []).map(|len| {
+                    let mut packed = vec![0; len];
+                    declared.pack_enum(&mut packed);
+                    packed
+                }),
+            )
+        })
+    } else {
+        let rounding = match c.get("rounding").map(|r| r.as_str().expect("rounding")) {
+            None | Some("strict") => Rounding::Strict,
+            Some("midpoint") => Rounding::Midpoint,
+            Some("floor") => Rounding::Floor,
+            Some("ceiling") => Rounding::Ceiling,
+            Some(other) => panic!("rounding {other}"),
+        };
+        let rules = NumericRules::new()
+            .maybe_minimum(decimal("minimum"))
+            .maybe_exclusive_minimum(decimal("exclusiveMinimum"))
+            .maybe_maximum(decimal("maximum"))
+            .maybe_exclusive_maximum(decimal("exclusiveMaximum"))
+            .maybe_multiple_of(decimal("multipleOf").map(|step| (step, rounding)));
+        let entries: Option<Vec<hypercast::Decimal>> = strings.map(|list| {
+            list.iter()
+                .map(|entry| decimal_for_declaration(entry).expect("an enum decimal"))
+                .collect()
+        });
+        Constraints::<hypercast::Decimal>::numeric(rules, entries.as_deref()).map(|declared| {
+            (
+                declared.raw(),
+                declared.pack_enum(&mut []).map(|len| {
+                    let mut packed = vec![0; len];
+                    declared.pack_enum(&mut packed);
+                    packed
+                }),
+            )
+        })
+    };
+    let (raw, packed) = declared.unwrap_or_else(|refusal| panic!("{c}: {refusal:?}"));
+    (raw, packed.expect("an enum that packs"))
+}
+
+/// A checked column of `door` at `ordinal`, declaring `c`.
+pub fn checked_column(ordinal: usize, door: Door, c: &Value) -> hypertabular::Column {
+    use hypercast::Constraints;
+    use hypertabular::Column;
+    let (raw, packed) = declaration_of(door, c);
+    macro_rules! typed {
+        ($ty:ty) => {
+            Column::checked(
+                ordinal,
+                Constraints::<$ty>::from_raw(raw, &packed).expect("a declaration for its door"),
+            )
+        };
+    }
+    match door {
+        Door::I8 => typed!(i8),
+        Door::I16 => typed!(i16),
+        Door::I32 => typed!(i32),
+        Door::I64 => typed!(i64),
+        Door::U8 => typed!(u8),
+        Door::U16 => typed!(u16),
+        Door::U32 => typed!(u32),
+        Door::U64 => typed!(u64),
+        Door::F32 => typed!(f32),
+        Door::F64 => typed!(f64),
+        Door::Decimal => typed!(hypercast::Decimal),
+        Door::Text => typed!(hypercast::Text),
+        other => panic!("the {other:?} door takes no constraints"),
+    }
+}
+
+/// A float's bits, as the corpus writes them beside a constrained float's value: what tells `-0`
+/// from `0`.
+pub fn bits_json(door: Door, value: f64) -> Value {
+    match door {
+        Door::F32 => json!(format!("0x{:08x}", (value as f32).to_bits())),
+        _ => json!(format!("0x{:016x}", value.to_bits())),
+    }
+}
+
+/// What a checked door said beside the value: `Ok((adjusted, enum_index))` when it passed, or
+/// the violation's `(keyword, offset, len)`.
+pub type Judged = Result<(bool, Option<u32>), (hypercast::Keyword, u32, u32)>;
+
+/// A checked door's value that passed, or that broke `keyword` at `fault`, in the corpus's shape:
+/// `value` is the door's ok cell, to which the check is added. `raw` is the cell's text.
+pub fn judged_json(door: Door, mut value: Value, passed: Judged, raw: &[u8]) -> Value {
+    if let Some(number) = value.get("value").and_then(Value::as_f64)
+        && matches!(door, Door::F32 | Door::F64)
+    {
+        value["bits"] = bits_json(door, number);
+    }
+    match passed {
+        Ok((adjusted, enum_index)) => {
+            value["adjusted"] = json!(adjusted);
+            if let Some(index) = enum_index {
+                value["enum_index"] = json!(index);
+            }
+        }
+        Err((keyword, offset, len)) => {
+            value["expect"] = json!("violation");
+            value["keyword"] = json!(keyword.name());
+            value["fault"] = json!([offset, len]);
+            match std::str::from_utf8(raw) {
+                Ok(text) => value["raw"] = json!(text),
+                Err(_) => value["raw_hex"] = json!(hex(raw)),
+            }
+        }
+    }
+    value
+}
+
+/// A constrained column's cell that cast, through its checked getter: passed, or a violation.
+fn checked_cell_json(batch: &hypertabular::Batch<'_>, column: usize, row: usize) -> Value {
+    use hypertabular::{Checked, Decimal, Rejection};
+    let door = batch.columns()[column].door;
+    let raw = batch.raw(column, row);
+    fn split<T>(judged: Result<Checked<T>, Rejection<T>>) -> (T, Judged) {
+        match judged {
+            Ok(passed) => (passed.value, Ok((passed.adjusted, passed.enum_index))),
+            Err(Rejection::Violation(broken)) => (
+                broken.value,
+                Err((broken.keyword, broken.offset, broken.len)),
+            ),
+            Err(Rejection::Fault(fault)) => panic!("a fault the verdict didn't say: {fault:?}"),
+        }
+    }
+    let number = |value: Value| json!({"expect": "ok", "value": value});
+    macro_rules! numeric {
+        ($ty:ty, $json:expr) => {{
+            let (value, passed) = split(batch.get_checked::<$ty>(column, row));
+            judged_json(door, $json(value), passed, &raw)
+        }};
+    }
+    match door {
+        Door::I8 => numeric!(i8, |v| number(json!(v))),
+        Door::I16 => numeric!(i16, |v| number(json!(v))),
+        Door::I32 => numeric!(i32, |v| number(json!(v))),
+        Door::I64 => numeric!(i64, |v| number(json!(v))),
+        Door::U8 => numeric!(u8, |v| number(json!(v))),
+        Door::U16 => numeric!(u16, |v| number(json!(v))),
+        Door::U32 => numeric!(u32, |v| number(json!(v))),
+        Door::U64 => numeric!(u64, |v| number(json!(v))),
+        Door::F32 => numeric!(f32, |v: f32| number(json!(f64::from(v)))),
+        Door::F64 => numeric!(f64, |v| number(json!(v))),
+        Door::Decimal => numeric!(Decimal, decimal_json),
+        Door::Text => {
+            let (value, passed) = split(batch.text_checked(column, row));
+            judged_json(door, text_json(value.as_bytes()), passed, &raw)
+        }
+        other => panic!("the {other:?} door takes no constraints"),
     }
 }
 
@@ -319,7 +498,7 @@ pub fn problems_of(
         }
         for (column, cell) in cells.as_array().expect("a row").iter().enumerate() {
             let reason = cell["expect"].as_str().expect("expect");
-            let refused = matches!(reason, "malformed" | "out_of_range");
+            let refused = matches!(reason, "malformed" | "out_of_range" | "violation");
             if !refused && cell.get("origin") != Some(&json!("uncached")) {
                 continue;
             }
@@ -330,7 +509,7 @@ pub fn problems_of(
                 "source_column": sources[column],
                 "reason": reason,
             });
-            for key in ["fault", "detail", "origin"] {
+            for key in ["fault", "detail", "origin", "keyword"] {
                 if let Some(value) = cell.get(key) {
                     problem[key] = value.clone();
                 }
@@ -357,6 +536,16 @@ pub fn problems_json(batch: &hypertabular::Batch<'_>, base: usize, problems: &mu
                     assert_eq!((problem.offset, problem.len), (0, 0));
                 }
                 assert_eq!((problem.expected, problem.found), (0, 0));
+            }
+            (Some(column), Some(source), None) => {
+                let keyword = problem
+                    .keyword
+                    .expect("a cell's entry with no reason is a violation");
+                entry["plan_column"] = json!(column);
+                entry["source_column"] = json!(source);
+                entry["reason"] = json!("violation");
+                entry["fault"] = json!([problem.offset, problem.len]);
+                entry["keyword"] = json!(keyword.name());
             }
             (None, None, None) => {
                 entry["expected"] = json!(problem.expected);
@@ -430,11 +619,56 @@ pub fn sheet_options_of(options: &Value) -> hypertabular::SheetOptions {
     read
 }
 
+/// A case's dialect, the options it may declare beside the 1.0 four.
+pub fn dialect_of(entry: &Value) -> hypertabular::Dialect {
+    let mut dialect =
+        hypertabular::Dialect::new(entry["separator"].as_str().expect("separator").as_bytes()[0])
+            .with_quoting(entry["quoting"].as_bool().expect("quoting"))
+            .with_header(entry["has_header"].as_bool().expect("has_header"))
+            .with_blank_lines_skipped(entry["skip_blank_lines"].as_bool().expect("skip"));
+    if let Some(skip) = entry.get("skip") {
+        dialect = dialect.with_skip(skip.as_u64().expect("skip") as u32);
+    }
+    if let Some(row) = entry.get("header_row") {
+        dialect = dialect.with_header_row(row.as_u64().expect("header_row") as u32);
+    }
+    if let Some(policy) = entry.get("short_rows") {
+        dialect = dialect.with_short_rows(match policy.as_str().expect("short_rows") {
+            "reject" => hypertabular::ShortRows::Reject,
+            "pad" => hypertabular::ShortRows::Pad,
+            other => panic!("short_rows {other}"),
+        });
+    }
+    if let Some(policy) = entry.get("long_rows") {
+        dialect = dialect.with_long_rows(match policy.as_str().expect("long_rows") {
+            "reject" => hypertabular::LongRows::Reject,
+            "report" => hypertabular::LongRows::Report,
+            "truncate" => hypertabular::LongRows::Truncate,
+            other => panic!("long_rows {other}"),
+        });
+    }
+    if let Some(tokens) = entry.get("tokens") {
+        dialect = dialect.with_tokens(&strings_of(tokens));
+    }
+    if let Some(encoding) = entry.get("encoding") {
+        dialect = dialect.with_encoding(match encoding.as_str().expect("encoding") {
+            "windows-1252" => hypertabular::Encoding::Windows1252,
+            "latin-1" => hypertabular::Encoding::Latin1,
+            "utf-16le" => hypertabular::Encoding::Utf16Le,
+            other => panic!("encoding {other}"),
+        });
+    }
+    dialect
+}
+
 /// A plan entry as a column.
 pub fn column_of(entry: &Value) -> hypertabular::Column {
     let ordinal = entry["ordinal"].as_u64().expect("ordinal") as usize;
     // An entry with no format is a column given none, so the vector says what `Column::new` reads.
-    let mut column = hypertabular::Column::new(ordinal, door_of(entry));
+    let mut column = match entry.get("constraints") {
+        Some(declared) => checked_column(ordinal, door_of(entry), declared),
+        None => hypertabular::Column::new(ordinal, door_of(entry)),
+    };
     if entry.get("format").is_some() {
         column = column.format(format_of(entry));
     }
@@ -494,6 +728,10 @@ const CELL_KEYS: &[&str] = &[
     "raw_hex",
     "detail",
     "origin",
+    "keyword",
+    "adjusted",
+    "enum_index",
+    "bits",
 ];
 const PROBLEM_KEYS: &[&str] = &[
     "row",
@@ -506,6 +744,7 @@ const PROBLEM_KEYS: &[&str] = &[
     "origin",
     "expected",
     "found",
+    "keyword",
 ];
 const FAILURE_KEYS: &[&str] = &["kind", "record", "line", "byte", "expected", "found"];
 const PLAN_KEYS: &[&str] = &[
@@ -517,6 +756,21 @@ const PLAN_KEYS: &[&str] = &[
     "format",
     "tokens",
     "options",
+    "constraints",
+];
+/// HyperCast's corpus names for a declaration's keywords.
+const CONSTRAINT_KEYS: &[&str] = &[
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "rounding",
+    "minLength",
+    "maxLength",
+    "enum",
+    "trim",
+    "caseSensitive",
 ];
 const FORMAT_KEYS: &[&str] = &["decimal_sep", "group_sep", "flags", "currency"];
 const DATE_OPTION_KEYS: &[&str] = &["flags", "pivot", "months"];
@@ -544,6 +798,14 @@ fn unknown_shared_keys(case: &Value, name: &str, unknown: &mut Vec<String>) {
         unknown_keys(column, &path, PLAN_KEYS, unknown);
         if let Some(format) = column.get("format") {
             unknown_keys(format, &format!("{path}.format"), FORMAT_KEYS, unknown);
+        }
+        if let Some(declared) = column.get("constraints") {
+            unknown_keys(
+                declared,
+                &format!("{path}.constraints"),
+                CONSTRAINT_KEYS,
+                unknown,
+            );
         }
         if let Some(options) = column.get("options") {
             unknown_keys(

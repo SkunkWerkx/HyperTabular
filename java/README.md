@@ -53,7 +53,7 @@ public class Main {
                 MemorySegment verdicts = batch.verdicts(2); // CellVerdict.LAYOUT, one per row
                 System.out.println("ids: " + Arrays.toString(ids.toArray(ValueLayout.JAVA_INT)));
                 long faults = verdicts.elements(CellVerdict.LAYOUT)
-                        .filter(verdict -> verdict.get(ValueLayout.JAVA_INT, 8) != 0) // the reason, 0 for ok
+                        .filter(verdict -> verdict.get(ValueLayout.JAVA_INT, 8) != 0) // the code, 0 for ok
                         .count();
                 System.out.println("faults: " + faults);
 
@@ -212,6 +212,67 @@ refuse. HyperCast's
 [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape
 and the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf` with a `Rounding`,
+`minLength`, `maxLength`, `enum`, with `trim` and `caseSensitive` for text), through the factory of
+its door. Each cell is cast first, so text that isn't the type is a `Fault` as ever, and then judged:
+
+```java
+import io.github.skunkwerkx.hypercast.Checked;
+import io.github.skunkwerkx.hypercast.Constraints;
+import io.github.skunkwerkx.hypercast.Fault;
+import io.github.skunkwerkx.hypercast.Violation;
+import io.github.skunkwerkx.hypertabular.Batch;
+import io.github.skunkwerkx.hypertabular.Column;
+import io.github.skunkwerkx.hypertabular.DelimitedReader;
+import io.github.skunkwerkx.hypertabular.Dialect;
+import io.github.skunkwerkx.hypertabular.Problem;
+import io.github.skunkwerkx.hypertabular.Row;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class Checks {
+    public static void main(String[] args) {
+        byte[] csv = "qty,sex\n12,MALE\n7,x\n".getBytes(StandardCharsets.UTF_8);
+        try (DelimitedReader reader = DelimitedReader.of(csv, Dialect.CSV, List.of(
+                Column.i32(0, Constraints.i32().minimum("1").maximum("10").build()),
+                Column.text(1, Constraints.text().enumOf("Female", "Male").build())))) {
+            Batch batch = reader.read();
+            for (Row row : batch) {
+                String qty = switch (row.getChecked(0, Integer.class)) {
+                    case Checked<Integer> passed -> "" + passed.value();
+                    case Violation<Integer> broken -> broken.value() + " breaks " + broken.keyword();
+                    case Fault<Integer> fault -> "" + fault.reason();
+                };
+                String sex = switch (row.getChecked(1, String.class)) {
+                    case Checked<String> passed -> passed.value(); // "MALE" matches the entry, and reads as "Male"
+                    case Violation<String> broken -> broken.toString();
+                    case Fault<String> fault -> fault.toString();
+                };
+                System.out.println(qty + " " + sex);
+            }
+            for (Problem problem : batch.faults()) {
+                System.out.println("line " + problem.line() + " column " + problem.sourceColumn().orElseThrow()
+                        + " " + problem.keyword());
+            }
+        }
+    }
+}
+```
+
+A violation isn't a fault: the cell cast, so `verdict(column, row).reason()` is `null`,
+`CellVerdict.isViolation()` says so, the value is kept exactly as cast (never rounded), and the span is
+the judged text's. A cell `multipleOf` rounded passes with `adjusted()` set, and a text `enum` match
+reads as the entry as declared, the caller's own string, with `enumIndex()` naming it. `faults()` lists
+a violation with its `keyword()` and a `null` `reason()`. `Constraints<Integer>` serves `i32`, `u8` and
+`u16` alike, so the factory checks the declaration's `door()` and refuses another door's with
+`IllegalArgumentException`. `get`, `text`, `string`, `chars` and `getChars` refuse a constrained column
+with `IllegalStateException`: they would read a violation as passed. `getChecked` reads an
+unconstrained column too, where every cell that cast passes, unadjusted. HyperCast judges the
+declaration when it is built, and refuses only one its core cannot read.
+
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
@@ -222,7 +283,7 @@ rows, not once per cell.
 
 - **One batch type.** `read()` returns a `Batch` — `rows()`, `columns()`, `line(row)`,
   `verdicts(column)`, `values(column)` for a whole column, `get(column, row, type)` for any
-  one cell, `detail` and `origin` for what a cell's verdict says beside itself, `faults()` for
+  one cell (`getChecked` for a column that declares constraints), `detail` and `origin` for what a cell's verdict says beside itself, `faults()` for
   what went wrong in the batch, `text`/`string`/`chars` for text, and `raw` for the text a cell
   was cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
@@ -235,7 +296,7 @@ rows, not once per cell.
   `get` would make, and likewise `uuid`, `instant`, `date`, `civil`, `time` and `duration`.
 - **Rows, when that is how the code thinks.** A `Batch` is `Iterable<Row>` (and `row(i)`
   picks one): a `Row` is the batch's accessors with the row chosen — `index()`, `line()`,
-  `get(column, type)`, `verdict`, `detail`, `origin`, `text`, `string`, `chars`, `raw` — a view, valid as long
+  `get(column, type)`, `getChecked`, `verdict`, `detail`, `origin`, `text`, `string`, `chars`, `raw` — a view, valid as long
   as the batch, and an iterator goes on no further than that: past the next `read()` it throws
   `ConcurrentModificationException`, never answering for the next batch. `reader.forEachRow(row -> …)` and `sheet.forEachRow(row -> …)` read every
   batch left and hand over each row; a row is valid only for its own call.

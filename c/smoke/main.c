@@ -4,7 +4,8 @@
 // grown when the core asks, and a sheet of corpus/workbook/basic.xlsx through the workbook
 // ones, and checks the header, every cell's value or verdict and every row's line. It reads
 // each again through the size-tagged calls, with tokens, notes and row widths, lists what went
-// wrong, decodes an encoding, asks for a suggestion and parses a range. Then it prints the
+// wrong, decodes an encoding, asks for a suggestion and parses a range, and reads two columns that
+// declare HyperCast's constraints, their checks beside their verdicts. Then it prints the
 // library's version, which run.sh holds to the package's. CMakeLists.txt builds it as C99, C11
 // and, where the compiler has it, C23, warnings as errors.
 //
@@ -280,6 +281,128 @@ static int delimited_with(void) {
                             HyperTabularRawDelimitedOptions_LONG_ROWS_REPORT, &cursor, problems, 1,
                             &written) == HYPERTABULAR_OK);
   CHECK(written == 0);
+  return 0;
+}
+
+// Two columns that declare HyperCast's constraints: an i32 at most 10, and text one of `Female` or
+// `Male`. A cell that cast and broke one is a violation, its check naming the keyword; a text match
+// names the entry. A constrained column's checks are required, and its declaration is the core's to
+// judge, as the batch's size is.
+static int constrained(void) {
+  static const char csv[] = "7,MALE\n11,other\nx,Female\n";
+  // The enum as HyperCast packs text: a little-endian length, then the bytes, per entry.
+  static const uint8_t sexes[] = {6,   0, 0, 0, 'F', 'e', 'm', 'a', 'l',
+                                  'e', 4, 0, 0, 0,   'M', 'a', 'l', 'e'};
+  uint64_t block[HyperTabularDelimitedState_SIZE / 8];
+  HyperTabularDelimitedState *state = (HyperTabularDelimitedState *)block;
+  HyperTabularRawDelimitedOptions options;
+  HyperTabularRawConstraints at_most;
+  HyperTabularRawConstraints one_of;
+  HyperTabularColumnSpecWith specs[2];
+  int32_t numbers[4];
+  HyperTabularSpan texts[4];
+  HyperTabularCellVerdict verdicts[2][4];
+  HyperTabularRawCheck checks[2][4];
+  HyperTabularColumnBufferWith columns[2];
+  HyperTabularSpan cells[16];
+  uint8_t arena[16];
+  HyperTabularBuffersWith buffers;
+  HyperTabularFilled out;
+  HyperTabularRawProblem problems[4];
+  HyperTabularRawBatchCheck plain;
+  HyperTabularRawBatchCheck checked;
+  uint64_t cursor = 0;
+  uintptr_t written = 0;
+  const uint8_t *input = (const uint8_t *)csv;
+  int i;
+
+  memset(&at_most, 0, sizeof at_most);
+  at_most.size = HyperTabularRawConstraints_SIZE;
+  at_most.flags = HyperTabularRawConstraints_HAS_MAXIMUM;
+  at_most.maximum.lo = 10;
+  memset(&one_of, 0, sizeof one_of);
+  one_of.size = HyperTabularRawConstraints_SIZE;
+  one_of.flags = HyperTabularRawConstraints_HAS_ENUM;
+
+  memset(&options, 0, sizeof options);
+  options.size = HyperTabularRawDelimitedOptions_SIZE;
+  options.separator = ',';
+  options.quoting = 1;
+  CHECK(hypertabular_delimited_init_with(state, &options) == HYPERTABULAR_OK);
+  memset(specs, 0, sizeof specs);
+  memset(columns, 0, sizeof columns);
+  for (i = 0; i < 2; ++i) {
+    specs[i].size = HyperTabularColumnSpecWith_SIZE;
+    specs[i].ordinal = (uint32_t)i;
+    specs[i].format = invariant();
+    columns[i].size = HyperTabularColumnBufferWith_SIZE;
+    columns[i].verdicts = verdicts[i];
+    columns[i].checks = checks[i];
+  }
+  specs[0].door = 4; // i32
+  specs[0].constraints = &at_most;
+  specs[1].door = 18; // text
+  specs[1].constraints = &one_of;
+  specs[1].enum_ptr = sexes;
+  specs[1].enum_len = sizeof sexes;
+  columns[0].values = numbers;
+  columns[1].values = texts;
+  memset(&buffers, 0, sizeof buffers);
+  buffers.size = HyperTabularBuffersWith_SIZE;
+  buffers.arena = arena;
+  buffers.arena_cap = sizeof arena;
+  buffers.cells = cells;
+  buffers.cells_cap = sizeof cells / sizeof cells[0];
+
+  // A constrained column without its checks is refused before a cell is read; so is a declaration
+  // the core refuses, here an enum list passed with HAS_ENUM clear.
+  columns[1].checks = NULL;
+  CHECK(hypertabular_delimited_fill_with(state, input, sizeof(csv) - 1, 1, specs, columns, 2, 4,
+                                         &buffers, &out) == HYPERTABULAR_ERR_CONTRACT);
+  columns[1].checks = checks[1];
+  one_of.flags = 0;
+  CHECK(hypertabular_delimited_fill_with(state, input, sizeof(csv) - 1, 1, specs, columns, 2, 4,
+                                         &buffers, &out) == HYPERTABULAR_ERR_CONTRACT);
+  one_of.flags = HyperTabularRawConstraints_HAS_ENUM;
+
+  memset(&out, 0, sizeof out);
+  CHECK(hypertabular_delimited_fill_with(state, input, sizeof(csv) - 1, 1, specs, columns, 2, 4,
+                                         &buffers, &out) == HYPERTABULAR_OK);
+  CHECK(out.rows == 3);
+  // 7 passes; MALE matches the second entry, under simple case folding.
+  CHECK(verdicts[0][0].reason == 0 && numbers[0] == 7 && checks[0][0].adjusted == 0 &&
+        checks[0][0].enum_index == UINT32_MAX);
+  CHECK(verdicts[1][0].reason == 0 && is(input, texts[0], "MALE") && checks[1][0].enum_index == 1);
+  // 11 breaks maximum (3), cast all the same; other breaks enum (8).
+  CHECK(verdicts[0][1].reason == HyperTabularCellVerdict_VIOLATION && numbers[1] == 11 &&
+        checks[0][1].keyword == 3 && verdicts[0][1].offset == 0 && verdicts[0][1].len == 2);
+  CHECK(verdicts[1][1].reason == HyperTabularCellVerdict_VIOLATION && checks[1][1].keyword == 8 &&
+        is(input, texts[1], "other"));
+  // x is the door's own fault; Female matches the first entry.
+  CHECK(verdicts[0][2].reason == 2);
+  CHECK(verdicts[1][2].reason == 0 && checks[1][2].enum_index == 0);
+
+  // The list of what went wrong names each violation's keyword, and a fault's reason alone.
+  CHECK(hypertabular_faults(columns, 2, 3, NULL, 0,
+                            HyperTabularRawDelimitedOptions_LONG_ROWS_REJECT, &cursor, problems, 4,
+                            &written) == HYPERTABULAR_OK);
+  CHECK(written == 3);
+  CHECK(problems[0].row == 1 && problems[0].plan_column == 0 &&
+        problems[0].reason == HyperTabularCellVerdict_VIOLATION && problems[0].keyword == 3 &&
+        problems[0].offset == 0 && problems[0].len == 2);
+  CHECK(problems[1].row == 1 && problems[1].plan_column == 1 && problems[1].keyword == 8);
+  CHECK(problems[2].row == 2 && problems[2].plan_column == 0 && problems[2].reason == 2 &&
+        problems[2].keyword == 0);
+
+  // A constrained column's checks count toward what a batch asks for.
+  memset(&plain, 0, sizeof plain);
+  memset(&checked, 0, sizeof checked);
+  CHECK(hypertabular_batch_check(&specs[1], 1, 1024, 1024, 0, &checked) == HYPERTABULAR_OK);
+  specs[1].constraints = NULL;
+  specs[1].enum_ptr = NULL;
+  specs[1].enum_len = 0;
+  CHECK(hypertabular_batch_check(&specs[1], 1, 1024, 1024, 0, &plain) == HYPERTABULAR_OK);
+  CHECK(checked.needed == plain.needed + 1024 * HyperTabularRawCheck_SIZE);
   return 0;
 }
 
@@ -954,14 +1077,18 @@ int main(int argc, char **argv) {
   CHECK(sizeof(HyperTabularRawSuggestion) == HyperTabularRawSuggestion_SIZE);
   CHECK(sizeof(HyperTabularRawRange) == HyperTabularRawRange_SIZE);
   CHECK(sizeof(HyperTabularRawBatchCheck) == HyperTabularRawBatchCheck_SIZE);
+  CHECK(sizeof(HyperTabularRawConstraints) == HyperTabularRawConstraints_SIZE);
+  CHECK(sizeof(HyperTabularRawCheck) == HyperTabularRawCheck_SIZE);
+  CHECK(sizeof(HyperTabularColumnSpecWith) == HyperTabularColumnSpecWith_SIZE);
+  CHECK(sizeof(HyperTabularColumnBufferWith) == HyperTabularColumnBufferWith_SIZE);
 
   if (argc != 2) {
     fprintf(stderr, "usage: %s <corpus directory>\n", argv[0]);
     return 2;
   }
-  if (delimited() != 0 || delimited_with() != 0 || grouping() != 0 || transcode() != 0 ||
-      suggest() != 0 || batch_check() != 0 || range() != 0 || workbook(argv[1]) != 0 ||
-      workbook_grouping(argv[1]) != 0) {
+  if (delimited() != 0 || delimited_with() != 0 || constrained() != 0 || grouping() != 0 ||
+      transcode() != 0 || suggest() != 0 || batch_check() != 0 || range() != 0 ||
+      workbook(argv[1]) != 0 || workbook_grouping(argv[1]) != 0) {
     return 1;
   }
 

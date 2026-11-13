@@ -25,7 +25,7 @@ public enum Origin : ushort
 /// <param name="Line">Delimited text: the record's first physical line. A sheet: its absolute row. From one.</param>
 /// <param name="PlanColumn">The column of the plan; <see langword="null"/> for an entry about the row as a whole.</param>
 /// <param name="SourceColumn">The source column, from zero; a sheet's own, so <c>A</c> is 0 wherever a range starts. <see langword="null"/> for an entry about the row as a whole.</param>
-/// <param name="Reason">Why the verdict is what it is: malformed, out of range, or empty for a formula with no cached value. <see langword="null"/> for an entry about the row as a whole.</param>
+/// <param name="Reason">Why the verdict is what it is: malformed, out of range, or empty for a formula with no cached value. <see langword="null"/> for an entry about the row as a whole, and for a violation, which <see cref="Keyword"/> names.</param>
 /// <param name="DetailCode">HyperCast's raw detail code, 0 for none; one this binding does not name is kept here.</param>
 /// <param name="Origin">Where the verdict came from. An entry about the row as a whole says <see cref="Origin.Cell"/>.</param>
 /// <param name="Offset">Byte offset of the offending span in the cell's decoded, unescaped text; 0 where there is none.</param>
@@ -47,6 +47,12 @@ public readonly record struct Problem(
 {
 	/// <summary>What failed, named: <see cref="FaultDetail.None"/>, one of HyperCast's members, or <see cref="FaultDetail.Unknown"/>.</summary>
 	public FaultDetail Detail => Abi.DetailFrom(DetailCode);
+
+	/// <summary>
+	/// For a cell that cast and broke a constraint its column declares, the keyword it broke, its
+	/// span in <see cref="Offset"/> and <see cref="Length"/>; <see langword="null"/> otherwise.
+	/// </summary>
+	public Keyword? Keyword { get; init; }
 }
 
 /// <summary>
@@ -195,22 +201,23 @@ public sealed unsafe class Batch
 		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)row, (uint)_rows, nameof(row));
 
 	/// <summary>
-	/// A column's verdicts, one per row. A verdict that is not ok is the cell's fault, its
-	/// span in the cell's text (<see cref="Raw"/>).
+	/// A column's verdicts, one per row. A verdict that is not ok is the cell's fault, or its
+	/// violation (<see cref="CellVerdict.IsViolation"/>), its span in the cell's text (<see cref="Raw"/>).
 	/// </summary>
 	public ReadOnlySpan<CellVerdict> Verdicts(int column) => _columns.Verdicts[column].AsSpan(0, _rows);
 
 	/// <summary>
 	/// The fault of the cell at (<paramref name="column"/>, <paramref name="row"/>), with what failed
-	/// on its <see cref="HyperCast.Fault.Detail"/>; <see langword="null"/> for a cell that cast. The
-	/// one way to a text column's: <see cref="CellVerdict.ToFault"/> has no room for the detail.
+	/// on its <see cref="HyperCast.Fault.Detail"/>; <see langword="null"/> for a cell that cast,
+	/// whether or not it broke a constraint. The one way to a text column's:
+	/// <see cref="CellVerdict.ToFault"/> has no room for the detail.
 	/// </summary>
 	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
 	public Fault? Fault(int column, int row)
 	{
 		CheckRow(row);
 		var verdict = _columns.Verdicts[column][row];
-		return verdict.IsOk ? null : Detailed(verdict, column, row);
+		return verdict.IsOk || verdict.IsViolation ? null : Detailed(verdict, column, row);
 	}
 
 	/// <summary>A verdict that is not ok as HyperCast's fault, with the note's detail on it.</summary>
@@ -237,7 +244,8 @@ public sealed unsafe class Batch
 	/// <summary>
 	/// What went wrong in this batch, in order by row and then by column, a row's own entry first:
 	/// cells at <see cref="CastFailure.Malformed"/> or <see cref="CastFailure.OutOfRange"/>, formulas
-	/// with no cached value (<see cref="Origin.Uncached"/>), and rows longer than the width under
+	/// with no cached value (<see cref="Origin.Uncached"/>), cells that broke a constraint their
+	/// column declares (<see cref="Problem.Keyword"/>), and rows longer than the width under
 	/// <see cref="LongRows.Report"/>. Blanks, tokens, padding and <see cref="LongRows.Truncate"/> are
 	/// not listed. A row the empty-row filter dropped cannot be named. With notes off a refused cell has
 	/// no detail, and an uncached one is not listed.
@@ -302,7 +310,10 @@ public sealed unsafe class Batch
 			return new(row, line, null, null, null, 0, HyperTabular.Origin.Cell, 0, 0, (int)raw.Expected, (int)raw.Found);
 		var column = (int)raw.PlanColumn;
 		return new(row, line, column, _columns.Plan[column].Ordinal + _firstColumn, Abi.ReasonFrom(raw.Reason), raw.Detail,
-			(Origin)raw.Origin, (int)raw.Offset, (int)raw.Len, (int)raw.Expected, (int)raw.Found);
+			(Origin)raw.Origin, (int)raw.Offset, (int)raw.Len, (int)raw.Expected, (int)raw.Found)
+		{
+			Keyword = HyperCast.Keyword.FromCode(raw.Keyword),
+		};
 	}
 
 	/// <summary>
@@ -319,7 +330,7 @@ public sealed unsafe class Batch
 	/// </list>
 	/// The <c>Raw</c> types are HyperCast's own (<see cref="HyperCast.Interop"/>), laid out as
 	/// the core writes them, and each converts itself to the type <see cref="Get{T}"/> makes. The
-	/// value of a row whose verdict is not ok is zero. A <see cref="Door.Uuid"/> column has no
+	/// value of a row whose verdict is a fault is zero; a violation's is the value as cast. A <see cref="Door.Uuid"/> column has no
 	/// span — its 16 bytes are in RFC 9562 order, which is not <see cref="Guid"/>'s layout — and
 	/// is read a cell at a time with <see cref="Get{T}"/>, as is a <see cref="Door.Text"/> column
 	/// with <see cref="TryGetText"/>.
@@ -368,11 +379,15 @@ public sealed unsafe class Batch
 	/// The temporal types hold 100 ns ticks, so sub-tick nanoseconds truncate. A
 	/// <see cref="Door.Text"/> column is read with <see cref="TryGetText"/>.
 	/// </summary>
-	/// <exception cref="InvalidOperationException">The column's door does not make a <typeparamref name="T"/>.</exception>
+	/// <exception cref="InvalidOperationException">
+	/// The column's door does not make a <typeparamref name="T"/>, or the column declares constraints,
+	/// whose cells <see cref="GetChecked{T}"/> reads.
+	/// </exception>
 	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
 	public Verdict<T> Get<T>(int column, int row) where T : struct
 	{
 		CheckRow(row);
+		Unchecked(column);
 		var door = _columns.Plan[column].Door;
 		if (!Reads<T>(door))
 			throw new InvalidOperationException($"Column {column} is cast through {door}, which does not make a {typeof(T).Name}.");
@@ -398,6 +413,66 @@ public sealed unsafe class Batch
 			return As<TimeSpan, T>(Read<RawDuration>(values, row).ToTimeSpan());
 		// The primitives: the value is the bytes the core wrote.
 		return new Verdict<T>(new Success<T>(Unsafe.ReadUnaligned<T>(ref values[row * Unsafe.SizeOf<T>()])));
+	}
+
+	/// <summary>Refuses a column that declares constraints: a violation is no fault, so a plain getter would read it as passed.</summary>
+	void Unchecked(int column)
+	{
+		if (_columns.Plan[column].IsChecked)
+			throw new InvalidOperationException($"Column {column} declares constraints: read it with GetChecked.");
+	}
+
+	/// <summary>
+	/// The cell at (<paramref name="column"/>, <paramref name="row"/>) as HyperCast cast and judged it:
+	/// the value, flagged when <c>multipleOf</c>'s rounding adjusted it and naming the <c>enum</c>
+	/// entry it matched, or the rejection, a <see cref="HyperCast.Fault"/> as <see cref="Get{T}"/>
+	/// gives it or a <see cref="Violation{T}"/> naming the keyword broken and carrying the value as
+	/// cast. <typeparamref name="T"/> is the type of the column's door: <see cref="sbyte"/> …
+	/// <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/> and <see cref="decimal"/> for the
+	/// numeric doors, <see cref="string"/> for <see cref="Door.Text"/>, where an <c>enum</c> match
+	/// reads as the entry as declared. A column that declares no constraints reads too: every cell
+	/// that cast passes, unadjusted.
+	/// </summary>
+	/// <exception cref="InvalidOperationException">The column's door has no checked door that makes a <typeparamref name="T"/>.</exception>
+	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
+	public CheckedVerdict<T> GetChecked<T>(int column, int row) where T : notnull
+	{
+		CheckRow(row);
+		var plan = _columns.Plan[column];
+		var reads = typeof(T) == typeof(string) ? plan.Door == Door.Text : Column.IsNumeric(plan.Door) && Reads<T>(plan.Door);
+		if (!reads)
+			throw new InvalidOperationException($"Column {column} is cast through {plan.Door}, which has no checked door making a {typeof(T).Name}.");
+		var verdict = _columns.Verdicts[column][row];
+		if (!verdict.IsOk && !verdict.IsViolation)
+			return new(new Rejection<T>(Detailed(verdict, column, row)));
+		var value = CheckedValue<T>(column, row);
+		if (_columns.Checks[column] is not { } checks)
+			return new(new Checked<T>(value, false, null));
+		var check = checks[row];
+		if (verdict.IsViolation)
+			return new(new Rejection<T>(new Violation<T>(
+				HyperCast.Keyword.FromCode(check.Keyword) ?? throw new InvalidOperationException(Workbook.ContractViolation),
+				value, verdict.Offset, verdict.Length)));
+		if (check.EnumIndex == uint.MaxValue)
+			return new(new Checked<T>(value, check.Adjusted != 0, null));
+		// A text match is the entry as declared, the caller's own string.
+		if (typeof(T) == typeof(string) && plan.Constraints is Constraints<string> { Enum: { } entries })
+			value = (T)(object)entries[(int)check.EnumIndex].ToString();
+		return new(new Checked<T>(value, check.Adjusted != 0, (int)check.EnumIndex));
+	}
+
+	/// <summary>The value the core wrote at <paramref name="row"/>, as the checked door's type.</summary>
+	T CheckedValue<T>(int column, int row) where T : notnull
+	{
+		var values = _columns.Values[column];
+		if (typeof(T) == typeof(string))
+			return (T)(object)Encoding.UTF8.GetString(Bytes(Read<Native.RawSpan>(values, row)));
+		if (typeof(T) == typeof(decimal))
+		{
+			var exact = Read<RawDecimal>(values, row).ToDecimal();
+			return Unsafe.As<decimal, T>(ref exact);
+		}
+		return Unsafe.ReadUnaligned<T>(ref values[row * Unsafe.SizeOf<T>()]);
 	}
 
 	/// <summary>Whether a door makes a <typeparamref name="T"/>.</summary>
@@ -441,10 +516,14 @@ public sealed unsafe class Batch
 	/// <c>true</c>, <c>2024-01-31T10:30:00</c>, <c>PT1H30M</c>). <see langword="false"/> for a
 	/// cell with no bytes at all, which is the one way text fails.
 	/// </summary>
-	/// <exception cref="InvalidOperationException">The column is not read through <see cref="Door.Text"/>.</exception>
+	/// <exception cref="InvalidOperationException">
+	/// The column is not read through <see cref="Door.Text"/>, or declares constraints, whose cells
+	/// <see cref="GetChecked{T}"/> reads.
+	/// </exception>
 	public bool TryGetText(int column, int row, out ReadOnlySpan<byte> utf8)
 	{
 		CheckRow(row);
+		Unchecked(column);
 		var door = _columns.Plan[column].Door;
 		if (door != Door.Text)
 			throw new InvalidOperationException($"Column {column} is cast through {door}, not {Door.Text}.");

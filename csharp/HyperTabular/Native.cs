@@ -198,6 +198,9 @@ static unsafe partial class Native
 		public nuint MonthsLen;
 		public byte* Tokens;
 		public nuint TokensLen;
+		public RawConstraints* Constraints;
+		public byte* EnumPtr;
+		public nuint EnumLen;
 	}
 
 	/// <summary>What a verdict does not say about a cell: HyperCast's detail code, and where the verdict came from.</summary>
@@ -216,6 +219,7 @@ static unsafe partial class Native
 		public void* Values;
 		public CellVerdict* Verdicts;
 		public RawCellNote* Notes;
+		public RawCheck* Checks;
 	}
 
 	/// <summary>The memory the <c>_with</c> fills work in: <see cref="RawBuffers"/>'s fields, tokens and the row widths.</summary>
@@ -258,6 +262,7 @@ static unsafe partial class Native
 		public uint Len;
 		public uint Expected;
 		public uint Found;
+		public uint Keyword;
 	}
 
 	/// <summary>What <c>hypertabular_suggest</c> says of one column of a sample.</summary>

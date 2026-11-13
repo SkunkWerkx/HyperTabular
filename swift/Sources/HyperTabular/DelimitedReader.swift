@@ -103,7 +103,7 @@ public final class DelimitedReader {
                 && MemoryLayout<HyperTabularRawDelimitedOptions>.size == HyperTabularRawDelimitedOptions_SIZE
                 && MemoryLayout<HyperTabularRawSheetOptions>.size == HyperTabularRawSheetOptions_SIZE
                 && MemoryLayout<HyperTabularCellNote>.stride == 4
-                && MemoryLayout<HyperTabularRawProblem>.stride == 32
+                && MemoryLayout<HyperTabularRawProblem>.stride == HyperTabularRawProblem_SIZE
                 && MemoryLayout<HyperTabularRawSuggestion>.stride == 20
                 && MemoryLayout<HyperTabularRawTranscoded>.size == 32
                 && MemoryLayout<HyperTabularRawRange>.size == 16

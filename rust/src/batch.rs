@@ -18,7 +18,10 @@ use crate::kernel::door::Door;
 use crate::kernel::faults::faults;
 use crate::kernel::size::value_bytes;
 use crate::{Column, Error};
-use hypercast::{CivilDateTime, Date, Decimal, Detail, Duration, Fault, Reason, Timestamp};
+use hypercast::{
+    Checked, CivilDateTime, Date, Decimal, Detail, Duration, Fault, Keyword, RawCheck, Reason,
+    Rejection, Timestamp, Violation,
+};
 use std::borrow::Cow;
 
 /// One column's room: `batch_rows` values of its door's type, and as many verdicts.
@@ -29,6 +32,8 @@ struct Store {
     verdicts: Vec<CellVerdict>,
     /// As many notes, or none for a read that doesn't take them.
     notes: Vec<CellNote>,
+    /// As many checks for a column that declares constraints, or none.
+    checks: Vec<RawCheck>,
 }
 
 /// The pointers handed to the core for one call.
@@ -94,6 +99,7 @@ impl Columns {
                     values: lent(bytes.div_ceil(8))?,
                     verdicts: lent(batch_rows)?,
                     notes: lent(if notes { batch_rows } else { 0 })?,
+                    checks: lent(if column.is_checked() { batch_rows } else { 0 })?,
                 })
             })
             .collect::<Result<_, Error>>()?;
@@ -129,6 +135,11 @@ impl Columns {
                     std::ptr::null_mut()
                 } else {
                     store.notes.as_mut_ptr()
+                },
+                checks: if store.checks.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    store.checks.as_mut_ptr()
                 },
             });
         }
@@ -320,7 +331,9 @@ impl<'r> Batch<'r> {
     }
 
     /// The verdicts of column `column`, one a row. A verdict with reason `0` is a value;
-    /// any other is a fault ([`CellVerdict::fault`]), with its span in the cell's text.
+    /// [`CellVerdict::VIOLATION`], on a column that declares constraints, a value that broke one,
+    /// which [`Batch::checks`] names; any other is a fault ([`CellVerdict::fault`]), with its span
+    /// in the cell's text.
     pub fn verdicts(&self, column: usize) -> &'r [CellVerdict] {
         &self.store(column).verdicts[..self.rows]
     }
@@ -486,7 +499,9 @@ impl<'r> Batch<'r> {
     /// without copying. `T` must be the type the column's door produces (see [`Value`]).
     ///
     /// Read [`Batch::verdicts`] beside the values: a row whose verdict is not ok holds
-    /// the door's zero, not a successfully cast value. Text uses [`Batch::text`].
+    /// the door's zero, not a successfully cast value, but for a violation of a constrained
+    /// column's declaration ([`CellVerdict::VIOLATION`]), which holds the value as cast. Text uses
+    /// [`Batch::text`].
     /// The slice borrows the reader for the batch's lifetime, so it cannot be retained
     /// across another read of that reader.
     ///
@@ -534,8 +549,10 @@ impl<'r> Batch<'r> {
     /// fault. `T` is the type the column's door makes — see [`Value`].
     ///
     /// # Panics
-    /// If the column's door does not make a `T`, or the row is not in the batch.
+    /// If the column's door does not make a `T`, the column declares constraints (read it with
+    /// [`Batch::get_checked`]), or the row is not in the batch.
     pub fn get<T: Value>(&self, column: usize, row: usize) -> Result<T, Fault> {
+        self.unchecked(column);
         let value = self.values::<T>(column)[row];
         match self.verdicts(column)[row].fault() {
             Some(fault) => Err(fault),
@@ -561,8 +578,10 @@ impl<'r> Batch<'r> {
     /// `2024-01-31T10:30:00`, `PT1H30M`.
     ///
     /// # Panics
-    /// If the column is not read through the text door, or the row is not in the batch.
+    /// If the column is not read through the text door, declares constraints (read it with
+    /// [`Batch::text_checked`]), or the row is not in the batch.
     pub fn text(&self, column: usize, row: usize) -> Result<&'r [u8], Fault> {
+        self.unchecked(column);
         let door = self.store_door(column);
         assert!(
             door == Door::Text,
@@ -583,6 +602,127 @@ impl<'r> Batch<'r> {
     /// As [`Batch::text`].
     pub fn text_str(&self, column: usize, row: usize) -> Result<Cow<'r, str>, Fault> {
         self.text(column, row).map(String::from_utf8_lossy)
+    }
+
+    /// Refuses a column that declares constraints, whose verdicts the plain getters can't say.
+    fn unchecked(&self, column: usize) {
+        assert!(
+            !self.columns.plan[column].is_checked(),
+            "column {column} declares constraints: read it with get_checked or text_checked"
+        );
+    }
+
+    /// The checks of column `column`, one a row, as the core wrote them beside a constrained
+    /// column's verdicts: on a cell that cast, whether rounding adjusted it and the `enum` entry it
+    /// matched; on a violation, the keyword. Empty for a column that declares none. A cell that
+    /// didn't cast has no check, and what's there is stale: read it beside the verdict, or through
+    /// [`Batch::get_checked`].
+    pub fn checks(&self, column: usize) -> &'r [RawCheck] {
+        let store = self.store(column);
+        store.checks.get(..self.rows).unwrap_or_default()
+    }
+
+    /// The verdict at `row` of a column read through the checked doors, its value set aside: the
+    /// check of a cell that passed, or what refused it.
+    fn judged(&self, column: usize, row: usize) -> Result<RawCheck, Refused> {
+        let verdict = self.verdicts(column)[row];
+        let check = self.checks(column).get(row).copied();
+        if verdict.reason == CellVerdict::VIOLATION {
+            return Err(Refused::Broke {
+                keyword: check.and_then(|check| keyword_of(check.keyword)),
+                offset: verdict.offset,
+                len: verdict.len,
+            });
+        }
+        match verdict.fault() {
+            Some(fault) => Err(Refused::Fault(fault)),
+            // A column without constraints has no checks, and nothing was adjusted or matched.
+            None => Ok(check.unwrap_or(RawCheck {
+                keyword: 0,
+                adjusted: 0,
+                enum_index: u32::MAX,
+            })),
+        }
+    }
+
+    /// The cell at `row` of column `column` as HyperCast's checked door judged it: the value,
+    /// flagged when `multipleOf`'s rounding adjusted it; a [`Violation`] of a constraint the
+    /// column declares ([`Column::checked`](crate::Column::checked)), carrying the value as cast
+    /// and its span; or the cell's fault, a cell no door was asked about included. A column that
+    /// declares none reads as its [`Batch::get`] does, never adjusted. `T` is the type the
+    /// column's door makes.
+    ///
+    /// # Panics
+    /// If the column's door does not make a `T`, or the row is not in the batch.
+    pub fn get_checked<T: Value>(
+        &self,
+        column: usize,
+        row: usize,
+    ) -> Result<Checked<T>, Rejection<T>> {
+        let value = self.values::<T>(column)[row];
+        self.settled(column, row, value)
+    }
+
+    fn settled<V>(&self, column: usize, row: usize, value: V) -> Result<Checked<V>, Rejection<V>> {
+        match self.judged(column, row) {
+            Ok(check) => Ok(Checked::new(
+                value,
+                check.adjusted != 0,
+                (check.enum_index != u32::MAX).then_some(check.enum_index),
+            )),
+            Err(Refused::Broke {
+                keyword: Some(keyword),
+                offset,
+                len,
+            }) => Err(Rejection::Violation(Violation::new(
+                keyword, value, offset, len,
+            ))),
+            // A keyword no check names, which no fill writes: the cell is still refused.
+            Err(Refused::Broke { offset, len, .. }) => Err(Rejection::Fault(Fault {
+                reason: Reason::OutOfRange,
+                offset,
+                len,
+            })),
+            Err(Refused::Fault(fault)) => Err(Rejection::Fault(fault)),
+        }
+    }
+
+    /// The text cell at `row` of column `column` as HyperCast's checked text door judged it: the
+    /// text it judged (after the `trim` the column declares), or, matching an `enum`, the declared
+    /// entry it matched, which [`Checked::enum_index`] names; a [`Violation`] carrying the text it
+    /// judged; or the cell's fault. A column that declares none reads as its [`Batch::text`] does,
+    /// as text: a cell whose bytes aren't UTF-8 is already `Malformed`.
+    ///
+    /// # Panics
+    /// If the column is not read through the text door, or the row is not in the batch.
+    pub fn text_checked(
+        &self,
+        column: usize,
+        row: usize,
+    ) -> Result<Checked<&'r str>, Rejection<&'r str>> {
+        let door = self.store_door(column);
+        assert!(
+            door == Door::Text,
+            "column {column} is read through the {door:?} door, not the text door"
+        );
+        let span = self.stored::<Span>(column)[row];
+        // The text door passed these bytes, or they're the text a violation carries: UTF-8.
+        let text = std::str::from_utf8(self.bytes(span)).unwrap_or_default();
+        let judged = self.settled(column, row, text);
+        let entries = self.columns.plan[column].text_constraints();
+        match (judged, entries.and_then(|declared| declared.enum_entries())) {
+            (Ok(passed), Some(mut entries)) => {
+                let entry = passed
+                    .enum_index
+                    .and_then(|index| entries.nth(index as usize))
+                    .and_then(|entry| std::str::from_utf8(entry).ok());
+                match entry {
+                    Some(entry) => Ok(Checked::new(entry, passed.adjusted, passed.enum_index)),
+                    None => Ok(passed),
+                }
+            }
+            (judged, _) => judged,
+        }
     }
 
     /// The row at `row`: the batch read across instead of down.
@@ -694,6 +834,23 @@ impl<'r> Row<'r> {
     /// Where the row came from: [`Batch::line`].
     pub fn line(&self) -> u32 {
         self.batch.line(self.index)
+    }
+
+    /// The cell in column `column` as HyperCast's checked door judged it: [`Batch::get_checked`].
+    ///
+    /// # Panics
+    /// As [`Batch::get_checked`].
+    pub fn get_checked<T: Value>(&self, column: usize) -> Result<Checked<T>, Rejection<T>> {
+        self.batch.get_checked(column, self.index)
+    }
+
+    /// The text cell in column `column` as HyperCast's checked text door judged it:
+    /// [`Batch::text_checked`].
+    ///
+    /// # Panics
+    /// As [`Batch::text_checked`].
+    pub fn text_checked(&self, column: usize) -> Result<Checked<&'r str>, Rejection<&'r str>> {
+        self.batch.text_checked(column, self.index)
     }
 
     /// The cell in column `column` as HyperCast judged it: [`Batch::get`].
@@ -820,7 +977,8 @@ pub struct Problem {
     /// wherever the range starts.
     pub source_column: Option<usize>,
     /// The verdict's reason: `Malformed`, `OutOfRange`, or `Empty` for a formula with no cached
-    /// value. `None` for an entry about the row as a whole.
+    /// value. `None` for an entry about the row as a whole, and for a violation, which `keyword`
+    /// names.
     pub reason: Option<Reason>,
     /// What failed in the cell: [`Batch::detail`].
     pub detail: Option<Detail>,
@@ -835,6 +993,8 @@ pub struct Problem {
     pub expected: u32,
     /// For a long row, the cells it had; otherwise `0`.
     pub found: u32,
+    /// For a [`CellVerdict::VIOLATION`], the keyword the cell broke; otherwise `None`.
+    pub keyword: Option<Keyword>,
 }
 
 /// Entries of the list a [`Faults`] holds at a time.
@@ -867,6 +1027,7 @@ impl Problem {
             len: raw.len,
             expected: raw.expected,
             found: raw.found,
+            keyword: keyword_of(raw.keyword),
         }
     }
 }
@@ -941,4 +1102,30 @@ impl std::fmt::Debug for Batch<'_> {
             .field("columns", &self.columns.plan.len())
             .finish()
     }
+}
+
+/// What refused a checked cell: a declared constraint, or the cell's fault.
+enum Refused {
+    Broke {
+        keyword: Option<Keyword>,
+        offset: u32,
+        len: u32,
+    },
+    Fault(Fault),
+}
+
+/// The keyword a [`RawCheck`] or a [`RawProblem`] names: `1` minimum … `8` enum, `None` for `0`.
+pub(crate) fn keyword_of(code: u32) -> Option<Keyword> {
+    [
+        Keyword::Minimum,
+        Keyword::ExclusiveMinimum,
+        Keyword::Maximum,
+        Keyword::ExclusiveMaximum,
+        Keyword::MultipleOf,
+        Keyword::MinLength,
+        Keyword::MaxLength,
+        Keyword::Enum,
+    ]
+    .into_iter()
+    .find(|keyword| keyword.code() == code)
 }

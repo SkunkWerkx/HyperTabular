@@ -106,7 +106,7 @@ module Agreement
     rows.each do |row|
       sha << [row.index, row.line].inspect
       row.size.times do |column|
-        sha << row.get(column).inspect << row.raw(column).inspect << row.origin(column).inspect
+        sha << row.to_a[column].inspect << row.raw(column).inspect << row.origin(column).inspect
       end
     end
   end
@@ -124,7 +124,7 @@ module Agreement
       batch.rows.times do |row|
         sha << batch.line(row).to_s
         plan.each_index do |column|
-          verdict = batch.get(column, row)
+          verdict = batch.send(:verdict_of, column, row)
           sha << verdict.inspect << batch.raw(column, row).inspect << batch.origin(column, row).inspect
           sha << verdict.detail.inspect if verdict.is_a?(HyperCast::Fault)
         end

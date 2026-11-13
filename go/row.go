@@ -19,7 +19,8 @@ import (
 // (strings.Clone, or Get[string], which allocates its own). Under NewDelimitedReaderBytes the
 // bytes are the caller's own, and must not change while the string is in use.
 //
-// Asking a column whose door is not DoorText panics, as Text does.
+// Asking a column whose door is not DoorText panics, as Text does, and so does a Text column that
+// declares constraints.
 func (b *Batch) TextString(column, row int) string {
 	text := b.Text(column)[row]
 	return unsafe.String(unsafe.SliceData(text), len(text))
@@ -108,6 +109,14 @@ func (r Row) Raw(column int) []byte { return r.batch.Raw(column, r.index) }
 // Cell is a function rather than a method because Go methods cannot take type parameters.
 func Cell[T Value](row Row, column int) (T, *hypercast.Fault) {
 	return Get[T](row.batch, column, row.index)
+}
+
+// CellChecked is the row's cell in column as HyperCast's checked doors judge it, as GetChecked says
+// of the same cell: GetChecked(row.Batch(), column, row.Index()).
+//
+// CellChecked is a function rather than a method because Go methods cannot take type parameters.
+func CellChecked[T hypercast.CheckedTarget](row Row, column int) (hypercast.Checked[T], hypercast.Rejection) {
+	return GetChecked[T](row.batch, column, row.index)
 }
 
 // reading is what DelimitedReader and Sheet have in common for rows: a Read.

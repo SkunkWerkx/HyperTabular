@@ -229,6 +229,7 @@ test('a detail says what failed, and notes off says nothing but the reason', () 
     length: 1,
     expected: 0,
     found: 0,
+    keyword: null,
   })
   // Notes off, the verdicts are the same, and nothing more is said of them.
   const quiet = batches(text, null, plan, { notes: false })[0]

@@ -243,12 +243,13 @@ module HyperTabular
     end
 
     # Every remaining row, batch after batch: yields one frozen Array per row, a verdict
-    # per plan column. Without a block, an Enumerator. Raises what #read raises.
+    # per plan column (a constrained column's as Batch#get_checked says it). Without a block, an
+    # Enumerator. Raises what #read raises.
     def each_row
       return to_enum(:each_row) unless block_given?
 
       batches do |batch|
-        columns = Array.new(@plan.size) { |column| batch.verdicts(column) }
+        columns = Array.new(@plan.size) { |column| batch.send(:verdicts_of, column) }
         batch.rows.times { |row| yield columns.map { |column| column[row] }.freeze }
       end
     end
@@ -560,7 +561,8 @@ module HyperTabular
       Batch.new(@plan, rows, Array.new(@plan.size) { |column| columns.values(column, rows) },
                 Array.new(@plan.size) { |column| columns.verdicts(column, rows) },
                 @kernel.cells, @kernel.per_row, @buffer, @start, @kernel.arena,
-                workbook: false, notes: notes, widths: reported ? columns.widths(rows) : nil,
+                workbook: false, notes: notes, checks: Batch.checks_of(@plan, columns, rows),
+                widths: reported ? columns.widths(rows) : nil,
                 expected: @kernel.expected, long_rows: Dialect::LONG_ROWS.fetch(@dialect.long_rows))
     end
 

@@ -590,11 +590,17 @@ typedef struct HyperTabularCellVerdict {
   uint32_t offset;
   // Byte length of the offending span.
   uint32_t len;
-  // `0` ok, `1` empty, `2` malformed, `3` out of range — HyperCast's ABI codes.
+  // `0` ok, `1` empty, `2` malformed, `3` out of range — HyperCast's ABI codes — or, from a
+  // `_with` fill on a column that declares constraints, [`CellVerdict::VIOLATION`].
   uint32_t reason;
 } HyperTabularCellVerdict;
 // The layout's size in bytes.
 #define HyperTabularCellVerdict_SIZE 12
+// `reason`: the cell cast, and broke a constraint its column declares, HyperCast's
+// `cast_checked` code. The value slot holds the value exactly as cast, never rounded, the span
+// is the judged text's, and the column's [`ColumnBufferWith::checks`] names the keyword.
+// [`CellVerdict::fault`] reads it as no fault.
+#define HyperTabularCellVerdict_VIOLATION 4
 
 // Where one column's output goes: `max_rows` values of the door's type and `max_rows`
 // verdicts, both the caller's memory. Neither has to be aligned.
@@ -695,6 +701,110 @@ typedef struct HyperTabularRawDateOptions {
 // The smallest `size` the core reads: the size and flags words, with no pivot.
 #define HyperTabularRawDateOptions_MIN_SIZE 8
 
+// An exact decimal — a sign, a 96-bit unsigned magnitude, and a base-10 scale — the
+// shape .NET's `decimal` stores natively and Java's `BigDecimal`, Python's `Decimal` and
+// Ruby's `BigDecimal` build from directly. The value is `(-1)^negative × (hi·2⁶⁴ + lo) ×
+// 10⁻ˢᶜᵃˡᵉ`. Casts produce canonical values: exact trailing fraction zeros are trimmed,
+// the scale is minimal, and zero has scale 0 and no negative sign. Casts never round:
+// text carrying more nonzero precision than 96 bits and 28 places can hold is
+// `OutOfRange`. The public fields also permit directly constructed, noncanonical
+// values; display preserves their declared scale and sign without clamping.
+// ABI layout: `lo` at offset 0, `hi` at 8, `scale` at 12, `negative` at 13,
+// 16 bytes with 8-byte alignment.
+typedef struct HyperTabularDecimal {
+  // The low 64 bits of the magnitude.
+  uint64_t lo;
+  // The high 32 bits of the magnitude; the magnitude never exceeds 2⁹⁶ − 1.
+  uint32_t hi;
+  // Base-10 scale: the number of places the magnitude is shifted right. Casts
+  // produce `0..=28`, with no trailing magnitude zeros at a positive scale.
+  // This public ABI representation can also be constructed directly; display
+  // handles every scale byte without clamping or changing its value.
+  uint8_t scale;
+  // True for a negative value. Casts never produce a negative zero.
+  bool negative;
+} HyperTabularDecimal;
+
+// A declaration of validation constraints as it crosses the ABI, bound to a door by the
+// call that takes it: a size word, the flags that say which fields are read, then the
+// five decimals, 104 bytes with 8-byte alignment. Pointer-free, so the layout is the same
+// on 32-bit and 64-bit targets; an `enum` list travels beside it. Built from a
+// [`Constraints`](crate::Constraints) by [`raw`](crate::Constraints::raw), and judged by
+// [`check_constraints`](crate::check_constraints).
+//
+// | Offset | Field | Bytes |
+// | --- | --- | --- |
+// | 0 | `size`, a `u32` | 4 |
+// | 4 | `flags`, a `u32` | 4 |
+// | 8 | `rounding`: `0` strict, `1` midpoint, `2` floor, `3` ceiling | 4 |
+// | 12 | `min_length`, read under [`HAS_MIN_LENGTH`](Self::HAS_MIN_LENGTH) | 4 |
+// | 16 | `max_length`, read under [`HAS_MAX_LENGTH`](Self::HAS_MAX_LENGTH) | 4 |
+// | 20 | `_reserved`, always `0` | 4 |
+// | 24 | `minimum`, read under [`HAS_MINIMUM`](Self::HAS_MINIMUM) | 16 |
+// | 40 | `maximum`, read under [`HAS_MAXIMUM`](Self::HAS_MAXIMUM) | 16 |
+// | 56 | `multiple_of`, read under [`HAS_MULTIPLE_OF`](Self::HAS_MULTIPLE_OF) | 16 |
+// | 72 | `exclusive_minimum`: `exclusiveMinimum`, read under [`HAS_EXCLUSIVE_MINIMUM`](Self::HAS_EXCLUSIVE_MINIMUM) | 16 |
+// | 88 | `exclusive_maximum`: `exclusiveMaximum`, read under [`HAS_EXCLUSIVE_MAXIMUM`](Self::HAS_EXCLUSIVE_MAXIMUM) | 16 |
+//
+// Each keyword has a field of its own, so all four bounds may be declared together, as
+// OpenAPI allows.
+//
+// A `size` other than [`SIZE`](Self::SIZE), an unknown flag bit, an unknown rounding code,
+// a nonzero `_reserved`, or (read from a caller's memory across the C ABI) a decimal's sign
+// byte other than `0` or `1` is a malformed layout. The `enum` list is read only under
+// [`HAS_ENUM`](Self::HAS_ENUM).
+typedef struct HyperTabularRawConstraints {
+  // `size_of::<RawConstraints>()` as the caller built it: [`RawConstraints::SIZE`].
+  uint32_t size;
+  // Which constraints are declared: the `HAS_*` bits, [`TRIM`](Self::TRIM) and
+  // [`CASE_SENSITIVE`](Self::CASE_SENSITIVE).
+  uint32_t flags;
+  // How a value that is not a multiple of `multiple_of` is treated: `0` strict, `1`
+  // midpoint (ties to even), `2` floor, `3` ceiling.
+  uint32_t rounding;
+  // The fewest code points the text may hold.
+  uint32_t min_length;
+  // The most code points the text may hold.
+  uint32_t max_length;
+  // Always `0`.
+  uint32_t _reserved;
+  // `minimum`: the value may equal it.
+  struct HyperTabularDecimal minimum;
+  // `maximum`: the value may equal it.
+  struct HyperTabularDecimal maximum;
+  // The step every value must be a multiple of.
+  struct HyperTabularDecimal multiple_of;
+  // `exclusiveMinimum`: the value must exceed it.
+  struct HyperTabularDecimal exclusive_minimum;
+  // `exclusiveMaximum`: the value must be below it.
+  struct HyperTabularDecimal exclusive_maximum;
+} HyperTabularRawConstraints;
+// The layout's size in bytes, which `size` carries.
+#define HyperTabularRawConstraints_SIZE 104
+// `minimum` is read.
+#define HyperTabularRawConstraints_HAS_MINIMUM 1
+// `exclusive_minimum`, the `exclusiveMinimum`, is read.
+#define HyperTabularRawConstraints_HAS_EXCLUSIVE_MINIMUM 2
+// `maximum` is read.
+#define HyperTabularRawConstraints_HAS_MAXIMUM 4
+// `exclusive_maximum`, the `exclusiveMaximum`, is read.
+#define HyperTabularRawConstraints_HAS_EXCLUSIVE_MAXIMUM 8
+// `multiple_of` and `rounding` are read.
+#define HyperTabularRawConstraints_HAS_MULTIPLE_OF 16
+// `min_length` is read.
+#define HyperTabularRawConstraints_HAS_MIN_LENGTH 32
+// `max_length` is read.
+#define HyperTabularRawConstraints_HAS_MAX_LENGTH 64
+// Text is trimmed of Unicode `White_Space` before it is judged.
+#define HyperTabularRawConstraints_TRIM 128
+// An `enum` list is declared and read: the list beside the layout, which may be empty,
+// an `enum` every value violates, as OpenAPI allows. Clear, no list is read, and one
+// passed anyway is a malformed layout.
+#define HyperTabularRawConstraints_HAS_ENUM 256
+// A text `enum` matches exactly, byte for byte, instead of under simple case folding,
+// for a vocabulary whose case carries meaning (`mm` and `Mm`). The text door only.
+#define HyperTabularRawConstraints_CASE_SENSITIVE 512
+
 // One output column as `hypertabular_delimited_fill_with` and `hypertabular_workbook_fill_with`
 // take it: [`ColumnSpec`], with date options, a month vocabulary and tokens.
 typedef struct HyperTabularColumnSpecWith {
@@ -723,6 +833,18 @@ typedef struct HyperTabularColumnSpecWith {
   const uint8_t *tokens;
   // Bytes at `tokens`.
   uintptr_t tokens_len;
+  // What the column's cells must also meet: HyperCast's 104-byte `RawConstraints`, judged as
+  // its `Constraints::from_raw` judges it, at a numeric door or text alone, and with
+  // [`ColumnBufferWith::checks`] set. Null declares none, and the column casts as it would
+  // without this field. A declaration refused, at any other door, or without `checks` is
+  // [`ERR_CONTRACT`] before any cell is read, as is a decimal in it whose sign byte is other
+  // than `0` or `1`, which is read as a byte before the layout is.
+  const struct HyperTabularRawConstraints *constraints;
+  // The `enum` list, packed as HyperCast packs it, read only when `constraints` sets
+  // `HAS_ENUM`; null and `0` otherwise.
+  const uint8_t *enum_ptr;
+  // Bytes at `enum_ptr`.
+  uintptr_t enum_len;
 } HyperTabularColumnSpecWith;
 
 
@@ -752,6 +874,19 @@ typedef struct HyperTabularCellNote {
 // and no door ran, and through the 1.0 fill it's simply `Empty`.
 #define HyperTabularCellNote_ORIGIN_UNCACHED 3
 
+// What a checked door reports beside its value, 12 bytes with 4-byte alignment.
+typedef struct HyperTabularRawCheck {
+  // On a violation, the keyword broken (`1` minimum … `8` enum); `0` otherwise.
+  uint32_t keyword;
+  // On success, `1` when rounding changed the value, else `0`.
+  uint32_t adjusted;
+  // On a success at the text door that matched an `enum` entry, that entry's index;
+  // `u32::MAX` otherwise.
+  uint32_t enum_index;
+} HyperTabularRawCheck;
+// The layout's size in bytes.
+#define HyperTabularRawCheck_SIZE 12
+
 // Where one column's output goes in `hypertabular_delimited_fill_with` and
 // `hypertabular_workbook_fill_with`: [`ColumnBuffer`], with a note per row.
 typedef struct HyperTabularColumnBufferWith {
@@ -764,6 +899,12 @@ typedef struct HyperTabularColumnBufferWith {
   // `max_rows` notes, not aligned, or null to write none. In delimited text, a column with no
   // notes, no tokens and no date options runs the same loop `hypertabular_delimited_fill` does.
   struct HyperTabularCellNote *notes;
+  // `max_rows` checks, aligned, HyperCast's `RawCheck` as its `cast_checked` writes one: on a
+  // [`CellVerdict::VIOLATION`] the keyword, on a cell that cast whether rounding adjusted it and
+  // the `enum` entry a text matched. Required when the column declares constraints; never read
+  // or written when it declares none, so null there. A row whose verdict isn't from a door (a
+  // token, padding, an uncached formula) or is a fault is left as it was.
+  struct HyperTabularRawCheck *checks;
 } HyperTabularColumnBufferWith;
 
 
@@ -821,8 +962,9 @@ typedef struct HyperTabularRawProblem {
   uint32_t row;
   // The column of the plan, or [`RawProblem::ROW_LEVEL`] for an entry about the row as a whole.
   uint32_t plan_column;
-  // The verdict's reason, HyperCast's code: `2` malformed, `3` out of range, or `1` empty for
-  // a formula with no cached value. `0` on a row-level entry.
+  // The verdict's reason, HyperCast's code: `2` malformed, `3` out of range,
+  // [`CellVerdict::VIOLATION`] for a constraint broken, or `1` empty for a formula with no
+  // cached value. `0` on a row-level entry.
   uint32_t reason;
   // The note's [`CellNote::detail`]: `0` on a row-level entry, or where the column had no notes.
   uint16_t detail;
@@ -836,9 +978,13 @@ typedef struct HyperTabularRawProblem {
   uint32_t expected;
   // On a row-level entry, the cells the row had; otherwise `0`.
   uint32_t found;
+  // On a [`CellVerdict::VIOLATION`], the keyword broken, as the column's
+  // [`ColumnBufferWith::checks`] names it (HyperCast's codes, `1` minimum … `8` enum); otherwise
+  // `0`.
+  uint32_t keyword;
 } HyperTabularRawProblem;
 // The layout's size in bytes.
-#define HyperTabularRawProblem_SIZE 32
+#define HyperTabularRawProblem_SIZE 36
 // What [`RawProblem::plan_column`] says for an entry about the row as a whole.
 #define HyperTabularRawProblem_ROW_LEVEL UINT32_MAX
 
@@ -1008,30 +1154,6 @@ typedef struct HyperTabularRawBatchCheck {
 #define HyperTabularRawBatchCheck_REFUSED_OVER_LIMIT 3
 // `refused`: one row alone is past `limit`, at any `batch_rows`; `needed` is that row's.
 #define HyperTabularRawBatchCheck_REFUSED_ROW_TOO_WIDE 4
-
-// An exact decimal — a sign, a 96-bit unsigned magnitude, and a base-10 scale — the
-// shape .NET's `decimal` stores natively and Java's `BigDecimal`, Python's `Decimal` and
-// Ruby's `BigDecimal` build from directly. The value is `(-1)^negative × (hi·2⁶⁴ + lo) ×
-// 10⁻ˢᶜᵃˡᵉ`. Casts produce canonical values: exact trailing fraction zeros are trimmed,
-// the scale is minimal, and zero has scale 0 and no negative sign. Casts never round:
-// text carrying more nonzero precision than 96 bits and 28 places can hold is
-// `OutOfRange`. The public fields also permit directly constructed, noncanonical
-// values; display preserves their declared scale and sign without clamping.
-// ABI layout: `lo` at offset 0, `hi` at 8, `scale` at 12, `negative` at 13,
-// 16 bytes with 8-byte alignment.
-typedef struct HyperTabularDecimal {
-  // The low 64 bits of the magnitude.
-  uint64_t lo;
-  // The high 32 bits of the magnitude; the magnitude never exceeds 2⁹⁶ − 1.
-  uint32_t hi;
-  // Base-10 scale: the number of places the magnitude is shifted right. Casts
-  // produce `0..=28`, with no trailing magnitude zeros at a positive scale.
-  // This public ABI representation can also be constructed directly; display
-  // handles every scale byte without clamping or changing its value.
-  uint8_t scale;
-  // True for a negative value. Casts never produce a negative zero.
-  bool negative;
-} HyperTabularDecimal;
 
 // A point in time, independent of any time zone or calendar — protobuf's
 // `google.protobuf.Timestamp` layout exactly, so every binding folds it into its platform
@@ -1213,13 +1335,14 @@ int32_t hypertabular_delimited_fill_with(struct HyperTabularDelimitedState *stat
 // `row_widths`, which would be a list that leaves out what it was asked to name.
 //
 // A column whose notes are null still lists every refused cell, at `detail` `0`, but can't tell
-// a formula with no cached value from a blank, so lists none. A workbook row that the empty-row
+// a formula with no cached value from a blank, so lists none. A violation is listed with the
+// keyword its column's `checks` names, so a column whose `checks` are null lists none. A workbook row that the empty-row
 // filter left out isn't in the batch, so nothing here can name it: `skip_empty_rows` says when
 // that happens.
 //
 // # Safety
 // `columns` is `column_count` aligned entries (or as far as the first wrong `size`), each
-// column's `verdicts` and `notes`, unless they're null, hold `rows` elements; `row_widths`, when
+// column's `verdicts`, and its `notes` and `checks` unless they're null, hold `rows` elements; `row_widths`, when
 // required, holds `rows` counts; `out` is `cap` writable entries; `cursor` and `written` are
 // writable and don't overlap them.
 int32_t hypertabular_faults(const struct HyperTabularColumnBufferWith *columns, uintptr_t column_count, uintptr_t rows, const uint32_t *row_widths, uint32_t expected_width, uint32_t long_rows, uint64_t *cursor, struct HyperTabularRawProblem *out, uintptr_t cap, uintptr_t *written);

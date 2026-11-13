@@ -188,17 +188,22 @@ new calls:
 - `hypertabular_delimited_init_with` takes a `HyperTabularRawDelimitedOptions`: lines to pass over
   (`skip`), records to discard (`header_row`), and what a short or a long row does.
 - `hypertabular_delimited_fill_with` and `hypertabular_workbook_fill_with` take
-  `HyperTabularColumnSpecWith` (a column's tokens, date options and month names),
-  `HyperTabularColumnBufferWith` (with a `HyperTabularCellNote` per row, saying what failed and
-  where a verdict came from) and `HyperTabularBuffersWith` (tokens for every column, and each row's
-  width). They judge a numeric format's flags in full, a column at a time. Flags `95`
+  `HyperTabularColumnSpecWith` (a column's tokens, date options and month names, and the
+  constraints it declares: HyperCast's 104-byte `HyperTabularRawConstraints` and its packed `enum`
+  list), `HyperTabularColumnBufferWith` (with a `HyperTabularCellNote` per row, saying what failed and
+  where a verdict came from, and for a column that declares constraints a `HyperTabularRawCheck` per
+  row) and `HyperTabularBuffersWith` (tokens for every column, and each row's width). A cell that cast
+  and broke a declared constraint has the verdict `HyperTabularCellVerdict_VIOLATION`, its value
+  written as cast and its check naming the keyword (`1` minimum … `8` enum); a cell that passed has a
+  check saying whether rounding adjusted it and which `enum` entry a text matched. They judge a numeric format's flags in full, a column at a time. Flags `95`
   (`HyperTabularNumFormat_ALL`, Western) read `1,234,567` and refuse `1,23,456`, flags `607` (with
   `HyperTabularNumFormat_GROUPING_INDIAN`) do the reverse, and an all-zero format is Western. Flags holding
   the retired grouping bit `256`, as `351` and `863` do, are `HYPERTABULAR_ERR_CONTRACT` before any cell,
   size or no size. `hypertabular_suggest` refuses them too.
 - `hypertabular_workbook_sheet_with` takes a `HyperTabularRawSheetOptions`, with the rows to pass
   over and discard and a range, which `hypertabular_range_parse` reads from `A5:F200`.
-- `hypertabular_faults` lists what went wrong in the rows a fill just wrote, from a cursor.
+- `hypertabular_faults` lists what went wrong in the rows a fill just wrote, from a cursor, a
+  violation with its `keyword`.
 - `hypertabular_transcode` turns Windows-1252, Latin-1 or UTF-16LE into the UTF-8 the delimited
   calls read, on the caller's buffers.
 - `hypertabular_suggest` says what a sample's columns look like. Nothing reads its answer but the
@@ -214,9 +219,9 @@ new calls:
 `Uuid`, `Timestamp`, `Date`, `CivilDateTime` and `Duration`, and a column's notation is a
 `hypercast::NumFormat`, so a program that also casts through HyperCast's doors directly has
 one set of types. So a C++ program finds both archives, and links HyperCast's library too
-when it calls HyperCast's doors itself, `NumFormat::declare`, `DateOptions::declare` or
-`MonthNames::declare`, which ask HyperCast's core, or `suggest`, which declares a comma-decimal
-candidate that way:
+when it calls HyperCast's doors itself, `NumFormat::declare`, `DateOptions::declare`,
+`MonthNames::declare` or `Constraints<T>::declare`, which ask HyperCast's core, or `suggest`, which
+declares a comma-decimal candidate that way:
 
 ```cmake
 find_package(hypertabular 1.1 REQUIRED)
@@ -315,7 +320,8 @@ opens or with `bind` after its header is read. A `Column`, a `Dialect` and `Shee
 lists, so they aren't `constexpr`. `read()` hands back a `Result<std::optional<Batch>>`, the batch
 empty at the end; a `Batch` is a view of the reader's buffers, valid until the next `read()` and no longer than the
 reader or sheet that read it, with
-`get<T>(column, row)`, `text(column, row)` (a `Verdict<std::string_view>`), `fault`, `raw` (the
+`get<T>(column, row)`, `text(column, row)` (a `Verdict<std::string_view>`), `get_checked<T>(column,
+row)` (a `hypercast::Checked<T>`, see [Constraints](#constraints)), `fault`, `raw` (the
 cell's text, whatever its verdict), `line`, `detail` (HyperCast's name for what failed), `origin`
 (`Origin::cell`, `token`, `padded` or `uncached`), `faults()` and its `Row`s. `for_each_row` does the
 loop. Reading a column as a type its door does not make, an index outside the batch, or walking
@@ -382,9 +388,10 @@ day: ambiguous, 2 candidates
 ```
 
 A `batch.faults()` range holds a read's cells at `malformed` or `out_of_range`, formulas with no
-cached value and rows `LongRows::report` declared, each a `Problem`: `row`, `line`, `plan_column`,
-`source_column` (the source's, a sheet's own whatever its range), `reason`, `detail`, `origin`,
-`offset` and `length`, or `expected` and `found` for a row. It's a view too: a walk past the next
+cached value, cells that broke a constraint their column declares and rows `LongRows::report`
+declared, each a `Problem`: `row`, `line`, `plan_column`, `source_column` (the source's, a sheet's
+own whatever its range), `reason` (none for a violation), `keyword` (a violation's), `detail`,
+`origin`, `offset` and `length`, or `expected` and `found` for a row. It's a view too: a walk past the next
 `read()` ends the program with `std::abort()`, a caller's bug like an index outside the batch, since
 stopping there would read as the end of the list. Finish the walk first. With notes off it has no `detail` and no uncached formula, and `detail()` and `origin()`
 say nothing.
@@ -418,6 +425,85 @@ policy: a column that declares it infers `,` and `.` from each cell, so `f64` re
 as 12.34 and `0,125` as 0.125. A format holding the retired
 grouping bit `256`, which `NumFormat::declare` and `with_grouping` can't make, is `ErrorKind::plan` when
 the plan is bound, before any cell, and in a suggest's options before it opens anything. C++ has no locale bridge, so nothing reads a locale's name.
+
+### Constraints
+
+A column can declare what its cells must also meet, as OpenAPI 3.2 says it: bounds, `multipleOf` with
+a rounding, lengths, `enum` and `trim`, through HyperCast's own `Constraints<T>::declare` (its README
+has every keyword). `Column::checked(ordinal, constraints)` reads the column through the checked door
+for `T`, the declaration's: `std::int8_t` to `std::uint64_t`, `float`, `double`, `Decimal`, or
+`std::string_view` for text. It copies the declaration and its `enum` list, so their storage needn't
+outlive the call, and `.format(...)`, `.tokens(...)` and `.date_options(...)` are set on it as on any
+column. `is_checked()` says whether a column declares any.
+
+`get_checked<T>(column, row)`, and `Row::get_checked<T>(column)`, give HyperCast's `Checked<T>`: a
+`CheckedValue` (the value, `adjusted` when rounding to `multipleOf` changed it, and at the text door,
+when an `enum` entry matched, its `enum_index` and the entry as declared for the value), or a
+`Rejection`, the cell's `Fault` as `get` gives it or a `Violation` naming the `Keyword` broken and
+carrying the value as cast and its span. A column that declares none reads through it too, every cell
+that cast passing unadjusted. `get` and `text` refuse a constrained column with `std::abort()`, since a
+violation is no fault and they would say it passed; `fault` gives `std::nullopt` for one.
+
+```cpp
+#include <cstdio>
+#include "hypertabular.hpp"
+
+namespace ht = hypertabular;
+
+int main() {
+  std::uint8_t entries[32]; // the packed list: 4 bytes and the text per entry
+  const auto sexes = ht::Constraints<std::string_view>::declare({}, {"Female", "Male"}, entries);
+  ht::Constraints<std::int32_t>::Fields age;
+  age.minimum = 0;
+  age.maximum = 120;
+  const auto ages = ht::Constraints<std::int32_t>::declare(age);
+  if (ages.value_if() == nullptr || sexes.value_if() == nullptr) {
+    return 1;
+  }
+  auto reader = ht::DelimitedReader::from_bytes(
+      "age,sex\n34,MALE\n130,other\n", ht::Dialect::csv(),
+      {ht::Column::checked(0, *ages.value_if()), ht::Column::checked(1, *sexes.value_if())});
+  if (!reader.ok()) {
+    return 1;
+  }
+  auto read = reader.value().read();
+  if (!read.ok() || !read.value()) {
+    return 1;
+  }
+  const ht::Batch &batch = *read.value();
+  for (const ht::Row &row : batch) {
+    const ht::Checked<std::int32_t> years = row.get_checked<std::int32_t>(0);
+    const ht::Checked<std::string_view> sex = row.get_checked<std::string_view>(1);
+    if (years.ok() && sex.ok()) { // MALE matched the entry Male, under simple case folding
+      const std::string_view entry = sex.value().value;
+      std::printf("line %u: %d, %.*s\n", row.line(), years.value().value,
+                  static_cast<int>(entry.size()), entry.data());
+    } else if (const ht::Violation<std::int32_t> *broken = years.rejection().violation_if()) {
+      std::printf("line %u: %d breaks %s\n", row.line(), broken->value,
+                  hypercast::name(broken->keyword).c_str());
+    }
+  }
+  for (const ht::Problem &problem : batch.faults()) {
+    if (problem.keyword) {
+      std::printf("line %u, column %zu: %s\n", problem.line, *problem.source_column,
+                  hypercast::name(*problem.keyword).c_str());
+    }
+  }
+  return 0;
+}
+```
+
+prints
+
+```
+line 2: 34, Male
+line 3: 130 breaks maximum
+line 3, column 0: maximum
+line 3, column 1: enum
+```
+
+In C, a `HyperTabularColumnSpecWith`'s `constraints` and `enum_ptr` carry the declaration, and the
+column's `HyperTabularColumnBufferWith` needs its `checks`; [C](#c) says how a violation reads there.
 HyperCast's [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and the locales neither policy matches.
 
 Declaring the locale, a number format and a date order, is the recommended route, and then nothing

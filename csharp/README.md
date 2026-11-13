@@ -212,6 +212,54 @@ a suggest's options before it opens anything. HyperCast's
 [grouping notes](https://github.com/SkunkWerkx/HyperCast/blob/master/docs/grouping.md) have every shape and
 the locales neither policy matches.
 
+## Constraints
+
+A numeric or text column can declare HyperCast's `Constraints<T>`, the OpenAPI 3.2 keywords
+(`minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum`, `multipleOf` with a `Rounding`,
+`minLength`, `maxLength`, `enum`, with `trim` and `caseSensitive` for text), through the factory of
+its door. Each cell is cast first, so text that isn't the type is a `Fault` as ever, and then judged:
+
+```csharp
+using HyperCast;
+using HyperTabular;
+
+using var reader = new DelimitedReader("qty,sex\n12,MALE\n7,x\n"u8.ToArray().AsMemory(), Dialect.Csv,
+[
+    Column.Int32(0, new Constraints<int>(minimum: 1, maximum: 10)),
+    Column.Text(1, new Constraints<string>(@enum: ["Female", "Male"])),
+]);
+var batch = reader.Read()!;
+foreach (var row in batch)
+{
+    var qty = row.GetChecked<int>(0) switch
+    {
+        Checked<int> passed => $"{passed.Value}",
+        Rejection<int> { Value: Violation<int> broken } => $"{broken.Value} breaks {broken.Keyword}",
+        Rejection<int> { Value: Fault fault } => $"{fault.Reason}",
+    };
+    var sex = row.GetChecked<string>(1) switch
+    {
+        Checked<string> passed => passed.Value, // "MALE" matches the entry, and reads as "Male"
+        Rejection<string> rejected => $"{rejected}",
+    };
+    Console.WriteLine($"{qty} {sex}");
+}
+foreach (var problem in batch.Faults())
+{
+    Console.WriteLine($"line {problem.Line} column {problem.SourceColumn} {problem.Keyword}");
+}
+```
+
+A violation isn't a fault: the cell cast, so `Fault(column, row)` is `null`, `CellVerdict.IsViolation`
+says so, the value is kept exactly as cast (never rounded), and the span is the judged text's. A cell
+`multipleOf` rounded passes with `Adjusted` set, and a text `enum` match reads as the entry as declared,
+the caller's own string, with `EnumIndex` naming it. `Faults()` lists a violation with its `Keyword` and
+no `Reason`. The constraints' type is the door's, so a column can't pair one door with another's, and
+`Get<T>`, `TryGetText` and `GetString` refuse a constrained column with `InvalidOperationException`:
+they would read a violation as passed. `GetChecked<T>` reads an unconstrained column too, where every
+cell that cast passes, unadjusted. HyperCast judges the declaration when it is built, and refuses only
+one its core cannot read.
+
 ## The shape
 
 The native core (`libhypertabular`) owns no memory and reads no files. `DelimitedReader`
@@ -239,8 +287,9 @@ rows, not once per cell.
   table is at most 8 MiB. Past it is the plan's `ArgumentException` too.
 - **One batch type.** `Read()` returns a `Batch` — `Rows`, `Columns`, `Line(row)`,
   `Verdicts(column)`, `Values<T>(column)` for a whole column, `Get<T>(column, row)` for any
-  one cell, `Fault` and `Origin` for what a cell's verdict says beside itself, `Faults()` for what
-  went wrong in the batch, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was
+  one cell, `GetChecked<T>(column, row)` for one a constrained column judged, `Fault` and
+  `Origin` for what a cell's verdict says beside itself, `Faults()` for what went wrong in the
+  batch, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was
   cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
   the next `Read()`, and the same type for delimited text and for a sheet.
@@ -251,7 +300,7 @@ rows, not once per cell.
   each of which converts itself to what `Get<T>` makes. A UUID column has no span: the core
   writes RFC 9562 byte order, which is not `Guid`'s layout, so it is read with `Get<Guid>`.
 - **Rows, when that is the shape.** `foreach (var row in batch)` visits each `Row` — a
-  `ref struct` view of (batch, index) with `Index`, `Line`, `Get<T>(column)`,
+  `ref struct` view of (batch, index) with `Index`, `Line`, `Get<T>(column)`, `GetChecked<T>(column)`,
   `Verdict(column)`, `Fault(column)`, `Origin(column)`, `TryGetText`, `GetString`, `GetChars`,
   `TryGetChars` and `Raw` —
   allocating nothing; `batch.Row(i)` picks one. Going on with a loop after the next `Read()` throws

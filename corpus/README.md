@@ -14,7 +14,7 @@ things by hand: the input, and the text that must reach each cell, tokens marked
 column makes of that text is not this layer's to decide — HyperCast is the judge — so a cell's
 verdict is whatever HyperCast's own door says of the hand-written text, asked directly.
 
-`delimited.json` is 123 cases. `Western grouping refuses an Indian group`, `no format is Western
+`delimited.json` is 137 cases. `Western grouping refuses an Indian group`, `no format is Western
 grouping` and `Indian grouping reads an Indian group` read the same bytes under flags `95`, no format and
 flags `607`, so a binding that loses a format's grouping fails one of them, and so does one that takes no
 format for anything else. `an Indian column beside a Western one` is one read of two policies, each
@@ -103,10 +103,10 @@ case's `note`, a sentence for whoever reads the file.
 
 ## `workbook.json` and `workbook/` — the contract for workbooks
 
-`workbook/` holds twenty-six small packages, and beside them the fifteen files real
-applications wrote (the table at the bottom lists them). The twenty-six: five fixtures
+`workbook/` holds twenty-seven small packages, and beside them the fifteen files real
+applications wrote (the table at the bottom lists them). The twenty-seven: five fixtures
 (`basic.xlsx`, `basic-1904.xlsx`, `multisheet.xlsx`, `rich.xlsx` from openpyxl and
-`basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and fifteen
+`basic.ods` from the ODF schema by hand — `make_fixtures.py` writes them) and twenty-two
 generated ones — two XLSX, two ODS and two Numbers, one of each deflated and one stored,
 the XLSX pair one in each date system; `broken.xlsx`, whose sheet names a shared
 string that is not there; and `ranges.xlsx`, `ranges.ods` and `ranges.numbers`, one table in each
@@ -125,6 +125,9 @@ and `suggest.numbers`, one table in each format, in which number cells and text 
 digits sit in columns of their own and side by side, for what a suggester has to tell apart. And
 `grouping.xlsx`, `grouping.ods` and `grouping.numbers`, one table in each format, of text cells in Indian and
 Western grouping above a typed number, for a column's policy to reach a text cell and leave a typed one alone.
+And `constraints.xlsx`, one table of typed numbers, a boolean, a formula with no result and a token beside
+text cells, for HyperCast's checked doors to judge a typed cell through its typed twin and a text cell with
+its span ([Constraints](#constraints)).
 Between them the
 generated packages hold every kind of cell each format has: shared, inline and rich strings, numbers under date, time and elapsed
 formats, booleans, errors, ISO dates, CDATA, prefixed elements, sparse rows, empty rows in
@@ -134,9 +137,9 @@ of day, durations, error and merged cells, in layouts Numbers itself never write
 chunks of a few bytes, tiles of seven rows, wide cell offsets, a segmented string list,
 rows left out of their tile.
 
-`workbook.json` is 398 cases over those 41 packages — every sheet of every package, read
-several ways, the two encrypted files refused, and `ranges.*`, `uncached.*`, `dates.*`, `suggest.*` and
-`grouping.*` read by hand-listed cases besides — 2,010 rows and 66,351 cells. What the `dates.*`, `suggest.*`
+`workbook.json` is 404 cases over those 42 packages — every sheet of every package, read
+several ways, the two encrypted files refused, and `ranges.*`, `uncached.*`, `dates.*`, `suggest.*`,
+`grouping.*` and `constraints.xlsx` read by hand-listed cases besides — 2,042 rows and 66,782 cells. What the `dates.*`, `suggest.*`
 and `grouping.*` cases read is held to tables worked out by hand in `rust/tests/corpus_workbook.rs`. A case:
 
 ```json
@@ -205,6 +208,39 @@ which that reader reported only as a message; the case says so in its `note`.
 `cargo run --example corpus -- --packages` rewrites the generated packages. Their
 deflated bytes depend on the deflate the build links, which is why they are committed and
 not rebuilt.
+
+## Constraints
+
+Both files hold cases whose plan columns declare HyperCast's constraints, read through its checked
+doors. They are ordinary cases, so every replay reads them, and a binding that can't declare a
+column's constraints, or read a violation back, fails its replay of either file.
+
+- A plan entry's `constraints` is a declaration in HyperCast's corpus shape, copied from
+  `corpus/constraints.json` there: `minimum`, `exclusiveMinimum`, `maximum`, `exclusiveMaximum` and
+  `multipleOf` as decimal strings, `rounding` (`strict`, the default, `midpoint`, `floor` or
+  `ceiling`), `minLength` and `maxLength`, `trim` and `caseSensitive`, and `enum`, a list of strings
+  (decimals at a numeric door). Only the numeric doors and the text door take one.
+- A constrained column's cell that passed is `{"expect": "ok", …the value…, "adjusted"}`, with
+  `enum_index` when it matched an `enum` entry, and at the text door its `text` is what the checked
+  door delivers: the text it judged, after the declared `trim`, or the declared entry it matched.
+- A cell that cast and broke a declared rule is `{"expect": "violation", "keyword", "fault", …the
+  value…, "raw"}`: `keyword` is HyperCast's name for the rule, the value is the one the door cast,
+  never rounded (at the text door, the text it judged), and `fault` is that value's span in the
+  cell's text. A typed workbook number has no text, so its violation spans nothing and its `raw` is
+  empty.
+- A constrained float's value, passed or broken, has `bits` beside it, `0x` and its IEEE bits
+  (eight hex digits for `f32`, sixteen for `f64`): what tells a `-0` the doors never deliver from a
+  `0`.
+- A cell that didn't cast, and one no door was asked about, is what it is in any other case: the
+  door's fault, or an `Empty` with its `origin`, and no check.
+- `problems` lists a violation as `{"row", "line", "plan_column", "source_column", "reason":
+  "violation", "fault", "keyword"}`.
+
+The delimited cases' cells are HyperCast's own checked verdicts on the hand-written text, as every
+other delimited cell is. The workbook cases', like every workbook cell, are the core's, and
+`rust/tests/constraints_equivalence.rs` holds each of them to an oracle that owes the reader nothing:
+the routing worked out from `constraints.xlsx`'s own cells, then HyperCast's checked door asked
+directly.
 
 ## The files real applications wrote
 
