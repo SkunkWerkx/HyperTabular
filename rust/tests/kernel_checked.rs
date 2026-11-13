@@ -385,6 +385,77 @@ fn an_empty_batch_still_judges_declarations() {
     }
 }
 
+/// A layout that is no `RawConstraints`, whatever its bytes: a size word other than the layout's,
+/// or a decimal whose sign byte holds what no Rust `bool` does. Refused by both fills before any
+/// cell, as a refused declaration is, and the bytes are never read as a `RawConstraints`.
+#[test]
+fn a_layout_that_is_no_declaration_is_refused() {
+    use core::mem::offset_of;
+    /// The layout's 104 bytes, any of them, where a `RawConstraints` would sit: a union, so the
+    /// bytes it holds, a decimal's padding among them, are never read as any type.
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    union Layout {
+        raw: RawConstraints,
+    }
+    impl Layout {
+        /// Writes `byte` at `at`, inside the layout.
+        fn poke(&mut self, at: usize, byte: u8) {
+            assert!(at < size_of::<Layout>());
+            // SAFETY: inside the union's bytes, and a union may hold any.
+            unsafe { (&raw mut *self).cast::<u8>().add(at).write(byte) };
+        }
+        fn on(&self, mut spec: ColumnSpecWith) -> ColumnSpecWith {
+            spec.constraints = (&raw const *self).cast::<RawConstraints>();
+            spec
+        }
+    }
+    let fine = Layout {
+        raw: Declared::of(&at_most("10")).raw,
+    };
+    let mut layouts = Vec::new();
+    for size in [0, RawConstraints::SIZE - 8, RawConstraints::SIZE + 8] {
+        let mut layout = fine;
+        for (at, byte) in size.to_ne_bytes().into_iter().enumerate() {
+            layout.poke(offset_of!(RawConstraints, size) + at, byte);
+        }
+        layouts.push((format!("size {size}"), layout));
+    }
+    for (name, decimal) in [
+        ("minimum", offset_of!(RawConstraints, minimum)),
+        ("maximum", offset_of!(RawConstraints, maximum)),
+        ("multipleOf", offset_of!(RawConstraints, multiple_of)),
+        (
+            "exclusiveMinimum",
+            offset_of!(RawConstraints, exclusive_minimum),
+        ),
+        (
+            "exclusiveMaximum",
+            offset_of!(RawConstraints, exclusive_maximum),
+        ),
+    ] {
+        let mut layout = fine;
+        layout.poke(decimal + offset_of!(Decimal, negative), 2);
+        layouts.push((format!("{name}'s sign byte"), layout));
+    }
+    let package = sheet_of(&["1", "2"]);
+    for (name, layout) in &layouts {
+        let specs = [layout.on(spec(Door::I32))];
+        let mut columns = [Column::new(2, true)];
+        let (code, out) = delimited(b"1\n2\n", &specs, &mut columns, &[], 2);
+        assert_eq!((code, out.rows), (ERR_CONTRACT, 0xAA), "delimited, {name}");
+        assert!(columns[0].untouched(), "delimited, {name}");
+        let mut columns = [Column::new(2, true)];
+        let (code, out) = workbook(&package, &specs, &mut columns, 2);
+        assert_eq!((code, out.rows), (ERR_CONTRACT, 0xAA), "workbook, {name}");
+        assert!(columns[0].untouched(), "workbook, {name}");
+    }
+    // The control: the same bytes, untouched, read.
+    let mut columns = [Column::new(2, true)];
+    let (code, out) = delimited(b"1\n2\n", &[fine.on(spec(Door::I32))], &mut columns, &[], 2);
+    assert_eq!((code, out.rows), (OK, 2));
+}
+
 #[test]
 fn a_valid_declaration_reads() {
     let declared = Declared::of(&at_most("10"));

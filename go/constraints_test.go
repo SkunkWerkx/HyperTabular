@@ -1,6 +1,7 @@
 package hypertabular
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -193,5 +194,43 @@ func TestATextEnumEntryIsReadOutOfThePackedList(t *testing.T) {
 	}
 	if !panics(func() { column.enumEntry(3) }) {
 		t.Error("an entry past the list")
+	}
+}
+
+// A column that declares constraints is given a check a row, which the core counts against the
+// batch's limit when the plan is bound: at the most rows the same column without a declaration
+// holds, the declared one is refused, before anything for the batch is allocated.
+func TestADeclaredColumnsChecksCountAgainstTheBatchLimit(t *testing.T) {
+	plain := []Column{Text(0)}
+	declared := []Column{CheckedText(0, hypercast.MustConstraints[string](hypercast.MaxLength(3)))}
+	specs, extras := sizeSpecs(plain)
+	// The most rows the plain column is allowed: the core's limit, found by halving.
+	allowed := func(rows int) bool {
+		code, _, err := askSizes(specs, extras, rows, 1, batchNotes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return code == codeOK
+	}
+	most, past := 1, math.MaxInt32
+	if !allowed(most) || allowed(past) {
+		t.Fatal("the plain column's limit is not between 1 and MaxInt32 rows")
+	}
+	for past-most > 1 {
+		if mid := most + (past-most)/2; allowed(mid) {
+			most = mid
+		} else {
+			past = mid
+		}
+	}
+	if _, err := checkSizes(specs, extras, most, 1, batchNotes); err != nil {
+		t.Fatalf("the plain column at %d rows: %v", most, err)
+	}
+	specs, extras = sizeSpecs(declared)
+	if _, err := checkSizes(specs, extras, most, 1, batchNotes); err == nil || !strings.Contains(err.Error(), "past the limit") {
+		t.Fatalf("the declared column at %d rows: %v, want past the limit", most, err)
+	}
+	if _, err := NewDelimitedReaderBytes([]byte("a\n"), unheaded, declared, BatchRows(most)); err == nil || !strings.Contains(err.Error(), "past the limit") {
+		t.Fatalf("binding the declared column at %d rows: %v, want past the limit", most, err)
 	}
 }

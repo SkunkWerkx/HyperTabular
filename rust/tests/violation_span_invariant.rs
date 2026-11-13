@@ -53,6 +53,11 @@ fn spans_inside(batch: &Batch<'_>, name: &str) -> usize {
     violations
 }
 
+/// The rows the case says its read delivers.
+fn expected_rows(case: &Value) -> usize {
+    case["rows"].as_array().expect("rows").len()
+}
+
 #[test]
 fn every_delimited_span_lies_inside_its_cell_at_every_cut() {
     let cases = cases("delimited.json");
@@ -71,7 +76,9 @@ fn every_delimited_span_lies_inside_its_cell_at_every_cut() {
             .iter()
             .map(column_of)
             .collect();
-        for cut in 0..=input.len() {
+        // A cut may leave input a read refuses (an open quote), so a cut's read stops at its
+        // first error; the whole input must read to the end, every row the case expects.
+        for cut in 0..input.len() {
             let Ok(mut reader) =
                 DelimitedReader::options().from_slice(&input[..cut], dialect, &plan)
             else {
@@ -81,6 +88,18 @@ fn every_delimited_span_lies_inside_its_cell_at_every_cut() {
                 violations += spans_inside(&batch, &format!("{name}, cut at {cut}"));
             }
         }
+        let mut reader = DelimitedReader::options()
+            .from_slice(&input, dialect, &plan)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let mut rows = 0;
+        while let Some(batch) = reader
+            .read()
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+        {
+            rows += batch.rows();
+            violations += spans_inside(&batch, name);
+        }
+        assert_eq!(rows, expected_rows(case), "{name}: rows read");
     }
     assert!(violations > 0, "the cuts left no violation to check");
 }
@@ -100,19 +119,27 @@ fn every_workbook_span_lies_inside_its_cell() {
             .iter()
             .map(column_of)
             .collect();
-        let Ok(book) = Workbook::open(format!("{}/{file}", generator::WORKBOOK_DIR)) else {
-            continue;
-        };
-        let Ok(mut sheet) = book.sheet(
-            case["sheet"].as_u64().unwrap_or(0) as usize,
-            sheet_options_of(&case["options"]),
-            &plan,
-        ) else {
-            continue;
-        };
-        while let Ok(Some(batch)) = sheet.read() {
+        // Every fixture is a whole, valid package: each step must succeed and deliver every row
+        // the case expects.
+        let book = Workbook::open(format!("{}/{file}", generator::WORKBOOK_DIR))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let mut sheet = book
+            .sheet(
+                case["sheet"].as_u64().unwrap_or(0) as usize,
+                sheet_options_of(&case["options"]),
+                &plan,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let mut rows = 0;
+        while let Some(batch) = sheet
+            .read()
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+        {
+            rows += batch.rows();
             violations += spans_inside(&batch, name);
         }
+        assert_eq!(rows, expected_rows(case), "{name}: rows read");
     }
     assert!(violations > 0, "the cases held no violation to check");
+    assert_eq!(cases.len(), 2, "the constrained workbook cases");
 }

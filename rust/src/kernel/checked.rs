@@ -27,19 +27,43 @@ pub(crate) enum Checks<'a> {
 
 /// The column's declaration, judged at `door`: `Ok(None)` when it declares none, and `Err(())`,
 /// the caller's [`ERR_CONTRACT`](crate::kernel::abi::ERR_CONTRACT), for one HyperCast's
-/// `Constraints::from_raw` refuses or at a door that takes none.
+/// `Constraints::from_raw` refuses or at a door that takes none, and for a layout that is no
+/// `RawConstraints` at all: a `size` other than [`RawConstraints::SIZE`] (nothing past the size
+/// word of a layout of unknown size can be read), or a decimal whose sign byte is other than `0`
+/// or `1`, which is no Rust `bool`. Those bytes are read as bytes before the layout is read as a
+/// `RawConstraints`, as HyperCast's own C exports read them.
 ///
 /// # Safety
-/// `spec.constraints` is null or points to a readable [`RawConstraints`], which need not be
-/// aligned; `spec.enum_ptr` is null or points to `spec.enum_len` live bytes.
+/// `spec.constraints` is null or points to a readable `u32` size word, followed by the rest of a
+/// [`RawConstraints`] when that word is its size, none of it necessarily aligned;
+/// `spec.enum_ptr` is null or points to `spec.enum_len` live bytes.
 pub(crate) unsafe fn resolved_constraints(
     spec: &ColumnSpecWith,
     door: Door,
 ) -> Result<Option<Checks<'_>>, ()> {
+    use core::mem::offset_of;
     if spec.constraints.is_null() {
         return Ok(None);
     }
-    // SAFETY: per the function contract.
+    let bytes = spec.constraints.cast::<u8>();
+    // SAFETY: a non-null layout starts with its size word, per the function contract.
+    if unsafe { bytes.cast::<u32>().read_unaligned() } != RawConstraints::SIZE {
+        return Err(());
+    }
+    let sign = offset_of!(Decimal, negative);
+    for decimal in [
+        offset_of!(RawConstraints, minimum),
+        offset_of!(RawConstraints, maximum),
+        offset_of!(RawConstraints, multiple_of),
+        offset_of!(RawConstraints, exclusive_minimum),
+        offset_of!(RawConstraints, exclusive_maximum),
+    ] {
+        // SAFETY: the size says the caller built the whole layout, and the offset lies in it.
+        if unsafe { bytes.add(decimal + sign).read() } > 1 {
+            return Err(());
+        }
+    }
+    // SAFETY: per the function contract, and every `bool` in the layout is 0 or 1.
     let raw = unsafe { spec.constraints.read_unaligned() };
     let entries: &[u8] = match (spec.enum_ptr.is_null(), spec.enum_len) {
         (_, 0) => &[],

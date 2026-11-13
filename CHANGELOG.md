@@ -102,7 +102,8 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   `RawCheck` a row, which a constrained column requires, and `RawProblem` the keyword, so
   `hypertabular_faults` lists violations beside faults; there's no new export. The core judges the
   declaration when the plan is bound, so one it refuses is the plan's error, never a column with no
-  rules, and `hypertabular_batch_check` counts the checks. The plain getters can't say a violation,
+  rules (a decimal in it whose sign byte isn't `0` or `1` among them, read as a byte first, as
+  HyperCast's own exports read it), and `hypertabular_batch_check` counts the checks. The plain getters can't say a violation,
   which is no fault, so every binding refuses them on a constrained column and reads it through a
   checked getter, which reads an unconstrained column too, every cell that cast passing unadjusted.
   `docs/design.md` maps each binding's surface. *(every package)*

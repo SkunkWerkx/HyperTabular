@@ -1067,19 +1067,41 @@ type sizeChecker struct {
 
 var sizeCheckers = sync.Pool{New: func() any { return &sizeChecker{n: newNative()} }}
 
-// askSizes asks the core about a read's sizes: its code and the RawBatchCheck it wrote.
-func askSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int32, [batchCheckSize]byte, error) {
+// askSizes asks the core about a read's sizes: its code and the RawBatchCheck it wrote. extras is
+// nil or one a spec: a column whose extra declares constraints is given its declaration, since the
+// core counts a check a row for each column whose spec points at one. The size check reads nothing
+// of a declaration but whether there is one, so its enum list stays behind.
+func askSizes(specs []rawSpec, extras []specExtra, batchRows, bufferBytes int, flags uint32) (int32, [batchCheckSize]byte, error) {
 	var found [batchCheckSize]byte
 	checker := sizeCheckers.Get().(*sizeChecker)
 	defer sizeCheckers.Put(checker)
 	n := checker.n
-	if !n.in.ensure(&checker.specs, uint64(len(specs))*specWithSize, false) {
+	specBytes := uint64(len(specs)) * specWithSize
+	declared := 0
+	for index := range extras {
+		if extras[index].checked {
+			declared++
+		}
+	}
+	// Each declaration 8-aligned, as the core reads it, behind the specs.
+	need := specBytes
+	if declared > 0 {
+		need += 7 + uint64(declared)*rawConstraintsSize
+	}
+	if !n.in.ensure(&checker.specs, need, false) {
 		return 0, found, guestMemory(len(specs))
 	}
 	if len(specs) > 0 {
 		mem := n.in.mem()
+		at := (checker.specs.off + uint32(specBytes) + 7) &^ 7
 		for index := range specs {
-			putSpecWith(mem[checker.specs.off+uint32(index)*specWithSize:], &specs[index], &specExtra{})
+			dst := mem[checker.specs.off+uint32(index)*specWithSize:]
+			putSpecWith(dst, &specs[index], &specExtra{})
+			if extras != nil && extras[index].checked {
+				putConstraints(mem[at:at+rawConstraintsSize], &extras[index].constraints)
+				le.PutUint32(dst[136:], at)
+				at += rawConstraintsSize
+			}
 		}
 	}
 	n.in.enter()
@@ -1091,7 +1113,7 @@ func askSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int32,
 
 // checkSizes is the core's answer on a read's sizes: the size to start an input buffer at, or an
 // error naming what was refused, with the bytes and the limit the core gave.
-func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int, error) {
+func checkSizes(specs []rawSpec, extras []specExtra, batchRows, bufferBytes int, flags uint32) (int, error) {
 	// The core takes an unsigned count, which a negative one isn't.
 	if batchRows < 0 {
 		return 0, fmt.Errorf("hypertabular: BatchRows must not be negative, not %d", batchRows)
@@ -1099,7 +1121,7 @@ func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int,
 	if bufferBytes < 0 {
 		return 0, fmt.Errorf("hypertabular: BufferBytes must not be negative, not %d", bufferBytes)
 	}
-	code, b, err := askSizes(specs, batchRows, bufferBytes, flags)
+	code, b, err := askSizes(specs, extras, batchRows, bufferBytes, flags)
 	if err != nil {
 		return 0, err
 	}
@@ -1124,31 +1146,33 @@ func checkSizes(specs []rawSpec, batchRows, bufferBytes int, flags uint32) (int,
 // sampleRows is the rows of a sampler's batch for a sampler wanting wanted rows: the core's answer,
 // however many batches that takes. Only a row past the limit is refused, in its words.
 func sampleRows(plan []Column, wanted int, flags uint32) (int, error) {
-	specs := sizeSpecs(plan)
-	_, found, err := askSizes(specs, wanted, 1, flags)
+	specs, extras := sizeSpecs(plan)
+	_, found, err := askSizes(specs, extras, wanted, 1, flags)
 	if err != nil {
 		return 0, err
 	}
 	rows := le.Uint64(found[24:])
 	if rows == 0 {
-		_, err := checkSizes(specs, wanted, 1, flags)
+		_, err := checkSizes(specs, extras, wanted, 1, flags)
 		return 0, err
 	}
 	return int(rows), nil
 }
 
-// sizeSpecs is what the core is told of a plan for its sizes alone. A plan that can't be honoured
-// says so where it always has, so its size is judged without it.
-func sizeSpecs(plan []Column) []rawSpec {
+// sizeSpecs is what the core is told of a plan for its sizes alone, each spec's extra beside it, a
+// declaration among them. A plan that can't be honoured says so where it always has, so its size is
+// judged without it.
+func sizeSpecs(plan []Column) ([]rawSpec, []specExtra) {
 	specs := make([]rawSpec, len(plan))
+	extras := make([]specExtra, len(plan))
 	for index, planned := range plan {
-		spec, _, err := planned.spec()
+		spec, extra, err := planned.spec()
 		if err != nil {
-			return nil
+			return nil, nil
 		}
-		specs[index] = spec
+		specs[index], extras[index] = spec, extra
 	}
-	return specs
+	return specs, extras
 }
 
 // rowsToCore is a batch's rows as the core's 32-bit count takes them. A size past it passes the check

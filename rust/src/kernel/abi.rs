@@ -870,7 +870,8 @@ pub struct ColumnSpecWith {
     /// its `Constraints::from_raw` judges it, at a numeric door or text alone, and with
     /// [`ColumnBufferWith::checks`] set. Null declares none, and the column casts as it would
     /// without this field. A declaration refused, at any other door, or without `checks` is
-    /// [`ERR_CONTRACT`] before any cell is read.
+    /// [`ERR_CONTRACT`] before any cell is read, as is a decimal in it whose sign byte is other
+    /// than `0` or `1`, which is read as a byte before the layout is.
     pub constraints: *const RawConstraints,
     /// The `enum` list, packed as HyperCast packs it, read only when `constraints` sets
     /// `HAS_ENUM`; null and `0` otherwise.

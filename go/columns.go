@@ -85,7 +85,7 @@ func newColumns(plan []Column, batchRows int, notes bool, flags uint32) (*column
 	if notes {
 		flags |= batchNotes
 	}
-	if _, err := checkSizes(s.specs, batchRows, 1, flags); err != nil {
+	if _, err := checkSizes(s.specs, s.extras, batchRows, 1, flags); err != nil {
 		return nil, err
 	}
 	// One allocation for every column's values and verdicts, each array on an 8-byte
