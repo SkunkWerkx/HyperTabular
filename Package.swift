@@ -18,9 +18,9 @@ import Foundation
 // three lines below for every release, from the zips the release then attaches; none resolves
 // before the first release that carries them. HyperCast's package takes its own core the same
 // way.
-let coreRelease = "1.0.0"
-let coreChecksum = ""
-let appleCoreChecksum = ""
+let coreRelease = "1.1.0"
+let coreChecksum = "ab0d965c78dbf71354071a291fe3388bb9d8a26bbd65948cb6685de5db721f48"
+let appleCoreChecksum = "56478445753cde2649fe5104b52b9c5f71f244dfe2ddc1e7100f525fbabef4fb"
 
 // In this repository, CI and .github/scripts/local-core.sh write the core into
 // swift/HyperTabularCore.artifactbundle/ (gitignored), and then this file links that instead,
