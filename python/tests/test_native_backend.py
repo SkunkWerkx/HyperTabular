@@ -47,7 +47,11 @@ def test_everything_exported_is_there():
     assert hypertabular.ColumnData.__module__ == "hypertabular"
 
 
-@pytest.mark.parametrize("name", [name for name in hypertabular.__all__ if name != "Verdict"])
+# HyperCast's two union aliases carry no docstring of their own, and PyPy gives a union none.
+_ALIASES = {"Verdict", "CheckedVerdict"}
+
+
+@pytest.mark.parametrize("name", [name for name in hypertabular.__all__ if name not in _ALIASES])
 def test_everything_exported_has_a_docstring(name: str):
     """Every exported name carries the docstring help() prints."""
     doc = getattr(hypertabular, name).__doc__

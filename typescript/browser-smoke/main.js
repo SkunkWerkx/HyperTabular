@@ -246,7 +246,11 @@ try {
     return outcome.value
   }
 
-  const delimited = parse(delimitedText)
+  // A case whose plan declares constraints is not replayed on this page, which reads through
+  // `get`: the suite run against this module (NAPI_RS_FORCE_WASI) replays every one of them.
+  const constrained = (c) => c.plan?.some((entry) => entry.constraints !== undefined) ?? false
+
+  const delimited = parse(delimitedText).filter((c) => !constrained(c))
   for (const c of delimited) {
     const d = c.dialect
     const dialect = {
@@ -293,7 +297,7 @@ try {
   }
   log(`delimited.json: ${delimited.length} cases`)
 
-  const workbooks = parse(workbookText)
+  const workbooks = parse(workbookText).filter((c) => !constrained(c))
   const books = new Map()
   for (const c of workbooks) {
     const url = assets[`../../corpus/${c.file}`]

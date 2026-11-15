@@ -718,11 +718,12 @@ bool check_checked(const ht::Batch &batch, std::size_t column, std::size_t row, 
       return failed(where + ": rejected, expected ok");
     }
     const Json *index = want.find("enum_index");
-    const std::optional<std::uint32_t> wanted_index =
-        index != nullptr ? std::optional<std::uint32_t>(static_cast<std::uint32_t>(index->u64()))
-                         : std::nullopt;
-    if (passed->adjusted != member(want, "adjusted").boolean ||
-        passed->enum_index != wanted_index) {
+    // Compared by hand: an optimizing GCC 14 calls std::optional's own != maybe-uninitialized here.
+    const bool same_index =
+        index != nullptr ? passed->enum_index.has_value() &&
+                               *passed->enum_index == static_cast<std::uint32_t>(index->u64())
+                         : !passed->enum_index.has_value();
+    if (passed->adjusted != member(want, "adjusted").boolean || !same_index) {
       return failed(where + ": adjusted or the enum entry");
     }
     return same_checked(want, passed->value) || failed(where + ": the checked value");
