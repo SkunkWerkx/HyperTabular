@@ -43,7 +43,7 @@ version its manifests require, never from the pin (the runbook's "Release order"
    B to its run, downloads the preserved packages, re-verifies every file and the inventory at
    A, holds B's `Package.swift` to the preserved zips, signs the release attestation from the
    tag, and publishes to the six registries, each publisher verifying its files just before
-   uploading. It then creates `go/vX.Y.Z` and the GitHub Release, with the 18 PHP extension
+   uploading. It then creates `go/vX.Y.Z` and the GitHub Release, with the 36 PHP extension
    zips attached (PIE installs from there; Packagist sees the tag at once, so `pie install`
    fails until the Release exists), and its last job, `pie-acceptance`, has PIE install
    `skunkwerkx/hypertabular:vX.Y.Z` on every platform and PHP minor and checks it from a fresh
