@@ -4,6 +4,7 @@
 // declaration, which makes a column that is not `valid`, refused when its plan is bound. `bun run
 // typecheck` compiles this file, so the narrowing below is checked too.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
+const { readFileSync }: typeof import('node:fs') = require('node:fs')
 const path: typeof import('node:path') = require('node:path')
 const { test }: typeof import('node:test') = require('node:test')
 const hypercast = require('@skunkwerkx/hypercast') as typeof import('@skunkwerkx/hypercast')
@@ -249,7 +250,8 @@ test('checks are sized like verdicts, across every batch', () => {
 
 test('a constrained sheet column is judged', () => {
   const file = path.join(__dirname, '..', '..', 'corpus', 'workbook', 'constraints.xlsx')
-  const book = Workbook.open(file)
+  // From its bytes: under the WASI fallback on Windows no path reaches the module (README).
+  const book = Workbook.fromBytes(readFileSync(file))
   assert.ok(book.ok, JSON.stringify(book))
   const sheet = book.value.sheet(0, { hasHeader: true }, [Column.checked(0, atMost('10'))])
   assert.ok(sheet.ok, JSON.stringify(sheet))
