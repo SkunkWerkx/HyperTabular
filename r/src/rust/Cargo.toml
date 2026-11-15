@@ -15,7 +15,7 @@ crate-type = ["staticlib"]
 # published graph. `staticlib` is the core's no_std archive feature: the 14 C exports and the
 # panic handler, with no copy of Rust's standard library and none of HyperCast's symbols.
 [dependencies]
-hypertabular = { version = "=1.0.0", default-features = false, features = ["staticlib"] }
+hypertabular = { version = "=1.1.0", default-features = false, features = ["staticlib"] }
 
 [profile.release]
 lto = true

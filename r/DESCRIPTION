@@ -1,7 +1,7 @@
 Package: hypertabular
 Type: Package
 Title: Forward-Only Reads of Delimited Text and Workbooks, Every Cell a Verdict
-Version: 1.0.0
+Version: 1.1.0
 Authors@R: c(
     person("Brian", "Buvinghausen", email = "buvinghausen@gmail.com",
            role = c("aut", "cre")),

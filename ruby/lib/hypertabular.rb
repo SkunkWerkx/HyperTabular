@@ -41,7 +41,7 @@ require_relative "hypertabular/runtime/workbook"
 module HyperTabular
   # This gem's own version — kept in lockstep with hypertabular.gemspec and the core's
   # rust/Cargo.toml.
-  VERSION = "1.0.0"
+  VERSION = "1.1.0"
 
   class << self
     # Whether the native core loaded and exports the ABI this binding was built against.
