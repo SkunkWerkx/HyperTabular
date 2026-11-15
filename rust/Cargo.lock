@@ -753,11 +753,12 @@ dependencies = [
 
 [[package]]
 name = "hypercast"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af357e0b00717d2158d5d119dbf81dcf9bfee414bf6565970d5b3f2bd158b712"
+checksum = "ff899c43c73bb0b60aad7de7ead93a22d9d8f4a7563441cd3744cac67b7358ff"
 dependencies = [
  "pyo3",
+ "simdutf8",
 ]
 
 [[package]]
@@ -1529,6 +1530,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skeptic"

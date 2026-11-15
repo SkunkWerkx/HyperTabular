@@ -3,7 +3,7 @@ name = "hypertabular-jni"
 version = "0.0.0"
 edition = "2024"
 # The core's own floor (rust/Cargo.toml), which this crate cannot go below.
-rust-version = "1.88"
+rust-version = "1.89"
 description = "The JNI library the Java binding loads below JDK 25: one native per C export of the HyperTabular core."
 license = "MIT"
 publish = false

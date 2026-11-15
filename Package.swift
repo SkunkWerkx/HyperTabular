@@ -89,13 +89,13 @@ let package = Package(
         .library(name: "HyperTabular", targets: ["HyperTabular"])
     ],
     dependencies: [
-        // 1.0.0, the newest HyperCast release, while 1.1.0 (the real floor) is in development:
-        // see rust/Cargo.toml. Its Swift core comes from its release by URL and checksum. A version range,
+        // 1.1.0 is the floor (see rust/Cargo.toml), the first HyperCast whose Swift core comes
+        // from its release by URL and checksum. A version range,
         // never a revision or a branch: SwiftPM refuses a tagged package that depends on one to
         // every consumer, so the release guard refuses a tag that does.
         usesPeerHyperCast
             ? .package(path: peerHyperCast)
-            : .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.0.0")
+            : .package(url: "https://github.com/SkunkWerkx/HyperCast", from: "1.1.0")
     ],
     targets: [
         .target(

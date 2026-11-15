@@ -470,8 +470,8 @@ The Composer package Packagist serves is the root [`composer.json`](../composer.
 the manifest at the top of the git repository it watches. This directory's `composer.json` is
 the development project, never published: PHPUnit, PHPBench and PHP_CodeSniffer. To build the
 extension from a checkout and run the suite against it (a Rust toolchain and PHP's development
-headers, `php-config` on `PATH`), with HyperCast's extension installed by PIE or built in a
-HyperCast checkout beside this one:
+headers, `php-config` on `PATH`), with HyperCast's extension built in a HyperCast checkout
+beside this one (`cargo php-ext` in its `rust/`) or, with no checkout beside it, installed by PIE:
 
 ```sh
 git clone https://github.com/SkunkWerkx/HyperTabular
@@ -484,8 +484,10 @@ composer bench                 # PHPBench, the same way
 ```
 
 `HYPERTABULAR_PHP_EXTENSION` names another build of this extension for `composer test` and
-`composer bench`, and `HYPERCAST_PHP_EXTENSION` a build of HyperCast's; without it, one the PHP
-already loads is used, else `../HyperCast/rust/target/php/release/`. The suite replays
+`composer bench`, and `HYPERCAST_PHP_EXTENSION` a build of HyperCast's; without it, outside CI, a
+HyperCast checkout beside this one supplies its own build, `../HyperCast/rust/target/php/release/`
+(it must be built, and an ext-hypercast this PHP's ini files already load is refused there), else
+the one the PHP already loads is used. The suite replays
 `corpus/delimited.json`, through stream buffers starting at one byte, and `corpus/workbook.json`;
 a workbook's buffers are the Rust reader's, whose own suite replays them from one element. The
 `big-sizes` group asks for batches just past the core's limit and reads a 268,000-column sample:

@@ -46,10 +46,10 @@ dependencies {
     // UnixPrecision, DateOrder and ExcelEpoch are its own types, from its own published
     // jar, and they are this binding's public API — hence `api`, so a consumer gets them
     // transitively. Nothing here calls HyperCast's doors: the core this binding loads has
-    // HyperCast compiled in, and casts every cell itself. 1.0.0, the newest HyperCast release,
-    // while 1.1.0 is in development (see rust/Cargo.toml): 1.1.0 is the real floor, the first
-    // HyperCast jar that runs on JDK 21 (a multi-release jar of its own).
-    api("io.github.skunkwerkx:hypercast:1.0.0")
+    // HyperCast compiled in, and casts every cell itself. 1.1.0 is the floor (see
+    // rust/Cargo.toml), the first HyperCast jar that runs on JDK 21 (a multi-release jar of its
+    // own).
+    api("io.github.skunkwerkx:hypercast:1.1.0")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("com.google.code.gson:gson:2.15.0")

@@ -87,7 +87,7 @@ jobs:
             build-mode: manual
             runner: macos-latest
           # Not scanned: C/C++, whose only files are hypertabular.h in the CI-built Swift bundles
-          # (nothing to compile; the C ABI is Rust's, rust/src/ffi.rs), and PHP, which CodeQL
+          # (nothing to compile; the C ABI is Rust's, rust/src/kernel/exports.rs), and PHP, which CodeQL
           # does not support.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

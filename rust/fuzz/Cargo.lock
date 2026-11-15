@@ -54,9 +54,12 @@ dependencies = [
 
 [[package]]
 name = "hypercast"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af357e0b00717d2158d5d119dbf81dcf9bfee414bf6565970d5b3f2bd158b712"
+checksum = "ff899c43c73bb0b60aad7de7ead93a22d9d8f4a7563441cd3744cac67b7358ff"
+dependencies = [
+ "simdutf8",
+]
 
 [[package]]
 name = "hypertabular"
@@ -111,6 +114,12 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "simdutf8"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "zlib-rs"

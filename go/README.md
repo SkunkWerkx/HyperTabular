@@ -485,9 +485,9 @@ step and cost a consumer nothing.
 
 ## Platforms
 
-Every GOOS and GOARCH Go has, with `CGO_ENABLED=0`, because the core is Go source. CI
-cross-compiles and vets the package for these 23 pairs on every pull request that touches
-the Go binding, the core or the workflows, and on every release-mode run:
+Every GOOS and GOARCH Go has, with `CGO_ENABLED=0`, because the core is Go source. Off a
+pull request (the weekly board and every release-mode run) CI cross-compiles and vets the
+package for these 23 pairs:
 
 | GOOS | GOARCH |
 | --- | --- |
@@ -500,10 +500,11 @@ the Go binding, the core or the workflows, and on every release-mode run:
 | `js`, `wasip1` | `wasm` |
 
 and runs the whole suite natively on Linux and Windows on x64 and arm64, on macOS on arm64,
-on Alpine (musl x64 and arm64), in an iOS simulator, in an Android emulator, and on the three
-WebAssembly hosts below. No big-endian host runs in CI; the suite runs the corpus through the
-big-endian decoding on every host as well (`TestTheCorpusThroughDecodedCopies`), and
-`TestDecodingForABigEndianHost` holds that decoding to big-endian order. A binary carries the
+on Alpine (musl x64 and arm64), on big-endian s390x under QEMU, in an iOS simulator, in an
+Android emulator, and on the three WebAssembly hosts below. A pull request that touches the
+Go binding, the core or the workflows runs the suite on Linux x64. On every host the suite
+also runs the corpus through the big-endian decoding (`TestTheCorpusThroughDecodedCopies`),
+and `TestDecodingForABigEndianHost` holds that decoding to big-endian order. A binary carries the
 core like any package and starts without touching the filesystem.
 
 ### iOS and Mac Catalyst
@@ -554,8 +555,7 @@ page loads one module. Under TinyGo, ranging over a batch's `All()` costs five a
 three TinyGo makes for a range-over-func loop's closures and two for the generation it captures, and
 `Faults()` four, once a loop and never a row or an entry; every other allocation count below holds there as under stock Go.
 
-CI runs the whole suite three ways on every pull request that touches the Go binding, the
-core or the workflows: under TinyGo on wasip1 under wasmtime (with the checkout mounted and
+Off a pull request, CI runs the whole suite three ways: under TinyGo on wasip1 under wasmtime (with the checkout mounted and
 the corpus found through `HYPERTABULAR_CORPUS`, and the same binary run without the mount
 as a negative control), and under stock Go on `js/wasm` under Node and on `wasip1/wasm`
 under wasmtime. It also builds [`internal/tinygosmoke`](internal/tinygosmoke) with TinyGo

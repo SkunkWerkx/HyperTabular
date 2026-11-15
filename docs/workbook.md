@@ -316,7 +316,7 @@ on a workbook already open; a 4,096-row sample costs four times as much, in the 
 
 ## What holds it to the truth
 
-- `corpus/workbook.json` — 398 cases over the 41 packages in `corpus/workbook/`: every
+- `corpus/workbook.json` — 404 cases over the 42 packages in `corpus/workbook/`: every
   sheet, with and without a header, empty rows skipped and delivered, every door over
   every column. The cases for the ten synthetic XLSX and ODS packages were written by the
   std workbook reader this crate had before the core could read a workbook — a reader that

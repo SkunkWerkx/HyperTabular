@@ -14,7 +14,7 @@ after the rows before it. No read signals an R error for anything in its data.
 
 ## Install
 
-From CRAN:
+From CRAN (pending approval):
 
 ```r
 install.packages("hypertabular")
@@ -323,10 +323,11 @@ jsonlite. The wrapper crate in `src/rust/` depends on the `hypertabular` crate b
 version, as any crates.io consumer does, so the graph CRAN builds is the published one;
 `vendor.sh` resolves that version from the checkout's `rust/` (a command-line `[patch]`,
 never a committed file, and it refuses a pin that differs from `rust/Cargo.toml`), vendors
-the `hypercast` crate from crates.io, adds the core as `cargo package` writes it, and
-rewrites the lock offline so it names the crates.io source. `HYPERCAST_PATH=<HyperCast's
-rust/>` takes a `hypercast` crate not yet on crates.io from a checkout instead, the same way;
-it is a local check only. The wrapper's `src/rust/Cargo.lock`, the vendor tarball, the C
+the `hypercast` crate, adds the core as `cargo package` writes it, and rewrites the lock
+offline so it names the crates.io source. CI and the release vendor crates.io's `hypercast`;
+outside CI a HyperCast checkout beside this one (`../HyperCast/rust`) is taken instead, the
+same way as the core, `HYPERCAST_PATH=<HyperCast's rust/>` names another, and
+`HYPERCAST_PATH=` (set, empty) takes crates.io's. The wrapper's `src/rust/Cargo.lock`, the vendor tarball, the C
 header under `src/include/` (the checkout's `include/hypertabular.h`, which the shim
 includes), the corpus copy under `tests/testthat/corpus/` (the two corpus files and every workbook
 `workbook.json` reads) and `inst/extdata/basic.xlsx`, which the examples read, are generated

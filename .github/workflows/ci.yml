@@ -157,7 +157,7 @@ jobs:
       HYPER_COMPANION_APP_KEY: ${{ secrets.HYPER_COMPANION_APP_KEY }}
 
   # The core on the seven hosts: cargo cdylib, the crate's suite and corpus, the glibc floor,
-  # the cdylib's exports held to rust/src/ffi.rs and loaded by .github/scripts/cdylib_smoke.py,
+  # the cdylib's exports held to rust/src/kernel/exports.rs and loaded by .github/scripts/cdylib_smoke.py,
   # this leg's static archive, the C archive assembled from both and c/smoke/ built against
   # it, and native-<rid> uploaded (attested on a release dispatch). It never skips on a code
   # change: a binding change can touch nothing here and still needs a core to test against.
@@ -441,17 +441,15 @@ jobs:
       mode: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
       crate: hypertabular
       project: HyperTabular
-      # Every browser target runs in headless Chrome, not just built, each when the pull
-      # request can reach it: the archive and the Blazor smoke app linking it (C#, the core
-      # or the workflows), the crate itself for wasm32-unknown-unknown (the core), and the Go
+      # Every browser target runs in headless Chrome, not just built: the archive and the
+      # Blazor smoke app linking it, the crate itself for wasm32-unknown-unknown, and the Go
       # binding's smoke package compiled by TinyGo, its core being Go source (translated by
       # wasm2go from the crate's wasm32-wasip1 build and committed). The Go suite itself runs
       # on WebAssembly too: under TinyGo on wasip1 (wasmtime, the corpus mounted, with a
       # negative control without the mount), and under stock Go on js/wasm (Node) and
-      # wasip1/wasm (wasmtime). And in release mode (weekly and release, not PRs) the Magnus
-      # extension, built for each Ruby minor the -wasm gem carries, linked into a ruby.wasm
-      # interpreter and run under Node and in headless Chrome; those archives are uploaded as
-      # ruby-wasm-{minor} for release.yml.
+      # wasip1/wasm (wasmtime). And the Magnus extension, built for each Ruby minor the -wasm
+      # gem carries, linked into a ruby.wasm interpreter and run under Node and in headless
+      # Chrome; those archives are uploaded as ruby-wasm-{minor} for release.yml.
       archive: ${{ needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true' }}
       blazor_check: ${{ (needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.csharp == 'true') && 'csharp/HyperTabular.WasmSmokeTest/check.sh' || '' }}
       rust_browser_test: ${{ (needs.changes.outputs.core == 'true' || needs.changes.outputs.ci == 'true') && 'rust/browser-test' || '' }}
