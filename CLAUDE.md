@@ -477,16 +477,15 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - Remove agent worktrees and their branches once the work is in the main checkout;
   `.claude/` is untracked and `git add` picks it up.
 
-## Open follow-ups (as of 2026-11-10)
+## Open follow-ups (as of 2026-11-14)
 
-- The next release waits on HyperCast 1.1.0 on every registry. HyperCast 1.1's work is on
-  HyperCast's `master` (`439b8cf`, still versioned 1.0.0), and the companion pin in
-  `.github/hyper.json` names that commit and its green run. Every manifest requires 1.0.0, the
-  newest release, as the committed lockfiles (`rust/`, `rust/browser-test/`, `rust/fuzz/`,
-  `typescript/`, `java/jni/`, `go.sum`) and `swift/Benchmarks/Package.resolved` do, though 1.1.0
-  is the real floor: once 1.1.0 is published, the bump above moves every manifest and lock to it,
-  before this package's release. The board meanwhile runs on the pin, whose wiring relocks each
-  job's tree, and development on the HyperCast checkout beside this one. HyperCast and HyperTabular 1.1 go to CRAN together, HyperCast's first.
+- HyperCast 1.1.0 is live on every registry but CRAN (2026-11-14), and every manifest requires
+  it, as the committed lockfiles (`rust/`, `rust/browser-test/`, `rust/fuzz/`, `typescript/`
+  and its two `bun.lock`s, `java/jni/`, `go.sum`) and `swift/Benchmarks/Package.resolved` do. The
+  companion pin in `.github/hyper.json` names `a74eafc` and the green `purpose=release` run that
+  prepared that release (the tag is one staging commit later): the board runs on the pin, whose
+  wiring relocks each job's tree, and development on the HyperCast checkout beside this one. HyperCast and HyperTabular 1.1 go to
+  CRAN together, HyperCast's first.
 - The next release is the first with npm, CRAN, C archives, PIE zips, the Swift zips and the
   JNI jar; what only it can prove is the same list as HyperCast's.
 - Benchmark tables: the workbook table through every binding and Go's and PHP's receipts were

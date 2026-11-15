@@ -291,7 +291,8 @@ A structural error is a `hypertabular::Result<T>`, shaped as a `Verdict` is: `ok
 make up), `match(on_value, on_error)`, and under C++23 with `<expected>` a conversion to
 `std::expected<T, hypertabular::Error>`. A `hypertabular::Error` has a `kind()` (`io`,
 `separator`, `plan`, `no_sheet`, `no_column`, `ambiguous_column`, `range`, `unbound`,
-`already_bound`, `structure`), what it is about (`failure()`, with its `FailureKind`, record,
+`already_bound`, `structure`, `zero_batch_rows`, `zero_buffer_bytes`, `batch_too_large`,
+`row_too_wide`, `busy`), what it is about (`failure()`, with its `FailureKind`, record,
 line, byte, expected and found; `column()`; `separator()`; `detail()`; `first()` and `second()`,
 the two columns a name is shared by), and `message()`, worded as every binding words it.
 

@@ -184,8 +184,9 @@ and `grouping.*` cases read is held to tables worked out by hand in `rust/tests/
   with the core's cells. A row the empty-row filter leaves out isn't in `rows`, so isn't in here.
 - A typed cell that fails its door has the cell said as text for its `raw` and a fault
   that spans all of it; a typed cell through the text door is that same text.
-- `failure`, when present (the one shown is `broken.xlsx`'s; the only others are the two
-  encrypted files', cases of nothing but `name`, `file` and the failure), ends the sheet
+- `failure`, when present (the one shown is `broken.xlsx`'s; the others are `ranges.xlsx`'s
+  `Broken` sheet's, a shared string that is not there too, and the two encrypted files', cases
+  of nothing but `name`, `file` and the failure), ends the sheet
   after the rows listed: `kind` is one of
   `not_a_zip`, `container`, `encrypted`, `method`, `missing_part`, `xml`, `deflate`,
   `not_a_workbook`, `shared_string`, `too_large`, `iwa`; `record` is the part of the

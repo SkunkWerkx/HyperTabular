@@ -369,9 +369,10 @@ Python call per cell.
   of [a messier file](#a-messier-file); `SheetOptions` states a sheet's header, whether empty rows
   are skipped, the batch size and its range; the plan states each column's door and, for numbers,
   its `NumFormat`. A suggestion is a plan to look at, applied to nothing.
-- **HyperCast is the judge.** `Success`, `Fault`, `CastFailure`, `NumFormat`,
-  `UnixPrecision`, `DateOrder` and `ExcelEpoch` are the `hypercast` package's own objects,
-  re-exported here unchanged. A text cell means exactly what `hypercast.cast_*` says of the
+- **HyperCast is the judge.** `Success`, `Fault`, `Verdict`, `CastFailure`, `Detail`,
+  `NumFormat`, `DateOptions`, `MonthNames`, `UnixPrecision`, `DateOrder`, `ExcelEpoch`, and the
+  checked door's `Constraints`, `Rounding`, `Checked`, `Violation`, `Keyword` and
+  `CheckedVerdict` are the `hypercast` package's own objects, re-exported here unchanged. A text cell means exactly what `hypercast.cast_*` says of the
   same text, a typed workbook cell is converted by the door directly, and its value is the
   Python type that door gives: `int`, `float`, `bool`, `decimal.Decimal`, `uuid.UUID`,
   `datetime`, `date`, `time`, `timedelta`, and `str` for text.

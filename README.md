@@ -129,7 +129,7 @@ Every binding needs HyperCast 1.1.0 or later: the verdict, fault, number-format 
 
 ## The core, and what holds it
 
-The crate is two layers. **The core** (`rust/src/kernel`) is what the native library `libhypertabular` is made of and what every binding calls: it reads bytes the caller hands it and writes into buffers the caller hands it. **The Rust API** over it, behind the default `std` feature, is one binding among eleven. The core's three properties are things a build refuses to get wrong, and `rust/check-core.sh` checks every one on the code and on the library it becomes, on every pull request that touches the core:
+The crate is two layers. **The core** (`rust/src/kernel`) is what the native library `libhypertabular` is made of and what every binding calls: it reads bytes the caller hands it and writes into buffers the caller hands it. **The Rust API** over it, behind the default `std` feature, is one binding among eleven. The core's three properties are things a build refuses to get wrong, and `rust/check-core.sh` checks every one on the code and on the library it becomes, on every pull request that builds the core:
 
 | Property | What makes it impossible to break quietly |
 | --- | --- |
@@ -143,7 +143,7 @@ The design record — why one repository, how the scanner and the workbook reade
 ## Receipts
 
 - **A sheet can keep every row.** By default a row whose only cells are formulas with no cached value is filtered out as empty, with nothing to say so. Set `skip_empty_rows=false`, in your language's spelling, to keep every row: those cells are then delivered, marked uncached.
-- **The corpus is the contract.** `corpus/delimited.json` (123 cases) and `corpus/workbook.json` (398 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included: C#'s P/Invoke, Java's JNI on JDK 21 and FFM on 25, Go's translated core, Swift, Ruby's Magnus *and* Fiddle backends, PHP's extension, Python's, TypeScript's addon and its WebAssembly fallback, R's `.Call` shim, and the C++ header over the C ABI. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own format and in its Excel export. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
+- **The corpus is the contract.** `corpus/delimited.json` (137 cases) and `corpus/workbook.json` (404 cases) replay through the Rust suite and through every binding's own, byte for byte, fault spans included: C#'s P/Invoke, Java's JNI on JDK 21 and FFM on 25, Go's translated core, Swift, Ruby's Magnus *and* Fiddle backends, PHP's extension, Python's, TypeScript's addon and its WebAssembly fallback, R's `.Call` shim, and the C++ header over the C ABI. The workbook cases read generated files and files written by real applications: Excel for Windows (data, strict OOXML, the 1904 date system, an encrypted and a protected workbook, a macro-enabled one, ZIP64), Excel for the web, LibreOffice and Google Sheets, in both formats, and Apple Numbers in its own format and in its Excel export. [`corpus/README.md`](corpus/README.md) records each writer and what it does that the others do not.
 - **Delimited text:** every cell located and handed out as text, validated as UTF-8, at 2.68 GiB/s, against 1.85 GiB/s for the `csv` crate splitting the same records without validating them; ten typed columns cast into the caller's buffers at 1.71 GiB/s; the structural scan alone at 6.77 GiB/s on NEON. Apple M6, a 26 MB 200 000 × 10 file, 2026-11-10. Each of those is a loss against 1.0 (tag `v1.0.0` over HyperCast 1.0.0) in the same session, printed: the scan 9.0% slower, the text 15.8%, the typed columns 8.5%, a file whose every cell is multi-byte 34%, one bad byte in every batch 20% and one in every row 131%, nearly all of it this release's validation and notes rather than HyperCast's ([`docs/delimited.md`](docs/delimited.md#numbers)).
 - **Workbooks, through every binding.** Three real-application files, read whole by each binding's own benchmark harness through one eight-column plan, every verdict looked at and every text cell's bytes, each harness printing the same checksum. Excel's `excel-win-300k.xlsx` (111 MB of sheet XML in a 16.7 MB package), LibreOffice's `libreoffice-300k.ods` (360 MB of `content.xml` in 13.3 MB) and Numbers' `numbers-300k.numbers` (29.4 MB of Snappy-compressed IWA parts in a 29.6 MB package); an Apple M6 (Mac18,5), 2026-11-08, one session, one build of the core:
 
@@ -164,7 +164,7 @@ The design record — why one repository, how the scanner and the workbook reade
 
 ## Platform support
 
-`.github/workflows/ci.yml`'s `core` job builds the Rust core fresh on five real-hardware legs and the two musl RIDs (in Alpine containers), and each language's `test-<binding>` job then runs that language's own suite, corpus replay included, on the same hosts against that leg's freshly built library (Go's against the committed translation of the same core; the musl suites in the language's own `*-alpine` image). A pull request runs the bindings it could have broken (its own tree, the core or the workflows changed), each after its lint; a dispatch, the weekly run and a release run them all. Intel macOS has no leg of its own; see the osx-x64 note under the table. The pipeline is the shared [SkunkWerkx forge](https://github.com/SkunkWerkx/.github), the same one HyperCast and HyperUuid ship from.
+`.github/workflows/ci.yml`'s `core` job builds the Rust core fresh on five real-hardware legs and the two musl RIDs (in Alpine containers), and each language's `test-<binding>` job then runs that language's own suite, corpus replay included, on the same hosts against that leg's freshly built library (Go's against the committed translation of the same core; the musl suites in the language's own `*-alpine` image). A pull request builds the core on linux-x64 alone and runs the bindings it could have broken there (its own tree, the core or the workflows changed), each after its lint; a dispatch, the weekly run and a release run them all on every leg. Intel macOS has no leg of its own; see the osx-x64 note under the table. The pipeline is the shared [SkunkWerkx forge](https://github.com/SkunkWerkx/.github), the same one HyperCast and HyperUuid ship from.
 
 | Language | linux-x64 | linux-arm64 | linux-musl-x64 | linux-musl-arm64 | osx-x64 | osx-arm64 | win-x64 | win-arm64 | Status |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | --- |
@@ -177,7 +177,7 @@ The design record — why one repository, how the scanner and the workbook reade
 | [Ruby](ruby/) | ✅ | ✅ | ✅ | ✅ | Fiddle, built | ✅ | ✅ | ✅ | [RubyGems](https://rubygems.org/gems/hypertabular) |
 | [PHP](php/) | ✅ | ✅ | ✅ | ✅ | — | ✅ | ✅ | — | `pie install` ([Packagist](https://packagist.org/packages/skunkwerkx/hypertabular); zips on the GitHub Release) |
 | [TypeScript](typescript/) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | [npm](https://www.npmjs.com/package/@skunkwerkx/hypertabular) |
-| [R](r/) | source | source | source | source | source | source | source | experimental | [CRAN](https://cran.r-project.org/package=hypertabular) |
+| [R](r/) | source | source | source | source | source | source | source | experimental | [CRAN](https://cran.r-project.org/package=hypertabular) (pending approval) |
 | [C, C++](c/) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | GitHub Release (one archive per RID) |
 
 The cells that are not a plain ✅, and why each is deliberate:
@@ -252,7 +252,7 @@ docs/       the design record (the core, delimited text, workbooks, prior art) a
 
 ## Contributing
 
-Pull requests and issues are welcome. `.github/workflows/ci.yml` builds the core on every host and runs each binding's suite when the pull request could have broken it (its own tree, the core or the workflows changed); `pr-board` is the one status to keep green before merging. Locally, `rust/check-core.sh` is the core's proof and `cargo test` its suite; each binding's README says how to run its own.
+Pull requests and issues are welcome. `.github/workflows/ci.yml` builds the core and runs each binding's suite when the pull request could have broken it (its own tree, the core or the workflows changed); `pr-board` is the one status to keep green before merging. Locally, `rust/check-core.sh` is the core's proof and `cargo test` its suite; each binding's README says how to run its own.
 
 ## License
 

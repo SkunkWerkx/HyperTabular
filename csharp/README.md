@@ -274,7 +274,7 @@ rows, not once per cell.
   of names, with `Ordinal(name)` (exact, case-sensitive, untrimmed; `KeyNotFoundException`
   naming the column when it is missing, and its subclass `DuplicateColumnException`, naming both
   positions, when two columns share the name), `TryOrdinal`, which takes the first of those, and
-  `Ordinal(ReadOnlySpan<byte>)` to match the raw UTF-8. `Bind(plan[, batchRows])` then
+  `Ordinal(ReadOnlySpan<byte>)` to match the raw UTF-8. `Bind(plan)` (a delimited reader's takes `batchRows` too) then
   declares the plan, once (`InvalidOperationException` on a second call, and on `Read()`
   before it — not final: bind and read). `IsBound` says which; `ColumnCount` is the header's
   width, or the first record's once read. A delimited plan column past the header's width
@@ -420,7 +420,8 @@ One compiled assembly covers browser-wasm too: every native entry point is decla
 times — `"hypertabular"` for platforms that load a library, `"*"` for the statically linked
 wasm module and `"__Internal"` for iOS and Mac Catalyst — picked at the call site by
 `OperatingSystem.IsBrowser()` and `OperatingSystem.IsIOS()`. CI builds the
-`wasm32-unknown-emscripten` archive on every pull request, the release pack stages it under
+`wasm32-unknown-emscripten` archive off a pull request (the weekly board and every
+release-mode run), the release pack stages it under
 `runtimes/browser-wasm/nativeassets/`, and the package's `build/net10.0/HyperTabular.targets`
 wires it into a Blazor WebAssembly project with no configuration: a `NativeFileReference`
 hands the archive to the linker beside HyperCast's (the two share no symbols), the SDK's
@@ -458,8 +459,8 @@ fallback can set
 
 No export takes more than twelve integer arguments, because Mono's interpreter, which runs
 .NET in the browser, passes no more to a native function; the work buffers travel in one
-struct instead. `HyperTabular.WasmSmokeTest` proves the chain in headless Chrome on every
-pull request: a Blazor app that reads delimited text and a workbook through the public API
+struct instead. `HyperTabular.WasmSmokeTest` proves the chain in headless Chrome off a pull
+request (the weekly board and every release-mode run): a Blazor app that reads delimited text and a workbook through the public API
 and renders `PASS` or `FAIL` into the page. One of the files it reads is one it serves,
 fetched with `HttpClient` as a streamed response — a stream the browser only reads
 asynchronously — and read through `OpenAsync` and `ReadAsync`. `./check.sh` in that

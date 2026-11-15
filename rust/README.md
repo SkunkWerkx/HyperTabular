@@ -125,17 +125,30 @@ are the same for the primitives. A slice borrows the reader and cannot outlive i
 read. A cell that did not cast holds the door's zero, so read `batch.verdicts(column)`
 beside the values. A text cell is `batch.text` or `batch.text_str`.
 
+A column can declare what its cells must also meet, as OpenAPI 3.2 says it: bounds, `multipleOf`
+with a rounding, lengths, `enum` and `trim`, through HyperCast's own `Constraints<T>` (its
+README has every keyword). `Column::checked(ordinal, constraints)` reads the column through the
+checked door for `T` and copies the declaration; `is_checked()` says whether a column declares
+any. `batch.get_checked::<T>(column, row)` and `batch.text_checked(column, row)`, and their `Row`
+twins, give HyperCast's `Result<Checked<T>, Rejection<T>>`: the value, flagged `adjusted` when
+rounding to `multipleOf` changed it (and at the text door the `enum` entry it matched), or a
+rejection, the cell's fault or a `Violation` naming the `Keyword` broken and carrying the value as
+cast and its span. A column that declares none reads through them too, never adjusted. `get` and
+`text` panic on a constrained column, since a violation is no fault and they would say it passed;
+`batch.checks(column)` is the raw checks beside the verdicts, and a `Problem` carries the `keyword`.
+
 A binding that hands a batch out past the next read keeps copies of it, and `KeptBatch` works
 the batch's faults list out from them when it's asked for, the list `batch.faults()` gave:
-each column's `batch.verdicts`, `batch.notes` and `batch.source_column`, each row's
-`batch.line`, and `batch.reported_widths()`.
+each column's `batch.verdicts`, `batch.notes` and `batch.source_column` (and, through
+`KeptColumn::with_checks`, a constrained column's `batch.checks`), each row's `batch.line`, and
+`batch.reported_widths()`.
 
 `Column`, `Dialect` and `SheetOptions` are built with their constructors, constants and
 builder methods (`Column::format`, `Dialect::with_quoting`, …), and are
 `#[non_exhaustive]` so a minor release can add a setting; `Door`, `Error`, `Format` and
 `FailureKind` are too, so a `match` on one outside the crate needs a wildcard arm. Below the Rust
 API, the core is reached through `kernel::abi`, `kernel::door`, `kernel::exports`,
-`kernel::delimited::fill`, `kernel::faults`, `kernel::suggest`, `kernel::transcode`, and
+`kernel::delimited::fill`, `kernel::faults`, `kernel::size`, `kernel::suggest`, `kernel::transcode`, and
 `kernel::workbook`'s state, memory, format constants and `book` and `rows` operations — what the C ABI exports;
 the parsing, compression and SIMD modules behind them are private. That ABI's C header,
 `include/hypertabular.h`, is generated from them by cbindgen (`tests/header.rs` fails when it
@@ -220,9 +233,10 @@ returned once every intact row before them has been delivered.
 
 **WebAssembly.** The crate needs nothing from its host — no clock, no entropy, no
 allocator in the core — so it builds for `wasm32-unknown-unknown` as it is, and its whole
-suite passes under wasmtime on `wasm32-wasip1` (all but its three `should_panic` tests,
+suite passes under wasmtime on `wasm32-wasip1` (all but its five `should_panic` tests,
 which libtest skips where a panic aborts). CI runs that suite in `core-checks` and
-`browser-test/` in headless Chrome, on every pull request that touches the core or `.github/`.
+`browser-test/` in headless Chrome, off a pull request (the weekly board and every
+release-mode run).
 
 The design record is in [`docs/`](https://github.com/SkunkWerkx/HyperTabular/tree/master/docs).
 

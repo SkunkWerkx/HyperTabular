@@ -41,7 +41,7 @@ Then the host scenarios:
 
 ```sh
 typescript/consumer-tests/run.sh /tmp/npm-local negative-unpublished plain omit-optional \
-  absent-native forced-wasi negative-deleted-package negative-deleted-wasm mac-lockfile bundlers
+  absent-native forced-wasi negative-deleted-package negative-deleted-wasm mac-lockfile bundlers bun-install
 ```
 
 And the container scenarios, which need Docker (on Docker Desktop the containers reach the
@@ -75,7 +75,7 @@ corpus read, the `node:22.13.0-alpine` image with `EBADENGINE`). The floor scena
   **external**, installed beside the bundle. That is the configuration the package README
   documents.
 - **npm bug 4828.** `mac-lockfile` reproduces npm/cli#4828 with npm 10.9.2, the npm Node
-  22.13.0 bundles: a lockfile regenerated beside a darwin-arm64 `node_modules` names only that
+  22.14.0 bundles: a lockfile regenerated beside a darwin-arm64 `node_modules` names only that
   platform, and `npm ci --os=linux --cpu=x64` from it installs no native and loads the
   fallback. Node 22 users with a lockfile a Mac wrote are who the fallback is for.
 - **Bun as the package manager.** `bun add` from a cold cache, then Node: native loads with an

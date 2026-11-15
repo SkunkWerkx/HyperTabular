@@ -8,7 +8,7 @@ actually affects.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] — 2026-11-14
 
 Every binding now needs HyperCast 1.1.0, whose own release comes first: its NuGet package,
 jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C archive.
@@ -149,8 +149,7 @@ jar, Go module, PyPI package, gem, PHP extension, npm package, R package and C a
   `Faults`, and a row `Detail` and `Origin`; `Notes(false)` turns the notes off for a reader or a
   sheet, whose constructors now take options. `SuggestDelimited`, `SuggestDelimitedBytes` and
   `Sheet.Suggest` return a `*Suggestion`; a `SampleRows` of 0 is not set, so 1,000, where Rust's
-  `sample_rows(0)` is 1, because a struct can't tell a field left out from 0. A `Faults` list ranged over past the next `Read()` panics. Every instance of the translated core is now 64 KiB larger,
-  four pages to start where it was three.
+  `sample_rows(0)` is 1, because a struct can't tell a field left out from 0. A `Faults` list ranged over past the next `Read()` panics.
   *(Go)*
 - **C and C++ have all of that.** The nine new exports are in `hypertabular.h`, and `c/README.md`
   lists them. In `hypertabular.hpp`, `Dialect` adds `with_skip`, `with_header_row`, `with_short_rows`,
@@ -1482,6 +1481,7 @@ cells through. *(every package)*
   values were made); and PHP decoded its record doors with an `unpack()` a cell, now one a
   column (0.28 s to 0.14 s of decoding for the xlsx file). *(Ruby, PHP)*
 
+[1.1.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.9.0...v1.0.0
 [0.9.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/SkunkWerkx/HyperTabular/compare/v0.7.0...v0.8.0
