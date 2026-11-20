@@ -10,8 +10,7 @@
 //! throws for data or for an argument of the wrong JavaScript type: each argument crosses as
 //! an `Unknown` and is read here, because napi's own typed conversions throw a `TypeError`
 //! before the method runs. What can still throw is the engine itself (out of memory building
-//! a result, or an exception a caller's own setter or getter throws past an outcome) and
-//! `new` on a class, which has no constructor.
+//! a result) and `new` on a class, which has no constructor.
 //!
 //! A column that declares HyperCast's constraints (`Column.checked`) is read through
 //! `getChecked`, whose verdict is HyperCast's checked one: `{ ok: true, value, adjusted,
@@ -26,11 +25,20 @@
 //! binding's types and its answers back, and never decides anything a Rust caller would get a
 //! different answer to.
 //!
-//! JavaScript can run in the middle of a call: a getter or a Proxy trap in an argument, or a
-//! setter a caller put on `Object.prototype`. A reader's and a sheet's state is therefore held
-//! in a `RefCell` and every method takes `&self`, so a call back into the same reader or sheet
-//! from that JavaScript finds it borrowed and answers `busy`, never a second `&mut` to state
-//! the outer call is using.
+//! JavaScript can run in the middle of a call: a getter or a Proxy trap in an argument. (An
+//! answer is no such route: `record` and `array` define what they hold, so no setter a caller
+//! put on `Object.prototype` runs. Nor is the WebAssembly runtime's own JavaScript, which
+//! assigns into arrays of its own the arguments of a call out of the module and a reference
+//! that is released: under it no array is made by a call out, a read hands `index.js` its
+//! batch in parts rather than calling it, and a `Uint8Array` is read without a reference, as
+//! `uint8_bytes` says.) A reader's and a sheet's state is therefore
+//! held in a `RefCell` and every method takes `&self`, so a call back into the same reader or
+//! sheet from that JavaScript finds it borrowed and answers `busy`, never a second `&mut` to
+//! state the outer call is using.
+//!
+//! A reader, a sheet and a workbook hold buffers the engine's collector cannot see, so each
+//! tells it how much (`Charged`): settled after every call that can have made or grown one,
+//! and taken back when it is closed or finalized.
 
 use hypercast as hc;
 use hypertabular as ht;
@@ -42,6 +50,7 @@ use napi::{Env, JsValue, Result, ValueType};
 use napi_derive::napi;
 use std::cell::RefCell;
 use std::ffi::CStr;
+use std::rc::Rc;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------------------
@@ -225,9 +234,8 @@ pub enum ErrorKind {
     /// The reader, sheet or workbook was closed.
     #[napi(value = "closed")]
     Closed,
-    /// JavaScript the call ran (a getter or a Proxy trap in an argument, a setter on
-    /// `Object.prototype`) called back into the same reader or sheet, which a call is never
-    /// re-entered by.
+    /// JavaScript the call ran (a getter or a Proxy trap in an argument) called back into the
+    /// same reader or sheet, which a call is never re-entered by.
     #[napi(value = "busy")]
     Busy,
 }
@@ -304,7 +312,7 @@ pub struct StructuralFailure {
 }
 
 /// Why a reader could not be made, or stopped.
-#[napi(object, object_from_js = false)]
+#[napi(object, object_to_js = false, object_from_js = false)]
 pub struct TabularError {
     /// What kind of error it is.
     pub kind: ErrorKind,
@@ -423,6 +431,35 @@ pub enum Door {
     Duration,
     #[napi(value = "text")]
     Text,
+}
+
+/// A door's name as JavaScript holds it: the `value` each `Door` above declares, which
+/// `tests/corpus.test.ts` holds every door of a batch to.
+fn door_text(door: Door) -> &'static str {
+    match door {
+        Door::Bool => "bool",
+        Door::I8 => "i8",
+        Door::I16 => "i16",
+        Door::I32 => "i32",
+        Door::I64 => "i64",
+        Door::U8 => "u8",
+        Door::U16 => "u16",
+        Door::U32 => "u32",
+        Door::U64 => "u64",
+        Door::F32 => "f32",
+        Door::F64 => "f64",
+        Door::Decimal => "decimal",
+        Door::Uuid => "uuid",
+        Door::Timestamp => "timestamp",
+        Door::Unix => "unix",
+        Door::ExcelSerial => "excelSerial",
+        Door::Date => "date",
+        Door::DateOrdered => "dateOrdered",
+        Door::Datetime => "datetime",
+        Door::Time => "time",
+        Door::Duration => "duration",
+        Door::Text => "text",
+    }
 }
 
 /// The kind of workbook a container holds, told by what is in it.
@@ -638,7 +675,12 @@ pub struct Candidate {
 }
 
 /// What a sample says of one source column.
-#[napi(object, object_from_js = false, use_nullable = true)]
+#[napi(
+    object,
+    object_to_js = false,
+    object_from_js = false,
+    use_nullable = true
+)]
 pub struct SuggestedColumn {
     /// The zero-based source column, as a `Column` names it.
     pub ordinal: u32,
@@ -818,6 +860,98 @@ fn record<'env>(env: &'env Env, fields: &[(&CStr, sys::napi_value)]) -> Result<O
     unsafe {
         let raw = napi::bindgen_prelude::create_object_with_properties(env.raw(), &properties)?;
         napi::bindgen_prelude::FromNapiValue::from_napi_value(env.raw(), raw)
+    }
+}
+
+/// The most elements `Array.of` is handed in one call: its arguments go on the engine's stack.
+const ARRAY_OF_MOST: usize = 4096;
+
+/// An array holding exactly these elements, defined rather than assigned, so a setter on
+/// `Object.prototype` or `Array.prototype` under an index neither runs nor keeps an element off
+/// the array. `Array.of` defines its elements and is one call for the lot; whatever it did not
+/// make (a list past what one call takes, or an `Array.of` that is no longer the engine's) is
+/// defined an element at a time. So is every element under the WebAssembly fallback, whose
+/// runtime assigns the arguments of a call out of the module into an array of its own.
+fn array<'env>(env: &'env Env, items: &[sys::napi_value]) -> Result<Unknown<'env>> {
+    let raw = env.raw();
+    let ok = sys::Status::napi_ok;
+    let first = items.len().min(ARRAY_OF_MOST);
+    let mut list = std::ptr::null_mut();
+    // SAFETY: `env` is the live environment of the call in progress, every item a value made
+    // in it, and each handle is read only after the call that made it answered `napi_ok`.
+    unsafe {
+        let mut global = std::ptr::null_mut();
+        let mut constructor = std::ptr::null_mut();
+        let mut of = std::ptr::null_mut();
+        let mut kind = sys::ValueType::napi_undefined;
+        let mut is_array = false;
+        let mut length = 0;
+        let made = cfg!(not(target_family = "wasm"))
+            && sys::napi_get_global(raw, &mut global) == ok
+            && sys::napi_get_named_property(raw, global, c"Array".as_ptr(), &mut constructor) == ok
+            && sys::napi_get_named_property(raw, constructor, c"of".as_ptr(), &mut of) == ok
+            && sys::napi_typeof(raw, of, &mut kind) == ok
+            && kind == sys::ValueType::napi_function
+            && sys::napi_call_function(raw, constructor, of, first, items.as_ptr(), &mut list)
+                == ok
+            && sys::napi_is_array(raw, list, &mut is_array) == ok
+            && is_array
+            && sys::napi_get_array_length(raw, list, &mut length) == ok
+            && length as usize == first;
+        let defined = if made {
+            first
+        } else {
+            clear_pending_exception(env);
+            if sys::napi_create_array(raw, &mut list) != ok {
+                return Err(napi::Error::from_reason("could not make an array"));
+            }
+            0
+        };
+        if defined < items.len() {
+            let names: Vec<std::ffi::CString> = (defined..items.len())
+                .map(|at| std::ffi::CString::new(at.to_string()).unwrap_or_default())
+                .collect();
+            let properties: Vec<sys::napi_property_descriptor> = names
+                .iter()
+                .zip(&items[defined..])
+                .map(|(name, value)| sys::napi_property_descriptor {
+                    utf8name: name.as_ptr(),
+                    name: std::ptr::null_mut(),
+                    method: None,
+                    getter: None,
+                    setter: None,
+                    value: *value,
+                    attributes: sys::PropertyAttributes::writable
+                        | sys::PropertyAttributes::enumerable
+                        | sys::PropertyAttributes::configurable,
+                    data: std::ptr::null_mut(),
+                })
+                .collect();
+            if sys::napi_define_properties(raw, list, properties.len(), properties.as_ptr()) != ok {
+                return Err(napi::Error::from_reason("could not fill an array"));
+            }
+        }
+        Ok(Unknown::from_raw_unchecked(raw, list))
+    }
+}
+
+/// An array of these values, each as JavaScript holds it.
+fn array_of<'env, V: ToNapiValue>(
+    env: &'env Env,
+    values: impl IntoIterator<Item = V>,
+) -> Result<Unknown<'env>> {
+    let items = values
+        .into_iter()
+        .map(|value| js(env, value))
+        .collect::<Result<Vec<_>>>()?;
+    array(env, &items)
+}
+
+/// A value as JavaScript holds it, or `null` for none.
+fn nullable<V: ToNapiValue>(env: &Env, value: Option<V>) -> Result<sys::napi_value> {
+    match value {
+        Some(value) => js(env, value),
+        None => js(env, Null),
     }
 }
 
@@ -1039,18 +1173,24 @@ fn refused(env: &Env, refusal: Refusal) -> Result<Object<'_>> {
         expected: failure.expected,
         found: failure.found,
     });
-    let error = js(
-        env,
-        TabularError {
-            kind: refusal.kind,
-            message: refusal.message,
-            failure,
-            column: refusal.column,
-            first: refusal.ambiguous.map(|(first, _)| first),
-            second: refusal.ambiguous.map(|(_, second)| second),
-        },
-    )?;
-    record(env, &[(c"ok", js(env, false)?), (c"error", error)])
+    // A `TabularError`, with the fields its kind carries and no others: built here because the
+    // object napi-rs would make of it assigns each optional field, through any setter.
+    let mut fields = vec![
+        (c"kind", js(env, refusal.kind)?),
+        (c"message", js(env, refusal.message)?),
+    ];
+    if let Some(failure) = failure {
+        fields.push((c"failure", js(env, failure)?));
+    }
+    if let Some(column) = refusal.column {
+        fields.push((c"column", js(env, column)?));
+    }
+    if let Some((first, second)) = refusal.ambiguous {
+        fields.push((c"first", js(env, first)?));
+        fields.push((c"second", js(env, second)?));
+    }
+    let error = record(env, &fields)?;
+    record(env, &[(c"ok", js(env, false)?), (c"error", error.raw())])
 }
 
 /// An outcome: the value `made` builds, or the refusal.
@@ -1096,16 +1236,131 @@ fn code(value: &Unknown<'_>) -> Option<u32> {
 
 /// The bytes a reader reads: a string as its UTF-8, or a `Uint8Array`'s bytes (a `Buffer`
 /// is one), copied, since the reader outlives the call.
-fn bytes_of(value: &Unknown<'_>) -> Option<Vec<u8>> {
+fn bytes_of(env: &Env, value: &Unknown<'_>) -> Option<Vec<u8>> {
     match value.get_type() {
         Ok(ValueType::String) => unsafe { value.cast::<String>() }
             .ok()
             .map(String::into_bytes),
-        Ok(ValueType::Object) => unsafe { value.cast::<Uint8Array>() }
-            .ok()
-            .map(|bytes| bytes.to_vec()),
+        Ok(ValueType::Object) => uint8_bytes(env, value),
         _ => None,
     }
+}
+
+/// A copy of a `Uint8Array`'s bytes (a `Buffer` is one), or `None` for any other value.
+///
+/// The array is asked where its bytes are and they are copied before anything else runs:
+/// nothing here outlives the call, and no JavaScript runs between the asking and the copy, so
+/// the buffer can be neither detached nor resized under it. napi-rs's own `Uint8Array` is not
+/// used for an argument: it takes a reference to the array and releases it as the call
+/// answers, and the WebAssembly runtime notes a released reference by assigning into a list,
+/// under an index, where a setter on `Object.prototype` would run. The bytes of a view of a
+/// `SharedArrayBuffer`, which another thread may be writing, are each read as an atomic.
+fn uint8_bytes(env: &Env, value: &Unknown<'_>) -> Option<Vec<u8>> {
+    let ok = sys::Status::napi_ok;
+    let mut kind = 0;
+    let mut length = 0usize;
+    let mut data = std::ptr::null_mut();
+    let mut buffer = std::ptr::null_mut();
+    let mut offset = 0usize;
+    // SAFETY: `env` and `value` are the live call's; napi answers a status, not `napi_ok`, for
+    // a value that is no typed array.
+    let status = unsafe {
+        sys::napi_get_typedarray_info(
+            env.raw(),
+            value.raw(),
+            &mut kind,
+            &mut length,
+            &mut data,
+            &mut buffer,
+            &mut offset,
+        )
+    };
+    if status != ok || kind != sys::TypedarrayType::uint8_array {
+        return None;
+    }
+    // napi may answer a null pointer for no bytes (a detached buffer's view among them).
+    if data.is_null() || length == 0 {
+        return Some(Vec::new());
+    }
+    let mut plain = true;
+    // SAFETY: `buffer` is the live call's. `napi_is_arraybuffer` is false for a shared one.
+    let shared = !buffer.is_null()
+        && unsafe { sys::napi_is_arraybuffer(env.raw(), buffer, &mut plain) } == ok
+        && !plain;
+    if shared {
+        // SAFETY: napi reports `length` bytes at `data`, live for the call; `AtomicU8` has
+        // `u8`'s layout, and only atomic loads touch them.
+        let cells = unsafe {
+            std::slice::from_raw_parts(data.cast::<std::sync::atomic::AtomicU8>(), length)
+        };
+        return Some(
+            cells
+                .iter()
+                .map(|cell| cell.load(std::sync::atomic::Ordering::Relaxed))
+                .collect(),
+        );
+    }
+    // SAFETY: napi reports `length` bytes at `data`, the caller's argument holds them for the
+    // call, and nothing runs JavaScript (which alone could detach or resize the buffer) before
+    // the copy is made.
+    Some(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length) }.to_vec())
+}
+
+/// A path as the module's libc must be handed it. Natively the operating system resolves a
+/// relative path against the process's working directory. Under WebAssembly the module's libc
+/// knows only the root it was preopened with, so the host's working directory, asked of
+/// `process.cwd()` at each open as the operating system would be, goes in front, with nothing
+/// normalized. Anything but a relative path is left as given: the empty string, an absolute
+/// path, and every path where the host has no `process` or its working directory is not a
+/// rooted one (a browser; Windows, where no path reaches the module at all).
+fn path_of(env: &Env, value: &Unknown<'_>) -> Option<String> {
+    let path = string_of(value)?;
+    #[cfg(target_family = "wasm")]
+    let path = match working_directory(env) {
+        Some(cwd) if !path.is_empty() && !path.starts_with('/') => {
+            if cwd.ends_with('/') {
+                format!("{cwd}{path}")
+            } else {
+                format!("{cwd}/{path}")
+            }
+        }
+        _ => path,
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let _ = env;
+    Some(path)
+}
+
+/// The host process's working directory, where it has one that starts at `/`.
+#[cfg(target_family = "wasm")]
+fn working_directory(env: &Env) -> Option<String> {
+    let raw = env.raw();
+    let ok = sys::Status::napi_ok;
+    let mut global = std::ptr::null_mut();
+    let mut process = std::ptr::null_mut();
+    let mut cwd = std::ptr::null_mut();
+    let mut answer = std::ptr::null_mut();
+    let mut kind = sys::ValueType::napi_undefined;
+    // SAFETY: `env` is the live environment of the call in progress, and each handle is read
+    // only after the call that made it answered `napi_ok`.
+    let asked = unsafe {
+        sys::napi_get_global(raw, &mut global) == ok
+            && sys::napi_get_named_property(raw, global, c"process".as_ptr(), &mut process) == ok
+            && sys::napi_typeof(raw, process, &mut kind) == ok
+            && kind == sys::ValueType::napi_object
+            && sys::napi_get_named_property(raw, process, c"cwd".as_ptr(), &mut cwd) == ok
+            && sys::napi_typeof(raw, cwd, &mut kind) == ok
+            && kind == sys::ValueType::napi_function
+            && sys::napi_call_function(raw, process, cwd, 0, std::ptr::null(), &mut answer) == ok
+    };
+    if !asked {
+        // No `process`, or a working directory that is gone: `cwd()` throws then.
+        clear_pending_exception(env);
+        return None;
+    }
+    // SAFETY: `answer` was made in `env` by the call above.
+    let answer = unsafe { Unknown::from_raw_unchecked(raw, answer) };
+    string_of(&answer).filter(|cwd| cwd.starts_with('/'))
 }
 
 fn string_of(value: &Unknown<'_>) -> Option<String> {
@@ -1446,7 +1701,7 @@ fn format_of(env: &Env, value: &Unknown<'_>) -> std::result::Result<Option<hc::N
     .ok_or(())?;
     let packed = match object.get::<Unknown>("packed") {
         Ok(Some(packed)) => match packed.get_type() {
-            Ok(ValueType::Object) => unsafe { packed.cast::<Uint8Array>() }.ok(),
+            Ok(ValueType::Object) => uint8_bytes(env, &packed),
             _ => None,
         },
         _ => None,
@@ -1455,7 +1710,7 @@ fn format_of(env: &Env, value: &Unknown<'_>) -> std::result::Result<Option<hc::N
         clear_pending_exception(env);
         return Err(());
     };
-    let bytes: [u8; 92] = packed.as_ref().try_into().map_err(|_| ())?;
+    let bytes: [u8; 92] = packed.as_slice().try_into().map_err(|_| ())?;
     hc::RawNumFormat::from_le_bytes(bytes)
         .resolve()
         .copied()
@@ -1525,6 +1780,44 @@ fn suggest_options(env: &Env, value: &Unknown<'_>) -> Refused<ht::SuggestOptions
         }
     }
     Ok(options)
+}
+
+/// What an object has told the engine's collector it holds outside the engine's heap. A reader's
+/// buffers, a sheet's and a workbook's bytes are Rust's, which the collector cannot see:
+/// uncounted, each weighs a few words to it, and a process that drops them without `close()`
+/// runs far ahead of its collections, each dead one keeping its buffers until it is finalized.
+/// So every call that may have made or grown a buffer settles the count, and `close()` and the
+/// finalizer take it all back, once: what is settled is the difference from what was told last.
+///
+/// Under the WebAssembly fallback nothing is told: the buffers are in the module's own memory,
+/// which the engine counts for itself.
+#[derive(Default)]
+struct Charged(std::cell::Cell<usize>);
+
+impl Charged {
+    /// Tells the collector the object now holds `held` bytes: one compare when that is what it
+    /// was told last.
+    fn settle(&self, env: &Env, held: usize) {
+        let was = self.0.replace(held);
+        if held != was {
+            let change =
+                i64::try_from(held).unwrap_or(i64::MAX) - i64::try_from(was).unwrap_or(i64::MAX);
+            // A count the engine did not take is one it was not told.
+            if cfg!(not(target_family = "wasm")) && env.adjust_external_memory(change).is_err() {
+                self.0.set(was);
+            }
+        }
+    }
+}
+
+/// The engine's own count of the bytes it has been told are held outside its heap, as it answers
+/// an adjustment of nothing; 0 under the WebAssembly fallback, where nothing is told. Internal to
+/// the package: its suite reads what a reader, a sheet and a workbook told the collector by it,
+/// where `process.memoryUsage()` does not say (Node 26).
+#[napi(catch_unwind, js_name = "__externalMemory")]
+pub fn external_memory(env: &Env) -> f64 {
+    env.adjust_external_memory(0)
+        .map_or(0.0, |total| total as f64)
 }
 
 /// The state a reader or a sheet keeps, for this call alone: `None` (and the caller answered
@@ -1851,10 +2144,10 @@ fn date_options_of(env: &Env, value: &Unknown<'_>) -> Option<(hc::DateOptions, O
             }?;
             let packed = names.get::<Unknown>("packed").ok().flatten()?;
             let packed = match packed.get_type() {
-                Ok(ValueType::Object) => unsafe { packed.cast::<Uint8Array>() }.ok(),
+                Ok(ValueType::Object) => uint8_bytes(env, &packed),
                 _ => None,
             }?;
-            Some(packed.to_vec())
+            Some(packed)
         }
     };
     Some((hc::DateOptions::from_flags(flags).with_pivot(pivot), months))
@@ -1873,9 +2166,7 @@ fn declaration_of(env: &Env, value: &Unknown<'_>) -> Option<(u32, Vec<u8>, Vec<u
     let bytes = |name: &str| -> Option<Vec<u8>> {
         let field = field(env, &object, what, name).ok()??;
         match field.get_type() {
-            Ok(ValueType::Object) => unsafe { field.cast::<Uint8Array>() }
-                .ok()
-                .map(|bytes| bytes.to_vec()),
+            Ok(ValueType::Object) => uint8_bytes(env, &field),
             _ => None,
         }
     };
@@ -1980,12 +2271,14 @@ pub struct Header {
 #[napi]
 impl Header {
     /// Every name, in column order (bytes that are not UTF-8 replaced by U+FFFD).
-    #[napi(getter, catch_unwind)]
-    pub fn names(&self) -> Vec<String> {
-        self.inner
-            .names()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
-            .collect()
+    #[napi(getter, catch_unwind, ts_return_type = "Array<string>")]
+    pub fn names<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        array_of(
+            env,
+            self.inner
+                .names()
+                .map(|name| String::from_utf8_lossy(name).into_owned()),
+        )
     }
 
     /// How many columns the header names.
@@ -1998,8 +2291,8 @@ impl Header {
     /// `Uint8Array` is matched against the bytes the file holds), or `null` if none has it.
     /// Two columns with the name answer the first: `require` refuses that instead.
     #[napi(catch_unwind, ts_args_type = "name: string | Uint8Array")]
-    pub fn ordinal(&self, name: Unknown<'_>) -> Option<u32> {
-        let wanted = bytes_of(&name)?;
+    pub fn ordinal(&self, env: &Env, name: Unknown<'_>) -> Option<u32> {
+        let wanted = bytes_of(env, &name)?;
         self.inner.ordinal(wanted).map(narrow)
     }
 
@@ -2012,7 +2305,7 @@ impl Header {
         ts_return_type = "Outcome<number>"
     )]
     pub fn require<'env>(&self, env: &'env Env, name: Unknown<'env>) -> Result<Object<'env>> {
-        let answer = bytes_of(&name)
+        let answer = bytes_of(env, &name)
             .ok_or_else(|| argument("the name must be a string or a Uint8Array"))
             .and_then(|wanted| Ok(narrow(self.inner.require(wanted)?)));
         outcome(env, answer)
@@ -3130,18 +3423,25 @@ fn js_store(env: &Env, copy: &BatchCopy) -> Result<sys::napi_value> {
 }
 
 /// What `index.js` registered to make its batches with: a function taking the store, the row
-/// count and the doors.
+/// count, the column count and the doors' names in one string, a comma between them, which a
+/// read makes in one step where an array of them is one a column.
 struct BatchMaker(sys::napi_ref);
 
-/// Makes every batch this environment reads with `make(store, rows, doors)`, `index.js`'s own,
+/// Makes every batch this environment reads with `make(store, rows, columns, doors)`, `index.js`'s
+/// own,
 /// rather than as the native `Batch`, which a native finalizer frees only once the event loop
 /// turns. Internal to the package: what `make` is given is of no use to anything else.
+///
+/// Answers whether a read calls `make` itself. Under the WebAssembly fallback it does not, since
+/// the runtime assigns the arguments of a call out of the module into an array of its own,
+/// under an index, where a setter on `Object.prototype` would run: there a read answers
+/// `{ store, rows, columns, doors }` as its value, for `index.js` to call `make` with.
 #[napi(
     catch_unwind,
     js_name = "__makeBatchesWith",
-    ts_args_type = "make: (store: unknown, rows: number, doors: Array<Door>) => Batch"
+    ts_args_type = "make: (store: unknown, rows: number, columns: number, doors: string) => Batch"
 )]
-pub fn make_batches_with(env: &Env, make: Unknown<'_>) -> Result<()> {
+pub fn make_batches_with(env: &Env, make: Unknown<'_>) -> Result<bool> {
     if make.get_type()? != ValueType::Function {
         return Err(napi::Error::from_reason("make must be a function"));
     }
@@ -3159,7 +3459,8 @@ pub fn make_batches_with(env: &Env, make: Unknown<'_>) -> Result<()> {
         // SAFETY: the reference was made in this environment, which is tearing down; it is
         // deleted once, here.
         unsafe { sys::napi_delete_reference(context.env.raw(), context.value.0) };
-    })
+    })?;
+    Ok(cfg!(not(target_family = "wasm")))
 }
 
 /// The function `index.js` registered, if it did.
@@ -3466,7 +3767,7 @@ fn column_at<'env>(
     env: &'env Env,
     source: &StoreAt<'_, '_>,
     column: Option<usize>,
-) -> Result<Array<'env>> {
+) -> Result<Unknown<'env>> {
     let rows = column.map_or(0, |column| {
         with_store(source, |store| {
             if column < store.columns() {
@@ -3476,19 +3777,19 @@ fn column_at<'env>(
             }
         })
     });
-    let mut list = Array::from_vec(env, Vec::<bool>::new())?;
+    let mut list = Vec::with_capacity(rows);
     for row in 0..rows {
-        // The store is looked at afresh for each row: making a verdict can run JavaScript.
-        list.insert(verdict(env, value_at(source, column, Some(row)))?)?;
+        // The store is looked at afresh for each row, never held across the making of a verdict.
+        list.push(verdict(env, value_at(source, column, Some(row)))?.raw());
     }
-    Ok(list)
+    array(env, &list)
 }
 
 fn column_checked_at<'env>(
     env: &'env Env,
     source: &StoreAt<'_, '_>,
     column: Option<usize>,
-) -> Result<Array<'env>> {
+) -> Result<Unknown<'env>> {
     let rows = column.map_or(0, |column| {
         with_store(source, |store| {
             if column < store.columns() {
@@ -3498,12 +3799,12 @@ fn column_checked_at<'env>(
             }
         })
     });
-    let mut list = Array::from_vec(env, Vec::<bool>::new())?;
+    let mut list = Vec::with_capacity(rows);
     for row in 0..rows {
-        // The store is looked at afresh for each row: making a verdict can run JavaScript.
-        list.insert(checked_verdict(env, checked_at(source, column, Some(row)))?)?;
+        // The store is looked at afresh for each row, never held across the making of a verdict.
+        list.push(checked_verdict(env, checked_at(source, column, Some(row)))?.raw());
     }
-    Ok(list)
+    array(env, &list)
 }
 
 // What `index.js`'s batch calls, its store in hand. Internal to the package: what they take is
@@ -3576,9 +3877,13 @@ pub fn batch_origin(
 }
 
 /// `Batch.faults`, over a store.
-#[napi(catch_unwind, ts_args_type = "store: unknown")]
-pub fn batch_faults(env: &Env, store: Unknown<'_>) -> Vec<Problem> {
-    faults_of(&StoreAt::Given(env, &store))
+#[napi(
+    catch_unwind,
+    ts_args_type = "store: unknown",
+    ts_return_type = "Array<Problem>"
+)]
+pub fn batch_faults<'env>(env: &'env Env, store: Unknown<'env>) -> Result<Unknown<'env>> {
+    array_of(env, faults_of(&StoreAt::Given(env, &store)))
 }
 
 /// `Batch.raw`, over a store.
@@ -3622,7 +3927,7 @@ pub fn batch_column<'env>(
     env: &'env Env,
     store: Unknown<'env>,
     column: Unknown<'env>,
-) -> Result<Array<'env>> {
+) -> Result<Unknown<'env>> {
     column_at(env, &StoreAt::Given(env, &store), index(&column))
 }
 
@@ -3636,7 +3941,7 @@ pub fn batch_column_checked<'env>(
     env: &'env Env,
     store: Unknown<'env>,
     column: Unknown<'env>,
-) -> Result<Array<'env>> {
+) -> Result<Unknown<'env>> {
     column_checked_at(env, &StoreAt::Given(env, &store), index(&column))
 }
 
@@ -3670,9 +3975,9 @@ impl Batch {
     }
 
     /// The door each column was read through, in plan order.
-    #[napi(getter, catch_unwind)]
-    pub fn doors(&self) -> Vec<Door> {
-        self.doors.clone()
+    #[napi(getter, catch_unwind, ts_return_type = "Array<Door>")]
+    pub fn doors<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        array_of(env, self.doors.iter().copied())
     }
 
     /// The line (delimited text) or the sheet row (a workbook) the row came from; 0 for a
@@ -3744,9 +4049,9 @@ impl Batch {
 
     /// What went wrong in the batch, by row and then column, a row's own entry first: worked
     /// out when asked for, a new array each call, the caller's own.
-    #[napi(catch_unwind)]
-    pub fn faults(&self) -> Vec<Problem> {
-        faults_of(&StoreAt::Held(&self.held))
+    #[napi(catch_unwind, ts_return_type = "Array<Problem>")]
+    pub fn faults<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        array_of(env, faults_of(&StoreAt::Held(&self.held)))
     }
 
     /// The text of the cell, whatever its door and verdict: what a fault's span is a span of.
@@ -3786,7 +4091,7 @@ impl Batch {
         ts_args_type = "column: number",
         ts_return_type = "Array<Verdict<T>>"
     )]
-    pub fn column<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Array<'env>> {
+    pub fn column<'env>(&self, env: &'env Env, column: Unknown<'env>) -> Result<Unknown<'env>> {
         column_at(env, &StoreAt::Held(&self.held), index(&column))
     }
 
@@ -3802,7 +4107,7 @@ impl Batch {
         &self,
         env: &'env Env,
         column: Unknown<'env>,
-    ) -> Result<Array<'env>> {
+    ) -> Result<Unknown<'env>> {
         column_checked_at(env, &StoreAt::Held(&self.held), index(&column))
     }
 
@@ -3922,7 +4227,30 @@ fn read_outcome<'env>(
             };
             let store = js_store(env, &copy)?;
             let BatchCopy { rows, doors, .. } = copy;
-            let args = [store, js(env, narrow(rows))?, js(env, doors)?];
+            let names = doors
+                .iter()
+                .map(|door| door_text(*door))
+                .collect::<Vec<_>>()
+                .join(",");
+            let args = [
+                store,
+                js(env, narrow(rows))?,
+                js(env, narrow(doors.len()))?,
+                js(env, names)?,
+            ];
+            if cfg!(target_family = "wasm") {
+                // No call out of the module (`__makeBatchesWith`): `index.js` makes the batch.
+                let parts = record(
+                    env,
+                    &[
+                        (c"store", args[0]),
+                        (c"rows", args[1]),
+                        (c"columns", args[2]),
+                        (c"doors", args[3]),
+                    ],
+                )?;
+                return success(env, parts);
+            }
             let mut undefined = std::ptr::null_mut();
             let mut made = std::ptr::null_mut();
             // SAFETY: `env` is the live environment of the call in progress; `make` and every
@@ -3966,23 +4294,17 @@ fn suggestion_outcome<'env>(
         Ok(found) => found,
         Err(error) => return refused(env, error.into()),
     };
-    let mut plan = Array::from_vec(env, Vec::<bool>::new())?;
-    for column in &found.plan {
-        plan.insert(Column::of(*column).into_instance(env)?)?;
-    }
-    let report: Vec<SuggestedColumn> = found
+    let plan = found
+        .plan
+        .iter()
+        .map(|column| js(env, Column::of(*column).into_instance(env)?))
+        .collect::<Result<Vec<_>>>()?;
+    // A `SuggestedColumn` each, built here because its candidates are an array.
+    let report = found
         .report
         .iter()
-        .map(|column| SuggestedColumn {
-            ordinal: narrow(column.ordinal),
-            name: column
-                .name
-                .as_deref()
-                .map(|name| String::from_utf8_lossy(name).into_owned()),
-            door: door_name(column.door),
-            declared: door_param(column.door),
-            format: column.format.map(format_out),
-            candidates: column
+        .map(|column| {
+            let candidates = column
                 .candidates
                 .iter()
                 .filter_map(|candidate| match candidate {
@@ -3998,23 +4320,39 @@ fn suggestion_outcome<'env>(
                     }),
                     // A candidate the Rust binding gains later, which nothing here can name.
                     _ => None,
-                })
-                .collect(),
-            status: match column.status {
+                });
+            let status = match column.status {
                 ht::SuggestStatus::Resolved => SuggestStatus::Resolved,
                 ht::SuggestStatus::Ambiguous => SuggestStatus::Ambiguous,
                 // `Unresolved`, and a status the Rust binding gains later: the plan reads text.
                 _ => SuggestStatus::Unresolved,
-            },
-            matched: column.matched,
-            sampled: column.sampled,
+            };
+            let name = column
+                .name
+                .as_deref()
+                .map(|name| String::from_utf8_lossy(name).into_owned());
+            Ok(record(
+                env,
+                &[
+                    (c"ordinal", js(env, narrow(column.ordinal))?),
+                    (c"name", nullable(env, name)?),
+                    (c"door", js(env, door_name(column.door))?),
+                    (c"declared", nullable(env, door_param(column.door))?),
+                    (c"format", nullable(env, column.format.map(format_out))?),
+                    (c"candidates", array_of(env, candidates)?.raw()),
+                    (c"status", js(env, status)?),
+                    (c"matched", js(env, column.matched)?),
+                    (c"sampled", js(env, column.sampled)?),
+                ],
+            )?
+            .raw())
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let value = record(
         env,
         &[
-            (c"plan", js(env, plan)?),
-            (c"report", js(env, report)?),
+            (c"plan", array(env, &plan)?.raw()),
+            (c"report", array(env, &report)?.raw()),
             (c"truncated", js(env, found.truncated)?),
         ],
     )?;
@@ -4027,10 +4365,35 @@ fn suggestion_outcome<'env>(
 
 /// A forward-only read of delimited text — CSV, TSV, any single-byte ASCII separator —
 /// through a plan, a batch at a time. Made by `fromBytes` or `open`, never by `new`.
-#[napi]
+#[napi(custom_finalize)]
 pub struct DelimitedReader {
     // `None` once closed.
     state: RefCell<Option<ht::DelimitedReader<'static>>>,
+    /// The bytes of the text `fromBytes` copied, which the reader reads as a stream and owns
+    /// behind it, where its own count cannot see them; 0 for a file.
+    input: usize,
+    charged: Charged,
+}
+
+impl DelimitedReader {
+    /// Settles with the collector what the reader now holds: its input and its buffers, and
+    /// nothing once it is closed. Called once a call has let go of the state.
+    fn settle(&self, env: &Env) {
+        if let Ok(state) = self.state.try_borrow() {
+            let held = state
+                .as_ref()
+                .map_or(0, |reader| self.input.saturating_add(reader.held_bytes()));
+            self.charged.settle(env, held);
+        }
+    }
+}
+
+impl napi::bindgen_prelude::ObjectFinalize for DelimitedReader {
+    /// Takes back whatever a reader that was never closed still has the collector told of.
+    fn finalize(self, env: Env) -> Result<()> {
+        self.charged.settle(&env, 0);
+        Ok(())
+    }
 }
 
 /// Where a reader's bytes come from.
@@ -4051,6 +4414,10 @@ fn delimited<'env>(
         let dialect = dialect_of(env, dialect)?;
         let plan = plan_of(env, plan)?;
         let options = delimited_options(env, options)?;
+        let input = match &source {
+            Source::Bytes(bytes) => bytes.capacity(),
+            Source::Path(_) => 0,
+        };
         let reader = match (source, plan) {
             (Source::Bytes(bytes), Some(plan)) => {
                 options.from_reader(std::io::Cursor::new(bytes), dialect, &plan)
@@ -4063,10 +4430,17 @@ fn delimited<'env>(
         }?;
         Ok(DelimitedReader {
             state: RefCell::new(Some(reader)),
+            input,
+            charged: Charged::default(),
         })
     })();
     match opened {
-        Ok(reader) => success(env, reader.into_instance(env)?),
+        Ok(reader) => {
+            // Told only once the object exists, whose finalizer takes it back.
+            let reader = reader.into_instance(env)?;
+            reader.settle(env);
+            success(env, reader)
+        }
         Err(refusal) => refused(env, refusal),
     }
 }
@@ -4091,7 +4465,7 @@ impl DelimitedReader {
         plan: Unknown<'env>,
         options: Unknown<'env>,
     ) -> Result<Object<'env>> {
-        let source = bytes_of(&bytes)
+        let source = bytes_of(env, &bytes)
             .map(Source::Bytes)
             .ok_or_else(|| argument("the bytes must be a Uint8Array or a string"));
         delimited(env, source, &dialect, &plan, &options)
@@ -4111,7 +4485,7 @@ impl DelimitedReader {
         plan: Unknown<'env>,
         options: Unknown<'env>,
     ) -> Result<Object<'env>> {
-        let source = string_of(&path)
+        let source = path_of(env, &path)
             .map(Source::Path)
             .ok_or_else(|| argument("the path must be a string"));
         delimited(env, source, &dialect, &plan, &options)
@@ -4134,7 +4508,7 @@ impl DelimitedReader {
     ) -> Result<Object<'env>> {
         let asked = (|| {
             let options = suggest_options(env, &options)?;
-            let path = string_of(&path).ok_or_else(|| argument("the path must be a string"))?;
+            let path = path_of(env, &path).ok_or_else(|| argument("the path must be a string"))?;
             Ok((options, path, dialect_of(env, &dialect)?))
         })();
         match asked {
@@ -4159,7 +4533,7 @@ impl DelimitedReader {
     ) -> Result<Object<'env>> {
         let asked = (|| {
             let options = suggest_options(env, &options)?;
-            let bytes = bytes_of(&bytes)
+            let bytes = bytes_of(env, &bytes)
                 .ok_or_else(|| argument("the bytes must be a Uint8Array or a string"))?;
             Ok((options, bytes, dialect_of(env, &dialect)?))
         })();
@@ -4190,6 +4564,7 @@ impl DelimitedReader {
             Ok(Null)
         })
         .unwrap_or_else(|| Err(busy(READER)));
+        self.settle(env);
         outcome(env, answer)
     }
 
@@ -4198,11 +4573,14 @@ impl DelimitedReader {
     /// delivered, and again on every read after.
     #[napi(catch_unwind, ts_return_type = "Outcome<Batch | null>")]
     pub fn read<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
-        exclusive(&self.state, |state| match state.as_mut() {
+        let answer = exclusive(&self.state, |state| match state.as_mut() {
             Some(inner) => read_outcome(env, inner.read()),
             None => refused(env, closed(READER)),
         })
-        .unwrap_or_else(|| refused(env, busy(READER)))
+        .unwrap_or_else(|| refused(env, busy(READER)));
+        // A long record grows the input buffer, and a cramped batch the cell table.
+        self.settle(env);
+        answer
     }
 
     /// Releases the reader's buffers and its file now, rather than when it is collected.
@@ -4215,6 +4593,7 @@ impl DelimitedReader {
             Ok(Null)
         })
         .unwrap_or_else(|| Err(busy(READER)));
+        self.settle(env);
         outcome(env, answer)
     }
 
@@ -4268,9 +4647,35 @@ impl DelimitedReader {
 
 /// An open XLSX, ODS or Numbers workbook, read whole into memory it owns (a zip is read from
 /// its directory at the end back). Made by `fromBytes` or `open`, never by `new`.
-#[napi]
+#[napi(custom_finalize)]
 pub struct Workbook {
-    inner: Arc<ht::Workbook<'static>>,
+    inner: Rc<Book>,
+}
+
+/// An open workbook, shared by its `Workbook` and every `Sheet` read from it, and what the
+/// collector has been told it holds: its bytes and its tables, which do not change once it is
+/// open, told once and taken back by whichever of them is finalized last.
+struct Book {
+    workbook: ht::Workbook<'static>,
+    charged: Charged,
+}
+
+impl Book {
+    /// Takes the workbook's bytes back from the collector, if `holder` is the last to hold it.
+    /// An object is finalized on the thread of the environment that made it, which is the only
+    /// one that holds its workbook, so the count is not changing under this.
+    fn release(holder: &Rc<Book>, env: &Env) {
+        if Rc::strong_count(holder) == 1 {
+            holder.charged.settle(env, 0);
+        }
+    }
+}
+
+impl napi::bindgen_prelude::ObjectFinalize for Workbook {
+    fn finalize(self, env: Env) -> Result<()> {
+        Book::release(&self.inner, &env);
+        Ok(())
+    }
 }
 
 fn workbook_outcome<'env>(
@@ -4278,13 +4683,21 @@ fn workbook_outcome<'env>(
     opened: std::result::Result<ht::Workbook<'static>, ht::Error>,
 ) -> Result<Object<'env>> {
     match opened {
-        Ok(book) => success(
-            env,
-            Workbook {
-                inner: Arc::new(book),
+        Ok(workbook) => {
+            let book = Workbook {
+                inner: Rc::new(Book {
+                    workbook,
+                    charged: Charged::default(),
+                }),
             }
-            .into_instance(env)?,
-        ),
+            .into_instance(env)?;
+            // Told only once the object exists, whose finalizer (or its last sheet's) takes it
+            // back.
+            book.inner
+                .charged
+                .settle(env, book.inner.workbook.held_bytes());
+            success(env, book)
+        }
         Err(error) => refused(env, error.into()),
     }
 }
@@ -4305,9 +4718,7 @@ impl Workbook {
     )]
     pub fn from_bytes<'env>(env: &'env Env, bytes: Unknown<'env>) -> Result<Object<'env>> {
         let bytes = match bytes.get_type() {
-            Ok(ValueType::Object) => unsafe { bytes.cast::<Uint8Array>() }
-                .ok()
-                .map(|bytes| bytes.to_vec()),
+            Ok(ValueType::Object) => uint8_bytes(env, &bytes),
             _ => None,
         };
         match bytes {
@@ -4323,7 +4734,7 @@ impl Workbook {
         ts_return_type = "Outcome<Workbook>"
     )]
     pub fn open<'env>(env: &'env Env, path: Unknown<'env>) -> Result<Object<'env>> {
-        match string_of(&path) {
+        match path_of(env, &path) {
             Some(path) => workbook_outcome(env, ht::Workbook::open(path)),
             None => refused(env, argument("the path must be a string")),
         }
@@ -4332,7 +4743,7 @@ impl Workbook {
     /// The kind of workbook it is.
     #[napi(getter, catch_unwind)]
     pub fn format(&self) -> WorkbookFormat {
-        match self.inner.format() {
+        match self.inner.workbook.format() {
             ht::Format::Ods => WorkbookFormat::Ods,
             ht::Format::Numbers => WorkbookFormat::Numbers,
             _ => WorkbookFormat::Xlsx,
@@ -4343,20 +4754,19 @@ impl Workbook {
     /// `2` 1904).
     #[napi(getter, catch_unwind)]
     pub fn date_system(&self) -> u32 {
-        self.inner.date_system() as u32
+        self.inner.workbook.date_system() as u32
     }
 
     /// Its sheets, in its own order.
-    #[napi(getter, catch_unwind)]
-    pub fn sheets(&self) -> Vec<SheetInfo> {
-        self.inner
-            .sheets()
-            .iter()
-            .map(|sheet| SheetInfo {
+    #[napi(getter, catch_unwind, ts_return_type = "Array<SheetInfo>")]
+    pub fn sheets<'env>(&self, env: &'env Env) -> Result<Unknown<'env>> {
+        array_of(
+            env,
+            self.inner.workbook.sheets().iter().map(|sheet| SheetInfo {
                 name: sheet.name.clone(),
                 hidden: sheet.hidden,
-            })
-            .collect()
+            }),
+        )
     }
 
     /// Starts a read of one sheet, by index or by name. With a plan it is bound now; without
@@ -4383,12 +4793,13 @@ impl Workbook {
             };
             let options = sheet_options(env, &options)?;
             let plan = plan_of(env, &plan)?;
-            let book = Arc::clone(&self.inner);
-            // SAFETY: the sheet borrows the workbook behind the `Arc` it is stored beside,
+            let book = Rc::clone(&self.inner);
+            // SAFETY: the sheet borrows the workbook behind the `Rc` it is stored beside,
             // which keeps that workbook at one address, unmoved and unchanged (a sheet only
             // reads it), for as long as the sheet lives: `Sheet` declares `state` before
             // `book`, so the sheet is dropped first.
-            let borrowed: &'static ht::Workbook<'static> = unsafe { &*Arc::as_ptr(&book) };
+            let borrowed: &'static ht::Workbook<'static> =
+                unsafe { &(*Rc::as_ptr(&book)).workbook };
             let sheet = match (&which, plan) {
                 (Which::Index(at), Some(plan)) => borrowed.sheet(*at, options, &plan),
                 (Which::Index(at), None) => borrowed.sheet_unbound(*at, options),
@@ -4398,10 +4809,16 @@ impl Workbook {
             Ok(Sheet {
                 state: RefCell::new(Some(sheet)),
                 book,
+                charged: Charged::default(),
             })
         })();
         match opened {
-            Ok(sheet) => success(env, sheet.into_instance(env)?),
+            Ok(sheet) => {
+                // Told only once the object exists, whose finalizer takes it back.
+                let sheet = sheet.into_instance(env)?;
+                sheet.settle(env);
+                success(env, sheet)
+            }
             Err(refusal) => refused(env, refusal),
         }
     }
@@ -4409,12 +4826,35 @@ impl Workbook {
 
 /// A forward-only read of one sheet through a plan, a batch at a time. Made by
 /// `Workbook.sheet`, never by `new`.
-#[napi]
+#[napi(custom_finalize)]
 pub struct Sheet {
     // Declared first, so dropped first: it borrows `book` (see `Workbook.sheet`).
     // `None` once closed.
     state: RefCell<Option<ht::Sheet<'static>>>,
-    book: Arc<ht::Workbook<'static>>,
+    book: Rc<Book>,
+    charged: Charged,
+}
+
+impl Sheet {
+    /// Settles with the collector what the sheet's own read now holds (its workbook's bytes
+    /// are the workbook's to tell), and nothing once it is closed. Called once a call has let
+    /// go of the state.
+    fn settle(&self, env: &Env) {
+        if let Ok(state) = self.state.try_borrow() {
+            let held = state.as_ref().map_or(0, ht::Sheet::held_bytes);
+            self.charged.settle(env, held);
+        }
+    }
+}
+
+impl napi::bindgen_prelude::ObjectFinalize for Sheet {
+    /// Takes back whatever a sheet that was never closed still has the collector told of, and
+    /// its workbook's bytes if it is the last to hold them.
+    fn finalize(self, env: Env) -> Result<()> {
+        self.charged.settle(&env, 0);
+        Book::release(&self.book, &env);
+        Ok(())
+    }
 }
 
 const SHEET: &str = "sheet";
@@ -4437,17 +4877,21 @@ impl Sheet {
             Ok(Null)
         })
         .unwrap_or_else(|| Err(busy(SHEET)));
+        self.settle(env);
         outcome(env, answer)
     }
 
     /// Reads the next batch, as `DelimitedReader.read` does.
     #[napi(catch_unwind, ts_return_type = "Outcome<Batch | null>")]
     pub fn read<'env>(&self, env: &'env Env) -> Result<Object<'env>> {
-        exclusive(&self.state, |state| match state.as_mut() {
+        let answer = exclusive(&self.state, |state| match state.as_mut() {
             Some(sheet) => read_outcome(env, sheet.read()),
             None => refused(env, closed(SHEET)),
         })
-        .unwrap_or_else(|| refused(env, busy(SHEET)))
+        .unwrap_or_else(|| refused(env, busy(SHEET)));
+        // A long part grows the window it inflates through, and a wide row the cell table.
+        self.settle(env);
+        answer
     }
 
     /// Samples the sheet from its first row, under the options it was opened with, and
@@ -4485,6 +4929,7 @@ impl Sheet {
             Ok(Null)
         })
         .unwrap_or_else(|| Err(busy(SHEET)));
+        self.settle(env);
         outcome(env, answer)
     }
 
@@ -4513,7 +4958,7 @@ impl Sheet {
     /// The workbook's date system, as `Workbook.dateSystem`.
     #[napi(getter, catch_unwind)]
     pub fn date_system(&self) -> u32 {
-        self.book.date_system() as u32
+        self.book.workbook.date_system() as u32
     }
 }
 

@@ -206,6 +206,29 @@ rscript <- function(code) {
                            stdout = TRUE, stderr = TRUE))
 }
 
+test_that("a reader dropped part-way is closed without a warning", {
+  skip_on_cran()
+  # In a process of its own: R reports a connection its collector closed as a warning at top
+  # level, whenever the collector next ran, which no handler in a test can be sure to see.
+  out <- rscript(c(
+    "path <- tempfile(fileext = '.csv')",
+    "writeLines(c('a', as.character(1:50000)), path)",
+    "before <- nrow(showConnections(all = TRUE))",
+    "drop_one <- function() {",
+    "  reader <- hypertabular::delimited_reader(path, plan = list(hypertabular::col_i32('a')),",
+    "                                           batch_rows = 16)",
+    "  hypertabular::read_batch(reader)",
+    "  stopifnot(identical(nrow(showConnections(all = TRUE)), before + 1L))",
+    "  NULL",
+    "}",
+    "invisible(drop_one())",
+    "invisible(gc())",
+    "invisible(gc())",
+    "cat('left open:', nrow(showConnections(all = TRUE)) - before, '\n')"
+  ))
+  expect_identical(out, "left open: 0 ")
+})
+
 test_that("both packages load in either order, in fresh processes", {
   skip_on_cran()
   check <- c(

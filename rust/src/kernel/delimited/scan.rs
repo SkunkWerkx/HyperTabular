@@ -37,6 +37,12 @@
 //! An unfinished row is never delivered; its bytes are re-scanned once more of it has
 //! arrived, which costs at most one row's worth of work per refill and removes every
 //! rebasing step from the buffer model.
+//!
+//! A row longer than a refill would be scanned again on every one, and cost the square of its
+//! length. So a caller that keeps a [`Resume`] between calls asks [`Scanner::row_end`] first
+//! whether the bytes that are new end the row, and scans only once they do. That search is this
+//! same walker, entered where it left off rather than at a row boundary, reporting to a sink
+//! that stops at the first row: it is a hint about where to look, and never what a row holds.
 
 use crate::kernel::delimited::engine::{self, Engine, Kind};
 
@@ -53,6 +59,10 @@ pub enum Flow {
 
 /// Where the walker reports what it finds. Offsets are into the scanned data.
 pub trait Sink {
+    /// Whether the walker keeps, for this sink, where a search for a row's end could go on
+    /// from. Only [`Scanner::row_end`]'s sink asks, so no other scan pays for it.
+    const MARKS: bool = false;
+
     /// A cell of the row in progress: its bytes are `start..end`, of which `quotes` are
     /// `"`. The byte at `end` is what ended it — a separator, `\r`, `\n`, or the data end.
     fn cell(&mut self, start: usize, end: usize, quotes: u32);
@@ -80,6 +90,47 @@ pub struct Stop {
     pub unclosed: bool,
 }
 
+/// Where the search for an unfinished row's end stands: a place in the row and what the walker
+/// knew there. `at` counts from the row's first byte, and no byte before it ends the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resume {
+    /// The offset to go on from.
+    pub at: usize,
+    /// A quoted cell is open there.
+    pub open: bool,
+    /// The quote parity carried into the block there.
+    pub parity: bool,
+    /// A cell starts there.
+    pub cell: bool,
+}
+
+impl Resume {
+    /// The start of a row.
+    pub const START: Resume = Resume {
+        at: 0,
+        open: false,
+        parity: false,
+        cell: true,
+    };
+}
+
+/// The sink of a search for a row's end: it wants no cell, and stops at the first row.
+struct FirstRow;
+
+impl Sink for FirstRow {
+    const MARKS: bool = true;
+
+    #[inline(always)]
+    fn cell(&mut self, _start: usize, _end: usize, _quotes: u32) {}
+
+    fn discard(&mut self) {}
+
+    #[inline(always)]
+    fn row(&mut self, _start: usize, _next: usize, _line: u32, _terminator: u8) -> Flow {
+        Flow::Full
+    }
+}
+
 /// The scanner: a separator, whether quotes count, and the engine to run.
 #[derive(Clone, Copy, Debug)]
 pub struct Scanner {
@@ -97,6 +148,8 @@ struct Args<'a, S> {
     line: u32,
     eof: bool,
     sink: &'a mut S,
+    /// What the walker knows on entry: at a row boundary, nothing is open and a cell starts.
+    entry: Resume,
 }
 
 impl Scanner {
@@ -139,7 +192,38 @@ impl Scanner {
             line,
             eof,
             sink,
+            entry: Resume::START,
         };
+        self.walk(args).0
+    }
+
+    /// Searches `row`, which starts at a row boundary and has more to come, for the row's end.
+    /// `None` when it ends there, and it's for a scan to read; otherwise the row is unfinished,
+    /// and this is where the next search goes on from. `from` is [`Resume::START`], or what an
+    /// earlier search of a shorter `row` gave: the bytes before `from.at` are not looked at. A
+    /// `from` that can't be one for this `row` is `None` too, so the scan decides.
+    pub fn row_end(&self, row: &[u8], from: Resume) -> Option<Resume> {
+        if from.at > row.len() || (from.at == 0 && from != Resume::START) {
+            return None;
+        }
+        let args = Args {
+            sep: self.sep,
+            quote_all: if self.quoting { u64::MAX } else { 0 },
+            data: row,
+            pos: from.at,
+            line: 1,
+            eof: false,
+            sink: &mut FirstRow,
+            entry: from,
+        };
+        let (stop, mark) = self.walk(args);
+        // The walker stops with nothing taken only when the data ran out inside the row.
+        (stop.next == from.at).then_some(mark)
+    }
+
+    /// The walk on this scanner's engine: where it stopped, and where it marked.
+    #[inline(always)]
+    fn walk<S: Sink>(&self, args: Args<'_, S>) -> (Stop, Resume) {
         // SAFETY: a `Kind` other than `Swar` is only ever made by `engine::detect`, on a
         // CPU that has what it names.
         match self.kind {
@@ -161,31 +245,31 @@ impl Scanner {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn walk_neon<S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk_neon<S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     unsafe { walk::<engine::Neon, S>(args) }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,aes")]
-unsafe fn walk_neon_pmull<S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk_neon_pmull<S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     unsafe { walk::<engine::NeonPmull, S>(args) }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
-unsafe fn walk_sse2<S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk_sse2<S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     unsafe { walk::<engine::Sse2, S>(args) }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2,pclmulqdq")]
-unsafe fn walk_sse2_clmul<S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk_sse2_clmul<S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     unsafe { walk::<engine::Sse2Clmul, S>(args) }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,pclmulqdq")]
-unsafe fn walk_avx2_clmul<S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk_avx2_clmul<S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     unsafe { walk::<engine::Avx2Clmul, S>(args) }
 }
 
@@ -301,7 +385,7 @@ fn walk_stray(quotes: Quotes, mut ends: u64, first: u32, carry: Carry) -> (u64, 
 /// # Safety
 /// `E`'s CPU features were detected.
 #[inline(always)]
-unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
+unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> (Stop, Resume) {
     let Args {
         sep,
         quote_all,
@@ -310,21 +394,40 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
         mut line,
         eof,
         sink,
+        entry,
     } = args;
     let len = data.len();
     let mut row_start = pos;
-    let mut cell_start = pos;
+    // A cell that started before `pos` starts anywhere before it, as far as the walker asks.
+    let mut cell_start = if entry.cell {
+        pos
+    } else {
+        pos.saturating_sub(1)
+    };
     let mut row_line = line;
     let mut carry = Carry {
-        open: false,
-        parity: 0,
+        open: entry.open,
+        parity: if entry.parity { u64::MAX } else { 0 },
     };
+    // Where a search could go on from: the top of the last block entered. What the walker knows
+    // there came from whole blocks with a byte after them, so it's what any longer data says too;
+    // what it knows after a last block isn't, a quote at the data's end being a close or half of
+    // a `""` by the byte that isn't there yet.
+    let mut mark = entry;
     let mut cr_carry = false;
     let mut quote_acc: u32 = 0;
     let mut block_pos = pos;
     let mut tail: [u8; 64];
 
     while block_pos < len {
+        if S::MARKS {
+            mark = Resume {
+                at: block_pos,
+                open: carry.open,
+                parity: carry.parity != 0,
+                cell: cell_start == block_pos,
+            };
+        }
         let rest = data.get(block_pos..).unwrap_or_default();
         let block: &[u8; 64] = match rest.first_chunk::<64>() {
             Some(block) => block,
@@ -416,12 +519,15 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
                         // A `\r` at the very end of a non-final buffer: its `\n` may be
                         // in the next read. Leave the row unfinished.
                         sink.discard();
-                        return Stop {
-                            next: row_start,
-                            partial: true,
-                            line: row_line,
-                            unclosed: false,
-                        };
+                        return (
+                            Stop {
+                                next: row_start,
+                                partial: true,
+                                line: row_line,
+                                unclosed: false,
+                            },
+                            mark,
+                        );
                     }
                 }
             } else {
@@ -432,12 +538,15 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
             let next = abs + terminator as usize;
             let flow = sink.row(row_start, next, row_line, terminator);
             if flow == Flow::Refused {
-                return Stop {
-                    next: row_start,
-                    partial: false,
-                    line: row_line,
-                    unclosed: false,
-                };
+                return (
+                    Stop {
+                        next: row_start,
+                        partial: false,
+                        line: row_line,
+                        unclosed: false,
+                    },
+                    mark,
+                );
             }
             line += 1;
             row_start = next;
@@ -446,12 +555,15 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
             row_bit = cell_bit;
             row_line = line;
             if flow == Flow::Full {
-                return Stop {
-                    next: row_start,
-                    partial: false,
-                    line,
-                    unclosed: false,
-                };
+                return (
+                    Stop {
+                        next: row_start,
+                        partial: false,
+                        line,
+                        unclosed: false,
+                    },
+                    mark,
+                );
             }
         }
 
@@ -464,39 +576,51 @@ unsafe fn walk<E: Engine, S: Sink>(args: Args<'_, S>) -> Stop {
     if !eof {
         // The data ended mid-row (or exactly at a row boundary with nothing pending).
         sink.discard();
-        return Stop {
-            next: row_start,
-            partial: row_start < len,
-            line: row_line,
-            unclosed: false,
-        };
+        return (
+            Stop {
+                next: row_start,
+                partial: row_start < len,
+                line: row_line,
+                unclosed: false,
+            },
+            mark,
+        );
     }
     if carry.open {
         sink.discard();
-        return Stop {
-            next: row_start,
-            partial: false,
-            line: row_line,
-            unclosed: true,
-        };
+        return (
+            Stop {
+                next: row_start,
+                partial: false,
+                line: row_line,
+                unclosed: true,
+            },
+            mark,
+        );
     }
     if row_start < len {
         // A final row with no terminator.
         sink.cell(cell_start, len, quote_acc);
         if sink.row(row_start, len, row_line, 0) == Flow::Refused {
-            return Stop {
-                next: row_start,
-                partial: false,
-                line: row_line,
-                unclosed: false,
-            };
+            return (
+                Stop {
+                    next: row_start,
+                    partial: false,
+                    line: row_line,
+                    unclosed: false,
+                },
+                mark,
+            );
         }
         line += 1;
     }
-    Stop {
-        next: len,
-        partial: false,
-        line,
-        unclosed: false,
-    }
+    (
+        Stop {
+            next: len,
+            partial: false,
+            line,
+            unclosed: false,
+        },
+        mark,
+    )
 }

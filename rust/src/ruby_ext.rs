@@ -209,6 +209,45 @@ fn product(ruby: &Ruby, first: usize, second: usize) -> Result<usize, Error> {
         .ok_or_else(|| Error::new(ruby.exception_no_mem_error(), "failed to allocate memory"))
 }
 
+/// The bytes a buffer holds outside Ruby's heap.
+fn held<T>(buffer: &Vec<T>) -> usize {
+    buffer.capacity() * size_of::<T>()
+}
+
+/// What an object has told Ruby's collector it holds outside Ruby's heap. The buffers here are
+/// Rust's, where the Fiddle backend's are Strings the collector counts for itself; uncounted, a
+/// reader weighs a few words, and a process with room in its heap makes them by the thousand
+/// without a collection, each dead one keeping its buffers (20,000 of them held 3 GB). So every
+/// call that may have made or grown a buffer settles the count, and dropping it, which the
+/// object's free function does, takes it all back.
+#[derive(Default)]
+struct Charged(Cell<usize>);
+
+impl Charged {
+    /// Tells the collector the object now holds +held+ bytes.
+    fn settle(&self, held: usize) {
+        let was = self.0.replace(held);
+        if held != was {
+            // SAFETY: called on a Ruby thread holding the GVL, from one of the object's methods
+            // or from its free function, where Ruby allows it: the call moves a counter and runs
+            // no collection of its own.
+            // The difference as the platform's `ssize_t`, which is as wide as `isize`.
+            unsafe { rb_sys::rb_gc_adjust_memory_usage((held as isize - was as isize) as _) };
+        }
+    }
+
+    /// The bytes last settled.
+    fn held(&self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Drop for Charged {
+    fn drop(&mut self) {
+        self.settle(0);
+    }
+}
+
 /// One plan column as the gem hands it over, column.rb's `Column.specs` entry: the fixed part of
 /// its `ColumnSpecWith`, and the lists the rest of it points at, owned here for as long as the
 /// plan is. Nothing is interned, so a list lasts as long as its reader does.
@@ -247,6 +286,15 @@ impl Spec {
             tokens: list(2)?,
             constraints,
         })
+    }
+
+    /// The bytes the spec's lists hold outside Ruby's heap.
+    fn held(&self) -> usize {
+        self.months.as_ref().map_or(0, held)
+            + self.tokens.as_ref().map_or(0, held)
+            + self.constraints.as_ref().map_or(0, |(_, packed_enum)| {
+                size_of::<RawConstraints>() + held(packed_enum)
+            })
     }
 
     /// The door the spec names, as the fixed part says.
@@ -358,6 +406,24 @@ impl Columns {
             widths: zeroed::<u32>(ruby, if widths { batch_rows } else { 0 })?,
             batch_rows,
         })
+    }
+
+    /// The bytes the plan and its arrays hold outside Ruby's heap.
+    fn held(&self) -> usize {
+        held(&self.specs)
+            + self.specs.iter().map(Spec::held).sum::<usize>()
+            + held(&self.stores)
+            + self
+                .stores
+                .iter()
+                .map(|store| {
+                    held(&store.values)
+                        + held(&store.verdicts)
+                        + held(&store.notes)
+                        + held(&store.checks)
+                })
+                .sum::<usize>()
+            + held(&self.widths)
     }
 
     /// The specs as the core takes them, pointing into `self.specs`.
@@ -482,11 +548,13 @@ unsafe fn window(
 #[magnus(
     class = "HyperTabular::Runtime::Native::Delimited",
     free_immediately,
-    mark
+    mark,
+    size
 )]
 struct Delimited {
     input: Cell<Option<Opaque<RString>>>,
     read: RefCell<DelimitedRead>,
+    charged: Charged,
 }
 
 struct DelimitedRead {
@@ -509,6 +577,10 @@ impl DataTypeFunctions for Delimited {
             marker.mark(input);
         }
     }
+
+    fn size(&self) -> usize {
+        size_of::<Self>() + self.charged.held()
+    }
 }
 
 /// A delimited read's arena, at least +needed+ bytes and at least doubled: the core rewrites
@@ -524,9 +596,23 @@ impl DelimitedRead {
     fn columns(&self, ruby: &Ruby) -> Result<&Columns, Error> {
         self.columns.as_ref().ok_or_else(|| contract(ruby))
     }
+
+    /// The bytes the read holds outside Ruby's heap.
+    fn held(&self) -> usize {
+        self.columns.as_ref().map_or(0, Columns::held)
+            + held(&self.cells)
+            + held(&self.names)
+            + held(&self.arena)
+            + held(&self.tokens)
+    }
 }
 
 impl Delimited {
+    /// Settles with the collector what the read now holds (`Charged`).
+    fn account(&self) {
+        self.charged.settle(self.read.borrow().held());
+    }
+
     /// `Delimited.start`: nil when the core refuses the options, the bytes of a
     /// `RawDelimitedOptions`. +tokens+ is the dialect's, packed, or nil. The plan comes later, by
     /// `bind`, so that the header can be read first.
@@ -568,10 +654,13 @@ impl Delimited {
             tokens: tokens.map_or(Vec::new(), |tokens| unsafe { tokens.as_slice() }.to_vec()),
             out: Filled::default(),
         };
-        Ok(Some(ruby.obj_wrap(Delimited {
+        let started = ruby.obj_wrap(Delimited {
             input: Cell::new(None),
             read: RefCell::new(read),
-        })))
+            charged: Charged::default(),
+        });
+        started.account();
+        Ok(Some(started))
     }
 
     /// Takes the plan: +specs+ is one `Column.specs` entry per plan column and +sizes+ the
@@ -590,12 +679,15 @@ impl Delimited {
         widths: bool,
     ) -> Result<(), Error> {
         let columns = Columns::new(ruby, specs, sizes, batch_rows, notes, widths)?;
-        let mut read = rb_self.read.borrow_mut();
-        // As many rows as the budget allows, at least one and at most a batch.
-        let rows = column::cell_rows(per_row, batch_rows);
-        read.cells = zeroed(ruby, per_row * rows)?;
-        read.per_row = per_row;
-        read.columns = Some(columns);
+        {
+            let mut read = rb_self.read.borrow_mut();
+            // As many rows as the budget allows, at least one and at most a batch.
+            let rows = column::cell_rows(per_row, batch_rows);
+            read.cells = zeroed(ruby, per_row * rows)?;
+            read.per_row = per_row;
+            read.columns = Some(columns);
+        }
+        rb_self.account();
         Ok(())
     }
 
@@ -606,6 +698,19 @@ impl Delimited {
 
     /// Reads the next record of the attached input as a header: OK or ERR_STRUCTURE.
     fn header(
+        ruby: &Ruby,
+        rb_self: &Self,
+        start: usize,
+        length: usize,
+        last: bool,
+    ) -> Result<i32, Error> {
+        let code = Self::read_header(ruby, rb_self, start, length, last);
+        rb_self.account();
+        code
+    }
+
+    /// `header`, which settles what it grew.
+    fn read_header(
         ruby: &Ruby,
         rb_self: &Self,
         start: usize,
@@ -655,6 +760,19 @@ impl Delimited {
     /// ERR_STRUCTURE. A batch that came back short with the arena half used or more has the
     /// next one start with it doubled, as on the Fiddle backend.
     fn fill(
+        ruby: &Ruby,
+        rb_self: &Self,
+        start: usize,
+        length: usize,
+        last: bool,
+    ) -> Result<i32, Error> {
+        let code = Self::read_batch(ruby, rb_self, start, length, last);
+        rb_self.account();
+        code
+    }
+
+    /// `fill`, which settles what it grew.
+    fn read_batch(
         ruby: &Ruby,
         rb_self: &Self,
         start: usize,
@@ -1141,6 +1259,11 @@ impl Scratch {
         Ok(())
     }
 
+    /// The bytes the buffers hold outside Ruby's heap.
+    fn held(&self) -> usize {
+        held(&self.window) + held(&self.arena) + held(&self.cells) + held(&self.row)
+    }
+
     fn memory<'a>(&'a mut self, tables: Tables<'a>) -> Memory<'a> {
         Memory {
             window: &mut self.window,
@@ -1216,7 +1339,8 @@ fn settle(ruby: &Ruby, code: i32, out: &Filled) -> Result<(), Error> {
 #[magnus(
     class = "HyperTabular::Runtime::Native::Opened",
     free_immediately,
-    mark
+    mark,
+    size
 )]
 struct Opened {
     container: Opaque<RString>,
@@ -1228,6 +1352,7 @@ struct Opened {
     strings_bytes: Vec<u8>,
     table: Vec<Span>,
     kinds: Vec<u8>,
+    charged: Charged,
 }
 
 impl DataTypeFunctions for Opened {
@@ -1235,6 +1360,10 @@ impl DataTypeFunctions for Opened {
         marker.mark(self.container);
         marker.mark(self.sheets);
         marker.mark(self.strings);
+    }
+
+    fn size(&self) -> usize {
+        size_of::<Self>() + self.charged.held()
     }
 }
 
@@ -1316,7 +1445,7 @@ impl Opened {
         settle(ruby, code, &out)?;
         let kinds = scratch.arena[..(out.rows as usize).min(scratch.arena.len())].to_vec();
 
-        Ok(ruby.obj_wrap(Opened {
+        let opened = ruby.obj_wrap(Opened {
             container: Opaque::from(container),
             state,
             format: found.format,
@@ -1326,7 +1455,16 @@ impl Opened {
             strings_bytes,
             table,
             kinds,
-        }))
+            charged: Charged::default(),
+        });
+        // Nothing in it changes once it is open, so this is settled once.
+        opened.charged.settle(
+            size_of::<Book>()
+                + held(&opened.strings_bytes)
+                + held(&opened.table)
+                + held(&opened.kinds),
+        );
+        Ok(opened)
     }
 
     fn tables(&self) -> Tables<'_> {
@@ -1377,11 +1515,13 @@ impl Opened {
 #[magnus(
     class = "HyperTabular::Runtime::Native::Reading",
     free_immediately,
-    mark
+    mark,
+    size
 )]
 struct Reading {
     book: Opaque<Obj<Opened>>,
     read: RefCell<SheetRead>,
+    charged: Charged,
 }
 
 struct SheetRead {
@@ -1400,9 +1540,18 @@ impl DataTypeFunctions for Reading {
     fn mark(&self, marker: &gc::Marker) {
         marker.mark(self.book);
     }
+
+    fn size(&self) -> usize {
+        size_of::<Self>() + self.charged.held()
+    }
 }
 
 impl Reading {
+    /// Settles with the collector what the read now holds (`Charged`).
+    fn account(&self) {
+        self.charged.settle(self.read.borrow().held());
+    }
+
     /// `Reading.new`: positions a copy of the workbook's state on +sheet+ (an entry of
     /// `Opened#sheets`), as +options+, the bytes of a `RawSheetOptions`, say. +tokens+ is the
     /// sheet's, packed, or nil.
@@ -1461,10 +1610,13 @@ impl Reading {
             &mut read.out,
         );
         settle(ruby, code, &read.out)?;
-        Ok(ruby.obj_wrap(Reading {
+        let reading = ruby.obj_wrap(Reading {
             book: Opaque::from(book),
             read: RefCell::new(read),
-        }))
+            charged: Charged::default(),
+        });
+        reading.account();
+        Ok(reading)
     }
 
     /// Takes the plan: +specs+ is one `Column.specs` entry per plan column, +sizes+ the bytes
@@ -1474,6 +1626,21 @@ impl Reading {
     /// cells in the row's slots — a row the sheet repeats (an ODS `number-rows-repeated`) is
     /// delivered again from them — so the slots are only ever grown here, never replaced.
     fn bind(
+        ruby: &Ruby,
+        rb_self: &Self,
+        specs: RArray,
+        sizes: RArray,
+        width: usize,
+        notes: bool,
+        widths: bool,
+    ) -> Result<(), Error> {
+        let bound = Self::take_plan(ruby, rb_self, specs, sizes, width, notes, widths);
+        rb_self.account();
+        bound
+    }
+
+    /// `bind`, which settles what it made.
+    fn take_plan(
         ruby: &Ruby,
         rb_self: &Self,
         specs: RArray,
@@ -1500,13 +1667,22 @@ impl Reading {
     /// Reads the header row: its names, as frozen UTF-8 Strings in a frozen Array.
     fn read_header(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let book = ruby.get_inner(rb_self.book);
-        rb_self.read.borrow_mut().header(ruby, &book)
+        let names = rb_self.read.borrow_mut().header(ruby, &book);
+        rb_self.account();
+        names
     }
 
     /// The next batch: `[rows, cells, arena, failure]` — its rows, its cell table and the
     /// arena as far as the core wrote into it, copied, and the failure that came with them
     /// or nil.
     fn fill(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let batch = Self::read_batch(ruby, rb_self);
+        rb_self.account();
+        batch
+    }
+
+    /// `fill`, which settles what it grew.
+    fn read_batch(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let book = ruby.get_inner(rb_self.book);
         let mut guard = rb_self.read.borrow_mut();
         let read = &mut *guard;
@@ -1612,6 +1788,14 @@ impl SheetRead {
     /// has bound a plan.
     fn columns(&self, ruby: &Ruby) -> Result<&Columns, Error> {
         self.columns.as_ref().ok_or_else(|| contract(ruby))
+    }
+
+    /// The bytes the read holds outside Ruby's heap.
+    fn held(&self) -> usize {
+        size_of::<Book>()
+            + self.columns.as_ref().map_or(0, Columns::held)
+            + held(&self.tokens)
+            + self.scratch.held()
     }
 
     /// The header row's names: in the shared strings as written, or — flagged — in the

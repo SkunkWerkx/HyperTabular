@@ -165,7 +165,8 @@ cell said as text. The span counts in the units `substr()` counts `raw` in, so
 bytes for a cell that is not valid UTF-8, whose `raw` is marked `"bytes"`. The core reports
 spans in UTF-8 bytes and the shim re-expresses them. `origin` says where a verdict came from:
 `"cell"`, `"token"` (an `na` matched), `"padded"` (a cell a short record lacked under
-`fill = TRUE`) or `"uncached"` (a workbook formula with no cached value).
+`fill = TRUE`) or `"uncached"` (a workbook formula with no cached value). It is a factor, and its
+fifth level, `"unknown"`, is for a code this version of the package doesn't name.
 
 Text R can't hold (a NUL byte inside it, or more than `INT_MAX` bytes) is `ok` with an `NA`
 value, through `col_text()` as through `hypercast::cast_text()`: `ok` says the core accepted

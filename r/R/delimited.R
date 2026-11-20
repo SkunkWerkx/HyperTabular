@@ -261,7 +261,7 @@ delimited_reader <- function(source, dialect = delimited_dialect(), plan = NULL,
       reader$own <- TRUE
     }
   } else if (!is.raw(source)) {
-    reader$con <- file(source, "rb")
+    reader$con <- hold_connection(file(source, "rb"))
     reader$own <- TRUE
   }
   reader$whole <- !is.null(reader$con) && whole_reads(reader$con)

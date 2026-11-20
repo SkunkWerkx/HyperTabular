@@ -131,11 +131,19 @@ var ErrNoSheet = errors.New("hypertabular: no such sheet")
 // stingy is for the tests: every buffer a workbook call works in starts with room for one
 // element and no shared-strings bound is asked for, so every call that can stop and resume
 // does — the grow-and-keep path exercised mid-part. grown counts the window's, the arena's
-// and the cell table's growth.
+// and the cell table's growth, and only while stingy is set: a counter every workbook wrote
+// would be the one thing workbooks on separate goroutines share.
 var (
 	stingy bool
 	grown  [3]int
 )
+
+// countGrowth counts one growth of a buffer for the stingy tests, and nothing otherwise.
+func countGrowth(buffer int) {
+	if stingy {
+		grown[buffer]++
+	}
+}
 
 // windowMin is the smallest window the core takes.
 const windowMin = 64 * 1024
@@ -211,13 +219,13 @@ func (s *scratch) drive(call bookCall, set *columns, stride int) int32 {
 		switch code {
 		case errWindow:
 			s.window = grownTo(s.window, s.filled.needed)
-			grown[0]++
+			countGrowth(0)
 		case errArena:
 			s.arenaCap = grownTo(s.arenaCap, s.filled.needed)
-			grown[1]++
+			countGrowth(1)
 		case errCells:
 			s.cellsCap = grownTo(s.cellsCap, s.filled.needed)
-			grown[2]++
+			countGrowth(2)
 			if s.rowFollowsCells {
 				s.row = max(s.row, s.cellsCap)
 			}

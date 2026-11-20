@@ -13,14 +13,19 @@
 // HyperCastDecimal and so on.
 //
 // The core owns no memory. Every pointer is the caller's for the length of the call and no
-// longer; a null where the contract needs memory is HYPERTABULAR_ERR_CONTRACT, and a length of
-// 0 never dereferences its pointer. Nothing is kept between calls but what the caller's state
+// longer; a null state block, result or options is HYPERTABULAR_ERR_CONTRACT, a null buffer is
+// read as an empty one whatever length is passed beside it (so a null input holds no rows, and a
+// null arena, cell table or window is one too small, HYPERTABULAR_ERR_ARENA and its kin) unless
+// the function's own comment refuses it, and a length of 0 never dereferences its pointer.
+// Nothing is kept between calls but what the caller's state
 // block holds. Every call returns HYPERTABULAR_OK or one of the HYPERTABULAR_ERR_ codes below;
 // none of them is a cell's verdict. A cell that does not cast is a HyperTabularCellVerdict
 // beside its value: reason 0 cast, 1 empty, 2 malformed, 3 out of range, HyperCast's codes,
 // with the offending span of the cell's own text. A structurally broken input is
 // HYPERTABULAR_ERR_STRUCTURE, returned only after every intact row before it was delivered,
-// with the result's `failure` saying what and where.
+// with the result's `failure` saying what and where. A delimited fill delivers those rows in
+// the calls before the one that fails; a workbook fill can return them beside the code, in the
+// same call's `rows`, so read `rows` whatever a workbook fill returns.
 //
 // A file in a declared encoding goes through hypertabular_transcode first, on the caller's
 // buffers, and the delimited calls read the UTF-8 it writes. docs/delimited.md says how a reader
@@ -214,7 +219,11 @@ typedef struct HyperTabularDelimitedState {
   uint8_t short_rows;
   // Nonzero when a long record is cut.
   uint8_t long_rows;
-  uint8_t tail[6];
+  // How far the search for the end of the unfinished record at the front of the next input
+  // got: its offset in that record, little-endian, then a byte of flags, what the scanner
+  // knew there; all zero when there is none. A hint: it says where to look, and never what
+  // a row holds.
+  uint8_t pending[6];
 } HyperTabularDelimitedState;
 // The layout's size in bytes, which `hypertabular_delimited_state_size` also reports.
 #define HyperTabularDelimitedState_SIZE 80
@@ -1273,7 +1282,9 @@ int32_t hypertabular_delimited_init_with(struct HyperTabularDelimitedState *stat
 // `progress` is writable, at any alignment.
 int32_t hypertabular_transcode(uint32_t encoding, const uint8_t *input, uintptr_t input_len, uint32_t last, uint8_t *out, uintptr_t cap, struct HyperTabularRawTranscoded *progress);
 
-// Reads the next record as a header. See [`fill::header`].
+// Reads the next record as a header. See [`fill::header`]. A record of more than 1,048,576
+// cells gives that many names, its first, one for every column a plan can read, and still
+// holds the records below it to its own width.
 //
 // # Safety
 // `state` was initialized by `hypertabular_delimited_init` or
@@ -1395,7 +1406,8 @@ int32_t hypertabular_workbook_styles(HyperTabularWorkbookState *state, const uin
 
 // Positions the state on one sheet: the XLSX part named by the `part_len` bytes at
 // `part`, or the ODS or Numbers table at `index` — both as `hypertabular_workbook_sheets`
-// listed them. See [`rows::sheet`].
+// listed them. See [`rows::sheet`]. The caller holds `index` to that listing: an ODS
+// index past its last table is not refused, and reads as a sheet with no rows.
 //
 // # Safety
 // `state` was opened by `hypertabular_workbook_open` over these same `container`
@@ -1415,7 +1427,8 @@ int32_t hypertabular_workbook_header(HyperTabularWorkbookState *state, const uin
 // [`rows::fill`]; a format's flags are read as 1.0 read them, ignoring every bit from 8 up, so
 // every format
 // reads Western.
-// Uses every buffer.
+// Uses every buffer. Broken data is [`ERR_STRUCTURE`] with the rows read before it in
+// `out.rows`, in the same call: read `out.rows` whatever the code.
 //
 // # Safety
 // `state` was positioned by `hypertabular_workbook_sheet` or
@@ -1435,6 +1448,8 @@ int32_t hypertabular_workbook_sheet_with(HyperTabularWorkbookState *state, const
 // [`hypertabular_workbook_fill`] with the column options, tokens, notes and row widths the
 // size-tagged shapes hold. See [`rows::fill_with`]. Every `size` is read first and must be
 // the one this core knows; [`ERR_CONTRACT`] writes nothing, `out` and `state` included.
+// Broken data is [`ERR_STRUCTURE`] with the rows read before it in `out.rows`, in the same
+// call: read `out.rows` whatever the code.
 //
 // # Safety
 // `state` was positioned by `hypertabular_workbook_sheet` or

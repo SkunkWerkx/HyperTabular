@@ -114,9 +114,10 @@ module HyperTabular
       end
 
       # Names the String the calls that follow read: +start+ and +offset+ below index its
-      # bytes. It is held where it is, not copied, and must not be modified until another
-      # one is attached. The one before is let go of only once this one is held, so that an
-      # exception along the way leaves the calls reading the one before, still held.
+      # bytes. It is held where it is, not copied: one that is modified, whose bytes may have
+      # moved, is attached again before the next call that reads it. The one before is let go
+      # of only once this one is held, so that an exception along the way leaves the calls
+      # reading the one before, still held.
       def attach(input)
         pin = Runtime.pin(input)
         @base = pin.to_i

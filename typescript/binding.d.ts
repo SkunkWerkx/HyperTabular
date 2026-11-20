@@ -395,11 +395,25 @@ export declare class Workbook {
 }
 
 /**
- * Makes every batch this environment reads with `make(store, rows, doors)`, `index.js`'s own,
+ * The engine's own count of the bytes it has been told are held outside its heap, as it answers
+ * an adjustment of nothing; 0 under the WebAssembly fallback, where nothing is told. Internal to
+ * the package: its suite reads what a reader, a sheet and a workbook told the collector by it,
+ * where `process.memoryUsage()` does not say (Node 26).
+ */
+export declare function __externalMemory(): number
+
+/**
+ * Makes every batch this environment reads with `make(store, rows, columns, doors)`, `index.js`'s
+ * own,
  * rather than as the native `Batch`, which a native finalizer frees only once the event loop
  * turns. Internal to the package: what `make` is given is of no use to anything else.
+ *
+ * Answers whether a read calls `make` itself. Under the WebAssembly fallback it does not, since
+ * the runtime assigns the arguments of a call out of the module into an array of its own,
+ * under an index, where a setter on `Object.prototype` would run: there a read answers
+ * `{ store, rows, columns, doors }` as its value, for `index.js` to call `make` with.
  */
-export declare function __makeBatchesWith(make: (store: unknown, rows: number, doors: Array<Door>) => Batch): void
+export declare function __makeBatchesWith(make: (store: unknown, rows: number, columns: number, doors: string) => Batch): boolean
 
 /** `Batch.column`, over a store. */
 export declare function batchColumn(store: unknown, column: number): Array<Verdict<Value>>

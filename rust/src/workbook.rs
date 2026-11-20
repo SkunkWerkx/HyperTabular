@@ -12,7 +12,7 @@
 //! with its own buffers, all borrowing the workbook.
 
 use crate::batch::{Batch, Columns, Home, Row};
-use crate::column;
+use crate::column::{self, capacity_bytes};
 use crate::kernel::abi::{
     ColumnSpecWith, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, ERR_WINDOW, Filled, OK, Opened,
     RawBatchCheck, RawRange, RawSheetOptions, Slot, Span,
@@ -578,6 +578,28 @@ impl<'a> Workbook<'a> {
         &self.sheets
     }
 
+    /// The bytes of everything the workbook owns (its container among them, unless it borrows
+    /// it), its sheets' reads aside, for a binding that settles with a collector.
+    #[doc(hidden)]
+    pub fn held_bytes(&self) -> usize {
+        let container = match &self.container {
+            Cow::Borrowed(_) => 0,
+            Cow::Owned(bytes) => capacity_bytes(bytes),
+        };
+        let names: usize = self
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.capacity() + capacity_bytes(&sheet.part))
+            .sum();
+        container
+            + size_of::<State>()
+            + capacity_bytes(&self.sheets)
+            + names
+            + capacity_bytes(&self.strings)
+            + capacity_bytes(&self.table)
+            + capacity_bytes(&self.kinds)
+    }
+
     /// The shared strings' bytes, which every batch of every sheet indexes — what the
     /// Python and PHP bindings share among them rather than copying into each.
     #[cfg(any(feature = "python", feature = "php"))]
@@ -837,6 +859,19 @@ impl<'w> Sheet<'w> {
             sample.read_from(&mut sheet)?;
         }
         sample.judge(sheet.header(), options)
+    }
+
+    /// The bytes of every buffer the sheet owns, its workbook's aside, for a binding that
+    /// settles with a collector.
+    #[doc(hidden)]
+    pub fn held_bytes(&self) -> usize {
+        size_of::<State>()
+            + capacity_bytes(&self.scratch.window)
+            + capacity_bytes(&self.scratch.arena)
+            + capacity_bytes(&self.scratch.cells)
+            + capacity_bytes(&self.row)
+            + self.columns.as_ref().map_or(0, Columns::held_bytes)
+            + self.header.as_ref().map_or(0, Header::held_bytes)
     }
 
     /// The options the sheet is read with.

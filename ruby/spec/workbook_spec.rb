@@ -239,6 +239,12 @@ RSpec.describe HyperTabular::Workbook do
     expect(book.inspect).to eq("#<HyperTabular::Workbook xlsx sheets=1>")
   end
 
+  it "raises TypeError for an IO whose read answers something that is not a String" do
+    io = Object.new
+    io.define_singleton_method(:read) { |*| 5 }
+    expect { described_class.new(io) }.to raise_error(TypeError, "the IO's read must return a String; got Integer")
+  end
+
   it "reads two sheets at once, each with its own buffers, and batches that outlive them" do
     book = described_class.open(File.join(CorpusHelpers.directory, "workbook", "basic.xlsx"))
     plan = [HyperTabular::Column.text(1), HyperTabular::Column.i64(0)]

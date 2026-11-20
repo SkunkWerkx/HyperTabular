@@ -503,3 +503,41 @@ fn what_is_not_there_is_an_error_and_not_a_panic() {
     let b = second.read().expect("a read").expect("a batch").rows();
     assert_eq!(a + 1, b, "the header is one row more");
 }
+
+/// What a binding tells a collector a workbook and a sheet hold: the bytes and tables they own,
+/// never bytes they borrow.
+#[test]
+fn held_bytes_counts_what_a_workbook_and_a_sheet_own() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../corpus/workbook/basic.xlsx");
+    let bytes = std::fs::read(path).unwrap();
+
+    let borrowed = Workbook::from_slice(&bytes).unwrap();
+    let owned = Workbook::from_vec(bytes.clone()).unwrap();
+    // The container counts only where the workbook owns it.
+    assert!(borrowed.held_bytes() > 0);
+    assert!(
+        owned.held_bytes() >= borrowed.held_bytes() + bytes.len(),
+        "{} owned, {} borrowed, {} in the file",
+        owned.held_bytes(),
+        borrowed.held_bytes(),
+        bytes.len()
+    );
+
+    // A sheet holds its own buffers, not its workbook's: the window its part inflates through
+    // and, once a plan is bound, the plan's arrays.
+    let unbound = owned.sheet_unbound(0, SheetOptions::new()).unwrap();
+    assert!(unbound.held_bytes() >= 4096, "{}", unbound.held_bytes());
+    let mut sheet = owned
+        .sheet(0, SheetOptions::new(), &[Column::text(0), Column::text(1)])
+        .unwrap();
+    let bound = sheet.held_bytes();
+    // 4096 rows of two text columns' values and verdicts, at the least.
+    assert!(
+        bound >= unbound.held_bytes() + 2 * 4096 * 8,
+        "{bound} bound, {} unbound",
+        unbound.held_bytes()
+    );
+    assert!(sheet.read().unwrap().is_some());
+    assert!(sheet.held_bytes() >= bound);
+    assert!(sheet.held_bytes() < owned.held_bytes() + bound + (1 << 20));
+}

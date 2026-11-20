@@ -205,12 +205,22 @@ A column is never refused when it is made: `Column.i32(-1)` is a `Column` whose 
 where the batch has none (`batch.get(9, 0)`) is HyperCast's contract violation, `malformed` at
 offset 0, length 0.
 
+Two misuses of the classes themselves do throw, since neither has an outcome to answer in. A
+method or getter called on something that is not its own object
+(`DelimitedReader.prototype.read.call({})`) throws a `TypeError` (`Illegal invocation`) for a
+method on Node, and napi's `Error` with `code` `'InvalidArg'` for a getter there and for both
+under Bun and the WebAssembly fallback; a `Batch`'s or a `Row`'s throws the engine's own
+`TypeError` for a private field. And no class is made with `new`: `new Column()` and the other
+native classes throw an `Error` (`Class contains no constructor`), `new Batch()` and
+`new Row()` a `TypeError`.
+
 The package throws two errors of its own. `ERR_HYPERTABULAR_UNAVAILABLE` comes from any opener
 when no addon and no fallback loaded: an installation problem, not an input
 ([below](#when-no-native-addon-fits)), which `isAvailable()` says up front.
 `ERR_HYPERTABULAR_BUSY` (`kind` `'busy'`) comes from a reader's or a sheet's getter read from
 inside one of its own calls, where it has no outcome to answer in
-([below](#calling-back-in)). `isHyperTabularError(error)` recognizes both. On the native addon every call also catches a Rust
+([below](#calling-back-in)). `isHyperTabularError(error)` recognizes both, and never throws
+itself, whatever a `catch` hands it: a Proxy whose traps throw, or a revoked one, is `false`. On the native addon every call also catches a Rust
 panic and throws it as napi's `GenericFailure` rather than taking the process down; that is a
 backstop, and on the fallback a panic aborts instead. An engine out of memory throws as it would
 anywhere. `tests/never_throws.test.ts` calls every opener, method and factory with some forty
@@ -262,7 +272,26 @@ step at a time: the batch, `null` past the end, or the error.
 `close()` releases a reader's or a sheet's buffers (and a reader's file) now, rather than when
 it is collected, and answers `{ ok: true, value: null }` (closing twice is no error); a workbook's bytes go when the workbook and its sheets are collected. A sheet
 read with a wide plan holds a cell table of several megabytes until then, so a loop opening
-many is better off closing each. A `Batch` and a `Row` are plain JavaScript, and a batch's copy
+many is better off closing each. A reader, a sheet, a workbook, a `Column` and a `Header` are
+native objects: what one still holds when it is collected is freed by a finalizer, which the
+engine runs only once the event loop turns. The engine's collector is told what a reader, a
+sheet and a workbook hold outside its heap: a reader's input buffer (256 KiB to begin with),
+the text `fromBytes` copied, the plan's arrays and the cell table; a sheet's the same; a
+workbook's bytes and tables. It is told again whenever a call grows that (a record longer than
+the buffer, a plan bound), and told it is gone at `close()`. So a loop that drops readers
+without closing them, and yields, is collected in step with what it holds: 3,000 readers of a
+200-row CSV, each dropped open with a yield after it, peaked at 131 MB on Node 26.13 and 18 MB
+on Bun 1.4.4 (2026-11-15, Apple M6). Telling runs no finalizer, though: a synchronous loop that
+opens many files still keeps, until it yields, a few kilobytes for each reader and sheet it
+closed, each workbook whole, and everything a reader or sheet it did not close holds (a
+process that dropped 400 readers open in one synchronous loop stood at 229 MB on Node and 183
+MB on Bun). Close each
+reader and sheet, which frees at once, and yield now and then
+(`await new Promise(setImmediate)`) in a loop that opens thousands. The telling costs a read
+nothing; on Bun, whose collector runs the more often for it, an open costs about 10 µs more
+(20,000 rounds of open, read and close over a two-row CSV took 318 ms on Bun, where they took
+118 ms without it, and 120 ms on Node, the same day and machine). The WebAssembly fallback tells nothing: its buffers are in
+the module's own memory, which the engine counts. A `Batch` and a `Row` are plain JavaScript, and a batch's copy
 an `ArrayBuffer` the engine owns, so what a loop drops is reclaimed by the engine's ordinary
 collection, a synchronous loop's included. Three passes over a 91 MB file of 2M rows in one
 synchronous loop, five runs each in Docker on an Apple M6, peaked at 125 to 126 MB on Node 26.13
@@ -471,8 +500,11 @@ every shape and the locales neither policy matches.
 ## Calling back in
 
 JavaScript can run in the middle of a reader's call: a getter or a Proxy in a plan or an option
-it reads, or a setter someone put on `Object.prototype` that the answer it builds assigns
-through. A call from there back into the same reader or sheet answers the `'busy'` error
+it reads. The answer a call builds is no such route: its properties and its arrays' elements are
+defined, never assigned, so a setter someone put on `Object.prototype`, under a field's name or
+an index, neither runs, nor throws out of the call, nor keeps anything off the answer (under
+the WebAssembly fallback one case of an index is left, [below](#when-no-native-addon-fits)). A call from a
+getter or a Proxy back into the same reader or sheet answers the `'busy'` error
 (`the reader is in the middle of a call; nothing that call runs can call back into it`), and
 its getters (`isBound`, `header`, `columnCount`, `records`), with no outcome to answer in,
 throw it as an `Error` whose `code` is `ERR_HYPERTABULAR_BUSY` and whose `kind` is `'busy'`.
@@ -541,6 +573,19 @@ same, the suite is the same, and `isAvailable()` is `true`. What differs:
   through the module before any Rust runs. The module stays sound and the next call answers.
   The native addon never looks at an argument's prototype, so there these are answered like
   any other value.
+- A setter put on `Object.prototype` under an array index runs under the fallback in one
+  case, a recorded loss: the runtime keeps its handles, its references and its scopes in
+  arrays that grow by assignment, so the first call to need a slot no call before it has
+  filled (more values at once, more native objects alive, than the process has had so far)
+  assigns under that slot's number, and a setter there that throws makes the call throw. The
+  module stays sound and the next call answers. Nothing the binding does assigns under an index: no array is made
+  by a call out of the module, a read hands its batch over without one, and a `Uint8Array` is
+  read without a reference. So a setter under a slot the runtime has filled does not run
+  (`'0'` and `'1'` are, from the moment the package is loaded), and one under a field's name
+  does not either, as on the native addon.
+- A relative path is the file under the process's working directory, as it is for the native
+  addon: the module's own libc knows only the root it was preopened with, so the binding puts
+  `process.cwd()` in front of a relative path at each open.
 - On Windows, opening by path is a recorded loss: `DelimitedReader.open` and `Workbook.open`
   answer an `io` error for every path, since the runtime preopens the drive root under its
   Windows name (`D:\`), which the module's libc matches only before a `/`. Read the file
@@ -562,9 +607,11 @@ passes, but the process never exits on its own, since the WebAssembly runtime wr
 module's threadsafe-function reference count little-endian and reads it back host-endian.
 Nothing more is claimed for big-endian hosts than the smoke's checks.
 
-**Bundlers.** esbuild and webpack cannot fold the loader's platform `require`s into one file:
-webpack fails the build on them, and an esbuild bundle cannot load the module from a directory
-with no `node_modules`. The form that works, for both, is the package external (esbuild
+**Bundlers.** esbuild and webpack cannot fold the loader's platform `require`s into one file.
+webpack fails the build on them. esbuild (`--bundle --platform=node`) fails it too where the
+native addon is installed (`No loader is configured for ".node" files`), and where only the
+fallback is, builds a bundle in which, run from a directory with no `node_modules`, the module
+is unavailable. The form that works, for both, is the package external (esbuild
 `--external:@skunkwerkx/hypertabular`, webpack
 `externals: { '@skunkwerkx/hypertabular': 'commonjs @skunkwerkx/hypertabular' }`) with it
 installed beside the bundle.
@@ -620,7 +667,11 @@ every suggestion the two corpora hold, reading each plan back. Beside it,
 for 2^48 rows or more, which no regression could allocate; the sizes just over and at the limit
 run only with `HYPERTABULAR_BIG_SIZES=1`, in a container capped at 4 GiB), `messier.test.ts` each dialect and sheet
 option, `grouping.test.ts` the two policies and the retired words, `suggest.test.ts` the
-suggestions, `reentry.test.ts` the calls back in, and `memory.test.ts`, run only with
+suggestions, `reentry.test.ts` the calls back in and the setters that never run,
+`prototype_setters.test.ts` every kind of call under a setter at each of 300 indices and the
+fallback's one recorded loss, `collector.test.ts` what the collector is told at an open, a
+bind, a read, a close and a finalization,
+`paths.test.ts` a relative path under a working directory that moves, and `memory.test.ts`, run only with
 `HYPERTABULAR_MEMORY_CHECK=1` and in a container capped in memory, holds a synchronous loop's
 growth under 64 MB over three passes of each reading idiom, a batch per row among them. Every cell is held to the corpus, and every
 delimited cell to what `@skunkwerkx/hypercast` says of its raw bytes. `HYPERTABULAR_CORPUS`

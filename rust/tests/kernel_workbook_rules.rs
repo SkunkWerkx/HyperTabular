@@ -626,6 +626,30 @@ fn a_sparse_xlsx_row_across_each_edge() {
     );
 }
 
+/// A gap is every row it stands for once the filter is off, so a row number no sheet has stands
+/// for billions in a few bytes. A range is what bounds it: the read ends at the range's last row.
+#[test]
+fn a_range_bounds_a_row_number_no_sheet_has() {
+    let sheet = "<row r=\"1\"><c r=\"A1\" t=\"str\"><v>one</v></c></row>\
+<row r=\"4294967295\"><c r=\"A4294967295\" t=\"str\"><v>far</v></c></row>";
+    let package = xlsx(&[("Data", sheet)], "", false, false);
+    // The filter leaves the two rows that hold a cell, each under its own number.
+    assert_eq!(
+        read(&package, 0, no_header(), 1).rows,
+        table(&[(1, &["one"]), (u32::MAX, &["far"])])
+    );
+    // With it off, all of a sheet Excel can hold, and no row past it.
+    let book = Workbook::from_slice(&package).expect("a workbook");
+    let options = every_row().with_range(range("A1:XFD1048576"));
+    let mut opened = book.sheet(0, options, &[Column::text(0)]).expect("a sheet");
+    let (mut rows, mut last) = (0usize, 0u32);
+    while let Some(batch) = opened.read().expect("a read") {
+        rows += batch.rows();
+        last = batch.line(batch.rows() - 1);
+    }
+    assert_eq!((rows, last), (1_048_576, 1_048_576));
+}
+
 #[test]
 fn an_ods_repeat_count_is_never_walked() {
     let table_xml = "<table:table table:name=\"Data\">\

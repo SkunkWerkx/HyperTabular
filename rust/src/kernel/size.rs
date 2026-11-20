@@ -41,6 +41,12 @@ pub const MAX_ROW_BYTES: u64 = 1 << 30;
 /// entries rather than a batch of them.
 pub const CELL_BUDGET: u64 = 4096 * 257;
 
+/// The names a delimited header gives at most: one for every column a plan can read, since every
+/// binding refuses an ordinal past this many. A header record of more cells still fixes the width
+/// of the records below it at its own, and only its names past here go unsaid, so a record of
+/// tens of millions of cells doesn't ask its reader for a name table of as many.
+pub const HEADER_NAMES: u64 = 1 << 20;
+
 /// The bytes one value of a door takes.
 pub const fn value_bytes(door: Door) -> u64 {
     (match door {

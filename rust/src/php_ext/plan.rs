@@ -5,7 +5,7 @@ use ext_php_rs::exception::PhpResult;
 use ext_php_rs::types::Zval;
 
 use super::classes::list_zval;
-use super::convert::column_of;
+use super::convert::{column_of, ordinal_refused};
 use super::enums::Door;
 use super::errors::{contract_violation, invalid_argument};
 use super::values::column_fields;
@@ -46,7 +46,10 @@ impl Plan {
         let mut constraints = Vec::with_capacity(fields.len());
         for (index, column) in fields.iter().enumerate() {
             let door = Door::from_code(column.door).ok_or_else(contract_violation)?;
-            let ordinal = usize::try_from(column.ordinal).map_err(|_| contract_violation())?;
+            // `Column` refuses an ordinal below zero itself; one that got past it (a column that
+            // was unserialized) is refused here, as one past the cap is.
+            let ordinal = usize::try_from(column.ordinal)
+                .map_err(|_| ordinal_refused(index, column.ordinal))?;
             columns.push(column_of(index, column, ordinal)?);
             doors.push(door);
             ordinals.push(ordinal);

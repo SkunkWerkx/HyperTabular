@@ -1069,3 +1069,93 @@ fn a_column_given_no_format_reads_western_grouping() {
         read(Column::i32(0))
     );
 }
+
+/// A header names no more columns than a plan can read, however wide its record: 64 MB of
+/// commas used to be 67 million names, and gigabytes in every binding that makes strings of them.
+#[test]
+fn a_header_wider_than_any_plan_gives_the_names_a_plan_can_read() {
+    const NAMES: usize = 1 << 20;
+    let width = NAMES + 5;
+    let mut text = b"id".to_vec();
+    text.resize(2 + width - 1, b',');
+    text.push(b'\n');
+    text.push(b'7');
+    text.resize(text.len() + width - 1, b',');
+    text.push(b'\n');
+
+    for stream in [false, true] {
+        let plan = [Column::i32(0)];
+        let mut reader = if stream {
+            DelimitedReader::from_reader(&text[..], Dialect::CSV, &plan).unwrap()
+        } else {
+            DelimitedReader::from_slice(&text, Dialect::CSV, &plan).unwrap()
+        };
+        let header = reader.header().unwrap();
+        assert_eq!(header.len(), NAMES);
+        assert_eq!(header.name(0), Some(&b"id"[..]));
+        assert_eq!(header.name(NAMES - 1), Some(&b""[..]));
+        // The row of the record's own width reads; the width is the record's, not the names'.
+        let batch = reader.read().unwrap().unwrap();
+        assert_eq!((batch.rows(), batch.get::<i32>(0, 0)), (1, Ok(7)));
+        assert!(reader.read().unwrap().is_none());
+    }
+}
+
+/// What a binding tells a collector a reader holds: the buffers it owns, never the input it
+/// borrows.
+#[test]
+fn held_bytes_counts_the_buffers_a_reader_owns_and_no_borrowed_input() {
+    const BUFFER: usize = 8 * 1024;
+    let plan = [Column::text(0), Column::i64(1)];
+    let options = DelimitedReader::options().buffer_bytes(BUFFER);
+
+    // A stream holds its buffer from the start, and its column arrays once a plan is bound.
+    let short = b"a,b\nx,1\n";
+    let unbound = options
+        .from_reader_unbound(&short[..], Dialect::CSV)
+        .unwrap();
+    assert!(unbound.held_bytes() >= BUFFER, "{}", unbound.held_bytes());
+    let mut bound = options
+        .from_reader_unbound(&short[..], Dialect::CSV)
+        .unwrap();
+    bound.bind(&plan).unwrap();
+    // 4096 rows of a text column's and an i64's values, verdicts and notes, at the least.
+    assert!(
+        bound.held_bytes() >= unbound.held_bytes() + 4096 * (8 + 8),
+        "{} bound, {} unbound",
+        bound.held_bytes(),
+        unbound.held_bytes()
+    );
+
+    // A record longer than the buffer grows it, and the count with it.
+    let mut long = b"a,b\n".to_vec();
+    long.resize(long.len() + 10 * BUFFER, b'y');
+    long.extend_from_slice(b",1\n");
+    let mut reader = options.from_reader(&long[..], Dialect::CSV, &plan).unwrap();
+    let before = reader.held_bytes();
+    assert_eq!(reader.read().unwrap().unwrap().rows(), 1);
+    assert!(
+        reader.held_bytes() >= before + 9 * BUFFER,
+        "{} after, {before} before",
+        reader.held_bytes()
+    );
+
+    // A slice is read in place: what the reader holds does not grow with the input.
+    let mut small = b"a,b\n".to_vec();
+    let mut large = small.clone();
+    for row in 0..4 {
+        small.extend_from_slice(format!("x,{row}\n").as_bytes());
+    }
+    for row in 0..200_000 {
+        large.extend_from_slice(format!("x,{row}\n").as_bytes());
+    }
+    let over_small = DelimitedReader::from_slice(&small, Dialect::CSV, &plan).unwrap();
+    let over_large = DelimitedReader::from_slice(&large, Dialect::CSV, &plan).unwrap();
+    assert!(large.len() > 1 << 20);
+    assert_eq!(over_small.held_bytes(), over_large.held_bytes());
+    // And less than a stream over the same text, by the buffer.
+    let streamed = options
+        .from_reader(&small[..], Dialect::CSV, &plan)
+        .unwrap();
+    assert!(streamed.held_bytes() >= over_small.held_bytes() + BUFFER);
+}

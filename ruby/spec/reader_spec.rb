@@ -358,6 +358,91 @@ RSpec.describe HyperTabular do
       expect(priced.get(0, 0)).to eq(HyperCast.i32("€12x4", euros))
     end
 
+    # The core counts bytes, and a span of its can end inside a character: the time door's fields are
+    # two bytes wide and a year's four, and a byte no UTF-8 text has is spanned as long as it claims
+    # to be. Every door, with a multi-byte character, and bytes that are no character, at every
+    # position of a cell.
+    it "keeps a span inside its cell, and whole characters, wherever a multi-byte character falls" do
+      invariant = HyperCast::NumFormat::INVARIANT
+      maximum = HyperCast::Constraints.new(door: :i32, maximum: 4)
+      short = HyperCast::Constraints.new(door: :text, max_length: 2, trim: true)
+      doors = [
+        [column.bool(0), ->(text) { HyperCast.bool(text) }, %w[true no]],
+        [column.i32(0), ->(text) { HyperCast.i32(text, invariant) }, ["-1,234", "(12)"]],
+        [column.u64(0), ->(text) { HyperCast.u64(text, invariant) }, ["1,234", "0x1F"]],
+        [column.f32(0), ->(text) { HyperCast.f32(text, invariant) }, ["1.5"]],
+        [column.f64(0), ->(text) { HyperCast.f64(text, invariant) }, ["-1,234.5e3", "12%"]],
+        [column.decimal(0), ->(text) { HyperCast.decimal(text, invariant) }, ["-1,234.50", "$12.5"]],
+        [column.uuid(0), ->(text) { HyperCast.uuid(text) }, ["123e4567-e89b-12d3-a456-426614174000"]],
+        [column.timestamp(0), ->(text) { HyperCast.timestamp(text) },
+         ["2024-01-02T03:04:05.678Z", "2024-01-02T03:04:05+01:00"]],
+        [column.unix(0, :seconds), ->(text) { HyperCast.unix(text, :seconds) }, ["1700000000"]],
+        [column.excel_serial(0, :y1900), ->(text) { HyperCast.excel_serial(text, :y1900) }, ["45000.5"]],
+        [column.date(0), ->(text) { HyperCast.date(text) }, ["2024-01-02"]],
+        [column.date(0, :day_month_year), ->(text) { HyperCast.date(text, :day_month_year) },
+         ["02/01/2024", "2 Jan 2024"]],
+        [column.datetime(0, :month_day_year), ->(text) { HyperCast.datetime(text, :month_day_year) },
+         ["01/02/2024 03:04:05 PM", "01/02/2024 03:04:05.5"]],
+        [column.time(0), ->(text) { HyperCast.time(text) }, ["12:34:56.789", "1:2"]],
+        [column.duration(0), ->(text) { HyperCast.duration(text) }, ["PT1H2M3.5S", "P1DT2H"]],
+        [column.text(0), ->(text) { HyperCast.text(text) }, ["ab c"]],
+        [column.text(0, constraints: short), ->(text) { HyperCast.text(text, short) }, [" abc ", "ab"]],
+        [column.i32(0, constraints: maximum), ->(text) { HyperCast.checked(text, invariant, maximum) }, ["12", " 3"]]
+      ]
+      # Characters of two, three and four bytes, then bytes that are no character: a byte no UTF-8
+      # text has, a four-byte character cut short, a continuation byte alone, and each of the first
+      # two ahead of a whole character and behind one.
+      stray = ["\xFF".b, "\xF0\x9F".b, "\x98".b]
+      placed = ["é", "日", "😀"].map(&:b) + stray + stray.first(2).flat_map { |bytes| [bytes + "日".b, "😀".b + bytes] }
+      # The characters of +text+ the bytes from +offset+ for +length+ touch: what String#[] slices by.
+      touched = lambda do |text, offset, length|
+        before = within = at = 0
+        text.each_char do |char|
+          break if at >= offset + length
+
+          at += char.bytesize
+          at <= offset ? before += 1 : within += 1
+        end
+        [before, length.zero? ? 0 : within]
+      end
+
+      tabbed = HyperTabular::Dialect.new(separator: "\t", has_header: false)
+      doors.each do |planned, door, seeds|
+        cells = seeds.flat_map do |seed|
+          placed.product((0..seed.bytesize).to_a).map { |bytes, at| seed.b.insert(at, bytes) }
+        end
+        batch = described_class.new("#{cells.join("\n")}\n", tabbed, [planned], batch_rows: cells.size).read
+        expect(batch.rows).to eq(cells.size)
+        listed = batch.faults.to_h { |problem| [problem.row, [problem.offset, problem.length]] }
+        rejected = 0
+        cells.each_index do |row|
+          verdict = batch.get_checked(0, row)
+          next unless verdict.respond_to?(:offset)
+
+          rejected += 1
+          raw = batch.raw(0, row)
+          label = "#{planned.door} #{raw.inspect}"
+          span = [verdict.offset, verdict.length]
+          expect(raw.b).to eq(cells[row]), label
+          expect(span.sum).to be <= raw.length, "#{label}: #{span} of #{raw.length}"
+          expect(listed.fetch(row, span)).to eq(span), label
+          next unless judge
+
+          # HyperCast's own door on the cell's text, and on its bytes, whose span is the core's.
+          expect(verdict).to eq(door.call(raw)), label
+          bytes = door.call(raw.b)
+          expect(span).to eq(touched.call(raw, bytes.offset, bytes.length)), "#{label}: #{span}"
+        end
+        expect(rejected).to be > 0
+      end
+
+      emoji = described_class.new("😀\n12:😀\n日本\n", HyperTabular::Dialect.new(separator: ",", has_header: false),
+                                  [column.time(0)]).read
+      expect(emoji.verdicts(0).map { |each| [each.reason, each.offset, each.length] })
+        .to eq([[:malformed, 0, 1], [:malformed, 3, 1], [:malformed, 0, 1]])
+      expect(emoji.faults.map { |problem| [problem.offset, problem.length] }).to eq([[0, 1], [3, 1], [0, 1]])
+    end
+
     it "gives back the raw text of any cell, whatever its door and verdict" do
       reader = described_class.new("a,b\n\" 7 \",\"x\"\"y\"\n,\"\"\n", csv, [column.i32(0), column.text(1)])
       batch = reader.read
@@ -402,6 +487,52 @@ RSpec.describe HyperTabular do
       expect(batch.values(0).first.encoding).to eq(Encoding::UTF_8)
     end
 
+    # Text its own encoding does not allow, or that has no UTF-8 form, is data: HyperCast's gem reads
+    # each such character as one byte no UTF-8 text has, malformed where it stands, and so does a read.
+    it "reads a String that is not valid in its encoding as data, never an exception" do
+      plan = [column.text(0), column.i32(1)]
+      malformed = have_attributes(reason: :malformed, offset: 0, length: 1)
+      utf16 = ->(text) { text.encode(Encoding::UTF_16LE).b }
+      {
+        "\x81".b.force_encoding(Encoding::Shift_JIS) => "n,v\n\x81,7\n".b.force_encoding(Encoding::Shift_JIS),
+        "\x8F".b.force_encoding(Encoding::EUC_JP) => "n,v\n\x8F,7\n".b.force_encoding(Encoding::EUC_JP),
+        # A lone surrogate.
+        "\x00\xD8".b.force_encoding(Encoding::UTF_16LE) =>
+          (utf16.call("n,v\n") + "\x00\xD8".b + utf16.call(",7\n")).force_encoding(Encoding::UTF_16LE),
+        # A character Windows-1252 leaves undefined.
+        "\x81".b.force_encoding(Encoding::Windows_1252) => "n,v\n\x81,7\n".b.force_encoding(Encoding::Windows_1252)
+      }.each do |cell, text|
+        batch = described_class.new(text, csv, plan).read
+        expect(batch.rows).to eq(1), text.inspect
+        expect(batch.get(0, 0)).to malformed, text.inspect
+        expect(batch.get(1, 0)).to eq(success(7)), text.inspect
+        expect(batch.raw(0, 0)).to eq("\x80".dup.force_encoding(Encoding::UTF_8)), text.inspect
+        expect(batch.get(0, 0)).to eq(HyperCast.text(cell)), text.inspect if judge
+      end
+
+      # Half a UTF-16 unit at the end: the rows ahead of it are whole, and it is a cell of its own.
+      odd = (utf16.call("n\n1\n") + "x".b).force_encoding(Encoding::UTF_16LE)
+      batch = described_class.new(odd, csv, [column.i32(0)]).read
+      expect(batch.verdicts(0)).to match([success(1), malformed])
+
+      # An encoding Ruby has no converter from (UTF-7) gives no byte a UTF-8 form, a line end
+      # included: one cell, malformed, and as a header the structural failure any header that is
+      # not UTF-8 is.
+      unread = "a\nb\n".b.force_encoding(Encoding::UTF_7)
+      headerless = HyperTabular::Dialect.new(separator: ",", has_header: false)
+      batch = described_class.new(unread, headerless, [column.text(0)]).read
+      expect(batch.verdicts(0)).to match([malformed])
+      expect(batch.raw(0, 0).b).to eq("\x80\x80\x80\x80".b)
+      expect { described_class.new(unread, csv, [column.text(0)]) }
+        .to raise_error(HyperTabular::TabularError) { |error| expect(error.kind).to eq(:encoding) }
+
+      # The String is the caller's still, as it was.
+      text = "n\n\x81\n".b.force_encoding(Encoding::Shift_JIS)
+      described_class.new(text, csv, [column.text(0)]).read
+      expect([text.b, text.encoding, text.frozen?]).to eq(["n\n\x81\n".b, Encoding::Shift_JIS, false])
+      expect(described_class.suggest_string(text, csv).plan.size).to eq(1)
+    end
+
     it "skips a byte-order mark, however the input is cut" do
       [1, 2, 3, 4, 64].each do |buffer_bytes|
         reader = described_class.new(StringIO.new("﻿a,b\n1,2\n"), csv, [column.i32(1)],
@@ -440,6 +571,74 @@ RSpec.describe HyperTabular do
       reader = described_class.new(StringIO.new("a,b\n1,#{long}\n2,short\n"), csv, [column.i32(0), column.text(1)],
                                    buffer_bytes: 16)
       expect(drain(reader)).to eq([[success(1), success(long)], [success(2), success("short")]])
+    end
+
+    # A record that outgrows the buffer grows where it is. A new buffer around it for every read of
+    # an IO that hands over a little would copy it once a read: the square of its length. What is
+    # counted is every byte of a String the core had not been attached to before, which is what a
+    # copy of the record is.
+    it "extends a long record where it is, rather than copying it for every read of its IO" do
+      { utf8: "x", latin1: "\xE9".b }.each do |encoding, unit|
+        long = unit * 200_000
+        text = "#{long},1\nshort,2\n".b
+        io = Object.new
+        io.define_singleton_method(:readpartial) { |_| text.empty? ? raise(EOFError) : text.slice!(0, 100) }
+        dialect = HyperTabular::Dialect.new(separator: ",", has_header: false, encoding: encoding)
+        reader = described_class.new(io, dialect, [column.text(0), column.i32(1)], buffer_bytes: 4096)
+        copied = 0
+        last = nil
+        allow(reader.instance_variable_get(:@kernel)).to receive(:attach).and_wrap_original do |original, buffer|
+          copied += buffer.bytesize unless buffer.equal?(last)
+          last = buffer
+          original.call(buffer)
+        end
+        decoded = long.dup.force_encoding(encoding == :utf8 ? Encoding::UTF_8 : Encoding::ISO_8859_1).encode("UTF-8")
+        expect(drain(reader)).to eq([[success(decoded), success(1)], [success("short"), success(2)]])
+        expect(copied).to be < decoded.bytesize
+      end
+    end
+
+    # An IO makes room for what it is asked for before it reads, so what it is asked for follows what
+    # it has been giving: at most twice its last read, and 64 KiB at least. Asking an IO that gives a
+    # kilobyte for as much again as a long record holds made room for the square of its length.
+    it "asks an IO that gives a little for a little" do
+      record = 4 << 20
+      [1024, 100_000].each do |step|
+        left = record
+        asked = []
+        io = Object.new
+        io.define_singleton_method(:readpartial) do |bytes|
+          asked << bytes
+          raise EOFError if left.zero?
+
+          given = [bytes, step, left].min
+          left -= given
+          "x" * given
+        end
+        reader = described_class.new(io, HyperTabular::Dialect.new(separator: ",", has_header: false), [column.text(0)])
+        batch = reader.read
+        expect([batch.rows, batch.raw(0, 0).bytesize, reader.read]).to eq([1, record, nil])
+        expect(asked.drop(1).max).to be <= [2 * step, 64 * 1024].max
+      end
+    end
+
+    # The decoder's output is cleared before it is written, so room for a whole long record, asked
+    # for at every read of an IO that hands over a little, clears the square of the record's length.
+    # A unit of one or two bytes is at most three of UTF-8, and a surrogate pair four.
+    it "asks the decoder for no more room than what it holds can fill" do
+      text = "#{"\xE9".b * 200_000},1\nshort,2\n".b
+      io = Object.new
+      io.define_singleton_method(:readpartial) { |_| text.empty? ? raise(EOFError) : text.slice!(0, 100) }
+      dialect = HyperTabular::Dialect.new(separator: ",", has_header: false, encoding: :latin1)
+      asked = []
+      allow(HyperTabular::Runtime).to receive(:transcode).and_wrap_original do |original, *args|
+        asked << [args[3], args[5]]
+        original.call(*args)
+      end
+      reader = described_class.new(io, dialect, [column.text(0), column.i32(1)], buffer_bytes: 4096)
+      expect(drain(reader)).to eq([[success("é" * 200_000), success(1)], [success("short"), success(2)]])
+      expect(asked.size).to be > 2000
+      expect(asked).to all(satisfy("be room for what is held") { |length, room| room <= (length * 3) + 4 })
     end
 
     it "grows the arena for escaped text larger than it, in a header and in a batch" do
@@ -611,6 +810,20 @@ RSpec.describe HyperTabular do
         expect { described_class.new("a\n", csv, plan, batch_rows: count) }.to raise_error(ArgumentError, /batch_rows/)
         expect { described_class.new(StringIO.new("a\n"), csv, plan, buffer_bytes: count) }
           .to raise_error(ArgumentError, /buffer_bytes/)
+      end
+    end
+
+    it "raises TypeError for an IO whose read answers something that is not a String, and reads no further" do
+      headerless = HyperTabular::Dialect.new(separator: ",", has_header: false)
+      { read: 5, readpartial: :chunk }.each do |method, answer|
+        io = Object.new
+        io.define_singleton_method(method) { |*| answer }
+        message = "the IO's #{method} must return a String; got #{answer.class}"
+        # With a header to read, the reader is never made.
+        expect { described_class.new(io, csv, [column.text(0)]) }.to raise_error(TypeError, message)
+        reader = described_class.new(io, headerless, [column.text(0)])
+        expect { reader.read }.to raise_error(TypeError, message)
+        expect { reader.read }.to raise_error(RuntimeError, /can't read on: TypeError \(#{Regexp.escape(message)}\)/)
       end
     end
 

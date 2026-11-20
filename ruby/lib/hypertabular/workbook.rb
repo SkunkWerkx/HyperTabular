@@ -170,9 +170,12 @@ module HyperTabular
     private
 
     # Everything +io+ has left, as a frozen binary String of the workbook's own; the IO
-    # closed after, if +close+ says so, whether or not the read went well.
+    # closed after, if +close+ says so, whether or not the read went well. TypeError for an IO
+    # whose read answers anything but a String or nil.
     def drain(io, close)
       bytes = io.read
+      raise TypeError, "the IO's read must return a String; got #{bytes.class}" unless bytes.nil? || bytes.is_a?(String)
+
       bytes = bytes.nil? ? String.new : bytes.dup
       bytes.force_encoding(Encoding::BINARY).freeze
     ensure

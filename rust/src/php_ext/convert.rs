@@ -190,6 +190,14 @@ fn checked_of(
     })
 }
 
+/// The refusal of a plan column whose ordinal no factory would have given it: below zero, or
+/// past the cap.
+pub(crate) fn ordinal_refused(index: usize, ordinal: impl std::fmt::Display) -> PhpException {
+    invalid_argument(format!(
+        "Plan column {index} reads source column {ordinal}; an ordinal must be below 2^20 (1,048,576)"
+    ))
+}
+
 pub(crate) fn column_of(
     index: usize,
     fields: &ColumnFields,
@@ -198,14 +206,25 @@ pub(crate) fn column_of(
     let format = num_format_of(&fields.format, &format!("Plan column {index}'s format"))?;
     // `Column` refuses an ordinal past the cap itself; one that got past it is refused here.
     if ordinal > MAX_ORDINAL {
-        return Err(invalid_argument(format!(
-            "Plan column {index} reads source column {ordinal}; an ordinal must be below 2^20 (1,048,576)"
-        )));
+        return Err(ordinal_refused(index, ordinal));
     }
+    // What a door declares beside itself is its factory's to set: a precision, a date order or
+    // an epoch for the four doors that take one, and nothing (0) for every other, which
+    // `Kernel::from_code` would not look at.
     let door = u32::try_from(fields.door)
         .ok()
         .zip(u32::try_from(fields.declared).ok())
-        .and_then(|(door, param)| Kernel::from_code(door, param))
+        .and_then(|(door, param)| Kernel::from_code(door, param).map(|door| (door, param)))
+        .and_then(|(door, param)| {
+            let declares = matches!(
+                door,
+                Kernel::Unix(_)
+                    | Kernel::DateOrdered(_)
+                    | Kernel::DateTime(_)
+                    | Kernel::ExcelSerial(_)
+            );
+            (declares || param == 0).then_some(door)
+        })
         .ok_or_else(|| {
             invalid_argument(format!(
                 "Plan column {index} names no door; build it with Column's factories"

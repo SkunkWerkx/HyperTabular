@@ -844,6 +844,7 @@ module.exports.Range = nativeBinding.Range
 module.exports.Row = nativeBinding.Row
 module.exports.Sheet = nativeBinding.Sheet
 module.exports.Workbook = nativeBinding.Workbook
+module.exports.__externalMemory = nativeBinding.__externalMemory
 module.exports.__makeBatchesWith = nativeBinding.__makeBatchesWith
 module.exports.batchColumn = nativeBinding.batchColumn
 module.exports.batchColumnChecked = nativeBinding.batchColumnChecked

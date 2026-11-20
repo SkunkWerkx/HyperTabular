@@ -269,7 +269,9 @@ reads as the entry as declared, the caller's own string, with `enumIndex()` nami
 a violation with its `keyword()` and a `null` `reason()`. `Constraints<Integer>` serves `i32`, `u8` and
 `u16` alike, so the factory checks the declaration's `door()` and refuses another door's with
 `IllegalArgumentException`. `get`, `text`, `string`, `chars` and `getChars` refuse a constrained column
-with `IllegalStateException`: they would read a violation as passed. `getChecked` reads an
+with `IllegalStateException`: they would read a violation as passed. `values` and `verdicts` read one
+whole, beside each other: a violation's value is there as cast, its verdict says `isViolation()`, and
+`getChecked` or `faults()` names the keyword. `getChecked` reads an
 unconstrained column too, where every cell that cast passes, unadjusted. HyperCast judges the
 declaration when it is built, and refuses only one its core cannot read.
 
@@ -287,7 +289,11 @@ rows, not once per cell.
   what went wrong in the batch, `text`/`string`/`chars` for text, and `raw` for the text a cell
   was cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
-  the next `read()`, and the same type for delimited text and for a sheet.
+  the next `read()`, and the same type for delimited text and for a sheet. A row it doesn't have,
+  or a column the plan doesn't have, is an `IndexOutOfBoundsException` (a column's is its subclass
+  `ArrayIndexOutOfBoundsException`). Once its reader or sheet is closed a batch has no rows: a cell,
+  a row, an iterator and `faults()` throw `IllegalStateException` ("The reader is closed.", or "The
+  sheet is closed."), and a whole column is an empty segment.
 - **Whole columns as the core wrote them.** `values(column)` is a read-only `MemorySegment`
   over any column but a text one: the primitive doors at their own width, read with the
   matching `ValueLayout`, and every other door in the layout HyperCast's
@@ -344,7 +350,11 @@ rows, not once per cell.
   reads a whole batch, which is not the instant a `critical` downcall is for. So the
   buffers are a confined `Arena`'s — freed by `close()`, with a view handed out earlier
   refused by the runtime rather than left dangling — and a reader belongs to the thread
-  that built it.
+  that built it. `close()` frees the memory at once. A reader, workbook or sheet dropped without it
+  is found by the collector, which doesn't find one while a batch of its own is still held, and its
+  memory is freed the next time its thread opens a reader, a workbook or a sheet: only that thread
+  can close a confined arena. A thread that ends first leaves what it dropped unclosed, so
+  `close()`, or try-with-resources, is still the way to give memory back.
 
 ## Where the bytes come from
 
@@ -393,7 +403,8 @@ takes its stream over. It lists its `sheets()` (name, and whether hidden), its `
 and its `dateSystem()`; `sheet(index or name, options, plan)` starts a read with its own
 buffers, so several sheets can be read at once, and `sheet(index or name, options)` reads
 the header row first and leaves the plan to `sheet.bind(plan)`. A missing index is an
-`IndexOutOfBoundsException`, a missing name a `NoSuchElementException`.
+`IndexOutOfBoundsException`, a missing name a `NoSuchElementException`. The list, the format and the
+date system still answer once the workbook is closed; starting a sheet doesn't.
 
 There is no asynchronous read. A reader is confined to the thread that built it, and in
 Java a virtual thread is the idiom for a read that blocks: run the loop on one, and a

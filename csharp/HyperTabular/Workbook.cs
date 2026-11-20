@@ -178,7 +178,7 @@ public sealed unsafe class Workbook : IDisposable
 	internal const string ContractViolation =
 		"libhypertabular reported a contract violation — a binding bug, please report it.";
 
-	MemoryHandle _pin;
+	readonly Pin _pin;
 	readonly byte* _container;
 	readonly nuint _length;
 	/// <summary>The state as opening left it: the template every sheet's own state is copied from.</summary>
@@ -189,13 +189,13 @@ public sealed unsafe class Workbook : IDisposable
 	readonly byte[] _kinds;
 	bool _disposed;
 
-	/// <summary>Opens the workbook in memory the caller holds. Pinned for the workbook's lifetime; nothing is copied.</summary>
+	/// <summary>Opens the workbook in memory the caller holds. Pinned until the workbook is disposed, or collected undisposed; nothing is copied.</summary>
 	/// <param name="container">The workbook's bytes.</param>
 	/// <exception cref="TabularException">The bytes are not a workbook this reader can read.</exception>
 	public Workbook(ReadOnlyMemory<byte> container)
 	{
-		_pin = container.Pin();
-		_container = (byte*)_pin.Pointer;
+		_pin = new Pin(container);
+		_container = _pin.Pointer;
 		_length = (nuint)container.Length;
 		try
 		{
@@ -239,7 +239,7 @@ public sealed unsafe class Workbook : IDisposable
 		}
 		catch
 		{
-			_pin.Dispose();
+			_pin.Release();
 			throw;
 		}
 	}
@@ -446,8 +446,7 @@ public sealed unsafe class Workbook : IDisposable
 	public Sheet Sheet(int index, SheetOptions options, ReadOnlySpan<Column> plan)
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)_sheets.Length, nameof(index));
-		return new Sheet(this, _sheets[index], options, plan, bound: true);
+		return new Sheet(this, Listed(index), options, plan, bound: true);
 	}
 
 	/// <summary>Starts a read of the first sheet named <paramref name="name"/> through <paramref name="plan"/>.</summary>
@@ -474,9 +473,14 @@ public sealed unsafe class Workbook : IDisposable
 	public Sheet Sheet(int index, SheetOptions options)
 	{
 		ObjectDisposedException.ThrowIf(_disposed, this);
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)_sheets.Length, nameof(index));
-		return new Sheet(this, _sheets[index], options, default, bound: false);
+		return new Sheet(this, Listed(index), options, default, bound: false);
 	}
+
+	/// <summary>The sheet at <paramref name="index"/> of <see cref="Sheets"/>, or the caller's own index refused.</summary>
+	SheetInfo Listed(int index) =>
+		(uint)index < (uint)_sheets.Length
+			? _sheets[index]
+			: throw new ArgumentOutOfRangeException(nameof(index), index, $"The workbook has no sheet at index {index}; it has {_sheets.Length}.");
 
 	/// <summary>
 	/// Starts a read of the first sheet named <paramref name="name"/> and reads its header,
@@ -518,7 +522,7 @@ public sealed unsafe class Workbook : IDisposable
 		if (_disposed)
 			return;
 		_disposed = true;
-		_pin.Dispose();
+		_pin.Release();
 	}
 
 	/// <summary>The workbook calls that take the shared buffers and may ask to have one grown.</summary>

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"testing/iotest"
 
@@ -162,6 +163,52 @@ func TestCorpusWorkbookWithBuffersThatStartWithNoRoom(t *testing.T) {
 		if times <= 1000 {
 			t.Errorf("grown %v times (window, arena, cells)", grown)
 		}
+	}
+}
+
+// Every workbook has an instance of its own, as every delimited reader does: workbooks opened
+// and read on separate goroutines share nothing, their buffers' growth included (the race
+// detector runs this too, and is what fails it).
+func TestWorkbooksOnGoroutinesShareNothing(t *testing.T) {
+	directory := filepath.Dir(repositoryFile(t, "corpus", "workbook.json"))
+	var wg sync.WaitGroup
+	errs := make(chan error, 12)
+	for worker := range 12 {
+		name := []string{"basic.xlsx", "basic.ods", "dates.numbers"}[worker%3]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			book, err := OpenWorkbook(filepath.Join(directory, "workbook", name))
+			if err != nil {
+				errs <- fmt.Errorf("%s: %w", name, err)
+				return
+			}
+			sheet, err := book.Sheet(0, DefaultSheetOptions, []Column{Text(0)}, BatchRows(1+worker))
+			if err != nil {
+				errs <- fmt.Errorf("%s: %w", name, err)
+				return
+			}
+			rows := 0
+			for {
+				b, err := sheet.Read()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					errs <- fmt.Errorf("%s: %w", name, err)
+					return
+				}
+				rows += b.Rows()
+			}
+			if rows == 0 {
+				errs <- fmt.Errorf("%s: no rows", name)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

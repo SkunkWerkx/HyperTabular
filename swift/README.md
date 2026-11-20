@@ -328,23 +328,26 @@ once per few thousand rows, not once per cell.
 - **A bad value is a verdict; a broken file is an error.** A cell that does not cast is a
   fault in its column and the read goes on. A record of the wrong width, input that ends
   inside a quoted cell, a workbook whose container or parts cannot be read, throws
-  `TabularError`, after every intact row before it.
+  `TabularError`, after every intact row before it. A file that can't be opened or read throws
+  Foundation's own error (a missing one is a `CocoaError`: `.fileNoSuchFile` from a delimited
+  reader, `.fileReadNoSuchFile` from a workbook), as a source's own error passes through.
 
 One very long record costs what it costs in Rust, but for memory. A release build on an Apple M6 Mac
-mini (`Mac18,5`) on 2026-11-07, one run of each, reading one record from a source:
+mini (`Mac18,5`), one run of each, reading one record from a source; the 1 GiB rows are from
+2026-11-07 and the rest from 2026-11-15:
 
 | One record | Swift | Rust |
 | --- | ---: | ---: |
 | 1 GiB, each read filling the room: time | 0.23 s | 0.19 s |
 | 1 GiB, each read filling the room: peak resident | 2.15 GB | 1.08 GB |
-| 64 MiB, 64 KiB a read | 1.36 s | 1.43 s |
-| 128 MiB, 64 KiB a read | 5.42 s | 5.77 s |
-| 64 MiB of Latin-1 | 0.37 s | 0.38 s |
-| 128 MiB of Latin-1 | 1.42 s | 1.49 s |
+| 64 MiB, 64 KiB a read | 0.014 s | 0.009 s |
+| 128 MiB, 64 KiB a read | 0.027 s | 0.017 s |
+| 64 MiB of Latin-1, 64 KiB a read | 0.062 s | 0.029 s |
+| 128 MiB of Latin-1, 64 KiB a read | 0.123 s | 0.057 s |
 
-Short reads and a declared encoding are quadratic in the record's length in both, since a fill looks
-again from the record's start. Swift's peak is twice Rust's because the input doubles by copying, with
-both copies alive for the copy.
+Twice the record is twice the time, short reads and a declared encoding included: the core looks at
+an unfinished record once, however many reads it arrives in. Swift's peak is twice Rust's because
+the input doubles by copying, with both copies alive for the copy.
 
 `Tabular.isAvailable` and `Tabular.nativeVersion()` report the linked core.
 

@@ -1,8 +1,8 @@
 // JavaScript can run in the middle of a reader's call: a getter or a Proxy trap in an argument
-// it reads (a plan's element, an option), or a setter a caller put on `Object.prototype` that
-// the answer it builds assigns through. A call back into the same reader or sheet from there is
-// refused with the `busy` error: a method answers it, a getter, with no outcome to answer in,
+// it reads (a plan's element, an option). A call back into the same reader or sheet from there
+// is refused with the `busy` error: a method answers it, a getter, with no outcome to answer in,
 // throws it. The outer call goes on unharmed. Nothing here reaches state the outer call is using.
+// The answer a call builds is no such route: its properties are defined, never assigned.
 const assert: typeof import('node:assert/strict') = require('node:assert/strict')
 const { readFileSync }: typeof import('node:fs') = require('node:fs')
 const path: typeof import('node:path') = require('node:path')
@@ -15,9 +15,9 @@ type Outcome<T> = import('../index.js').Outcome<T>
 // Under the WASI fallback on Windows no path reaches the module (README): there a path's open
 // is the I/O error it is, and the file's own bytes stand in for it. What is judged before the
 // file is touched is still the path's answer.
-const pathsUnreachable =
-  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native' &&
-  process.platform === 'win32'
+const wasi =
+  (require('../binding.js') as { __napiBindingTarget: string }).__napiBindingTarget !== 'native'
+const pathsUnreachable = wasi && process.platform === 'win32'
 function byPath<T>(
   opened: Outcome<T>,
   file: string,
@@ -152,32 +152,156 @@ test('a call back into a sheet from a plan it is binding is refused, and the bin
   }
 })
 
-test('a call back into a reader from what its read assigns through is refused, and the read goes on', () => {
-  // A structural failure's error carries optional fields, which JavaScript assigns: a setter on
-  // Object.prototype runs mid-read, inside the reader's call.
-  const reader = value(DelimitedReader.fromBytes('n\n1\n"2\n', null, [Column.i32(0)]))
-  const answers: Outcome<unknown>[] = []
-  Object.defineProperty(Object.prototype, 'failure', {
+// An answer is built of properties and elements that are defined, never assigned: a setter a
+// caller put on `Object.prototype`, under a field's name or an array's index, does not run, so it
+// can neither call back in, nor throw out of a call, nor keep a field off the answer.
+test('no answer is assigned through a setter on Object.prototype', () => {
+  const hypercast = require('@skunkwerkx/hypercast') as typeof import('@skunkwerkx/hypercast')
+  const most = hypercast.Constraints.declare({ door: hypercast.Door.I32, maximum: '5' })
+  assert.ok(most.ok)
+  const checked = Column.checked(0, most.value)
+  const book = value(openBook(path.join(WORKBOOKS, 'basic.xlsx')))
+  const absent = path.join(WORKBOOKS, 'no-such-file.csv')
+  const batch = (text: string, plan: ColumnT[]) => {
+    const read = value(value(DelimitedReader.fromBytes(text, null, plan)).read())
+    assert.ok(read !== null)
+    return read
+  }
+  const calls: Record<string, () => unknown> = {
+    'an io error': () => DelimitedReader.open(absent),
+    'a structural failure': () =>
+      value(DelimitedReader.fromBytes('n\n"2\n', null, [Column.i32(0)])).read(),
+    'a plan error': () => value(DelimitedReader.fromBytes(TEXT)).bind([Column.i32(-1)]),
+    'an ambiguous column': () =>
+      value(DelimitedReader.fromBytes('a,a\n1,2\n')).header?.require('a'),
+    'a range error': () => api.Range.parse('nonsense'),
+    'a header': () => value(DelimitedReader.fromBytes('a,b,c\n1,2,3\n')).header?.names,
+    'a read, its doors and its rows': () => {
+      const read = batch('a,b\n1,x\n2,y\n', [Column.i32(0), Column.text(1)])
+      return [read.doors, read.rows, [...read].map((row) => row.get(1))]
+    },
+    'a fault': () => batch('n\nx\n', [Column.i32(0)]).get(0, 0),
+    'a date': () => batch('d\n2026-01-02\n', [Column.date(0)]).get(0, 0),
+    'a column': () => batch('n\n1\nx\n3\n', [Column.i32(0)]).column(0),
+    'a checked column': () => batch('n\n1\n9\nx\n', [checked]).columnChecked(0),
+    'a violation': () => batch('n\n9\n', [checked]).getChecked(0, 0),
+    'the faults': () => batch('n\nx\n9\n', [checked]).faults(),
+    'a suggestion': () => {
+      const found = value(DelimitedReader.suggestBytes('a,b\n"1,234",01/02/2026\n"5,678",x\n'))
+      return [found.report, found.truncated, found.plan.map((column) => column.door)]
+    },
+    'the sheets': () => book.sheets,
+    'a sheet read': () => {
+      const sheet = value(book.sheet(0, null, [Column.text(0), Column.text(1)]))
+      const read = value(sheet.read())
+      assert.ok(read !== null)
+      return [read.doors, read.column(0), read.faults()]
+    },
+  }
+  const keys = [
+    ...['ok', 'value', 'error', 'kind', 'message', 'failure', 'record', 'line', 'byte'],
+    ...['expected', 'found', 'column', 'first', 'second', 'fault', 'reason', 'offset', 'length'],
+    ...['violation', 'keyword', 'adjusted', 'enumIndex', 'name', 'hidden', 'row', 'planColumn'],
+    ...['sourceColumn', 'origin', 'detail', 'plan', 'report', 'truncated', 'ordinal', 'door'],
+    ...['declared', 'format', 'candidates', 'status', 'matched', 'sampled', 'order', 'packed'],
+    ...['year', 'month', 'day', '0', '1', '2'],
+  ]
+  const proto = Object.prototype as Record<string, unknown>
+  for (const [name, call] of Object.entries(calls)) {
+    const plain = call()
+    for (const key of keys) {
+      // Counted, not listed: `push` assigns, and would run the setter under an index itself.
+      let ran = 0
+      let answer: unknown
+      let thrown: unknown
+      Object.defineProperty(proto, key, {
+        configurable: true,
+        get: () => undefined,
+        set() {
+          ran += 1
+          throw new Error(`the setter under ${key}`)
+        },
+      })
+      try {
+        answer = call()
+      } catch (error) {
+        thrown = error
+      } finally {
+        delete proto[key]
+      }
+      assert.equal(thrown, undefined, `${name}, a setter under ${key}: ${thrown}`)
+      assert.equal(ran, 0, `${name}: the setter under ${key} ran`)
+      assert.deepEqual(answer, plain, `${name}, a setter under ${key}`)
+    }
+  }
+})
+
+// An array is made by `Array.of`, which defines its elements, up to what one call takes, and an
+// element at a time past that or where `Array.of` is no longer the engine's.
+test('a whole column is whole past one call of Array.of, and without it', () => {
+  const ROWS = 9000
+  let text = 'n\n'
+  for (let row = 0; row < ROWS; row++) text += `${row}\n`
+  const expected = Array.from({ length: ROWS }, (_, row) => ({ ok: true, value: row }))
+  const column = () => {
+    const reader = value(
+      DelimitedReader.fromBytes(text, null, [Column.i32(0)], { batchRows: ROWS }),
+    )
+    const read = value(reader.read())
+    assert.ok(read !== null)
+    return [read.column(0), read.columnChecked(0).length, read.doors]
+  }
+  assert.deepEqual(column(), [expected, ROWS, ['i32']])
+  const of = Array.of
+  for (const stand of [
+    undefined,
+    () => 'not an array',
+    () => {
+      throw new Error('of')
+    },
+  ]) {
+    let made: unknown
+    try {
+      ;(Array as { of: unknown }).of = stand
+      made = column()
+    } finally {
+      Array.of = of
+    }
+    assert.deepEqual(made, [expected, ROWS, ['i32']])
+  }
+})
+
+// The WebAssembly fallback's runtime assigns the arguments of a call it makes out of the module
+// into an array of its own, and a reference it is done with into a list: so a read hands its
+// batch over without a call out, and a `Uint8Array` is read without a reference
+// (`prototype_setters.test.ts` has every call, under 300 indices).
+test('a setter under an index neither runs nor stops a read, the fallback included', () => {
+  const reader = value(DelimitedReader.fromBytes(TEXT, null, [Column.i32(0)]))
+  const proto = Object.prototype as Record<string, unknown>
+  let ran = 0
+  Object.defineProperty(proto, '0', {
     configurable: true,
+    get: () => undefined,
     set() {
-      answers.push(reader.read(), reader.close(), reader.bind([Column.i32(0)]))
+      ran += 1
+      throw new Error('the setter under 0')
     },
   })
-  let first: Outcome<unknown>
-  let failed: Outcome<unknown>
+  let read: Outcome<import('../index.js').Batch | null>
+  let column: unknown
   try {
-    first = reader.read()
-    failed = reader.read()
+    read = reader.read()
+    column = read.ok ? read.value?.column(0) : undefined
   } finally {
-    delete (Object.prototype as { failure?: unknown }).failure
+    delete proto['0']
   }
-  assert.ok(first.ok)
-  assert.ok(!failed.ok && failed.error.kind === 'structure')
-  assert.ok(answers.length >= 3)
-  for (const answer of answers) busy(answer, 'reader')
-  // The reader is where the read left it: failed, and open.
-  const again = reader.read()
-  assert.ok(!again.ok && again.error.kind === 'structure')
+  assert.equal(ran, 0)
+  assert.ok(read.ok, JSON.stringify(read))
+  assert.deepEqual(column, [
+    { ok: true, value: 1 },
+    { ok: true, value: 3 },
+    { ok: true, value: 5 },
+  ])
   assert.deepEqual(reader.close(), { ok: true, value: null })
 })
 

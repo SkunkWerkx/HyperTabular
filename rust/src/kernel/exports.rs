@@ -7,8 +7,9 @@
 //! export list is exactly the functions declared here.
 //!
 //! Return codes are [`crate::kernel::abi`]'s. Every pointer is the caller's memory for the
-//! length of the call and no longer; a null where the contract needs memory is
-//! [`ERR_CONTRACT`], and a length of `0` never dereferences its pointer.
+//! length of the call and no longer; a null state block, result or options is
+//! [`ERR_CONTRACT`], a null buffer is read as an empty one whatever length is passed beside it,
+//! unless the export's own comment refuses it, and a length of `0` never dereferences its pointer.
 
 use crate::kernel::abi::{
     Buffers, BuffersWith, ColumnBuffer, ColumnBufferWith, ColumnSpec, ColumnSpecWith, ERR_CONTRACT,
@@ -194,7 +195,9 @@ export! {
 }
 
 export! {
-    /// Reads the next record as a header. See [`fill::header`].
+    /// Reads the next record as a header. See [`fill::header`]. A record of more than 1,048,576
+    /// cells gives that many names, its first, one for every column a plan can read, and still
+    /// holds the records below it to its own width.
     ///
     /// # Safety
     /// `state` was initialized by `hypertabular_delimited_init` or
@@ -651,7 +654,8 @@ export! {
 export! {
     /// Positions the state on one sheet: the XLSX part named by the `part_len` bytes at
     /// `part`, or the ODS or Numbers table at `index` — both as `hypertabular_workbook_sheets`
-    /// listed them. See [`rows::sheet`].
+    /// listed them. See [`rows::sheet`]. The caller holds `index` to that listing: an ODS
+    /// index past its last table is not refused, and reads as a sheet with no rows.
     ///
     /// # Safety
     /// `state` was opened by `hypertabular_workbook_open` over these same `container`
@@ -718,7 +722,8 @@ export! {
     /// [`rows::fill`]; a format's flags are read as 1.0 read them, ignoring every bit from 8 up, so
     /// every format
     /// reads Western.
-    /// Uses every buffer.
+    /// Uses every buffer. Broken data is [`ERR_STRUCTURE`] with the rows read before it in
+    /// `out.rows`, in the same call: read `out.rows` whatever the code.
     ///
     /// # Safety
     /// `state` was positioned by `hypertabular_workbook_sheet` or
@@ -805,6 +810,8 @@ export! {
     /// [`hypertabular_workbook_fill`] with the column options, tokens, notes and row widths the
     /// size-tagged shapes hold. See [`rows::fill_with`]. Every `size` is read first and must be
     /// the one this core knows; [`ERR_CONTRACT`] writes nothing, `out` and `state` included.
+    /// Broken data is [`ERR_STRUCTURE`] with the rows read before it in `out.rows`, in the same
+    /// call: read `out.rows` whatever the code.
     ///
     /// # Safety
     /// `state` was positioned by `hypertabular_workbook_sheet` or

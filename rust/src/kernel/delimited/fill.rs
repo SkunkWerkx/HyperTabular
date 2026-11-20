@@ -39,9 +39,10 @@ use crate::kernel::abi::{
 };
 use crate::kernel::checked::{Checks, resolved_constraints, text_checked};
 use crate::kernel::delimited::engine::{self, Kind};
-use crate::kernel::delimited::scan::{Flow, Scanner, Sink, Stop};
+use crate::kernel::delimited::scan::{Flow, Resume, Scanner, Sink, Stop};
 use crate::kernel::delimited::unescape::unescape_into;
 use crate::kernel::door::Door;
+use crate::kernel::size::HEADER_NAMES;
 use hypercast::detailed::{self, Rejection};
 use hypercast::{
     Checked, CivilDateTime, Date, DateOptions, Decimal, Duration, Fault, MonthNames, NumFormat,
@@ -110,7 +111,11 @@ pub struct State {
     short_rows: u8,
     /// Nonzero when a long record is cut.
     long_rows: u8,
-    tail: [u8; 6],
+    /// How far the search for the end of the unfinished record at the front of the next input
+    /// got: its offset in that record, little-endian, then a byte of flags, what the scanner
+    /// knew there; all zero when there is none. A hint: it says where to look, and never what
+    /// a row holds.
+    pending: [u8; 6],
 }
 
 impl RawDialect {
@@ -150,8 +155,74 @@ impl State {
         header_row: 0,
         short_rows: 0,
         long_rows: 0,
-        tail: [0; 6],
+        pending: [0; 6],
     };
+
+    /// `pending[4]`: a search is kept; a quoted cell is open there; the quote parity carried
+    /// there; a cell starts there.
+    const PENDING: u8 = 1;
+    const PENDING_OPEN: u8 = 2;
+    const PENDING_PARITY: u8 = 4;
+    const PENDING_CELL: u8 = 8;
+
+    /// Where the search for the end of the unfinished record at the front of the input stands,
+    /// if one is kept. Only a block from [`State::init_with`] has room to keep one.
+    fn pending(&self) -> Option<Resume> {
+        let [a, b, c, d, flags, _] = self.pending;
+        (self.extended != 0 && flags & State::PENDING != 0).then(|| Resume {
+            at: u32::from_le_bytes([a, b, c, d]) as usize,
+            open: flags & State::PENDING_OPEN != 0,
+            parity: flags & State::PENDING_PARITY != 0,
+            cell: flags & State::PENDING_CELL != 0,
+        })
+    }
+
+    /// Keeps `resume` for the next call, or forgets what was kept.
+    fn keep(&mut self, resume: Option<Resume>) {
+        self.pending = [0; 6];
+        let Some(resume) = resume.filter(|_| self.extended != 0) else {
+            return;
+        };
+        let Ok(at) = u32::try_from(resume.at) else {
+            return;
+        };
+        let [a, b, c, d] = at.to_le_bytes();
+        let flags = State::PENDING
+            | if resume.open { State::PENDING_OPEN } else { 0 }
+            | if resume.parity {
+                State::PENDING_PARITY
+            } else {
+                0
+            }
+            | if resume.cell { State::PENDING_CELL } else { 0 };
+        self.pending = [a, b, c, d, flags, 0];
+    }
+
+    /// True when the record at the front of `input` was unfinished when the last call saw it and
+    /// the bytes that have come since don't end it: the call has nothing to read, and what it
+    /// would have scanned to find that out is left alone. The search goes on from where it
+    /// stopped, so a record fed a little at a time is looked at once, not once a call.
+    fn still_unfinished(&mut self, scanner: &Scanner, input: &[u8], last: bool) -> bool {
+        let Some(from) = self.pending() else {
+            return false;
+        };
+        let found = if last {
+            None
+        } else {
+            scanner.row_end(input, from)
+        };
+        self.keep(found);
+        found.is_some()
+    }
+
+    /// Where the next call's search for the end of the record a scan left unfinished starts:
+    /// the record is `input` from `stop.next`, which is where the next input begins.
+    fn unfinished(&self, scanner: &Scanner, input: &[u8], stop: &Stop) -> Option<Resume> {
+        if !stop.partial || self.extended == 0 {
+            return None;
+        }
+        scanner.row_end(input.get(stop.next..)?, Resume::START)
+    }
 }
 
 // The two layouts pinned as crate::kernel::abi pins the rest, here because the state's
@@ -183,7 +254,7 @@ const _: () = {
     assert!(offset_of!(State, header_row) == 68);
     assert!(offset_of!(State, short_rows) == 72);
     assert!(offset_of!(State, long_rows) == 73);
-    assert!(offset_of!(State, tail) == 74);
+    assert!(offset_of!(State, pending) == 74);
 };
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -1150,6 +1221,8 @@ struct Walked<'c> {
     header_row: u32,
     next: usize,
     line: u32,
+    /// What the state keeps of the record the scan left unfinished, once the rows are delivered.
+    pending: Option<Resume>,
 }
 
 /// What [`gather`] scans, and the room it has for the rows.
@@ -1251,6 +1324,9 @@ fn walk<'c, P: Planned>(
         out.needed = per_row as u64;
         return Err(ERR_CELLS);
     }
+    if state.still_unfinished(scanner, input, last) {
+        return Err(OK);
+    }
     let Some(first) = state.first_byte(input, last) else {
         return Err(OK);
     };
@@ -1308,6 +1384,7 @@ fn walk<'c, P: Planned>(
         }
         state.skip = 0;
         state.header_row = header_row;
+        state.keep(state.unfinished(scanner, input, &stop));
         state.advance(stop.next, stop.line, records);
         out.consumed = stop.next as u64;
         if failure.code != 0 {
@@ -1335,6 +1412,7 @@ fn walk<'c, P: Planned>(
         header_row,
         next: stop.next,
         line: stop.line,
+        pending: state.unfinished(scanner, input, &stop),
     })
 }
 
@@ -1487,6 +1565,7 @@ impl State {
         self.expected = walked.expected;
         self.skip = 0;
         self.header_row = walked.header_row;
+        self.keep(walked.pending);
         self.advance(walked.next, walked.line, walked.records);
         out.rows = walked.rows as u64;
         out.consumed = walked.next as u64;
@@ -1991,9 +2070,10 @@ impl Sink for Names<'_> {
 /// Reads the next record as a header: each cell's text located in `names`, as a `Text`
 /// value is — a span into the input, flagged when it is in the arena instead. Fixes the
 /// width every later record must have. `out.rows` is the number of names; `0` with
-/// nothing left over and `last` set means the input had no record at all.
+/// nothing left over and `last` set means the input had no record at all. A record of more than
+/// [`HEADER_NAMES`] cells gives that many names, its first, and fixes the width at its own.
 ///
-/// Returns [`OK`]; [`ERR_CELLS`] when the record has more cells than `names` holds
+/// Returns [`OK`]; [`ERR_CELLS`] when the record has more names to give than `names` holds
 /// (`out.needed` says how many) and [`ERR_ARENA`] when its escaped names need more arena
 /// than there is — nothing consumed either way; [`ERR_STRUCTURE`] or [`ERR_CONTRACT`] as
 /// [`fill`], and [`ERR_STRUCTURE`] with [`Failure::ENCODING`] for a name that isn't valid
@@ -2017,6 +2097,9 @@ pub fn header(
     let Some(scanner) = state.scanner() else {
         return ERR_CONTRACT;
     };
+    if state.still_unfinished(&scanner, input, last) {
+        return OK;
+    }
     let Some(first) = state.first_byte(input, last) else {
         return OK;
     };
@@ -2054,6 +2137,7 @@ pub fn header(
     if !taken {
         state.skip = 0;
         state.header_row = header_row;
+        state.keep(state.unfinished(&scanner, input, &stop));
         state.advance(stop.next, stop.line, records);
         out.consumed = stop.next as u64;
         if stop.unclosed {
@@ -2069,6 +2153,9 @@ pub fn header(
         }
         return OK;
     }
+    // The record's own width, which every later record is held to, and the names it gives.
+    let width = seen;
+    let seen = width.min(HEADER_NAMES as usize);
     if seen > names.len() {
         out.needed = seen as u64;
         return ERR_CELLS;
@@ -2083,14 +2170,14 @@ pub fn header(
         out.needed = need as u64;
         return ERR_ARENA;
     }
-    if state.expected != 0 && state.expected != seen as u32 {
+    if state.expected != 0 && state.expected != width as u32 {
         let failure = Failure {
             code: Failure::COLUMN_COUNT,
             line,
             record: records - 1,
             byte: state.offset + start as u64,
             expected: state.expected,
-            found: seen as u32,
+            found: width as u32,
         };
         return state.fail(failure, out);
     }
@@ -2112,9 +2199,10 @@ pub fn header(
         }
         *name = span;
     }
-    state.expected = seen as u32;
+    state.expected = width as u32;
     state.skip = 0;
     state.header_row = header_row;
+    state.keep(state.unfinished(&scanner, input, &stop));
     state.advance(stop.next, stop.line, records);
     out.rows = seen as u64;
     out.consumed = stop.next as u64;

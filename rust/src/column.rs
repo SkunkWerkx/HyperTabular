@@ -444,6 +444,11 @@ pub(crate) fn cell_rows(per_row: usize, batch_rows: usize) -> usize {
     size::cell_rows(per_row as u64, batch_rows as u64) as usize
 }
 
+/// The bytes a buffer has allocated, used or not: what a reader's `held_bytes` counts.
+pub(crate) fn capacity_bytes<T>(buffer: &Vec<T>) -> usize {
+    buffer.capacity().saturating_mul(size_of::<T>())
+}
+
 /// A type whose all-zero bytes are a value of it, so that it can be had from `alloc_zeroed`.
 ///
 /// # Safety

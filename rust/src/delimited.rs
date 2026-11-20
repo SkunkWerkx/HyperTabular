@@ -16,7 +16,7 @@
 //! is the same reader, its text being the decoded text.
 
 use crate::batch::{Batch, Columns, Home, Row};
-use crate::column::{self, zeroed};
+use crate::column::{self, capacity_bytes, zeroed};
 use crate::error::{Failure, FailureKind};
 use crate::kernel::abi::{
     ColumnSpecWith, ERR_ARENA, ERR_CELLS, ERR_STRUCTURE, Filled, OK, RawBatchCheck,
@@ -475,6 +475,7 @@ impl DelimitedOptions {
             reader: Box::new(reader),
             eof: false,
             ceiling: DelimitedReader::MAX_ROW_BYTES,
+            room: usize::MAX,
             decoder: self.decoder(dialect, sizes)?,
         })
     }
@@ -583,6 +584,10 @@ impl Decoder {
     }
 }
 
+/// The least room a stream's read is offered once the source has shown what it gives: a pipe's
+/// worth, and more than the longest character a decoder writes.
+const ROOM_FLOOR: usize = 64 * 1024;
+
 /// Where the bytes come from.
 enum Source<'a> {
     /// The whole input, in memory, handed to the core at most `window` bytes a call.
@@ -601,6 +606,11 @@ enum Source<'a> {
         reader: Box<dyn Read + Send + 'a>,
         eof: bool,
         ceiling: usize,
+        /// The most of the buffer the next read is offered: twice what the last one gave, and
+        /// [`ROOM_FLOOR`] at least. What's offered is cleared first, so offering all of a
+        /// buffer that has grown to a long record's size, to a source that gives a little at a
+        /// time, costs the square of the record's length in clearing alone.
+        room: usize,
         /// With a declared encoding, what the buffer's text is decoded by.
         decoder: Option<Decoder>,
     },
@@ -669,6 +679,33 @@ impl<'a> Source<'a> {
         }
     }
 
+    /// The bytes of the buffers a source owns: none for a slice, which is read in place, and
+    /// for a stream its buffer, its decoder's and the box the stream sits in (whatever the
+    /// stream holds for itself is its own to count).
+    fn held_bytes(&self) -> usize {
+        let decoded = |decoder: &Option<Decoder>| {
+            decoder
+                .as_ref()
+                .map_or(0, |decoder| capacity_bytes(&decoder.raw))
+        };
+        match self {
+            Source::Slice { .. } => 0,
+            Source::Stream {
+                buf,
+                reader,
+                decoder,
+                ..
+            } => capacity_bytes(buf) + size_of_val(&**reader) + decoded(decoder),
+            #[cfg(feature = "async")]
+            Source::Async {
+                buf,
+                reader,
+                decoder,
+                ..
+            } => capacity_bytes(buf) + size_of_val(&*reader.as_ref()) + decoded(decoder),
+        }
+    }
+
     /// Whether the source can only be read by awaiting it.
     fn is_async(&self) -> bool {
         #[cfg(feature = "async")]
@@ -691,6 +728,7 @@ impl<'a> Source<'a> {
             reader,
             eof,
             ceiling,
+            room,
             decoder,
         } = self
         else {
@@ -719,7 +757,7 @@ impl<'a> Source<'a> {
             *limit = limit.saturating_mul(2).min(*ceiling);
         }
         let filled = buf.len();
-        buf.resize(*limit, 0);
+        buf.resize(filled + (*limit - filled).min(*room), 0);
         if let Some(decoder) = decoder {
             loop {
                 let written = match decoder.step(&mut buf[filled..]) {
@@ -752,6 +790,7 @@ impl<'a> Source<'a> {
                     }
                 };
                 buf.truncate(filled + written);
+                *room = written.saturating_mul(2).max(ROOM_FLOOR);
                 return Ok(());
             }
         }
@@ -764,6 +803,7 @@ impl<'a> Source<'a> {
                 }
                 Ok(n) => {
                     buf.truncate(filled + n);
+                    *room = n.saturating_mul(2).max(ROOM_FLOOR);
                     break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -1236,6 +1276,16 @@ impl<'a> DelimitedReader<'a> {
     /// Whether a plan has been bound: always, for a reader opened with one.
     pub fn is_bound(&self) -> bool {
         self.columns.is_some()
+    }
+
+    /// The bytes of every buffer the reader owns, for a binding that settles with a collector.
+    #[doc(hidden)]
+    pub fn held_bytes(&self) -> usize {
+        self.source.held_bytes()
+            + capacity_bytes(&self.cells)
+            + capacity_bytes(&self.arena)
+            + self.columns.as_ref().map_or(0, Columns::held_bytes)
+            + self.header.as_ref().map_or(0, Header::held_bytes)
     }
 
     /// The dialect the reader was built with.

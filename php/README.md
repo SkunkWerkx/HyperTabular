@@ -330,6 +330,14 @@ into PHP values the first time it is asked for.
   inside a quoted cell, a workbook whose container or parts cannot be read, throws
   `HyperTabular\TabularException`, after every intact row before it — and the same exception
   object again from every read after.
+- **A path that cannot be opened is a `\RuntimeException`**, from `DelimitedReader::open()`,
+  `DelimitedReader::suggest()` and `Workbook::open()` alike: `hypertabular: cannot open <path>:`
+  and what PHP said of it, for a file that is missing or unreadable, or one `open_basedir` or a
+  stream wrapper refuses, and `it is a directory` for a directory, which is refused before
+  anything is read. The path is opened by PHP's own `fopen()` and `file_get_contents()`, so two
+  of the engine's exceptions pass through as they are: a `\ValueError` for a path holding a NUL
+  byte, and whatever a stream wrapper's own PHP throws. A reader given a stream the caller then
+  closes gets `fread()`'s `\TypeError` from the next read that needs the stream.
 
 ## Install
 
