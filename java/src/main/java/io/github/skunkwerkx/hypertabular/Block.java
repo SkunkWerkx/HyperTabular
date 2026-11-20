@@ -46,7 +46,10 @@ final class Block {
         readOnly = larger.asReadOnly();
     }
 
+    /** Frees the memory. Harmless twice: a reader's own close and the collector's net both end here. */
     void close() {
-        arena.close();
+        if (arena.scope().isAlive()) {
+            arena.close();
+        }
     }
 }

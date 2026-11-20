@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -65,7 +66,10 @@ public readonly record struct Problem(
 /// integers is the array the core wrote, and a text cell is the input itself (or the
 /// workbook's shared strings) wherever its bytes could stay where they were. It is valid
 /// until the reader is asked for the next batch — the reader hands out the same instance
-/// each time — and every span it gives out is valid as long. Not thread-safe.
+/// each time — and every span it gives out is valid as long. Once its
+/// <see cref="DelimitedReader"/> is disposed it holds no rows, so a whole column is empty, and
+/// reading a cell, walking its rows or listing its faults throws
+/// <see cref="ObjectDisposedException"/>. Not thread-safe.
 /// </remarks>
 [SkipLocalsInit]
 public sealed unsafe class Batch
@@ -75,6 +79,8 @@ public sealed unsafe class Batch
 	/// <summary>What a plan's ordinal is short of the sheet's own column: a range's start.</summary>
 	readonly int _firstColumn;
 	int _rows;
+	/// <summary>The reader was disposed: the batch has no rows, and says why.</summary>
+	bool _disposed;
 	/// <summary>Moves whenever the batch is over, so that a list asked of it never answers for the next.</summary>
 	ulong _generation;
 	/// <summary>The width a long row is held to, as the read last knew it.</summary>
@@ -132,11 +138,22 @@ public sealed unsafe class Batch
 		_rows = 0;
 	}
 
+	/// <summary>Ends the batch for good: its reader is disposed.</summary>
+	internal void Close()
+	{
+		Clear();
+		_disposed = true;
+	}
+
+	/// <summary>Refuses a batch whose reader is disposed, for what is asked of a batch once and not of each cell.</summary>
+	void Undisposed() => ObjectDisposedException.ThrowIf(_disposed, _owner);
+
 	/// <summary>How many rows the batch holds. Never zero while the batch is current.</summary>
 	public int Rows => _rows;
 
 	/// <summary>Row <paramref name="index"/> of the batch, as a view (<see cref="HyperTabular.Row"/>).</summary>
 	/// <exception cref="ArgumentOutOfRangeException">The row is not in the batch.</exception>
+	/// <exception cref="ObjectDisposedException">The batch's reader is disposed.</exception>
 	public Row Row(int index)
 	{
 		CheckRow(index);
@@ -147,7 +164,12 @@ public sealed unsafe class Batch
 	/// The batch's rows, in order, for <c>foreach (var row in batch)</c>: each a view of the
 	/// batch (<see cref="HyperTabular.Row"/>), made without allocating, and valid as long as the batch is.
 	/// </summary>
-	public RowEnumerator GetEnumerator() => new(this);
+	/// <exception cref="ObjectDisposedException">The batch's reader is disposed.</exception>
+	public RowEnumerator GetEnumerator()
+	{
+		Undisposed();
+		return new(this);
+	}
 
 	/// <summary>A loop over a batch's rows.</summary>
 	public ref struct RowEnumerator
@@ -197,14 +219,41 @@ public sealed unsafe class Batch
 		return (int)(_workbook ? entry.Offset : entry.Len);
 	}
 
-	void CheckRow(int row) =>
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)row, (uint)_rows, nameof(row));
+	/// <summary>
+	/// Refuses a row the batch does not hold: the one test every cell's read makes. A batch whose
+	/// reader is disposed holds none, so it is told apart only once the test has failed.
+	/// </summary>
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	void CheckRow(int row)
+	{
+		if ((uint)row >= (uint)_rows)
+			NoSuchRow(row);
+	}
+
+	[DoesNotReturn]
+	void NoSuchRow(int row)
+	{
+		Undisposed();
+		throw new ArgumentOutOfRangeException(nameof(row), row, $"The batch has no row {row}; it has {_rows}.");
+	}
+
+	[DoesNotReturn]
+	void NoSuchColumn(int column) =>
+		throw new ArgumentOutOfRangeException(nameof(column), column, $"The batch has no column {column}; it has {_columns.Plan.Length}.");
 
 	/// <summary>
 	/// A column's verdicts, one per row. A verdict that is not ok is the cell's fault, or its
 	/// violation (<see cref="CellVerdict.IsViolation"/>), its span in the cell's text (<see cref="Raw"/>).
+	/// A column that declares constraints reads here as any other does.
 	/// </summary>
 	public ReadOnlySpan<CellVerdict> Verdicts(int column) => _columns.Verdicts[column].AsSpan(0, _rows);
+
+	/// <summary>One verdict of <see cref="Verdicts"/>, for a row's view: the row held to the batch as every cell's read holds it.</summary>
+	internal CellVerdict Verdict(int column, int row)
+	{
+		CheckRow(row);
+		return _columns.Verdicts[column][row];
+	}
 
 	/// <summary>
 	/// The fault of the cell at (<paramref name="column"/>, <paramref name="row"/>), with what failed
@@ -254,7 +303,12 @@ public sealed unsafe class Batch
 	/// The list, which belongs to this batch: going on with it after the next read throws
 	/// <see cref="InvalidOperationException"/>, and never answers for the next batch.
 	/// </returns>
-	public IEnumerable<Problem> Faults() => ListedFor(_generation);
+	/// <exception cref="ObjectDisposedException">The batch's reader is disposed.</exception>
+	public IEnumerable<Problem> Faults()
+	{
+		Undisposed();
+		return ListedFor(_generation);
+	}
 
 	IEnumerable<Problem> ListedFor(ulong generation)
 	{
@@ -330,7 +384,11 @@ public sealed unsafe class Batch
 	/// </list>
 	/// The <c>Raw</c> types are HyperCast's own (<see cref="HyperCast.Interop"/>), laid out as
 	/// the core writes them, and each converts itself to the type <see cref="Get{T}"/> makes. The
-	/// value of a row whose verdict is a fault is zero; a violation's is the value as cast. A <see cref="Door.Uuid"/> column has no
+	/// value of a row whose verdict is a fault is zero; a violation's is the value as cast. So a column
+	/// that declares constraints reads here too, unlike through <see cref="Get{T}"/>: read
+	/// <see cref="Verdicts"/> beside the values, where <see cref="CellVerdict.IsViolation"/> marks a
+	/// value that cast and broke a constraint, and <see cref="GetChecked{T}"/> or <see cref="Faults"/>
+	/// names the keyword. A <see cref="Door.Uuid"/> column has no
 	/// span — its 16 bytes are in RFC 9562 order, which is not <see cref="Guid"/>'s layout — and
 	/// is read a cell at a time with <see cref="Get{T}"/>, as is a <see cref="Door.Text"/> column
 	/// with <see cref="TryGetText"/>.
@@ -605,7 +663,8 @@ public sealed unsafe class Batch
 	public ReadOnlySpan<byte> Raw(int column, int row)
 	{
 		CheckRow(row);
-		ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)column, (uint)_columns.Plan.Length, nameof(column));
+		if ((uint)column >= (uint)_columns.Plan.Length)
+			NoSuchColumn(column);
 		var at = _workbook ? column : _columns.Plan[column].Ordinal;
 		var cell = _cells[row * _perRow + at];
 		if (_workbook || !cell.Flagged)

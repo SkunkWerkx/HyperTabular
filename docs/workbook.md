@@ -185,6 +185,13 @@ bytes, as can a gap in XLSX row numbers. Every limit above is arithmetic on the 
 and how many rows it stands for, so a row cut by a range's edge, or by `skip`, costs what one row
 costs, and a repeated cell likewise in the range's columns.
 
+What is counted is still delivered when it's asked for. With `skip_empty_rows` off a gap is every
+row it stands for, and a repeated row that holds a cell is delivered that many times whatever the
+filter says, so a file of a few kilobytes can stand for four billion rows: an XLSX row numbered
+`4294967295` is read under that number, though no sheet Excel writes has a row past 1,048,576. A
+reader of files it doesn't trust declares a range, which ends the read at its last row:
+`A1:XFD1048576` is all of a sheet Excel can hold.
+
 **Cells.** In a `fill_with`, a cell's note says what's known beyond its verdict:
 
 - A text cell whose exact bytes are a declared token is `Empty`, at origin `token`. A column's own
@@ -401,8 +408,8 @@ read is its open.
 | Go (`go test -bench`), the translated core | 28.8 ms | 483 ms | 380 ms | 1.17 s | 823 ms | 1.14 s |
 | Swift (package-benchmark) | 15 ms | 266 ms | 188 ms | 592 ms | 464 ms | 679 ms |
 | Python (pyperf) | 14.8 ms | 277 ms | 190 ms | 610 ms | 460 ms | 682 ms |
-| Ruby (benchmark-ips), Magnus | 13.6 ms | 458 ms | 188 ms | 787 ms | 466 ms | 875 ms |
-| Ruby (benchmark-ips), Fiddle | 14.2 ms | 704 ms | 193 ms | 1.02 s | 480 ms | 887 ms |
+| Ruby (benchmark-ips), Magnus | 13.7 ms | 456 ms | 188 ms | 787 ms | 461 ms | 868 ms |
+| Ruby (benchmark-ips), Fiddle | 14.1 ms | 454 ms | 186 ms | 782 ms | 472 ms | 876 ms |
 | PHP (phpbench), the extension | 13.9 ms | 362 ms | 188 ms | 707 ms | 477 ms | 788 ms |
 | numbers-parser 4.22.2 (Python) | | | | | 21.4 s | 22.2 s |
 
@@ -416,10 +423,14 @@ Intel Core i9-11900H, with the core at `00a511d`, and its rows aren't comparable
   [`go/README.md`](../go/README.md#benchmarks) has every row. The row was taken at opt-level 3;
   the shipped core is now built at `s`, a correctness workaround, which in a later session
   (2026-11-13) read xlsx 18.5% and ods 9.6% slower and Numbers 1.6% faster than 3.
-- **Ruby's Fiddle path is the slower one now** on the files with more cells to decode: 704 ms
-  against Magnus's 458 ms on the xlsx read and 1.02 s against 787 ms on the ods read, level on the
-  Numbers read (887 against 875 ms). A second run of both, Fiddle first, gave 704 and 458 ms, and
-  1.00 s and 794 ms. Where it goes isn't measured.
+- **Ruby's two rows are from 2026-11-15, one run of both backends, and they are level.** The
+  Fiddle row printed here before, from 2026-11-08, was 14.2 ms, 704 ms, 193 ms, 1.02 s, 480 ms and
+  887 ms: 54% slower than Magnus on the xlsx read and 30% on the ods read, twice over in that
+  session. It did not reproduce: on the same machine with the same harness and files, the tree
+  and the published 1.1.0 gems both read level (452 against 453 ms on xlsx, 786 against 789 ms on
+  ods, from the gems), and timing around the native call splits the same on both backends. Why
+  that session's Fiddle runs were slow was not found; the library Fiddle loaded then is the one
+  thing the two sessions can't be shown to share. Magnus's row moved by under 1%.
 - **The release's own cost, against 1.0, through the bindings that changed how they read**, measured
   on this machine on 2026-11-07 with a plain timing loop, not these harnesses. These predate the
   changes of 2026-11-08 to Ruby's read path (a guard against calls back in, and an exception in a

@@ -23,6 +23,11 @@ impl Header {
         self.spans.push((offset, name.len()));
     }
 
+    /// The bytes the names are held in: what a reader's `held_bytes` counts for its header.
+    pub(crate) fn held_bytes(&self) -> usize {
+        crate::column::capacity_bytes(&self.bytes) + crate::column::capacity_bytes(&self.spans)
+    }
+
     /// How many columns the header names.
     pub fn len(&self) -> usize {
         self.spans.len()

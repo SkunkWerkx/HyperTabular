@@ -70,6 +70,10 @@ import java.util.function.Function;
  *
  * <p>Not thread-safe, and confined: the buffers are a confined {@link Arena}'s, so a reader
  * belongs to the thread that built it, and the runtime refuses a call from any other.
+ * {@link #close()} frees them. A reader dropped without it is not a leak for as long as its thread
+ * goes on working: once the collector has found the reader, its thread frees the buffers the next
+ * time it opens a reader, a workbook or a sheet. That is a net under a missed {@code close()}, not
+ * a substitute: the memory stays until both have happened, and a thread that ends first leaves it.
  *
  * <p>The caller's stream runs in the middle of a read. A call from it back into the reader — a
  * read, a bind, a loop over {@link #forEachRow} — is refused with an {@link IllegalStateException};
@@ -234,9 +238,9 @@ public final class DelimitedReader implements AutoCloseable {
         long failedAt;
 
         /** A decoder of a source. */
-        Decoder(int encoding, int size) {
+        Decoder(int encoding, int size, Owned memory) {
             this.encoding = encoding;
-            this.raw = new Block(Math.clamp(size, MAX_CHARACTER, MAX_ROW_BYTES), 1);
+            this.raw = memory.block(Math.clamp(size, MAX_CHARACTER, MAX_ROW_BYTES), 1);
             this.memory = null;
         }
 
@@ -280,6 +284,9 @@ public final class DelimitedReader implements AutoCloseable {
     // Everything the core is handed, allocated once: the fixed-size blocks in one arena,
     // and each buffer that can be outgrown in its own.
     private final Arena arena;
+    /** The same memory as the collector's net sees it, should the reader never be closed. */
+    private final Owned owned;
+
     private MemorySegment state;
     private MemorySegment filled;
     // The fill's cells, arena, tokens and row widths, as the core takes them: in a buffers block,
@@ -681,7 +688,8 @@ public final class DelimitedReader implements AutoCloseable {
             throw new IllegalStateException("libhypertabular's state block is " + stateBytes
                     + " bytes; this binding reads " + Abi.STATE_READ_BYTES + " of it.");
         }
-        this.arena = Arena.ofConfined();
+        this.owned = Owned.begin();
+        this.arena = owned.arena();
         try {
             state = arena.allocate(stateBytes, 8);
             filled = arena.allocate(Abi.FILLED_BYTES, 8);
@@ -692,7 +700,7 @@ public final class DelimitedReader implements AutoCloseable {
                 buffers.set(ValueLayout.ADDRESS, Abi.BUFFERS_WITH_TOKENS, Columns.held(tokens, arena));
                 buffers.set(LONG, Abi.BUFFERS_WITH_TOKENS + 8, tokens.length);
             }
-            unescaped = new Block(4096, 1);
+            unescaped = owned.block(4096, 1);
 
             MemorySegment raw = arena.allocate(Abi.DELIMITED_OPTIONS_BYTES, 4);
             raw.set(INT, 0, (int) Abi.DELIMITED_OPTIONS_BYTES);
@@ -710,6 +718,7 @@ public final class DelimitedReader implements AutoCloseable {
             if (plan != null) {
                 attach(plan, batchRows);
             }
+            owned.watch(this);
         } catch (RuntimeException | Error failure) {
             release();
             throw failure;
@@ -726,10 +735,10 @@ public final class DelimitedReader implements AutoCloseable {
         long bytes = cellRows(width, batchRows) * width * Abi.SPAN_BYTES;
         Columns bound =
                 new Columns(plan, batchRows, arena, dialect.notes(), dialect.longRows() == LongRows.REPORT, false);
-        Block table = new Block(bytes, 4);
+        Block table = owned.block(bytes, 4);
         perRow = width;
         cells = table;
-        batch = new Batch(bound, false, 0);
+        batch = new Batch(bound, false, 0, this, owned);
         columns = bound;
     }
 
@@ -859,7 +868,7 @@ public final class DelimitedReader implements AutoCloseable {
         // Under a declared encoding the memory is the decoder's, and what it decodes to lands in a
         // buffer.
         decoder = new Decoder(dialect.encoding().code(), text);
-        buffer = new Block(DEFAULT_BUFFER_BYTES, 1);
+        buffer = owned.block(DEFAULT_BUFFER_BYTES, 1);
         transcoded = arena.allocate(Abi.TRANSCODED_BYTES, 8);
     }
 
@@ -867,9 +876,9 @@ public final class DelimitedReader implements AutoCloseable {
     private void overSource(Source from, int bufferBytes) {
         source = from;
         try {
-            buffer = new Block(bufferBytes, 1);
+            buffer = owned.block(bufferBytes, 1);
             if (dialect.encoding() != Encoding.UTF_8) {
-                decoder = new Decoder(dialect.encoding().code(), bufferBytes);
+                decoder = new Decoder(dialect.encoding().code(), bufferBytes, owned);
                 transcoded = arena.allocate(Abi.TRANSCODED_BYTES, 8);
             }
         } catch (RuntimeException | Error failure) {
@@ -1332,11 +1341,13 @@ public final class DelimitedReader implements AutoCloseable {
             decoder.close();
         }
         arena.close();
+        owned.release();
     }
 
     /**
      * Releases the native memory, and closes the stream or file the reader was built over.
-     * Closing twice is harmless. Called from the reader's stream in the middle of a read, it is done
+     * Closing twice is harmless. Its batch is over with it: a cell read from one throws
+     * {@link IllegalStateException}. Called from the reader's stream in the middle of a read, it is done
      * as soon as the stream returns, and that read ends with an {@link IllegalStateException},
      * handing out no batch.
      *

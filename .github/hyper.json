@@ -11,7 +11,7 @@
   "swift_remote": true,
   "c_assets": true,
   "companions": {
-    "hypercast": {"repo": "SkunkWerkx/HyperCast", "commit": "a74eafc0bb497c25dd5ef5f49638ad1d565e355e", "run": 43410604417}
+    "hypercast": {"repo": "SkunkWerkx/HyperCast", "commit": "d844b2eee97c864b949b28174bcb61f256e589a9", "run": 44737220801}
   },
   "big_endian_control": {"file": "delimited.json", "find": "\"value\": 2.5", "replace": "\"value\": 2.75", "test": "corpus_delimited", "fails": "every_case_reads_as_the_corpus_says"},
   "r_corpus": [

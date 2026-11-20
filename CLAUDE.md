@@ -122,7 +122,15 @@ flight can fail their fetch, so don't merge one then, and re-run the whole board
   `@skunkwerkx/hypertabular-<suffix>`, one per RID, mapped by `NODE_PLATFORMS` in the Forge's
   `hyper_config.py` and listed as `napi.targets` in `typescript/package.json`, and the
   WebAssembly fallback `@skunkwerkx/hypertabular-wasm32-wasip1` (the last `napi.targets`
-  entry). The root's `optionalDependencies` are injected at pack time, never committed;
+  entry). The fallback is a plain dependency of
+  the root on purpose (decided 2026-11-15, when a review suggested `optionalDependencies`):
+  npm 10.9.2, the one Node 22 bundles, regenerates a lockfile beside a Mac's `node_modules`
+  naming only that platform (npm/cli#4828, the `mac-lockfile` scenario), and `--omit=optional`
+  drops every optional package; either way the root still loads, on the fallback, where one
+  with no plain fallback fails. Its cost is about 1.4 MB and the `@emnapi` betas in every
+  install. npm offers no floor a dependency can enforce (`engines.npm` only warns). Revisit
+  when Node 22 leaves the floor (2027-04-30); `--omit=optional` will still argue for plain.
+  The root's `optionalDependencies` are injected at pack time, never committed;
   `@skunkwerkx/hypercast` is a peer. The first publish of every package is the owner's, by
   hand with a granular token: npm Trusted Publishing attaches only to a package that exists,
   and `release.yml` is registered as its trusted publisher after.
@@ -489,20 +497,14 @@ stays recorded, never gating. `bun run test` is the package script; `bun test` i
 - The next release is the first with npm, CRAN, C archives, PIE zips, the Swift zips and the
   JNI jar; what only it can prove is the same list as HyperCast's.
 - Benchmark tables: the workbook table through every binding and Go's and PHP's receipts were
-  measured on an Apple M6 on 2026-11-08, one session; the delimited and workbook core against 1.0
+  measured on an Apple M6 on 2026-11-08, one session (Ruby's two rows again on 2026-11-15, when
+  that session's slow Fiddle row did not reproduce); the delimited and workbook core against 1.0
   (tag `v1.0.0` over HyperCast 1.0.0, with a third build splitting each loss between the two
   libraries) on 2026-11-10, after the sink, bad-row and shared-string fixes and over the HyperCast
   (`439b8cf`) that took back what a refused cell costs; the tables through the bindings predate
   all four. The WSL2 i9-11900H receipts left (pre-1.0, in `docs/delimited.md`, `docs/workbook.md`
   and `docs/design.md`) say so. Re-measure every harness on one machine before relabelling a
   table; never mix machines.
-- Ruby's Fiddle path reads an xlsx sheet 54% and an ods one 30% slower than the Magnus
-  extension (`ruby/README.md`, 2026-11-08). A three-column sheet read level on 2026-11-07, before
-  the 2026-11-08 changes to Ruby's read path; the cause isn't known.
-- One long record from a stream whose reads come back short costs the square of its length
-  (256 MiB at 64 KiB a read, about 24 s in Rust, the same shape in Java and Swift): the core
-  scans an unfinished record again from its start each fill. Parked, with numbers, in
-  `docs/delimited.md`.
 - Owner decisions held for later: a sheet row of only uncached formulas is filtered by
   `skip_empty_rows` (kept for this release, `skip_empty_rows=false` documented as the lossless
   route); a workbook's date columns suggest text (native date inference parked).

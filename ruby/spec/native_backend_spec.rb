@@ -83,6 +83,37 @@ RSpec.describe "native backend" do
     expect([first.values(0), second.values(0)]).to eq([[1], [2]])
   end
 
+  # The extension's buffers are Rust's, outside Ruby's heap, where the Fiddle backend's are Strings.
+  # Unless it says what each object holds, the collector counts a reader as a few words: a process
+  # with room in its heap then makes readers by the thousand without ever collecting one (20,000 of
+  # them, each long dead, held 3 GB). A subprocess, so the collector can be held off while it counts.
+  it "tells the collector what a reader, a workbook and a sheet hold outside its heap" do
+    lib = File.expand_path("../lib", __dir__)
+    script = <<~RUBY
+      require "objspace"
+      rows = 65_536
+      plan = Array.new(8) { HyperTabular::Column.f64(0) }
+      # A value, a verdict and a note a row, in every column: 12 MiB that no read here touches.
+      held = plan.size * rows * (8 + 12 + 4)
+      GC.start
+      GC.disable
+      before = GC.stat(:malloc_increase_bytes)
+      reader = HyperTabular::DelimitedReader.new("n\n1\n", HyperTabular::Dialect::CSV, plan, batch_rows: rows)
+      counted = GC.stat(:malloc_increase_bytes) - before
+      sized = ObjectSpace.memsize_of(reader.instance_variable_get(:@kernel))
+
+      book = HyperTabular::Workbook.open(#{File.expand_path('../../corpus/workbook/basic.xlsx', __dir__).dump})
+      before = GC.stat(:malloc_increase_bytes)
+      sheet = book.sheet(0, HyperTabular::SheetOptions.new(batch_rows: rows), plan)
+      sheet_counted = GC.stat(:malloc_increase_bytes) - before
+      sheet_sized = ObjectSpace.memsize_of(sheet.instance_variable_get(:@reading))
+      book_sized = ObjectSpace.memsize_of(book.instance_variable_get(:@book))
+      print [counted >= held, sized >= held, sheet_counted >= held, sheet_sized >= held, book_sized > 1024].inspect
+    RUBY
+    out, status = Open3.capture2e(RbConfig.ruby, "-I", lib, "-r", "hypertabular", "-e", script)
+    expect([status.success?, out]).to eq([true, "[true, true, true, true, true]"])
+  end
+
   it "raises the structural failure a broken workbook is, as the Fiddle backend does" do
     script = 'begin; HyperTabular::Workbook.new("PK\x03\x04 not a zip".b); rescue HyperTabular::TabularError => e; ' \
              "[e.kind, e.message]; end.inspect"

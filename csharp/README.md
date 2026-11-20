@@ -255,8 +255,10 @@ says so, the value is kept exactly as cast (never rounded), and the span is the 
 `multipleOf` rounded passes with `Adjusted` set, and a text `enum` match reads as the entry as declared,
 the caller's own string, with `EnumIndex` naming it. `Faults()` lists a violation with its `Keyword` and
 no `Reason`. The constraints' type is the door's, so a column can't pair one door with another's, and
-`Get<T>`, `TryGetText` and `GetString` refuse a constrained column with `InvalidOperationException`:
-they would read a violation as passed. `GetChecked<T>` reads an unconstrained column too, where every
+`Get<T>`, `TryGetText`, `GetString`, `GetChars` and `TryGetChars` refuse a constrained column with
+`InvalidOperationException`: they would read a violation as passed. `Values<T>` and `Verdicts` read one
+whole, beside each other: a violation's value is there as cast, its verdict says `IsViolation`, and
+`GetChecked<T>` or `Faults()` names the keyword. `GetChecked<T>` reads an unconstrained column too, where every
 cell that cast passes, unadjusted. HyperCast judges the declaration when it is built, and refuses only
 one its core cannot read.
 
@@ -292,7 +294,11 @@ rows, not once per cell.
   batch, `TryGetText`/`GetString` for text, and `Raw` for the text a cell was
   cast from —
   or `null` when there are no more rows. It is a view of the reader's buffers, valid until
-  the next `Read()`, and the same type for delimited text and for a sheet.
+  the next `Read()`, and the same type for delimited text and for a sheet. A row it doesn't have is
+  an `ArgumentOutOfRangeException` naming the row and the count, and a column the plan doesn't have
+  an `IndexOutOfRangeException` (`Raw`'s is an `ArgumentOutOfRangeException`). Once its reader is
+  disposed a batch has no rows: a cell, a row, a loop over it and `Faults()` throw
+  `ObjectDisposedException`, and a whole column is an empty span.
 - **Whole columns as the core wrote them.** `Values<T>` lends the primitive doors as their
   own type, the time door as `ulong` nanoseconds since midnight, and the decimal and other
   temporal doors as HyperCast's own `HyperCast.Interop` layouts — `RawDecimal`,
@@ -343,7 +349,13 @@ rows, not once per cell.
   read an embedded resource or a response to its end into pinned memory the workbook owns —
   exactly the remaining length of a seekable stream, more than `int.MaxValue` refused as
   `TabularFailure.TooLarge` before anything is allocated — and dispose the stream as soon
-  as it has been read, unless asked to leave it open.
+  as it has been read, unless asked to leave it open. `book.Sheet(index, …)` with an index the
+  workbook doesn't list is an `ArgumentOutOfRangeException` naming the index and the count, and
+  `book.Sheet(name, …)` with a name it doesn't list a `KeyNotFoundException` naming it.
+- **Memory is read in place, pinned.** A reader or a workbook over a `ReadOnlyMemory<byte>` pins
+  it and copies nothing, so the caller's array stays where it is, and alive, while the reader is
+  open. `Dispose` gives the pin up at once. A reader or workbook dropped without it gives the pin up
+  when the collector finds it, which it doesn't while one of its batches or sheets is still held.
 - **Async, with cancellation.** `DelimitedReader.OpenAsync(stream, dialect, …)` awaits the
   header and `ReadAsync(cancellationToken)` awaits each refill (`Stream.ReadAsync`); the
   native fill between them is synchronous, and a reader of memory completes synchronously.

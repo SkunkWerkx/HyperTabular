@@ -540,8 +540,9 @@ RSpec.describe "a call back in, and an exception mid-call" do
     end
   end
 
-  # The core reads the String last attached, by address on the Fiddle backend: the String it reads is
-  # never changed, and the one after it is attached before anything else moves, so whatever lands on
+  # The core reads the String last attached, by address on the Fiddle backend. A String that takes
+  # its place is attached before anything else moves, and one that grows where it is, a record
+  # longer than the buffer, is attached again before the core is next called, so whatever lands on
   # the way leaves the core reading memory the reader still holds.
   describe "an exception as a grown buffer is attached" do
     def attaching(&wrap)
@@ -551,6 +552,32 @@ RSpec.describe "a call back in, and an exception mid-call" do
         allow_any_instance_of(HyperTabular::Runtime::Native::Delimited)
           .to receive(:attach).and_wrap_original { |original, string| wrap.call { original.call(string) } }
       end
+    end
+
+    # The String a long record grows in is the one the core was attached to last: its bytes may have
+    # moved, and an exception at its attach leaves the core holding where they were.
+    it "attaches a record that grew where it is before the core is next called, whatever was raised there" do
+      held = reader.new(pieces.new(long_text, 13), dialect_class::CSV, plan, batch_rows: 4, buffer_bytes: 16)
+      kernel = held.instance_variable_get(:@kernel)
+      events = []
+      last = nil
+      armed = true
+      allow(kernel).to receive(:attach).and_wrap_original do |original, string|
+        if armed && string.equal?(last)
+          armed = false
+          events.clear
+          raise Interrupt, "at attach"
+        end
+        events << :attach
+        last = string
+        original.call(string)
+      end
+      allow(kernel).to receive(:fill).and_wrap_original do |original, *args|
+        events << :fill
+        original.call(*args)
+      end
+      expect(drained.call(held)).to eq([long_control, 1])
+      expect(events.first).to eq(:attach)
     end
 
     encodings.each do |encoding, codec|

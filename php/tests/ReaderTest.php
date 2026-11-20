@@ -19,6 +19,7 @@ use HyperTabular\Dialect;
 use HyperTabular\Door;
 use HyperTabular\TabularException;
 use HyperTabular\TabularFailure;
+use HyperTabular\Workbook;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -236,6 +237,79 @@ final class ReaderTest extends TestCase
         $this->assertSame([2], $reader->read()->values(0));
     }
 
+    /**
+     * A `Column` is serializable, so one can reach a plan with fields no factory would have given
+     * it. It is refused as a factory refuses them, an `\InvalidArgumentException` naming its place
+     * in the plan, on a reader made with the plan and on one bound to it after its header.
+     */
+    public function testAForgedColumnIsRefusedWhenItsPlanIsBound(): void
+    {
+        $forged = static function (Column $column, string $field, int $from, int $to): Column {
+            $text = serialize($column);
+            $slot = \sprintf('s:%d:"%s";i:', \strlen($field), $field);
+            $changed = str_replace("{$slot}{$from};", "{$slot}{$to};", $text);
+            self::assertNotSame($text, $changed, "{$field} was not forged");
+            $made = unserialize($changed);
+            self::assertInstanceOf(Column::class, $made);
+            return $made;
+        };
+        $noDoor = "Plan column 0 names no door; build it with Column's factories";
+        $refused = [
+            'an ordinal below zero' => [
+                $forged(Column::i32(0), 'ordinal', 0, -1),
+                'Plan column 0 reads source column -1; an ordinal must be below 2^20 (1,048,576)',
+            ],
+            'the lowest ordinal there is' => [
+                $forged(Column::i32(0), 'ordinal', 0, PHP_INT_MIN),
+                'Plan column 0 reads source column ' . PHP_INT_MIN
+                    . '; an ordinal must be below 2^20 (1,048,576)',
+            ],
+            'an ordinal of 2^20' => [
+                $forged(Column::i32(0), 'ordinal', 0, 1 << 20),
+                'Plan column 0 reads source column 1048576; an ordinal must be below 2^20 (1,048,576)',
+            ],
+            'a declaration on a door that takes none' => [$forged(Column::i32(0), 'declared', 0, 999), $noDoor],
+            'a declaration below zero' => [$forged(Column::i32(0), 'declared', 0, -1), $noDoor],
+            'a precision that is none' => [
+                $forged(Column::unix(0, UnixPrecision::Seconds), 'declared', UnixPrecision::Seconds->value, 999),
+                $noDoor,
+            ],
+        ];
+        $text = "a\n1\n";
+        foreach ($refused as $what => [$column, $message]) {
+            $binds = [
+                'made with the plan' => static fn () => DelimitedReader::fromString($text, Dialect::csv(), [$column]),
+                'bound after its header' => static fn () =>
+                    DelimitedReader::fromString($text, Dialect::csv())->bind([$column]),
+            ];
+            foreach ($binds as $how => $bind) {
+                try {
+                    $bind();
+                    $this->fail("{$what} was accepted, {$how}");
+                } catch (\Exception $e) {
+                    $where = "{$what}, {$how}";
+                    $this->assertSame(\InvalidArgumentException::class, $e::class, "{$where}: {$e->getMessage()}");
+                    $this->assertSame($message, $e->getMessage(), $where);
+                }
+            }
+        }
+        // The control: what serializing left alone, and a forged field a factory would have given,
+        // bind and read.
+        $kept = unserialize(serialize(Column::i32(0)));
+        $this->assertSame([1], DelimitedReader::fromString($text, Dialect::csv(), [$kept])->read()->values(0));
+        $millis = $forged(
+            Column::unix(0, UnixPrecision::Seconds),
+            'declared',
+            UnixPrecision::Seconds->value,
+            UnixPrecision::Milliseconds->value,
+        );
+        $this->assertEquals(
+            DelimitedReader::fromString($text, Dialect::csv(), [Column::unix(0, UnixPrecision::Milliseconds)])
+                ->read()->values(0),
+            DelimitedReader::fromString($text, Dialect::csv(), [$millis])->read()->values(0),
+        );
+    }
+
     public function testAFarOrdinalWithoutAHeaderCostsOneRowOfCellTable(): void
     {
         $reader = DelimitedReader::fromString(
@@ -449,6 +523,41 @@ final class ReaderTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('hypertabular: cannot open');
         DelimitedReader::open(sys_get_temp_dir() . '/hypertabular-no-such-file.csv', Dialect::csv(), []);
+    }
+
+    /**
+     * A directory is a path that cannot be read, on every opener alike: the `\RuntimeException` a
+     * missing file is, before anything is read, so PHP has no notice to raise about a read of it.
+     */
+    public function testADirectoryIsAFileThatCannotBeOpened(): void
+    {
+        $dir = sys_get_temp_dir();
+        $openers = [
+            'DelimitedReader::open' => static fn () => DelimitedReader::open($dir, Dialect::csv()),
+            'DelimitedReader::open, with a plan' => static fn () =>
+                DelimitedReader::open($dir, Dialect::csv(), [Column::text(0)])->read(),
+            'DelimitedReader::suggest' => static fn () => DelimitedReader::suggest($dir, Dialect::csv()),
+            'Workbook::open' => static fn () => Workbook::open($dir),
+        ];
+        $raised = [];
+        set_error_handler(static function (int $level, string $message) use (&$raised): bool {
+            $raised[] = $message;
+            return true;
+        });
+        try {
+            foreach ($openers as $what => $open) {
+                try {
+                    $open();
+                    $this->fail("{$what} opened a directory");
+                } catch (\Exception $e) {
+                    $this->assertSame(\RuntimeException::class, $e::class, "{$what}: {$e->getMessage()}");
+                    $this->assertSame("hypertabular: cannot open {$dir}: it is a directory", $e->getMessage(), $what);
+                }
+            }
+        } finally {
+            restore_error_handler();
+        }
+        $this->assertSame([], $raised);
     }
 
     public function testAStreamStaysTheCallers(): void

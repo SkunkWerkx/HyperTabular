@@ -25,6 +25,8 @@ public final class Sheet implements AutoCloseable {
     private final SheetInfo info;
     private SheetOptions options;
     private final Arena arena;
+    /** The sheet's memory as the collector's net sees it, should it never be closed. */
+    private final Owned owned;
     /** The plan's columns and the batch they are read into: {@code null} until a plan is bound. */
     private Columns columns;
 
@@ -53,15 +55,17 @@ public final class Sheet implements AutoCloseable {
                 options.batchRows(),
                 1,
                 Abi.BATCH_SHEET | (options.notes() ? Abi.BATCH_NOTES : 0));
-        this.arena = Arena.ofConfined();
+        this.owned = Owned.begin();
+        this.arena = owned.arena();
         Workbook.Scratch made = null;
         try {
             if (checked != null) {
                 Columns bound = new Columns(checked, options.batchRows(), arena, options.notes(), false, true);
                 made = Workbook.stingy
-                        ? new Workbook.Scratch(arena, 1, 1, 1, bound.width)
+                        ? new Workbook.Scratch(arena, owned, 1, 1, 1, bound.width)
                         : new Workbook.Scratch(
                                 arena,
+                                owned,
                                 Abi.WINDOW_MIN,
                                 4096,
                                 Math.multiplyExact((long) options.batchRows(), checked.length + 1),
@@ -74,8 +78,8 @@ public final class Sheet implements AutoCloseable {
                 // reads; without one there is a slot for every entry the cell table has room
                 // for, and the slots grow with it (Scratch.drive) while the header is read.
                 made = Workbook.stingy
-                        ? new Workbook.Scratch(arena, 1, 1, 1, 1)
-                        : new Workbook.Scratch(arena, Abi.WINDOW_MIN, 4096, 64, 64);
+                        ? new Workbook.Scratch(arena, owned, 1, 1, 1, 1)
+                        : new Workbook.Scratch(arena, owned, Abi.WINDOW_MIN, 4096, 64, 64);
             }
             scratch = made;
             byte[] tokens = options.tokens().packed();
@@ -116,6 +120,7 @@ public final class Sheet implements AutoCloseable {
             if (options.hasHeader()) {
                 header = readHeader();
             }
+            owned.watch(this);
         } catch (RuntimeException | Error thrown) {
             if (batch != null) {
                 batch.close();
@@ -130,7 +135,7 @@ public final class Sheet implements AutoCloseable {
 
     private void attach(Columns bound) {
         perRow = bound.plan.length + 1;
-        batch = new Batch(bound, true, options.firstColumn());
+        batch = new Batch(bound, true, options.firstColumn(), this, owned);
         columns = bound;
     }
 
@@ -360,7 +365,10 @@ public final class Sheet implements AutoCloseable {
         return read() == null ? 0 : columns.rowWidths.get(ValueLayout.JAVA_INT, 0);
     }
 
-    /** Releases the sheet's native memory. Closing twice is harmless. */
+    /**
+     * Releases the sheet's native memory. Closing twice is harmless. Its batch is over with it: a
+     * cell read from one throws {@link IllegalStateException}.
+     */
     @Override
     public void close() {
         if (closed) {
@@ -372,5 +380,6 @@ public final class Sheet implements AutoCloseable {
         }
         scratch.close();
         arena.close();
+        owned.release();
     }
 }

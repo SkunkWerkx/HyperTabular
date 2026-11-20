@@ -36,7 +36,7 @@ public readonly ref struct Row
 	public CheckedVerdict<T> GetChecked<T>(int column) where T : notnull => _batch.GetChecked<T>(column, Index);
 
 	/// <summary>The verdict of the cell in <paramref name="column"/>: <see cref="Batch.Verdicts"/> of the column, at this row.</summary>
-	public CellVerdict Verdict(int column) => _batch.Verdicts(column)[Index];
+	public CellVerdict Verdict(int column) => _batch.Verdict(column, Index);
 
 	/// <summary>The fault of the cell in <paramref name="column"/>, with its detail: <see cref="Batch.Fault"/> of this row.</summary>
 	public Fault? Fault(int column) => _batch.Fault(column, Index);

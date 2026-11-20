@@ -68,16 +68,6 @@ learned about 3 is under it, and about 10 under "Landed".
 - **Not found:** where the cast loop's 4.5 points come from. The next step is the two builds'
   assembly for `column` under the text door, side by side.
 
-### 4. A long record from a short-read stream is quadratic
-
-- **Measured:** a 256 MiB record from a stream handing out 64 KiB a read takes 23.8 s. Each doubling of
-  the record costs four times the time. A stream that fills the room it's given takes 0.064 s. Java
-  (21.8 s) and Swift show the same shape. Source: `docs/delimited.md`, "Parked".
-- **Cause:** an unfinished record is scanned again from its start on every fill.
-- **Fix:** remember how far the scan of an unfinished record got, and resume from there. This changes
-  the core's state across calls.
-- **Proof:** the corpus in every binding, including every binding's stream path, plus no-panic.
-
 ### 5. Parked from the first delimited pass (`docs/delimited.md`, "Parked")
 
 - Sep's tiered mask fast paths (blocks of pure separators, blocks of separators and newlines).
@@ -114,13 +104,6 @@ learned about 3 is under it, and about 10 under "Landed".
   preload the wrong trade.
 
 ## The bindings
-
-### 11. Ruby's Fiddle path reads workbooks slower than the extension
-
-- **Measured:** Fiddle reads an xlsx sheet 54% slower and an ods sheet 30% slower than the Magnus
-  extension (`ruby/README.md`, 2026-11-08). A three-column sheet read level on 2026-11-07, before the
-  2026-11-08 changes to Ruby's read path. The cause isn't known.
-- **First step:** profile the Fiddle sheet read before and after the 2026-11-08 changes.
 
 ### 12. Go's translated core (1.7–2.3x slower than cgo)
 

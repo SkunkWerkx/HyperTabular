@@ -26,14 +26,19 @@ header = """
 // HyperCastDecimal and so on.
 //
 // The core owns no memory. Every pointer is the caller's for the length of the call and no
-// longer; a null where the contract needs memory is HYPERTABULAR_ERR_CONTRACT, and a length of
-// 0 never dereferences its pointer. Nothing is kept between calls but what the caller's state
+// longer; a null state block, result or options is HYPERTABULAR_ERR_CONTRACT, a null buffer is
+// read as an empty one whatever length is passed beside it (so a null input holds no rows, and a
+// null arena, cell table or window is one too small, HYPERTABULAR_ERR_ARENA and its kin) unless
+// the function's own comment refuses it, and a length of 0 never dereferences its pointer.
+// Nothing is kept between calls but what the caller's state
 // block holds. Every call returns HYPERTABULAR_OK or one of the HYPERTABULAR_ERR_ codes below;
 // none of them is a cell's verdict. A cell that does not cast is a HyperTabularCellVerdict
 // beside its value: reason 0 cast, 1 empty, 2 malformed, 3 out of range, HyperCast's codes,
 // with the offending span of the cell's own text. A structurally broken input is
 // HYPERTABULAR_ERR_STRUCTURE, returned only after every intact row before it was delivered,
-// with the result's `failure` saying what and where.
+// with the result's `failure` saying what and where. A delimited fill delivers those rows in
+// the calls before the one that fails; a workbook fill can return them beside the code, in the
+// same call's `rows`, so read `rows` whatever a workbook fill returns.
 //
 // A file in a declared encoding goes through hypertabular_transcode first, on the caller's
 // buffers, and the delimited calls read the UTF-8 it writes. docs/delimited.md says how a reader

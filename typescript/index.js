@@ -64,11 +64,14 @@ const made = Symbol('made')
 class Batch {
   #store
   #rows
+  #columns
+  // The doors' names in plan order, a comma between them.
   #doors
-  constructor(token, store, rows, doors) {
+  constructor(token, store, rows, columns, doors) {
     if (token !== made) throw new TypeError('a Batch is made by read(), never by new')
     this.#store = store
     this.#rows = rows
+    this.#columns = columns
     this.#doors = doors
   }
   /** How many rows the batch holds. */
@@ -77,11 +80,11 @@ class Batch {
   }
   /** How many columns: the plan's length. */
   get columnCount() {
-    return this.#doors.length
+    return this.#columns
   }
   /** The door each column was read through, in plan order: a new array each time. */
   get doors() {
-    return this.#doors.slice()
+    return this.#columns === 0 ? [] : this.#doors.split(',')
   }
   line(row) {
     return native.batchLine(this.#store, row)
@@ -194,7 +197,28 @@ if (native) {
   // Every read in this module's environment now makes its batch here. `__makeBatchesWith` and
   // the `batch*` functions are private to this file, not API: the store they take is held in
   // `Batch`'s private field, out of reach of anything else.
-  native.__makeBatchesWith((store, rowCount, doors) => new Batch(made, store, rowCount, doors))
+  const make = (store, rows, columns, doors) => new Batch(made, store, rows, columns, doors)
+  if (!native.__makeBatchesWith(make)) {
+    // The WebAssembly fallback makes no call out of the module (its runtime assigns such a
+    // call's arguments into an array of its own, under an index, where a setter someone put on
+    // `Object.prototype` would run): a read answers the batch in parts, and it is made here.
+    for (const Reader of [DelimitedReader, Sheet]) {
+      const read = Reader.prototype.read
+      Object.defineProperty(Reader.prototype, 'read', {
+        ...Object.getOwnPropertyDescriptor(Reader.prototype, 'read'),
+        value: {
+          read() {
+            const outcome = read.call(this)
+            if (outcome.ok && outcome.value !== null) {
+              const { store, rows, columns, doors } = outcome.value
+              outcome.value = make(store, rows, columns, doors)
+            }
+            return outcome
+          },
+        }.read,
+      })
+    }
+  }
 }
 
 const dialect = (separator) =>
@@ -207,10 +231,17 @@ const Dialect = Object.freeze({
   PSV: dialect('|'),
 })
 const isAvailable = () => native !== null
-const isHyperTabularError = (value) =>
-  value instanceof Error &&
-  typeof value.code === 'string' &&
-  value.code.startsWith('ERR_HYPERTABULAR_')
+// Asked inside a `catch` of whatever was caught, so it never throws: a Proxy whose traps throw,
+// or a revoked one, is not this package's error.
+const isHyperTabularError = (value) => {
+  try {
+    if (!(value instanceof Error)) return false
+    const code = value.code
+    return typeof code === 'string' && code.startsWith('ERR_HYPERTABULAR_')
+  } catch {
+    return false
+  }
+}
 module.exports = {
   nativeVersion,
   isAvailable,

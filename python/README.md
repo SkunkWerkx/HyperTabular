@@ -253,7 +253,9 @@ print(people)
 `DelimitedReader(source, …)` takes `bytes` or a binary file object (anything with
 `read(size)`), and so does `Workbook(data)`: a workbook is read to the end into memory it owns,
 since a zip is read from its directory at the end back. Either way the format is read from the
-bytes. A file object is the caller's to close. A delimited reader calls the object's
+bytes. A file object is the caller's to close. A reader is a context manager, and `close()` lets
+go of its source: batches already read stay valid, and a `read` or `bind` after it raises
+`ValueError` (`read of a closed DelimitedReader`). A delimited reader calls the object's
 `read1(size)` where it has one and parses whatever each read returns, so over a pipe, a socket
 or a FIFO opened with `DelimitedReader.open` the header and every complete record arrive
 without waiting for the buffer to fill.

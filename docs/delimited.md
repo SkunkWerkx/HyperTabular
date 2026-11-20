@@ -213,9 +213,23 @@ unit the chunk cut off, and asks for more room in both cases; at the ceiling tha
   read returns to parsing, so a complete header or batch need not wait for the buffer to
   fill or the source to close. Because a
   row start is always a clean scanner state (no open cell, no pending `\r`), nothing
-  is rebased — the cost is re-scanning at most one row per refill.
+  is rebased.
+- A record that hasn't ended is looked at once, however many reads it arrives in. A fill that
+  stops inside one keeps, in the state block, how far the search for its end got and the quoting
+  it was in (a hint: it never decides what a row holds, and a state made by the 1.0 `init`,
+  which has no room for it, scans again). The next call resumes the search there and scans the
+  record only once its end is in the input. And a read is offered at most twice what the last one
+  gave, 64 KiB at least, since the room offered is cleared first: a source that gives a little is
+  not handed a buffer the size of the record to clear each time. One record of `x` and one text
+  column through the Rust reader, Apple M6, Rust 1.99.1, 2026-11-15, one run each: 256 MiB at
+  64 KiB a read in 0.034 s and 128 MiB at 1 KiB a read in 0.076 s, each half the size in half the
+  time, and 128 MiB of Latin-1 at 64 KiB a read in 0.057 s. Before either change the 256 MiB took
+  23.8 s (2026-11-08), four times the time for twice the record.
 - A row that does not complete within the buffer doubles it, up to
   `DelimitedReader::MAX_ROW_BYTES` (1 GiB), then `FailureKind::RowTooLong`.
+- A header gives at most 1,048,576 names, the most columns a plan can read, whatever its record's
+  width; the width every later record is held to is still the record's own. A file of 64 MB of
+  commas was 67 million empty names, and gigabytes in a binding that makes a string of each.
 - The reader owns the column arrays (`DelimitedOptions::batch_rows` long, 4096 by
   default; `0`, and a batch past the core's 4 GiB limit, are refused before anything is allocated:
   `docs/design.md`, "Errors"; a suggestion sizes its own batches, and they're never refused), the cell table and the arena, and lends them: `read()` returns a `Batch` that
@@ -446,17 +460,6 @@ time when every row is one.
 
 ## Parked
 
-- **A long record from a stream that hands out a little at a time is quadratic.** A stream source
-  reads once per call, so finished rows reach the caller when a stream stalls, and the times say
-  that a record that hasn't ended yet is scanned again from its start on every call. Through the Rust reader, one
-  record of `x` and one text column, a stream handing out 64 KiB a read, Apple M6, Rust 1.99.1,
-  2026-11-08, one run each: 16 MiB in 0.095 s, 32 MiB in 0.36 s, 64 MiB in 1.48 s, 128 MiB in
-  5.89 s, 256 MiB in 23.8 s, four times the time for twice the record; the same 256 MiB from a
-  stream that fills the room it's given takes 0.064 s. Peak resident is the same either way, 542 MB
-  for 256 MiB. Swift's README has its own row, and Java's is the same shape (21.8 s for 256 MiB on
-  2026-11-07). Records of a few megabytes don't feel it. The cure is to remember how far the scan
-  of an unfinished record got and resume there, which is a change to the core's state across calls,
-  not made in this release.
 - **A third notation for the suggester: Indian grouping.** With no format declared, `1,23,456` reads
   under neither candidate, each being Western, so it's text, resolved, and beside `5` unresolved: nothing
   is lost, and declaring Indian grouping for the column reads 123456 and suggests a number. A third

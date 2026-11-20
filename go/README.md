@@ -357,7 +357,9 @@ rounded), and the span is the judged text's. A cell `MultipleOf` rounded passes 
 and a text `Enum` match reads as the entry as declared, with `EnumIndex` naming it. `Faults()` lists a
 violation with its `Keyword` and a zero `Reason`. `Get`, `Cell`, `Text` and `TextString` panic on a
 constrained column, as does `GetChecked` asked for a type other than the door's: they would read a
-violation as passed. `GetChecked` reads an unconstrained column too, where every cell that cast
+violation as passed. A whole-column accessor (`I32` and the rest) hands out a constrained column's
+values all the same, to be read beside `Verdicts`: a violation's slot holds the value as cast.
+`GetChecked` reads an unconstrained column too, where every cell that cast
 passes, unadjusted. A door that takes no constraints has no `Constraints` type to give `Checked`, so
 the mistake doesn't compile. HyperCast judges the declaration when `NewConstraints` builds it, and
 refuses only one its core cannot read; `Checked` panics on the zero `Constraints`, which was never

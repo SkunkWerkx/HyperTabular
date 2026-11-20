@@ -635,9 +635,13 @@ other binding. A sample of 0 is one row everywhere else.
 **How long a batch lives.** C#, Java, Go, Swift and C++ hand out a batch as a view of the
 reader's buffers, valid until the next `read()`: no copy per batch, and a language that can
 say "valid until" says it. A batch that outlives its reader never reads freed memory where the
-language can prevent it. Closing a C#, Java or Go reader ends its batch, which then has no rows. A
+language can prevent it. Closing a C#, Java or Go reader ends its batch, which then has no rows: a
+C# batch's cells, rows and `Faults()` throw `ObjectDisposedException`, a Java one's
+`IllegalStateException`, and the whole-column views of both are empty. A
 C# batch whose reader is merely forgotten, a Go batch and a Swift batch, whose reader has no close,
-hold what they point into and stay readable. A Java cell in a workbook closed under an open sheet
+hold what they point into and stay readable. A C# or Java reader dropped without being closed
+gives its memory back once nothing holds it: C#'s pin on the caller's array at collection, Java's
+confined arenas when the thread that made them next opens a reader, workbook or sheet. A Java cell in a workbook closed under an open sheet
 refuses, through the closed segment. A C++ batch is a view like any other in C++, and must not
 outlive its reader or sheet. Python, Ruby, PHP, TypeScript and R copy what the core wrote into
 the batch as it is made, so a batch outlives the reader's next read: a garbage-collected

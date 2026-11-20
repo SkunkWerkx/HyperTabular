@@ -8,7 +8,7 @@
 //! One type serves delimited text and workbooks alike; the two differ only in where a
 //! cell's text lies, which the batch knows and its accessors hide.
 
-use crate::column::{AllZero, zeroed};
+use crate::column::{AllZero, capacity_bytes, zeroed};
 use crate::kernel::abi::{
     CellNote, CellVerdict, ColumnBufferWith, ColumnSpecWith, OK, RawDelimitedOptions, RawProblem,
     Span,
@@ -115,6 +115,27 @@ impl Columns {
 
     pub(crate) fn plan(&self) -> &[Column] {
         &self.plan
+    }
+
+    /// The bytes of every array the columns own: what a reader's `held_bytes` counts for its
+    /// plan.
+    pub(crate) fn held_bytes(&self) -> usize {
+        let stores: usize = self
+            .stores
+            .iter()
+            .map(|store| {
+                capacity_bytes(&store.values)
+                    + capacity_bytes(&store.verdicts)
+                    + capacity_bytes(&store.notes)
+                    + capacity_bytes(&store.checks)
+            })
+            .sum();
+        capacity_bytes(&self.plan)
+            + capacity_bytes(&self.specs_with.0)
+            + capacity_bytes(&self.stores)
+            + stores
+            + capacity_bytes(&self.pointers_with.0)
+            + capacity_bytes(&self.widths)
     }
 
     pub(crate) fn batch_rows(&self) -> usize {

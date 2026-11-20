@@ -30,9 +30,24 @@ new_reader <- function(class, batch_rows) {
   reader
 }
 
+# The connections readers opened from a path, by connection number, held here until their
+# reader closes them. A reader dropped without close() is closed by its finalizer; were the
+# connection reachable from the reader alone, R would collect the two together and warn of
+# "closing unused connection" first.
+opened_paths <- new.env(parent = emptyenv())
+
+hold_connection <- function(con) {
+  assign(as.character(as.integer(con)), con, envir = opened_paths)
+  con
+}
+
 close_source <- function(reader) {
   if (isTRUE(reader$own) && !is.null(reader$con)) {
+    key <- as.character(as.integer(reader$con))
     try(close(reader$con), silent = TRUE)
+    if (exists(key, envir = opened_paths, inherits = FALSE)) {
+      rm(list = key, envir = opened_paths)
+    }
   }
   reader$con <- NULL
   reader$own <- FALSE

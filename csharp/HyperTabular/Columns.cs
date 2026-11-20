@@ -1,9 +1,50 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using HyperCast;
 using HyperCast.Interop;
 
 namespace HyperTabular;
+
+/// <summary>
+/// The pin on memory a caller handed over, read in place: released when its reader or workbook is
+/// disposed, and by the collector when one is dropped without that, so memory is never pinned for
+/// ever. A reader holds its pin and a batch its reader, so the pin lasts as long as anything that
+/// reads through it can be reached; nothing looks at this object in a read.
+/// </summary>
+sealed unsafe class Pin
+{
+	MemoryHandle _handle;
+
+	internal Pin(ReadOnlyMemory<byte> memory)
+	{
+		_handle = memory.Pin();
+		Pointer = (byte*)_handle.Pointer;
+	}
+
+	/// <summary>Where the memory is, for as long as it is pinned.</summary>
+	internal byte* Pointer { get; }
+
+	/// <summary>Unpins the memory now. Harmless twice.</summary>
+	internal void Release()
+	{
+		_handle.Dispose();
+		GC.SuppressFinalize(this);
+	}
+
+	~Pin()
+	{
+		// A caller's own MemoryManager unpins in its own code, which may have been finalized
+		// first; nothing it throws may leave a finalizer, where it would end the process.
+		try
+		{
+			_handle.Dispose();
+		}
+		catch (Exception)
+		{
+		}
+	}
+}
 
 /// <summary>
 /// The columns a reader owns: the plan, the plan as the core takes it, and for each column

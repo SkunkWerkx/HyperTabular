@@ -19,7 +19,7 @@ use hypertabular::kernel::abi::{
 };
 use hypertabular::kernel::delimited::engine::{self, Kind};
 use hypertabular::kernel::delimited::fill::{self, RawDialect, State};
-use hypertabular::kernel::delimited::scan::{Flow, Scanner, Sink};
+use hypertabular::kernel::delimited::scan::{Flow, Resume, Scanner, Sink};
 use hypertabular::kernel::delimited::unescape::unescape_into;
 use std::fmt::Debug;
 
@@ -703,6 +703,57 @@ fn the_header_is_one_record_located_like_text() {
         OK
     );
     assert_eq!((out.rows, out.consumed), (0, 2));
+}
+
+/// A header names the columns a plan can read, 2^20 of them at most, and holds the records below
+/// it to the width it has, however wide that is.
+#[test]
+fn a_header_names_no_more_columns_than_a_plan_can_read() {
+    const NAMES: usize = 1 << 20;
+    let width = NAMES + 5;
+    let mut text = vec![b'a'];
+    text.resize(width, b',');
+    text.push(b'\n');
+    let header = text.len();
+    text.push(b'7');
+    text.resize(header + width, b',');
+    text.extend_from_slice(b"\nshort\n");
+
+    let mut state = State::init(CSV).unwrap();
+    let mut out = Filled::default();
+    // Room for too few: asked for the names it gives, not for a cell table of the record.
+    let mut names = vec![Span::default(); 16];
+    assert_eq!(
+        fill::header(&mut state, &text, true, &mut names, &mut [], &mut out),
+        ERR_CELLS
+    );
+    assert_eq!((out.needed, out.consumed), (NAMES as u64, 0));
+    let mut names = vec![Span::default(); NAMES];
+    assert_eq!(
+        fill::header(&mut state, &text, true, &mut names, &mut [], &mut out),
+        OK
+    );
+    assert_eq!((out.rows, out.consumed), (NAMES as u64, header as u64));
+    assert_eq!((names[0].offset, names[0].len()), (0, 1));
+    assert!(names[1..].iter().all(|name| name.is_empty()));
+    assert_eq!(state.expected as usize, width);
+
+    // The record of that width reads, and the short one is held to it.
+    let specs = [ColumnSpec::new(0, Door::I32.code(), 0)];
+    let (code, read, values, ..) = call(&mut state, &text[header..], true, &specs, 4);
+    assert_eq!((code, read.rows), (OK, 1));
+    assert_eq!(i32::from_ne_bytes(values[0][..4].try_into().unwrap()), 7);
+    let rest = &text[header + read.consumed as usize..];
+    let (code, read, ..) = call(&mut state, rest, true, &specs, 4);
+    assert_eq!(code, ERR_STRUCTURE);
+    assert_eq!(
+        (
+            read.failure.code,
+            read.failure.expected as usize,
+            read.failure.found
+        ),
+        (Failure::COLUMN_COUNT, width, 1)
+    );
 }
 
 /// Cells as delivered, after unescape: the spec's table for where a quote decides a boundary.
@@ -6275,5 +6326,218 @@ mod suggesting {
         .run();
         assert_eq!(code, OK);
         assert_eq!(out[0].status, UNRESOLVED);
+    }
+}
+
+// An unfinished record across calls. A caller that feeds a record a little at a time puts what
+// wasn't consumed at the front of the next call, and a state from `init_with` remembers how far
+// the search for that record's end got, so each call looks at the bytes that are new.
+
+fn every_row_taken(engine: u8, quoting: u8) -> State {
+    State::init_with(&RawDelimitedOptions {
+        size: RawDelimitedOptions::SIZE,
+        separator: b',',
+        quoting,
+        skip_blank_lines: 1,
+        engine,
+        skip: 0,
+        header_row: 0,
+        short_rows: RawDelimitedOptions::SHORT_ROWS_PAD,
+        long_rows: RawDelimitedOptions::LONG_ROWS_TRUNCATE,
+    })
+    .expect("a state")
+}
+
+/// Every row `state` gives of `input`, more to come: how many, and the bytes they took.
+fn drained(state: &mut State, input: &[u8], last: bool, max_rows: usize) -> (u64, usize) {
+    let specs = [ColumnSpec::new(0, Door::Text.code(), 0)];
+    let (mut rows, mut consumed) = (0u64, 0usize);
+    loop {
+        let (code, out, ..) = call(state, &input[consumed..], last, &specs, max_rows);
+        assert_eq!(code, OK, "{:?}", out.failure);
+        rows += out.rows;
+        consumed += out.consumed as usize;
+        if out.rows == 0 {
+            return (rows, consumed);
+        }
+    }
+}
+
+#[test]
+fn rows_arrive_as_soon_as_they_are_whole_however_the_input_grows() {
+    let mut random = Random(0x0DD5_EED5_0F00_BA11);
+    for round in 0..6_000 {
+        let mut data = Vec::new();
+        for _ in 0..1 + random.below(4) {
+            data.extend(quote_soup(&mut random));
+        }
+        let quoting = u8::from(round % 8 != 0);
+        for kind in available() {
+            let mut state = every_row_taken(kind.code(), quoting);
+            let max_rows = 1 + random.below(3);
+            let (mut rows, mut consumed, mut upto) = (0u64, 0usize, 0usize);
+            while upto < data.len() {
+                upto = (upto + 1 + random.below(97)).min(data.len());
+                let (more, took) = drained(&mut state, &data[consumed..upto], false, max_rows);
+                rows += more;
+                consumed += took;
+                // What a read that had never seen a shorter prefix gives of this one.
+                let mut fresh = every_row_taken(kind.code(), quoting);
+                let whole = drained(&mut fresh, &data[..upto], false, 64);
+                assert_eq!(
+                    (rows, consumed),
+                    whole,
+                    "round {round}, {kind:?}, {upto} bytes of {:?}",
+                    String::from_utf8_lossy(&data)
+                );
+            }
+            // And at the end of the input, where an unfinished record is a row or a failure.
+            let specs = [ColumnSpec::new(0, Door::Text.code(), 0)];
+            let mut fresh = every_row_taken(kind.code(), quoting);
+            let mut ends = [(0, 0u64, 0u64); 2];
+            for (end, (state, from)) in ends
+                .iter_mut()
+                .zip([(&mut state, consumed), (&mut fresh, 0)])
+            {
+                let (mut at, mut total) = (from, 0u64);
+                *end = loop {
+                    let (code, out, ..) = call(state, &data[at..], true, &specs, 64);
+                    total += out.rows;
+                    at += out.consumed as usize;
+                    if code != OK || out.rows == 0 {
+                        break (code, total, out.failure.byte);
+                    }
+                };
+            }
+            let (streamed, whole) = (ends[0], ends[1]);
+            assert_eq!(
+                (streamed.0, rows + streamed.1, streamed.2),
+                whole,
+                "round {round}, {kind:?}, the end of {:?}",
+                String::from_utf8_lossy(&data)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_long_record_fed_a_little_at_a_time_is_looked_at_once() {
+    const LENGTH: usize = 8 << 20;
+    // One plain record, and one whose cell is quoted and full of line endings.
+    let plain = {
+        let mut record = vec![b'x'; LENGTH];
+        record.extend_from_slice(b"\nnext\n");
+        record
+    };
+    let quoted = {
+        let mut record = vec![b'"'];
+        while record.len() < LENGTH {
+            record.extend_from_slice(b"line, with \"\"quotes\"\"\r\n");
+        }
+        record.extend_from_slice(b"\"\nnext\n");
+        record
+    };
+    // A column the record doesn't have, so its one cell is located and never unescaped.
+    let specs = [ColumnSpec::new(1, Door::Text.code(), 0)];
+    for (name, data) in [("plain", &plain), ("quoted", &quoted)] {
+        let record = data.len() - b"next\n".len();
+        let lines = 1 + data[..record - 1]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count() as u32;
+        for kind in available() {
+            let started = std::time::Instant::now();
+            let mut state = every_row_taken(kind.code(), 1);
+            let mut upto = 0;
+            let mut calls = 0;
+            let delivered = loop {
+                upto = (upto + 1024).min(data.len());
+                let (code, out, ..) = call(&mut state, &data[..upto], false, &specs, 1);
+                assert_eq!(code, OK);
+                calls += 1;
+                if out.rows != 0 {
+                    break out;
+                }
+                assert_eq!(out.consumed, 0);
+                assert!(
+                    upto < data.len(),
+                    "{name}, {kind:?}: the record never ended"
+                );
+            };
+            assert_eq!(delivered.consumed as usize, record, "{name}, {kind:?}");
+            assert_eq!(state.line, 1 + lines, "{name}, {kind:?}");
+            assert!(
+                calls > LENGTH / 1024,
+                "{name}, {kind:?}: fed in {calls} calls"
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(8),
+                "{name}, {kind:?}: an unfinished record was scanned again on every call: {:?}",
+                started.elapsed()
+            );
+        }
+    }
+}
+
+/// Whether a scan of `data`, more to come, finds a row.
+struct AnyRow(bool);
+
+impl Sink for AnyRow {
+    fn cell(&mut self, _start: usize, _end: usize, _quotes: u32) {}
+
+    fn discard(&mut self) {}
+
+    fn row(&mut self, _start: usize, _next: usize, _line: u32, _terminator: u8) -> Flow {
+        self.0 = true;
+        Flow::Full
+    }
+}
+
+/// The search a fill makes before it scans is right both ways: it finds an end exactly where a
+/// scan of the same bytes finds a row, wherever the search before it stopped. Missing one would
+/// hold a whole row back; seeing one that isn't there would scan a record once a call again.
+#[test]
+fn the_search_for_a_rows_end_agrees_with_the_scan() {
+    let mut random = Random(0xFEED_FACE_0BAD_CAFE);
+    for round in 0..40_000 {
+        // Rows of hundreds of bytes, so a search stops and goes on across many blocks.
+        let length = 1 + random.below(900);
+        let quote_one_in = [2, 5, 20, 80][random.below(4)];
+        let end_one_in = [40, 150, 600][random.below(3)];
+        let data: Vec<u8> = (0..length)
+            .map(|_| {
+                if random.below(quote_one_in) == 0 {
+                    b'"'
+                } else if random.below(end_one_in) == 0 {
+                    b"\n\r"[random.below(2)]
+                } else {
+                    b"ab,,"[random.below(4)]
+                }
+            })
+            .collect();
+        let quoting = round % 8 != 0;
+        for kind in available() {
+            let scanner = Scanner::with_engine(b',', quoting, kind);
+            let (mut from, mut upto) = (Resume::START, 0);
+            while upto < data.len() {
+                upto = (upto + 1 + random.below(130)).min(data.len());
+                let mut scanned = AnyRow(false);
+                scanner.scan_into(&data[..upto], 0, 1, false, &mut scanned);
+                let searched = scanner.row_end(&data[..upto], from);
+                assert_eq!(
+                    searched.is_none(),
+                    scanned.0,
+                    "round {round}, {kind:?}, quoting {quoting}, {upto} bytes from {from:?} of {:?}",
+                    String::from_utf8_lossy(&data)
+                );
+                match searched {
+                    Some(next) => {
+                        assert!(next.at >= from.at && next.at <= upto);
+                        from = next;
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 }

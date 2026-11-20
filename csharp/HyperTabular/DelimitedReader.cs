@@ -115,7 +115,8 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	readonly Stream? _stream;
 	readonly bool _leaveOpen;
 	byte[] _buffer = [];
-	MemoryHandle _pin;
+	/// <summary>The pin on a caller's memory: <see langword="null"/> over a stream.</summary>
+	readonly Pin? _pin;
 	readonly byte* _memory;
 	int _start;
 	int _end;
@@ -182,7 +183,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	/// Reads delimited text already in memory, in place — nothing is copied unless the dialect declares an encoding, which has to be decoded — the header
 	/// first, leaving the plan to <see cref="Bind"/>.
 	/// </summary>
-	/// <param name="utf8">The text. Pinned for the reader's lifetime.</param>
+	/// <param name="utf8">The text. Pinned until the reader is disposed, or collected undisposed.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <exception cref="ArgumentException">The dialect's separator cannot be honoured.</exception>
 	/// <exception cref="TabularException">The header record is structurally broken.</exception>
@@ -194,7 +195,7 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	}
 
 	/// <summary>Reads delimited text already in memory, in place — nothing is copied unless the dialect declares an encoding, which has to be decoded — through <paramref name="plan"/>.</summary>
-	/// <param name="utf8">The text. Pinned for the reader's lifetime.</param>
+	/// <param name="utf8">The text. Pinned until the reader is disposed, or collected undisposed.</param>
 	/// <param name="dialect">The declared dialect.</param>
 	/// <param name="plan">The output columns, in output order.</param>
 	/// <param name="batchRows">Rows per batch.</param>
@@ -353,8 +354,8 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 	DelimitedReader(Dialect dialect, Columns? columns, ReadOnlyMemory<byte> text)
 		: this(dialect, columns)
 	{
-		_pin = text.Pin();
-		_memory = (byte*)_pin.Pointer;
+		_pin = new Pin(text);
+		_memory = _pin.Pointer;
 		if (dialect.Encoding == TextEncoding.Utf8)
 		{
 			_end = text.Length;
@@ -1057,8 +1058,8 @@ public sealed unsafe class DelimitedReader : IDisposable, IAsyncDisposable, IBat
 		if (_disposed)
 			return false;
 		_disposed = true;
-		_batch?.Clear();
-		_pin.Dispose();
+		_batch?.Close();
+		_pin?.Release();
 		return true;
 	}
 

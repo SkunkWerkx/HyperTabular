@@ -115,6 +115,12 @@ before the header is read.
 - **A workbook from an IO.** `Workbook.new(io)` reads anything with `#read` to its end into a
   String the workbook owns, as soon as it is opened; `close_source: true` closes the IO once it
   has been read. The kind of workbook is read from its bytes, never from a name.
+- **Closing.** `DelimitedReader.open` with a block closes the reader, and its file, when the
+  block ends; without one `reader.close` does, and it closes an IO the reader was handed only
+  with `close_source: true`. `close` is safe to call twice, `closed?` says which it is, and
+  batches already read stay good. A `read`, a walk (`each`, `each_row`) or a `bind` on a closed
+  reader raises `IOError`, "closed reader". A workbook holds its bytes, not a file, so it and
+  its sheets have nothing to close.
 
 ## A messier file
 
@@ -188,7 +194,8 @@ included. Whatever the IO's read raises goes to the caller and is final, as in R
 transient `IOError` or `SystemCallError` (`Errno::EAGAIN`, `Errno::ETIMEDOUT`) included: Ruby can't
 tell one from an exception that landed in the read (below), which may have taken bytes with it, so
 the reader isn't resumable after it. Every later read raises `RuntimeError` naming it; open the
-source again to go on. A broken record is final too, the same failure on every later read.
+source again to go on. An IO whose read returns anything but a String or `nil` is a `TypeError`,
+and as final. A broken record is final too, the same failure on every later read.
 
 A reader or a sheet is called into once at a time. A call back into it from the IO it reads or from
 a plan's `each` while it reads or binds (`read`, `each`, `bind`, `close`, a sheet's `suggest`)
@@ -347,8 +354,13 @@ boundary is crossed once per few thousand rows, not once per cell.
   from, whatever its door and verdict, and a `Fault`'s span indexes it in the units
   `String#[]` slices by, as HyperCast's gem does: `raw[fault.offset, fault.length]` is the
   offending text.
-- **A String is read in place**, unless its dialect declares an encoding. An IO is read forward only, through a buffer that grows
-  when a record does not fit it.
+- **A UTF-8 String is read in place**, and so is a binary or US-ASCII one, its bytes taken as
+  UTF-8, unless its dialect declares an encoding. A String in any other encoding is transcoded
+  to UTF-8 first, as HyperCast's gem takes one: a character with no UTF-8 form (bytes its
+  encoding doesn't allow, a lone surrogate) is one malformed byte in its cell, a `Fault` like
+  any other and never an exception, and in a header the `TabularError` of kind `:encoding` that
+  any header that isn't UTF-8 is. An IO is read forward only, through a buffer that grows when
+  a record does not fit it.
 - **No async API, and none needed.** An IO is read with `#readpartial` or `#read`, which yield
   to the Fiber scheduler (the `async` gem's, or any other) instead of blocking, and a task
   cancelled in one is interrupted there; the core's work between reads is on memory.
@@ -385,12 +397,12 @@ Selection happens once, at `require`, in that order. Both backends read a batch 
 call and hand back the same bytes; everything above that crossing — the readers, the
 workbook, `Batch` and every value and verdict it builds — is the same Ruby on either, and
 `spec/native_backend_spec.rb` holds the two to the same answer over every cell of both corpora.
-Either backend crosses once per batch, yet they don't read at the same speed, and the cause
-hasn't been looked into. Through `benchmark/workbook_benchmark.rb`'s eight-column plan on an Apple
-M6 on 2026-11-08, making every value, Fiddle is the slower: an xlsx sheet of 300k rows reads in
-704 ms against the extension's 458 ms (54% slower), an ods one in 1.02 s against 787 ms (30%), and a
-Numbers one in 887 ms against 875 ms. The extension also buys a platform gem with no shared library
-for Fiddle to find, and Ruby in the browser, where there is no Fiddle at all.
+Either backend crosses once per batch, and they read at the same speed. Through
+`benchmark/workbook_benchmark.rb`'s eight-column plan on an Apple M6 on 2026-11-15, making every
+value, an xlsx sheet of 300k rows reads in 454 ms through Fiddle against the extension's 456 ms, an
+ods one in 782 ms against 787 ms, and a Numbers one in 876 ms against 868 ms. What the extension
+buys is a platform gem with no shared library for Fiddle to find, and Ruby in the browser, where
+there is no Fiddle at all.
 
 `HYPERTABULAR_PURE` forces `:fiddle`, as `HYPERCAST_PURE` does for hypercast. It is a testing
 and diagnostic switch — CI runs the whole suite through it — read for presence, not value. A

@@ -123,9 +123,12 @@ module HyperTabular
     # buffer of +buffer_bytes+ that grows when a record does not fit it, one read of the IO each
     # time the core wants more, so finished rows reach the caller while a stream goes quiet. An
     # IO is read as bytes; one opened in text mode on Windows should be in binmode first. A
+    # String in another encoding is transcoded to UTF-8 first, as HyperCast's gem takes one: a
+    # character with no UTF-8 form is one malformed byte in its cell, never an exception. A
     # Dialect that declares an encoding has its bytes decoded ahead of the read, which a String
     # is copied for. An exception the IO raises goes to the caller and is final: every later
-    # #read raises RuntimeError naming it.
+    # #read raises RuntimeError naming it. So is the TypeError for an IO whose read answers
+    # anything but a String or nil.
     #
     # +dialect+ is the declared Dialect and +plan+ the output Columns, in output order — or
     # nil, for a reader that reads its header first and is given its plan by #bind.
@@ -163,6 +166,10 @@ module HyperTabular
       # What the IO answered and the decoder made of it, each held until the buffer it goes into is
       # whole; and the batch made, until it is handed over.
       @incoming = @undelivered = @handing = @in_flight = nil
+      # The most the IO is next asked for: twice what its last read gave, and ROOM_FLOOR at least.
+      @room = Float::INFINITY
+      # Whether the buffer has grown where it is since the core was attached to it (#extend_buffer).
+      @stale = false
       take(source)
       @header = dialect.has_header ? read_header : nil
       # A plan bound before the header was read is held to it as soon as it is.
@@ -315,10 +322,14 @@ module HyperTabular
 
       # At most +room+ more bytes of decoded text, which is empty when there is no more until the
       # failure is raised or the source is over; nil when it needs more of the source first (#feed).
-      # +room+ is at least the 4 one character takes.
+      # +room+ is at least the 4 one character takes, and no more of it is asked for than what is held
+      # can fill (a unit of one or two bytes is at most three of UTF-8, and a surrogate pair four):
+      # the room is cleared before it is written, and room for a whole long record at every read of
+      # an IO that hands over a little would clear the square of the record's length.
       def step(room)
+        held = @raw.bytesize - @at
         consumed, written, failed, failure_at, out =
-          Runtime.transcode(@encoding, @raw, @at, @raw.bytesize - @at, @eof, room)
+          Runtime.transcode(@encoding, @raw, @at, held, @eof, [room, (held * 3) + 4].min)
         @failed_at = @offset + failure_at unless failed.zero?
         @at += consumed
         @offset += consumed
@@ -393,12 +404,16 @@ module HyperTabular
     # The text as a frozen String of UTF-8 bytes that is this reader's alone: the caller's
     # own when it is already that; otherwise a copy-on-write duplicate, which shares the
     # bytes and is immune to what the caller does to theirs next. Only a foreign encoding
-    # pays a transcode.
+    # pays a transcode, and it is HyperCast's gem's own, so a cell means what its door says of
+    # the same String: text with no UTF-8 form (bytes its encoding does not allow, a lone
+    # surrogate, a character Unicode has none for) is data, each such character crossing as
+    # the one byte no UTF-8 text has, malformed in its cell, where a bare String#encode raises.
     def utf8(text)
       return text if text.frozen? && text.encoding == Encoding::UTF_8
       return text.dup.force_encoding(Encoding::UTF_8).freeze if BYTE_COMPATIBLE.include?(text.encoding)
 
-      text.encode(Encoding::UTF_8).freeze
+      # Private to that gem, and what its own extension calls for the same reason.
+      HyperCast.__send__(:utf8, text).freeze
     end
 
     # What the core is to read next — how many bytes from @start — and whether nothing
@@ -424,6 +439,7 @@ module HyperTabular
     # before the next.
     def step(header)
       loop do
+        reattach if @stale
         length, last = window
         offset = @kernel.offset
         code = moving(offset) { header ? @kernel.header(@start, length, last) : @kernel.fill(@start, length, last) }
@@ -455,23 +471,23 @@ module HyperTabular
     # The noun the busy and spoiled messages name.
     def noun = "reader"
 
-    # Puts the unfinished record at the front of a new buffer, and what the IO answered behind it; or,
-    # with nothing answered yet, how much to ask it for — at least as much again as is pending, so a
-    # record that does not fit doubles the buffer rather than creeping up on it.
+    # Puts what the IO answered behind the unfinished record (#extend_buffer); or, with nothing
+    # answered yet, how much to ask it for: as much again as is pending, so a record that does not fit
+    # doubles the buffer rather than creeping up on it, but no more than @room, since an IO makes
+    # room for what it is asked for before it reads.
     def refill
       pending = @buffer.bytesize - @start
       return refill_decoded(pending) if @decoder
 
       raise too_long if @io.nil? || pending >= MAX_ROW_BYTES
-      return [@buffer_bytes, pending].max if @incoming.nil?
+      return [[@buffer_bytes, pending].max, @room].min if @incoming.nil?
 
       if @incoming.empty?
         @incoming = nil
         @eof = true
         return
       end
-      rebuild(@buffer.byteslice(@start, pending) << @incoming.dup.force_encoding(Encoding::UTF_8))
-      @incoming = nil
+      extend_buffer(pending, @incoming.dup.force_encoding(Encoding::UTF_8)) { @incoming = nil }
     end
 
     # As #refill, through the decoder. A failure it holds is raised once the fill has had all the
@@ -493,8 +509,7 @@ module HyperTabular
       @undelivered ||= decoded([@buffer_bytes, pending, 4].max)
       return @buffer_bytes if @undelivered.nil?
 
-      rebuild(@buffer.byteslice(@start, pending) << @undelivered.force_encoding(Encoding::UTF_8))
-      @undelivered = nil
+      extend_buffer(pending, @undelivered.force_encoding(Encoding::UTF_8)) { @undelivered = nil }
       @eof = @decoder.finished? && @decoder.failed_at.nil?
       nil
     end
@@ -508,6 +523,35 @@ module HyperTabular
         @decoder.feed(@incoming)
         @incoming = nil
       end
+    end
+
+    # Puts +more+ behind the unfinished record, the +pending+ bytes from @start, then runs the block,
+    # which lets go of what +more+ was held in. Answers nil.
+    #
+    # A record that starts the buffer grows where it is: nothing of that buffer has been consumed, so
+    # no batch was made from it and none holds it, and a new buffer for every read of an IO that hands
+    # over a little would copy a long record once a read, the square of its length. Its bytes may
+    # move as it grows, so it is attached again, and @stale says so from before they can move until
+    # it is: whatever is raised on the way, the core is not called before #reattach has run. Any
+    # other record goes to the front of a new buffer (#rebuild).
+    def extend_buffer(pending, more)
+      unless @start.zero?
+        rebuild(@buffer.byteslice(@start, pending) << more)
+        yield
+        return
+      end
+
+      @stale = true
+      @buffer << more
+      yield
+      reattach
+    end
+
+    # Attaches the buffer where it now is. Answers nil.
+    def reattach
+      @kernel.attach(@buffer)
+      @stale = false
+      nil
     end
 
     # Attaches +grown+, a String no batch and no core call has seen, and makes it the buffer: the core
@@ -528,10 +572,17 @@ module HyperTabular
     # leaves the reader refusing every later read. So does anything the IO's read raises itself,
     # an IOError or a SystemCallError included: Ruby can't tell one from an exception that landed
     # there (Timeout.timeout's own class can be Errno::ETIMEDOUT), so none is taken as resumable.
+    # An IO whose read answers anything but a String or nil is a TypeError, and as final.
     def fetch(bytes)
       answered = false
       while_blocked do
-        @incoming = (@partial ? @io.readpartial(bytes) : @io.read(bytes)) || EMPTY
+        chunk = (@partial ? @io.readpartial(bytes) : @io.read(bytes)) || EMPTY
+        unless chunk.is_a?(String)
+          raise TypeError, "the IO's #{@partial ? 'readpartial' : 'read'} must return a String; got #{chunk.class}"
+        end
+
+        @incoming = chunk
+        @room = [chunk.bytesize * 2, ROOM_FLOOR].max
         answered = true
       rescue EOFError
         @incoming = EMPTY
@@ -550,7 +601,9 @@ module HyperTabular
 
     # The end of the IO, held.
     EMPTY = "".b.freeze
-    private_constant :EMPTY
+    # The least an IO is asked for once it has shown what it gives: a pipe's worth.
+    ROOM_FLOOR = 64 * 1024
+    private_constant :EMPTY, :ROOM_FLOOR
 
     # The batch the core just wrote, copied out of the kernel's arrays: its spans index the
     # input from @start, where the core was handed it.

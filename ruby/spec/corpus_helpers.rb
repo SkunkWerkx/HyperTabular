@@ -242,6 +242,20 @@ module CorpusHelpers
     end
   end
 
+  # The corpus's byte span over +raw+ in the characters String#[] slices by: every character the
+  # bytes touch, since the core's span can end inside one (a time's two-byte field), counted here
+  # by the String's own characters and not by the gem's routine.
+  def characters(raw, offset, length)
+    before = within = at = 0
+    raw.each_char do |char|
+      break if at >= offset + length
+
+      at += char.bytesize
+      at <= offset ? before += 1 : within += 1
+    end
+    [before, length.zero? ? 0 : within]
+  end
+
   # Holds a Fault to what the corpus says of the cell: its reason, detail and span, and no value.
   def assert_fault(label, batch, column, row, expected, fault, notes: true)
     raw = batch.raw(column, row)
@@ -258,7 +272,7 @@ module CorpusHelpers
         expect(raw).to eq(expected["raw"]), label
       end
       expect([offset, length])
-        .to eq([raw.byteslice(0, span[0]).length, raw.byteslice(span[0], span[1]).length]), label
+        .to eq(characters(raw, span[0], span[1])), label
     else
       expect([offset, length]).to eq([0, 0]), label
     end
@@ -290,7 +304,7 @@ module CorpusHelpers
       expect(raw).to eq(expected["raw"]), label
       span = expected["fault"]
       expect([offset, length])
-        .to eq([raw.byteslice(0, span[0]).length, raw.byteslice(span[0], span[1]).length]), "#{label}: span"
+        .to eq(characters(raw, span[0], span[1])), "#{label}: span"
       expect(batch.values(column)[row]).to eql(value), "#{label}: the value as cast"
       assert_checked_value(label, plan.door, value, expected)
     in HyperCast::Fault => fault
@@ -370,7 +384,7 @@ module CorpusHelpers
       cell = vector["rows"].fetch(problem["row"]).fetch(problem["plan_column"])
       raw = cell.key?("raw_hex") ? [cell["raw_hex"]].pack("H*").force_encoding(Encoding::UTF_8) : cell.fetch("raw")
       offset, length = problem["fault"]
-      problem.merge("fault" => [raw.byteslice(0, offset).length, raw.byteslice(offset, length).length])
+      problem.merge("fault" => characters(raw, offset, length))
     end.then { |listed| notes ? listed : problems_without_notes(listed) }
   end
 

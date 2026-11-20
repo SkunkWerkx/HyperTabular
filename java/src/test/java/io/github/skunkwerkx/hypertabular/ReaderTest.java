@@ -448,9 +448,157 @@ final class ReaderTest {
         assertEquals(0, batch.rows());
         assertEquals(records, reader.records());
         assertThrows(IllegalStateException.class, reader::read);
-        assertThrows(IndexOutOfBoundsException.class, () -> batch.text(0, 0));
+        assertEquals(
+                "The reader is closed.",
+                assertThrows(IllegalStateException.class, () -> batch.text(0, 0))
+                        .getMessage());
         // A view handed out before the close is refused by the runtime, not left dangling.
         assertThrows(IllegalStateException.class, () -> name.get(ValueLayout.JAVA_BYTE, 0));
+    }
+
+    /** Every way into a batch whose reader or sheet is closed says so, a row in range or not. */
+    @Test
+    void aBatchOfAClosedReaderSaysSo() {
+        DelimitedReader reader = DelimitedReader.of(utf8("name\nalice\n"), Dialect.CSV, List.of(Column.text(0)));
+        Batch batch = reader.read();
+        Row row = batch.row(0);
+        reader.close();
+        List<org.junit.jupiter.api.function.Executable> reads = List.of(
+                () -> batch.row(0),
+                () -> batch.line(0),
+                () -> batch.line(7),
+                () -> batch.isOk(0, 0),
+                () -> batch.verdict(0, 0),
+                () -> batch.detail(0, 0),
+                () -> batch.origin(0, 0),
+                () -> batch.get(0, 0, String.class),
+                () -> batch.getChecked(0, 0, String.class),
+                () -> batch.text(0, 0),
+                () -> batch.string(0, 0),
+                () -> batch.chars(0, 0),
+                () -> batch.getChars(0, 0, new char[8], 0),
+                () -> batch.raw(0, 0),
+                () -> batch.rawString(0, 0),
+                () -> batch.iterator(),
+                () -> batch.faults(),
+                () -> row.string(0),
+                () -> row.verdict(0));
+        for (int index = 0; index < reads.size(); index++) {
+            IllegalStateException closed = assertThrows(IllegalStateException.class, reads.get(index), "read " + index);
+            assertEquals("The reader is closed.", closed.getMessage(), "read " + index);
+        }
+        // It holds no rows, and what was never the reader's memory still answers.
+        assertEquals(0, batch.rows());
+        assertEquals(List.of(Column.text(0)), batch.columns());
+
+        Path basic = CorpusTest.CORPUS_DIRECTORY.resolve("workbook").resolve("basic.xlsx");
+        try (Workbook book = Workbook.open(basic)) {
+            Sheet sheet = book.sheet(0, SheetOptions.DEFAULT, List.of(Column.text(0)));
+            Batch cells = sheet.read();
+            sheet.close();
+            assertEquals(
+                    "The sheet is closed.",
+                    assertThrows(IllegalStateException.class, () -> cells.string(0, 0))
+                            .getMessage());
+            assertEquals(
+                    "The sheet is closed.",
+                    assertThrows(IllegalStateException.class, () -> cells.row(0))
+                            .getMessage());
+        }
+    }
+
+    /** A row or a column that is not there is an IndexOutOfBoundsException, whichever it is. */
+    @Test
+    void whatIsOutOfRangeIsAnIndexOutOfBoundsException() {
+        try (DelimitedReader reader = DelimitedReader.of(utf8("name\nalice\n"), Dialect.CSV, List.of(Column.text(0)))) {
+            Batch batch = reader.read();
+            assertEquals(
+                    "Index 1 out of bounds for length 1",
+                    assertThrows(IndexOutOfBoundsException.class, () -> batch.string(0, 1))
+                            .getMessage());
+            assertEquals(
+                    "Index -1 out of bounds for length 1",
+                    assertThrows(IndexOutOfBoundsException.class, () -> batch.line(-1))
+                            .getMessage());
+            // A column's is the array's own, a subclass.
+            assertThrows(ArrayIndexOutOfBoundsException.class, () -> batch.string(1, 0));
+            assertThrows(ArrayIndexOutOfBoundsException.class, () -> batch.get(-1, 0, String.class));
+            assertThrows(ArrayIndexOutOfBoundsException.class, () -> batch.values(1));
+            assertThrows(IndexOutOfBoundsException.class, () -> batch.raw(1, 0));
+        }
+    }
+
+    /**
+     * A reader, a workbook or a sheet dropped without being closed gives its native memory back: the
+     * collector finds it, and the thread that built it, the only one that can close its confined
+     * arenas, does so the next time it opens one. Each view kept here is of another piece of that
+     * memory, and says when it has gone.
+     */
+    @Test
+    void whatIsNeverClosedGivesItsNativeMemoryBack(@TempDir Path directory) throws Exception {
+        Path file = directory.resolve("orders.csv");
+        Files.write(file, ORDERS);
+        Path basic = CorpusTest.CORPUS_DIRECTORY.resolve("workbook").resolve("basic.xlsx");
+        byte[] container = Files.readAllBytes(basic);
+        List<MemorySegment> views = new ArrayList<>();
+        for (int index = 0; index < 200; index++) {
+            droppedUnclosed(views, file, basic, container, index);
+        }
+        assertTrue(views.size() >= 1000, "views of " + views.size() + " pieces of memory");
+
+        for (int attempt = 0; attempt < 200 && alive(views) > 0; attempt++) {
+            System.gc();
+            Thread.sleep(25);
+            // Any reader this thread opens takes back what the collector has found.
+            DelimitedReader.of(ORDERS, Dialect.CSV, List.of(Column.i32(0))).close();
+        }
+        assertEquals(0, alive(views), "views still alive of " + views.size());
+    }
+
+    private static long alive(List<MemorySegment> views) {
+        return views.stream().filter(view -> view.scope().isAlive()).count();
+    }
+
+    /** Opens one of everything, reads a batch of each, keeps a view of each piece of its memory, and drops it. */
+    private static void droppedUnclosed(List<MemorySegment> views, Path file, Path basic, byte[] container, int index) {
+        List<Column> plan = List.of(Column.text(1), Column.i32(0));
+        // A file: the read buffer and the columns.
+        Batch fromFile = DelimitedReader.open(file, Dialect.CSV, plan, 16, 4096).read();
+        views.add(fromFile.text(0, 0));
+        views.add(fromFile.values(1));
+        // A byte array in another encoding: the copy, the decoder's buffer, and a cell unescaped for raw.
+        byte[] quoted = "id,name\n1,\"a \"\"b\"\"\"\n".getBytes(StandardCharsets.UTF_16LE);
+        Batch decoded = DelimitedReader.of(quoted, Dialect.CSV.withEncoding(Encoding.UTF_16LE), plan, 16)
+                .read();
+        views.add(decoded.text(0, 0));
+        views.add(decoded.raw(0, 0));
+        // A workbook, mapped or copied or read from a stream, and a sheet of it.
+        Workbook book = switch (index % 3) {
+            case 0 -> Workbook.open(basic);
+            case 1 -> Workbook.of(container);
+            default -> Workbook.of(new ByteArrayInputStream(container));
+        };
+        Batch cells = book.sheet(0, SheetOptions.DEFAULT.withBatchRows(16), List.of(Column.text(0), Column.i64(0)))
+                .read();
+        views.add(cells.text(0, 0));
+        views.add(cells.values(1));
+    }
+
+    /** A batch kept past every other reference to its reader keeps the reader, and so its memory. */
+    @Test
+    void aBatchLeftBehindStillReads() throws Exception {
+        Batch left = leftBehind();
+        for (int attempt = 0; attempt < 20; attempt++) {
+            System.gc();
+            Thread.sleep(25);
+            DelimitedReader.of(ORDERS, Dialect.CSV, List.of(Column.i32(0))).close();
+        }
+        assertEquals("alice", left.string(0, 0));
+        assertEquals("bob, jr", left.rawString(0, 1));
+    }
+
+    private static Batch leftBehind() {
+        return DelimitedReader.of(ORDERS, Dialect.CSV, List.of(Column.text(1))).read();
     }
 
     @Test

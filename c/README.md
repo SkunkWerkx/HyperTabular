@@ -157,9 +157,13 @@ int main(void) {
 ```
 
 Every call returns `HYPERTABULAR_OK` or a `HYPERTABULAR_ERR_` code: `ERR_CONTRACT` for a
-caller bug (a null where memory is needed, an undefined door or a numeric format the core
+caller bug (a null state block, result or options, an undefined door or a numeric format the core
 refuses), `ERR_STRUCTURE` for broken input with `out->failure` filled in, and `ERR_ARENA`,
-`ERR_CELLS` or `ERR_WINDOW` for a buffer too small, with `out->needed` the size it needs. A
+`ERR_CELLS` or `ERR_WINDOW` for a buffer too small, with `out->needed` the size it needs. A null
+buffer is read as an empty one whatever length is passed beside it, unless the function's comment
+in the header refuses it. A delimited fill delivers the
+rows before a failure in the calls before the one that fails; a workbook fill can return them
+beside `ERR_STRUCTURE`, in the same call's `out->rows`, so read `out->rows` whatever it returns. A
 delimited call that stops for room consumed nothing and is simply made again; a workbook call
 stops in place, and the caller grows that buffer keeping its contents (a `realloc`) and repeats
 the call. No return code is a cell's verdict: that is the `HyperTabularCellVerdict` beside each

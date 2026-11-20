@@ -56,8 +56,24 @@ fn cannot_open(path: &[u8]) -> PhpResult<ext_php_rs::exception::PhpException> {
     )))
 }
 
+/// Refuses a directory before it is opened. PHP opens one as a stream on every Unix and only a
+/// read of it fails, with a notice of PHP's own (`Read of 8192 bytes failed with errno=21 Is a
+/// directory`); `file_get_contents()` hands back an empty string for it. So a directory is the
+/// error a path that cannot be opened is, on every opener alike, and nothing of it is read.
+/// `@is_dir($path)`: false for a wrapper that cannot say, which then opens as it always did.
+fn refuse_directory(path: &[u8]) -> PhpResult<()> {
+    if quietly("is_dir", &mut [bytes_zval(path)])?.is_some() {
+        return Err(runtime(format!(
+            "hypertabular: cannot open {}: it is a directory",
+            String::from_utf8_lossy(path)
+        )));
+    }
+    Ok(())
+}
+
 /// `@fopen($path, 'rb')`, or 1.0's error.
 pub(crate) fn open(path: &[u8]) -> PhpResult<Zval> {
+    refuse_directory(path)?;
     match quietly("fopen", &mut [bytes_zval(path), bytes_zval(b"rb")])? {
         Some(stream) => Ok(stream),
         None => Err(cannot_open(path)?),
@@ -66,6 +82,7 @@ pub(crate) fn open(path: &[u8]) -> PhpResult<Zval> {
 
 /// `@file_get_contents($path)`, or 1.0's error.
 pub(crate) fn contents(path: &[u8]) -> PhpResult<Vec<u8>> {
+    refuse_directory(path)?;
     match quietly("file_get_contents", &mut [bytes_zval(path)])? {
         Some(bytes) => Ok(bytes
             .zend_str()

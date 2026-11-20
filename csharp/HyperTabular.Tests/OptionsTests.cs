@@ -971,12 +971,148 @@ public sealed class OptionsTests
 		left.Raw(1, 1).ToArray().ShouldBe("2x"u8.ToArray());
 		left.Line(1).ShouldBe(3);
 
-		// Disposed, the batch is over: it refuses, as a batch past the next read does.
+		// Disposed, the batch is over: it says so, as the reader does.
 		var over = ReaderDisposed("name\nalice\n");
 		Churn();
 		over.Rows.ShouldBe(0);
-		Should.Throw<ArgumentOutOfRangeException>(() => over.Line(0));
+		Should.Throw<ObjectDisposedException>(() => over.Line(0)).ObjectName.ShouldBe(typeof(DelimitedReader).FullName);
 	}
+
+	/// <summary>Every way into a batch whose reader is disposed says the reader is disposed, a row in range or not.</summary>
+	[Fact]
+	void A_batch_of_a_disposed_reader_says_so()
+	{
+		var over = ReaderDisposed("name\nalice\n");
+		Should.Throw<ObjectDisposedException>(() => over.Row(0));
+		Should.Throw<ObjectDisposedException>(() => over.Get<int>(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.GetChecked<string>(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.TryGetText(0, 0, out _));
+		Should.Throw<ObjectDisposedException>(() => over.GetString(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.GetChars(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.TryGetChars(0, 0, default, out _));
+		Should.Throw<ObjectDisposedException>(() => over.Raw(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.Fault(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.Origin(0, 0));
+		Should.Throw<ObjectDisposedException>(() => over.Line(7));
+		Should.Throw<ObjectDisposedException>(() => over.Faults());
+		Should.Throw<ObjectDisposedException>(() => over.GetEnumerator());
+		// It holds no rows, so a whole column of it is empty.
+		over.Rows.ShouldBe(0);
+		over.Verdicts(0).Length.ShouldBe(0);
+		over.Columns.Count.ShouldBe(1);
+
+		// A row taken while the reader was open says the same once it is not.
+		var reader = new DelimitedReader(Utf8("n\n1\n"), Dialect.Csv, [Column.Int32(0)]);
+		var row = reader.Read().ShouldNotBeNull().Row(0);
+		reader.Dispose();
+		var threw = false;
+		try
+		{
+			row.Verdict(0);
+		}
+		catch (ObjectDisposedException)
+		{
+			threw = true;
+		}
+		threw.ShouldBeTrue();
+	}
+
+	/// <summary>A row or a column that is not there is named as the caller gave it.</summary>
+	[Fact]
+	void What_is_out_of_range_is_named_as_it_was_asked_for()
+	{
+		using var reader = new DelimitedReader(Utf8("name\nalice\n"), Dialect.Csv, [Column.Text(0)]);
+		var batch = reader.Read().ShouldNotBeNull();
+		var row = Should.Throw<ArgumentOutOfRangeException>(() => batch.Line(-1));
+		row.ActualValue.ShouldBe(-1);
+		row.ParamName.ShouldBe("row");
+		row.Message.ShouldNotContain("4294967295");
+		Should.Throw<ArgumentOutOfRangeException>(() => batch.GetString(0, 1)).ActualValue.ShouldBe(1);
+		var column = Should.Throw<ArgumentOutOfRangeException>(() => batch.Raw(-1, 0));
+		column.ActualValue.ShouldBe(-1);
+		column.ParamName.ShouldBe("column");
+		column.Message.ShouldNotContain("4294967295");
+
+		using var book = Workbook.Open(Corpus("basic.xlsx"));
+		foreach (var missing in new[] { -1, book.Sheets.Count })
+		{
+			var planned = Should.Throw<ArgumentOutOfRangeException>(() => book.Sheet(missing, SheetOptions.Default, [Column.Text(0)]));
+			planned.ActualValue.ShouldBe(missing);
+			planned.ParamName.ShouldBe("index");
+			planned.Message.ShouldNotContain("4294967295");
+			Should.Throw<ArgumentOutOfRangeException>(() => book.Sheet(missing, SheetOptions.Default)).ActualValue.ShouldBe(missing);
+		}
+	}
+
+	/// <summary>
+	/// A reader or a workbook over the caller's memory that is dropped without being disposed gives the
+	/// memory back when the collector finds it: the pin is not for ever. So does one whose constructor threw.
+	/// </summary>
+	[Fact]
+	void What_is_never_disposed_lets_go_of_the_callers_memory()
+	{
+		const int Readers = 200;
+		var text = Dropped(Readers, _ =>
+		{
+			var bytes = new byte[1 << 20];
+			"a,b\n1,2\n"u8.CopyTo(bytes);
+			new DelimitedReader(bytes.AsMemory(), Dialect.Csv with { HasHeader = false }, [Column.Text(0)]).Read().ShouldNotBeNull();
+			return bytes;
+		});
+		var refused = Dropped(Readers, _ =>
+		{
+			var bytes = "\"never closed"u8.ToArray();
+			Should.Throw<TabularException>(() => new DelimitedReader(bytes.AsMemory(), Dialect.Csv));
+			return bytes;
+		});
+		var container = File.ReadAllBytes(Corpus("basic.xlsx"));
+		var books = Dropped(Readers, _ =>
+		{
+			var bytes = container.ToArray();
+			new Workbook(bytes).Sheet(0, SheetOptions.Default, [Column.Text(0)]).Read().ShouldNotBeNull();
+			return bytes;
+		});
+		var disposed = Dropped(Readers, _ =>
+		{
+			var bytes = "a\n1\n"u8.ToArray();
+			using var reader = new DelimitedReader(bytes.AsMemory(), Dialect.Csv, [Column.Text(0)]);
+			return bytes;
+		});
+
+		GC.Collect();
+		GC.WaitForPendingFinalizers();
+		GC.Collect();
+		// The disposed readers are the control: they never pinned past their own frame.
+		(Disposed: Alive(disposed), Undisposed: Alive(text), Refused: Alive(refused), Workbooks: Alive(books)).ShouldBe((0, 0, 0, 0));
+
+		static int Alive(WeakReference[] arrays) => arrays.Count(array => array.IsAlive);
+	}
+
+	/// <summary>Makes and drops <paramref name="count"/> arrays in a frame of its own, so that nothing here still holds one.</summary>
+	[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+	static WeakReference[] Dropped(int count, Func<int, byte[]> make)
+	{
+		var weak = new WeakReference[count];
+		for (var index = 0; index < count; index++)
+			weak[index] = new WeakReference(make(index));
+		return weak;
+	}
+
+	/// <summary>A batch left behind over the caller's memory keeps its reader, and so the pin, for as long as it is held.</summary>
+	[Fact]
+	void A_batch_left_behind_over_memory_still_reads()
+	{
+		var left = MemoryReaderLeftBehind("name,n\nalice,1\n\"bob \"\"jr\"\"\",2x\n");
+		Churn();
+		left.GetString(0, 0).ShouldBe("alice");
+		left.GetString(0, 1).ShouldBe("bob \"jr\"");
+		left.Raw(1, 1).ToArray().ShouldBe("2x"u8.ToArray());
+		GC.KeepAlive(left);
+	}
+
+	[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+	static Batch MemoryReaderLeftBehind(string text) =>
+		new DelimitedReader(Utf8(text), Dialect.Csv, [Column.Text(0), Column.Int32(1)]).Read()!;
 
 	/// <summary>The same of a sheet: the shared strings are the workbook's, and a batch's text is in them.</summary>
 	[Theory]

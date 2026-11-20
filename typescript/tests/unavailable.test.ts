@@ -25,6 +25,47 @@ test('isHyperTabularError recognises the unavailable error and refuses everythin
   assert.equal(api.isHyperTabularError(Object.assign(new Error('x'), { code: 42 })), false)
 })
 
+// It is what a `catch` asks of whatever it caught, so it answers for anything and never throws:
+// a Proxy whose prototype lookup throws, a revoked one, an error whose `code` is a getter that
+// throws.
+test('isHyperTabularError never throws, whatever it is asked about', () => {
+  const trapped = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error('trap')
+      },
+    },
+  )
+  const revocable = Proxy.revocable({}, {})
+  revocable.revoke()
+  const throwingCode = Object.defineProperty(new Error('x'), 'code', {
+    get() {
+      throw new Error('getter')
+    },
+  })
+  const throwingStartsWith = Object.assign(new Error('x'), {
+    code: new Proxy(new String('ERR_HYPERTABULAR_BUSY'), {
+      get() {
+        throw new Error('trap')
+      },
+    }),
+  })
+  for (const value of [
+    trapped,
+    revocable.proxy,
+    throwingCode,
+    throwingStartsWith,
+    Symbol('x'),
+    1n,
+    undefined,
+    () => 1,
+    Object.create(null),
+  ]) {
+    assert.equal(api.isHyperTabularError(value), false)
+  }
+})
+
 // The loader is made to fail in a process of its own (the same runtime, Node or Bun): a copy of
 // index.js beside a binding.js that throws, as an install with no addon and no fallback leaves
 // it. A preload hook would do on Node, but Bun's require does not consult one.

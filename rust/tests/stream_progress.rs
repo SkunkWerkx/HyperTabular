@@ -147,3 +147,61 @@ mod asynchronous {
         }
     }
 }
+
+/// A source that hands out `step` bytes a read, and remembers the most room it was offered
+/// after its first read.
+struct Trickle {
+    left: usize,
+    step: usize,
+    reads: usize,
+    most: Arc<Mutex<usize>>,
+}
+
+impl Read for Trickle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.reads > 0 {
+            let mut most = self.most.lock().unwrap();
+            *most = (*most).max(buf.len());
+        }
+        self.reads += 1;
+        let n = self.step.min(self.left).min(buf.len());
+        if n == 0 && self.left == 0 {
+            return Ok(0);
+        }
+        buf[..n].fill(if self.left == 1 { b'\n' } else { b'x' });
+        if self.left > 1 && n > 0 && self.left == n {
+            buf[n - 1] = b'\n';
+        }
+        self.left -= n;
+        Ok(n)
+    }
+}
+
+/// The room a read is offered is cleared first, so it follows what the source has been giving:
+/// offering megabytes to a source that gives a kilobyte made a long record cost the square of its
+/// length in clearing alone.
+#[test]
+fn a_source_giving_a_little_is_offered_a_little() {
+    const RECORD: usize = 4 << 20;
+    for step in [1024, 100_000] {
+        let most = Arc::new(Mutex::new(0));
+        let source = Trickle {
+            left: RECORD,
+            step,
+            reads: 0,
+            most: most.clone(),
+        };
+        let dialect = Dialect::CSV.with_header(false);
+        let mut reader = DelimitedReader::from_reader(source, dialect, &[Column::text(0)]).unwrap();
+        let mut bytes = 0;
+        while let Some(batch) = reader.read().unwrap() {
+            bytes += batch.text(0, 0).unwrap().len();
+        }
+        assert_eq!(bytes, RECORD - 1);
+        let most = *most.lock().unwrap();
+        assert!(
+            most <= (2 * step).max(64 * 1024),
+            "{most} bytes offered to a source giving {step}"
+        );
+    }
+}

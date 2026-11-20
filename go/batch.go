@@ -292,8 +292,9 @@ func view[T any](b *Batch, column int, accessor string, door Door) []T {
 }
 
 // Bool is a Bool column's values, one per row. Here and for every column accessor below,
-// the value of a row whose verdict is not OK is the type's zero value, and asking a column
-// for a type its door does not write panics.
+// the value of a row whose verdict is not OK is the type's zero value, but for a violation in
+// a column that declares constraints, which holds the value as cast (read Verdicts beside it),
+// and asking a column for a type its door does not write panics.
 func (b *Batch) Bool(column int) []bool { return view[bool](b, column, "Bool", DoorBool) }
 
 // I8 is an I8 column's values.

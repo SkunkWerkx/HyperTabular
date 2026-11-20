@@ -8,6 +8,141 @@ actually affects.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **A header gives at most 1,048,576 names.** That is the most columns a plan can read, and
+  every binding already refuses an ordinal past it. A header record wider than that gives its
+  first 1,048,576 names and still fixes the width every later record is held to at its own. A
+  file of 64 MB of commas read with a header was 67 million empty names, and gigabytes in a
+  binding that makes a string of each (2.4 GB resident in Swift, past 3 GB in Java). *(all
+  packages)*
+
+### Fixed
+
+- **One long record from a stream costs its length, not the square of it.** A record that had
+  not ended was scanned again from its start on every call, so a stream handing out a little at
+  a time paid for the whole record each read: 256 MiB at 64 KiB a read took 23.8 s through the
+  Rust reader. A fill that stops inside a record now keeps, in the state block, how far the
+  search for its end got, and the next call resumes there; the hint never decides what a row
+  holds, and a state made by the 1.0 `hypertabular_delimited_init`, which has no room for it,
+  reads as before. The Rust reader also cleared all of its spare buffer before every read, the
+  same square again in clearing; a read is now offered at most twice what the last one gave,
+  64 KiB at least. The same 256 MiB reads in 0.034 s, and 128 MiB at 1 KiB a read in 0.076 s
+  (Apple M6, 2026-11-15). Measured through every binding's own stream to 128 MiB, each
+  now takes twice the time for twice the record. Go's core is regenerated. *(all packages)*
+- **C# — a reader over the caller's memory that is never disposed lets go of it.** A
+  `DelimitedReader` or `Workbook` over a `ReadOnlyMemory<byte>` pinned the array until
+  `Dispose`, so one dropped without it pinned the array for the life of the process. The pin is
+  now given up when the reader is collected. *(C#)*
+- **C# — a batch whose reader is disposed says so.** Its cells, rows and `Faults()` throw
+  `ObjectDisposedException` naming the reader, in place of an `ArgumentOutOfRangeException`
+  about row 0. And `Workbook.Sheet(index)` names the index as it was asked for: `-1`, not
+  `4294967295`. *(C#)*
+- **Java — a reader dropped without `close()` gives its native memory back.** A reader, workbook
+  or sheet that was never closed kept its confined arenas for the life of its thread: 1,200
+  buffers after 200 dropped readers. The collector now hands what it finds to the thread that
+  made it, which frees it the next time it opens a reader, a workbook or a sheet. A thread that
+  ends first still leaves what it dropped; `close()`, or try-with-resources, stays the way to
+  free memory at a known time. *(Java)*
+- **Java — a batch whose reader or sheet is closed says so.** Its cells, rows and `faults()`
+  throw `IllegalStateException` ("The reader is closed." or "The sheet is closed."), in place of
+  an `IndexOutOfBoundsException`. *(Java)*
+- **Ruby — a long record from an IO costs its length on both backends.** Beside the core's
+  rescan, the reader copied the whole unfinished record into a new String for every read of its
+  IO, gave a declared encoding's decoder room for the whole record at every step, and asked the
+  IO for as much as the record already held. The record now grows where it is, the decoder is
+  given room for what it holds, and the IO is asked for at most twice what its last read gave,
+  64 KiB at least. A 128 MiB record at 64 KiB a read takes 0.024 s where it took 3.8 s, 64 MiB
+  at 1 KiB a read 0.09 s where it took 43 s, and 128 MiB of Latin-1 0.31 s where it took 20 s
+  (the extension, Apple M6, 2026-11-15); a million short rows read as fast as before. *(Ruby)*
+- **Ruby — a String that is not valid in its encoding is data.** A String tagged with an
+  encoding it isn't valid in, or holding characters with no UTF-8 form, raised
+  `Encoding::InvalidByteSequenceError`, `UndefinedConversionError` or `ConverterNotFoundError`.
+  It is now read as HyperCast's gem reads it: each such character is a `:malformed` cell, and in
+  a header the `:encoding` `TabularError`. *(Ruby)*
+- **Ruby — a span never passes the end of its cell.** A fault's or violation's span that the
+  core ends inside a character (a `time`, `timestamp` or `datetime` field, or bytes that aren't
+  UTF-8) is every character it touches: `😀` under `Column.time` was offset 0, length 2. The
+  rule is HyperCast's gem's, in the HyperCast release that follows 1.1.0. *(Ruby)*
+- **Ruby — the extension tells the collector what it holds.** A reader's, a workbook's and a
+  sheet's buffers outside Ruby's heap were invisible to it, so a process with a large free heap
+  never collected dead readers: 1,200 of them held 350 MB, about 299 KiB each, with no
+  collection run. They are now counted, and 20,000 hold a level 123 MB. *(Ruby)*
+- **Ruby — an IO whose `read` returns something that isn't a String raises `TypeError`,** for a
+  reader and a workbook, in place of an internal `NoMethodError`. *(Ruby)*
+- **TypeScript — the WebAssembly fallback opens a relative path.** `DelimitedReader.open`,
+  `suggest` and `Workbook.open` answered an `io` error for every relative path under the
+  fallback on macOS and Linux, because the module's libc knows only the root it was preopened
+  with. The binding now puts `process.cwd()` in front at each open, as the operating system does
+  for the native addon. Windows is unchanged: no path reaches the fallback there. *(TypeScript)*
+- **TypeScript — an answer is defined, never assigned.** A setter on `Object.prototype` under
+  `failure`, `column`, `first`, `second` or an array index ran while an answer was built, and one
+  that threw made a data call throw. Every object and array is now built of defined properties,
+  so no such setter runs, and a read no longer builds an array of door names. Under the
+  WebAssembly fallback a `Uint8Array` argument took a reference the runtime released into a
+  list by assignment, and a read and every array were made by a call out of the module, whose
+  arguments the runtime assigns into an array: a throwing setter under `'0'` made `read()`
+  throw. A `Uint8Array` is now read without a reference, arrays are defined element by element
+  and a read hands its batch over without a call out. One case is left under the fallback and
+  is the runtime's: its tables of handles, references and scopes grow by assignment, so a setter
+  under the number of a slot no call has yet filled still runs. *(TypeScript)*
+- **TypeScript — a reader, a sheet and a workbook tell the engine's collector what they hold.**
+  Their buffers are Rust's, which the collector could not see, so a process that dropped readers
+  without `close()` ran far ahead of its collections: 3,000 dropped open, yielding after each,
+  stood at 358 MB on Node 26.13 and 339 MB on Bun 1.4.4, and now at 131 MB and 18 MB. The count
+  is settled when a call grows it and taken back at `close()` or finalization, once. A
+  synchronous loop still holds everything until it yields, since no finalizer runs before then.
+  A read costs nothing more; on Bun an open costs about 10 µs more (20,000 rounds of open, read
+  and close: 118 ms to 318 ms), a loss printed in the README. The fallback tells nothing: its
+  buffers are in the module's memory, which the engine counts. The Rust readers gain a hidden
+  `held_bytes` for it. *(TypeScript, Rust)*
+- **TypeScript — `isHyperTabularError` never throws.** A Proxy whose `getPrototypeOf` trap
+  throws, or a revoked one, is `false`. *(TypeScript)*
+- **PHP — a forged `Column` is an `InvalidArgumentException`.** An unserialized column with an
+  ordinal below zero threw the binding's "contract violation" `RuntimeException`, and a
+  `declared` on a door that takes none was accepted. Both are refused when the plan is bound,
+  naming the plan column. *(PHP)*
+- **PHP — a directory is a path that cannot be opened.** `Workbook::open()` of a directory threw
+  `TabularException` (not a zip) and `DelimitedReader::open()` a `RuntimeException` about a
+  failed read, each beside a PHP notice. Both, and `suggest()`, now throw `RuntimeException`
+  saying it is a directory, before anything is read. *(PHP)*
+- **R — a reader dropped part-way is closed without a warning.** A reader over a path that was
+  never read to its end left its connection to R's collector, which closes it with "closing
+  unused connection". The package now holds the connections it opened until the reader's own
+  finalizer closes them. *(R)*
+- **Go — workbooks on separate goroutines share nothing.** Every growth of a workbook's buffers
+  wrote a package-level counter kept for the tests, so two goroutines each reading a workbook of
+  their own were a data race, and a consumer's `go test -race` failed. The counter now counts only
+  under the tests' own switch. No read gave a wrong cell. *(Go)*
+- **C — the header says what a null and a failing workbook fill do.** It said every null where
+  memory is needed is `HYPERTABULAR_ERR_CONTRACT`; a null state block, result or options is, and
+  a null buffer is read as an empty one whatever length is passed beside it, unless a function's
+  comment refuses it. And `hypertabular_workbook_fill` and `_fill_with` can return
+  `HYPERTABULAR_ERR_STRUCTURE` with the rows read before the failure in the same call's `rows`,
+  where a delimited fill delivers them in the calls before: the header and `c/README.md` now say
+  to read `rows` whatever a workbook fill returns. No behaviour changed. *(C)*
+- **Docs.** A whole column of a constrained column is read beside its verdicts, a violation's
+  slot holding the value as cast (Rust and Go READMEs, and Go's accessor comment, which said
+  every refused row holds a zero); a reader used after `close()` raises `ValueError` (Python);
+  `origin` has a fifth level, `"unknown"` (R); a file that can't be opened throws Foundation's
+  error, not `TabularError` (Swift); and `docs/workbook.md` says that a gap or repeat stands for
+  every row it counts, four billion in a few bytes with `skip_empty_rows` off, and that a range
+  is what bounds a file that isn't trusted. The C# and Java READMEs say the same of a whole
+  column, and name what an index or a column out of range throws; Ruby's says how a reader is
+  closed and what reading a closed one raises; TypeScript's says what esbuild does with and
+  without the native addon installed, what a wrong `this` and `new` throw, and what a
+  synchronous loop and an unclosed reader hold until the event loop turns; PHP's lists what
+  `open` can throw; and the C header says an ODS sheet index past the last table reads as a
+  sheet with no rows. *(all packages)*
+- **Correction: Ruby's Fiddle backend is not slower on workbooks.** The README's table and
+  Ruby's own said Fiddle read an xlsx sheet 54% and an ods one 30% slower than the extension
+  (704 against 458 ms, 1.02 s against 787 ms, 2026-11-08). Taken again on 2026-11-15 with the
+  same harness, files and machine, the two are level (454 against 456 ms, 782 against 787 ms),
+  as are the published 1.1.0 gems. Why that session's Fiddle runs were slow was not found. Both
+  Ruby rows now carry the 2026-11-15 run. *(Ruby)*
+
 ## [1.1.0] — 2026-11-14
 
 Every binding now needs HyperCast 1.1.0, whose own release comes first: its NuGet package,

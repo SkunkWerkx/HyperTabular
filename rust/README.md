@@ -135,6 +135,8 @@ rounding to `multipleOf` changed it (and at the text door the `enum` entry it ma
 rejection, the cell's fault or a `Violation` naming the `Keyword` broken and carrying the value as
 cast and its span. A column that declares none reads through them too, never adjusted. `get` and
 `text` panic on a constrained column, since a violation is no fault and they would say it passed;
+a whole column (`batch.i32(column)` and the rest) is handed out all the same, to be read beside
+`batch.verdicts(column)`, where a violation's slot holds the value as cast;
 `batch.checks(column)` is the raw checks beside the verdicts, and a `Problem` carries the `keyword`.
 
 A binding that hands a batch out past the next read keeps copies of it, and `KeptBatch` works

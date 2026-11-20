@@ -42,7 +42,9 @@ import java.util.UUID;
  * workbook's shared strings) wherever its bytes could stay where they were. It is valid until
  * the reader is asked for the next batch — the reader hands out the same instance each time —
  * and every segment it hands out is valid as long, and refused by the runtime once the reader
- * is closed. Not thread-safe, and confined to the reader's thread.
+ * is closed. A batch whose reader or sheet is closed holds no rows, and reading a cell of it,
+ * walking its rows or listing its faults throws {@link IllegalStateException}. Not thread-safe,
+ * and confined to the reader's thread.
  *
  * <p>A batch is also its rows, in order — {@code for (Row row : batch)} — each a {@link Row}
  * view with the batch's accessors, valid as long as the batch is.
@@ -55,6 +57,16 @@ public final class Batch implements Iterable<Row> {
 
     private final Columns columns;
     private final boolean workbook;
+    /**
+     * The reader or sheet: a batch can outlive every other reference to it, and while the batch can
+     * be reached the collector must not take the memory it reads.
+     */
+    @SuppressWarnings("unused")
+    private final Object owner;
+    /** Where the blocks the batch makes for itself are accounted, with its reader's. */
+    private final Owned memory;
+    /** The reader or sheet was closed: the batch has no rows, and says why. */
+    private boolean closed;
     /** What a plan's ordinal is short of the sheet's own column: a range's start. */
     private final int firstColumn;
 
@@ -97,10 +109,12 @@ public final class Batch implements Iterable<Row> {
     /** For the tests: how many times a char arena was made or replaced. */
     static long charsGrown;
 
-    Batch(Columns columns, boolean workbook, int firstColumn) {
+    Batch(Columns columns, boolean workbook, int firstColumn, Object owner, Owned memory) {
         this.columns = columns;
         this.workbook = workbook;
         this.firstColumn = firstColumn;
+        this.owner = owner;
+        this.memory = memory;
     }
 
     /** Points the batch at what the core just wrote. */
@@ -135,6 +149,7 @@ public final class Batch implements Iterable<Row> {
     void close() {
         generation++;
         rows = 0;
+        closed = true;
         if (scratch != null) {
             scratch.close();
             scratch = null;
@@ -171,9 +186,36 @@ public final class Batch implements Iterable<Row> {
      * @param row row of the batch
      * @return the row, valid as long as the batch is
      * @throws IndexOutOfBoundsException if the row is not in the batch
+     * @throws IllegalStateException if the batch's reader or sheet is closed
      */
     public Row row(int row) {
-        return new Row(this, Objects.checkIndex(row, rows));
+        checkRow(row);
+        return new Row(this, row);
+    }
+
+    /**
+     * Refuses a row the batch does not hold: the one test every cell's read makes. A batch whose
+     * reader is closed holds none, so it is told apart only once the test has failed.
+     */
+    private void checkRow(int row) {
+        if (row < 0 || row >= rows) {
+            throw noSuchRow(row);
+        }
+    }
+
+    private RuntimeException noSuchRow(int row) {
+        return closed ? closed() : new IndexOutOfBoundsException("Index " + row + " out of bounds for length " + rows);
+    }
+
+    private IllegalStateException closed() {
+        return new IllegalStateException(workbook ? "The sheet is closed." : "The reader is closed.");
+    }
+
+    /** Refuses a batch whose reader is closed, for what is asked of a batch once and not of each cell. */
+    private void requireOpen() {
+        if (closed) {
+            throw closed();
+        }
     }
 
     /**
@@ -183,9 +225,11 @@ public final class Batch implements Iterable<Row> {
      * next batch.
      *
      * @return an iterator over the rows
+     * @throws IllegalStateException if the batch's reader or sheet is closed
      */
     @Override
     public Iterator<Row> iterator() {
+        requireOpen();
         long walkedFor = generation;
         return new Iterator<>() {
             private int next;
@@ -215,7 +259,7 @@ public final class Batch implements Iterable<Row> {
      * @return the line or row number
      */
     public int line(int row) {
-        Objects.checkIndex(row, rows);
+        checkRow(row);
         long entry = ((long) row * perRow + perRow - 1) * Abi.SPAN_BYTES;
         return cells.get(INT, entry + (workbook ? 0 : 4));
     }
@@ -226,7 +270,7 @@ public final class Batch implements Iterable<Row> {
 
     /** The reason code of the cell at ({@code column}, {@code row}): {@code 0} when it cast. */
     private int code(int column, int row) {
-        Objects.checkIndex(row, rows);
+        checkRow(row);
         return columns.verdicts[column].get(INT, row * Abi.VERDICT_BYTES + 8);
     }
 
@@ -272,7 +316,7 @@ public final class Batch implements Iterable<Row> {
 
     /** The word a note holds at {@code at}: 0 with notes off. */
     private int note(int column, int row, long at) {
-        Objects.checkIndex(row, rows);
+        checkRow(row);
         Objects.checkIndex(column, columns.plan.length);
         return columns.notes == null
                 ? 0
@@ -318,8 +362,10 @@ public final class Batch implements Iterable<Row> {
      * {@link ConcurrentModificationException}, and never answers for the next batch.
      *
      * @return the list, walked from the start each time it is asked for an iterator
+     * @throws IllegalStateException if the batch's reader or sheet is closed
      */
     public Iterable<Problem> faults() {
+        requireOpen();
         long listedFor = generation;
         return () -> new Faults(listedFor);
     }
@@ -365,7 +411,7 @@ public final class Batch implements Iterable<Row> {
 
         private void page() {
             if (listed == null) {
-                listed = new Block(PROBLEMS + HELD * Abi.PROBLEM_BYTES, 8);
+                listed = memory.block(PROBLEMS + HELD * Abi.PROBLEM_BYTES, 8);
             }
             MemorySegment memory = listed.segment;
             memory.set(LONG, 0, cursor);
@@ -440,8 +486,8 @@ public final class Batch implements Iterable<Row> {
     /**
      * A column's verdicts, exactly as the core wrote them: one {@link CellVerdict#LAYOUT}
      * entry per row. Read-only. A reason of 0 is a value. On a column that declares
-     * constraints, a reason of 4 is a value that broke one, which {@link #getChecked} names.
-     * Any other is the cell's fault, its span in the cell's text.
+     * constraints, which reads here as any other does, a reason of 4 is a value that broke one,
+     * which {@link #getChecked} names. Any other is the cell's fault, its span in the cell's text.
      *
      * @param column index into the plan
      * @return the column's verdict array
@@ -460,8 +506,11 @@ public final class Batch implements Iterable<Row> {
      * {@code NativeValues.decimal(values, row * NativeValues.DECIMAL_BYTES)} is what
      * {@link #get} makes of a {@link Door#DECIMAL} cell, and likewise {@code uuid},
      * {@code instant}, {@code date}, {@code civil}, {@code time} and {@code duration}. The value
-     * of a row whose verdict is a fault is zero; a violation's is the value as cast. A text column is read a cell at a time, with
-     * {@link #text}. Read-only.
+     * of a row whose verdict is a fault is zero; a violation's is the value as cast. So a column
+     * that declares constraints reads here too, unlike through {@link #get}: read
+     * {@link #verdicts} beside the values, where a reason of 4 marks a value that cast and broke a
+     * constraint, and {@link #getChecked} or {@link #faults} names the keyword. A text column is
+     * read a cell at a time, with {@link #text}. Read-only.
      *
      * @param column index into the plan
      * @return the column's value array
@@ -874,7 +923,7 @@ public final class Batch implements Iterable<Row> {
      * @return the cell's UTF-8 bytes
      */
     public MemorySegment raw(int column, int row) {
-        Objects.checkIndex(row, rows);
+        checkRow(row);
         Objects.checkIndex(column, columns.plan.length);
         int at = workbook ? column : columns.plan[column].ordinal();
         long entry = ((long) row * perRow + at) * Abi.SPAN_BYTES;
@@ -886,7 +935,7 @@ public final class Batch implements Iterable<Row> {
         // A quoted cell with an escaped quote in it: unescaped, as the core cast it.
         int length = span & Abi.SPAN_LENGTH;
         if (scratch == null) {
-            scratch = new Block(Math.max(length, 256), 1);
+            scratch = memory.block(Math.max(length, 256), 1);
         } else if (scratch.bytes() < length) {
             scratch.resize(length, 0);
         }

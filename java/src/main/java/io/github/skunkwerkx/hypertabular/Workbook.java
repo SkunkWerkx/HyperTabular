@@ -44,7 +44,9 @@ import java.util.Objects;
  * }
  *
  * <p>Not thread-safe, and confined: the memory is a confined {@link Arena}'s, so a workbook
- * and its sheets belong to the thread that opened it.
+ * and its sheets belong to the thread that opened it. {@link #close()} frees it; a workbook or a
+ * sheet dropped without it is freed as a {@link DelimitedReader} is, by its thread once the
+ * collector has found it.
  */
 public final class Workbook implements AutoCloseable {
     /**
@@ -61,6 +63,9 @@ public final class Workbook implements AutoCloseable {
             "libhypertabular reported a contract violation — a binding bug, please report it";
 
     private final Arena arena;
+    /** The workbook's memory as the collector's net sees it, should it never be closed. */
+    private final Owned owned;
+
     private final MemorySegment container;
     /** The memory a stream was read into, when the workbook was opened from one: closed with it. */
     private final Block read;
@@ -203,7 +208,13 @@ public final class Workbook implements AutoCloseable {
         this.arena = arena;
         this.container = container;
         this.read = read;
+        this.owned = Owned.begin();
+        owned.hold(arena);
+        if (read != null) {
+            owned.hold(read);
+        }
         state = arena.allocate(Native.workbookStateSize(), 8);
+        // Closed below, whatever happens: the opening's own, and never the net's.
         Scratch scratch = stingy ? new Scratch(arena, 1, 1, 1, 0) : new Scratch(arena, Abi.WINDOW_MIN, 1024, 64, 0);
         try {
             MemorySegment opened = open(scratch);
@@ -249,6 +260,7 @@ public final class Workbook implements AutoCloseable {
         } finally {
             scratch.close();
         }
+        owned.watch(this);
     }
 
     private MemorySegment copy(MemorySegment from, long bytes, long alignment) {
@@ -309,7 +321,9 @@ public final class Workbook implements AutoCloseable {
 
     /**
      * The workbook's sheets, in its own order. Sheets that hold no cells (chart sheets, macro
-     * sheets) are not among them.
+     * sheets) are not among them. The list is the workbook's own copy of the names, and with
+     * {@link #format()} and {@link #dateSystem()} still answers once the workbook is closed, as a
+     * reader's header and plan do.
      *
      * @return the sheets, unmodifiable
      */
@@ -431,6 +445,7 @@ public final class Workbook implements AutoCloseable {
         if (read != null) {
             read.close();
         }
+        owned.release();
     }
 
     /** The buffers a call to the core may ask to have grown: one set while the workbook opens, one for each sheet. */
@@ -455,15 +470,25 @@ public final class Workbook implements AutoCloseable {
         /** How many slots the core is told {@link #row} has. */
         long rowSlots;
 
+        /** A scratch closed where it is made: the workbook's own, while it opens. */
         Scratch(Arena owner, long window, long arena, long cells, long rowSlots) {
-            this.window = new Block(window, 8);
-            this.arena = new Block(arena, 8);
-            this.cells = new Block(cells * Abi.SPAN_BYTES, 4);
-            this.row = new Block(Math.max(rowSlots, 1) * Abi.SLOT_BYTES, 8);
+            this(owner, null, window, arena, cells, rowSlots);
+        }
+
+        /** A sheet's scratch, its blocks accounted in {@code memory} with the rest of what the sheet owns. */
+        Scratch(Arena owner, Owned memory, long window, long arena, long cells, long rowSlots) {
+            this.window = block(memory, window, 8);
+            this.arena = block(memory, arena, 8);
+            this.cells = block(memory, cells * Abi.SPAN_BYTES, 4);
+            this.row = block(memory, Math.max(rowSlots, 1) * Abi.SLOT_BYTES, 8);
             this.buffers = owner.allocate(Abi.BUFFERS_BYTES, 8);
             this.buffersWith = owner.allocate(Abi.BUFFERS_WITH_BYTES, 8);
             this.filled = owner.allocate(Abi.FILLED_BYTES, 8);
             this.rowSlots = rowSlots;
+        }
+
+        private static Block block(Owned memory, long bytes, long alignment) {
+            return memory == null ? new Block(bytes, alignment) : memory.block(bytes, alignment);
         }
 
         /** Entries the cell table has room for. */

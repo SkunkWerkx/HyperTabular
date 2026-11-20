@@ -69,9 +69,10 @@ corpus read, the `node:22.13.0-alpine` image with `EBADENGINE`). The floor scena
   and later do for a peer, and on every backend the peer's door agreed with the cell's
   verdict. Where the package fell back to WebAssembly, so did the peer.
 - **Bundlers.** Neither esbuild (`--bundle --platform=node`) nor webpack produces a working
-  self-contained bundle: webpack fails the build on the loader's platform `require`s, and
-  esbuild bundles but the bundle cannot load the module from a directory with no
-  `node_modules`. The configuration that passes, for both, is `@skunkwerkx/hypertabular`
+  self-contained bundle: webpack fails the build on the loader's platform `require`s; esbuild
+  fails it too where the install holds a native addon (`No loader is configured for ".node"
+  files`), and otherwise bundles, but the bundle cannot load the module from a directory with
+  no `node_modules`. The configuration that passes, for both, is `@skunkwerkx/hypertabular`
   **external**, installed beside the bundle. That is the configuration the package README
   documents.
 - **npm bug 4828.** `mac-lockfile` reproduces npm/cli#4828 with npm 10.9.2, the npm Node
